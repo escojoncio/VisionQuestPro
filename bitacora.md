@@ -29,7 +29,7 @@
   SpaceWarp), perfil Quest 3 (→ `KL_OVRP_HEADSET=11`; apagado por defecto: JNI/Build.MODEL de Klepton dicen Quest 2).
 - `app/Native/vq_config.c/.h` (+ bridging header): `vq_gfx_config_apply` guarda, registra y reenvía por `dlsym` a
   `vpvk_config_set_*` de VPVulkan (VPEngine `gpu/vulkan/include/vpvk/config.h`); con MoltenVK solo registra.
-- Verificado: sintaxis de los .c con clang en Linux (sin errores en las zonas tocadas), `vq_config.c` con gcc -Wall.
+- Build verde: run 38222233549 (commit 8c33463). Verificado antes: sintaxis de los .c con clang en Linux (sin errores en las zonas tocadas), `vq_config.c` con gcc -Wall.
   Swift sin compilar en local (CI).
 
 ### Pendiente (foveado/VPKTAA)
