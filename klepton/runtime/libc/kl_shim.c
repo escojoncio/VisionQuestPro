@@ -1921,6 +1921,13 @@ X(klb_pthread_rwlock_init) X(klb_pthread_rwlock_destroy) X(klb_pthread_rwlock_rd
 X(klb_pthread_rwlock_wrlock) X(klb_pthread_rwlock_unlock)
 X(klb_pthread_attr_init) X(klb_pthread_attr_destroy) X(klb_pthread_attr_setstacksize)
 X(klb_pthread_attr_setdetachstate) X(klb_pthread_attr_getstack) X(klb_pthread_getattr_np)
+X(klb_pthread_attr_getstacksize) X(klb_pthread_attr_getdetachstate) X(klb_pthread_attr_setstack)
+X(klb_pthread_attr_setguardsize) X(klb_pthread_attr_getguardsize)
+X(klb_pthread_attr_setschedpolicy) X(klb_pthread_attr_getschedpolicy)
+X(klb_pthread_attr_setschedparam) X(klb_pthread_attr_getschedparam)
+X(klb_pthread_attr_setscope) X(klb_pthread_attr_getscope)
+X(klb_pthread_attr_setinheritsched) X(klb_pthread_attr_getinheritsched)
+X(klb_pthread_setschedprio) X(klb_sched_get_priority_max) X(klb_sched_get_priority_min)
 X(klb_pthread_key_create) X(klb_pthread_key_delete) X(klb_pthread_getspecific)
 X(klb_pthread_setspecific) X(klb_pthread_once)
 X(klb_pthread_create) X(klb_pthread_join) X(klb_pthread_detach) X(klb_pthread_exit)
@@ -2216,6 +2223,19 @@ static const kl_entry g_shim[] = {
     E("pthread_attr_setdetachstate", klb_pthread_attr_setdetachstate),
     E("pthread_attr_getstack", klb_pthread_attr_getstack),
     E("pthread_getattr_np", klb_pthread_getattr_np),
+    E("pthread_attr_getstacksize", klb_pthread_attr_getstacksize),
+    E("pthread_attr_getdetachstate", klb_pthread_attr_getdetachstate),
+    E("pthread_attr_setstack", klb_pthread_attr_setstack),
+    E("pthread_attr_setguardsize", klb_pthread_attr_setguardsize),
+    E("pthread_attr_getguardsize", klb_pthread_attr_getguardsize),
+    E("pthread_attr_setschedpolicy", klb_pthread_attr_setschedpolicy),
+    E("pthread_attr_getschedpolicy", klb_pthread_attr_getschedpolicy),
+    E("pthread_attr_setschedparam", klb_pthread_attr_setschedparam),
+    E("pthread_attr_getschedparam", klb_pthread_attr_getschedparam),
+    E("pthread_attr_setscope", klb_pthread_attr_setscope),
+    E("pthread_attr_getscope", klb_pthread_attr_getscope),
+    E("pthread_attr_setinheritsched", klb_pthread_attr_setinheritsched),
+    E("pthread_attr_getinheritsched", klb_pthread_attr_getinheritsched),
     E("pthread_key_create", klb_pthread_key_create),
     E("pthread_key_delete", klb_pthread_key_delete),
     E("pthread_getspecific", klb_pthread_getspecific),
@@ -2234,6 +2254,11 @@ static const kl_entry g_shim[] = {
     E("sem_open", klb_sem_open), E("sem_close", klb_sem_close),
     E("pthread_getschedparam", klb_pthread_getschedparam),
     E("pthread_setschedparam", klb_pthread_setschedparam),
+    E("pthread_setschedprio", klb_pthread_setschedprio),
+    // Linux policy numbering (FIFO=1), not Darwin's: see kl_pthread.c. These
+    // must not be direct forwards, so they are absent from kl_libc_table.h.
+    E("sched_get_priority_max", klb_sched_get_priority_max),
+    E("sched_get_priority_min", klb_sched_get_priority_min),
 
     // dl
     E("dlopen", klb_dlopen), E("dlsym", klb_dlsym), E("dlclose", klb_dlclose),

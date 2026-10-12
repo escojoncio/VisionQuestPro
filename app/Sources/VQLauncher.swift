@@ -249,10 +249,16 @@ struct VQSettingsView: View {
                     }
                     Toggle(VQL("VPKTAA (sustituye al AA/MSAA del juego)", "VPKTAA (replaces the game's AA/MSAA)"), isOn: $settings.vpktaa)
                     if settings.vpktaa {
-                        Stepper(VQL("VPKTAA: \(Int(settings.vpktaaPercent)) %", "VPKTAA: \(Int(settings.vpktaaPercent)) %"),
+                        Stepper(VQL("Intensidad del suavizado: \(Int(settings.vpktaaPercent)) %", "Smoothing strength: \(Int(settings.vpktaaPercent)) %"),
                                 value: $settings.vpktaaPercent, in: 0...100, step: 5)
+                        Text(VQL("Cuánto se mezcla cada frame con los anteriores. Más: bordes más limpios y menos parpadeo; también más estela al girar rápido o en objetos que se mueven. Recomendado 60–80 %.",
+                                 "How much each frame is blended with the previous ones. Higher: cleaner edges and less shimmer, but more trailing on fast turns and moving objects. Recommended 60–80 %."))
+                            .font(.caption)
                         Stepper(VQL("Nitidez: \(Int(settings.vpktaaSharpness * 100)) %", "Sharpness: \(Int(settings.vpktaaSharpness * 100)) %"),
                                 value: $settings.vpktaaSharpness, in: 0...1, step: 0.1)
+                        Text(VQL("Enfoque aplicado después del suavizado, para recuperar el detalle que el TAA difumina. Demasiado alto: halos y bordes que parpadean. Recomendado 20–30 %; 0 % lo desactiva.",
+                                 "Sharpening applied after the smoothing, to recover the detail TAA blurs. Too high: halos and flickering edges. Recommended 20–30 %; 0 % turns it off."))
+                            .font(.caption)
                     }
                     Toggle(VQL("Idioma del sistema si el juego lo incluye (si no, inglés)", "System language if the game ships it (else English)"), isOn: $settings.systemLanguage)
                     Picker(VQL("Postura", "Posture"), selection: $settings.posture) {
@@ -275,7 +281,10 @@ struct VQSettingsView: View {
                     .pickerStyle(.segmented)
                     Text(VQL("Nativa: densidad real de la pantalla del Vision Pro; la más pesada.", "Native: the Vision Pro panel's real density; the heaviest."))
                         .font(.caption)
-                    Toggle(VQL("Desactivar el MSAA del juego", "Disable the game's MSAA"), isOn: $settings.dropGameAA)
+                    Toggle(VQL("Mostrar FPS", "Show FPS"), isOn: $settings.showFps)
+                    Text(VQL("Panel delante de ti con los fps del juego, los Hz del visor, la resolución de render y si VPKTAA está activo.",
+                             "Panel in front of you with the game's fps, the headset's Hz, the render resolution and whether VPKTAA is on."))
+                        .font(.caption)
                     Stepper(VQL("Resolución de render: \(Int(settings.renderScale * 100)) %", "Render resolution: \(Int(settings.renderScale * 100)) %"),
                             value: $settings.renderScale, in: 0.5...1.5, step: 0.05)
                     Picker(VQL("Filtrado anisotrópico", "Anisotropic filtering"), selection: $settings.anisoLevel) {

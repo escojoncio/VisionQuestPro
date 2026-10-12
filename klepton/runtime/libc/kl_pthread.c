@@ -938,6 +938,87 @@ int klb_pthread_attr_setdetachstate(bionic_attr *a, int st) {
 int klb_pthread_attr_getstack(const bionic_attr *a, void **base, size_t *size) {
     *base = a->stack_base; *size = a->stack_size; return 0;
 }
+// The rest of the attribute family. Every field lives in the bionic struct the
+// guest owns, so set/get round-trip exactly as on Android even where the host
+// ignores the value (policy, priority, guard, inherit: pthread_create only
+// honours stack size and detach state). Values and error numbers are the Linux
+// ones the guest was compiled against. CRIWARE's libcri_ware_unity.so (Attack
+// on Titan VR) calls pthread_attr_setschedpolicy while starting its audio
+// threads; unresolved, that call was fatal.
+#define BIONIC_ATTR_INHERIT  0x4   // bionic PTHREAD_ATTR_FLAG_INHERIT
+#define BIONIC_ATTR_EXPLICIT 0x8   // bionic PTHREAD_ATTR_FLAG_EXPLICIT
+#define LX_EINVAL  22
+#define LX_ENOTSUP 95              // Linux ENOTSUP == EOPNOTSUPP
+static int lx_policy_ok(int p) { return p == 0 || p == 1 || p == 2 || p == 3 || p == 5; }
+
+int klb_pthread_attr_getstacksize(const bionic_attr *a, size_t *n) {
+    *n = a->stack_size; return 0;
+}
+int klb_pthread_attr_getdetachstate(const bionic_attr *a, int *st) {
+    *st = (a->flags & BIONIC_ATTR_DETACHED) ? 1 : 0;   // PTHREAD_CREATE_DETACHED : JOINABLE
+    return 0;
+}
+int klb_pthread_attr_setstack(bionic_attr *a, void *base, size_t size) {
+    // bionic stores the LOW address, which is what POSIX setstack is given.
+    a->stack_base = base; a->stack_size = size; return 0;
+}
+int klb_pthread_attr_setguardsize(bionic_attr *a, size_t n) { a->guard_size = n; return 0; }
+int klb_pthread_attr_getguardsize(const bionic_attr *a, size_t *n) { *n = a->guard_size; return 0; }
+int klb_pthread_attr_setschedpolicy(bionic_attr *a, int policy) {
+    if (!lx_policy_ok(policy)) return LX_EINVAL;
+    a->policy = policy; return 0;
+}
+int klb_pthread_attr_getschedpolicy(const bionic_attr *a, int *policy) {
+    *policy = a->policy; return 0;
+}
+// struct sched_param is { int sched_priority; } on both sides; only the first
+// int is read or written.
+int klb_pthread_attr_setschedparam(bionic_attr *a, const void *param) {
+    if (!param) return LX_EINVAL;
+    a->prio = *(const int *)param; return 0;
+}
+int klb_pthread_attr_getschedparam(const bionic_attr *a, void *param) {
+    if (!param) return LX_EINVAL;
+    *(int *)param = a->prio; return 0;
+}
+int klb_pthread_attr_setscope(bionic_attr *a, int scope) {
+    (void)a;
+    if (scope == 0) return 0;              // PTHREAD_SCOPE_SYSTEM
+    if (scope == 1) return LX_ENOTSUP;     // PTHREAD_SCOPE_PROCESS, as bionic answers
+    return LX_EINVAL;
+}
+int klb_pthread_attr_getscope(const bionic_attr *a, int *scope) {
+    (void)a; *scope = 0; return 0;         // PTHREAD_SCOPE_SYSTEM
+}
+int klb_pthread_attr_setinheritsched(bionic_attr *a, int inherit) {
+    // Bionic numbering: PTHREAD_EXPLICIT_SCHED 0, PTHREAD_INHERIT_SCHED 1 (not glibc's).
+    if (inherit == 1) {                    // PTHREAD_INHERIT_SCHED
+        a->flags |= BIONIC_ATTR_INHERIT;  a->flags &= ~BIONIC_ATTR_EXPLICIT;
+    } else if (inherit == 0) {             // PTHREAD_EXPLICIT_SCHED
+        a->flags |= BIONIC_ATTR_EXPLICIT; a->flags &= ~BIONIC_ATTR_INHERIT;
+    } else return LX_EINVAL;
+    return 0;
+}
+int klb_pthread_attr_getinheritsched(const bionic_attr *a, int *inherit) {
+    *inherit = (a->flags & BIONIC_ATTR_INHERIT) ? 1 : 0;
+    return 0;
+}
+
+// sched_get_priority_{min,max} take a POLICY number, and Linux's numbering is
+// not Darwin's (Darwin SCHED_FIFO is 4, SCHED_RR 2; Linux FIFO 1, RR 2), so the
+// direct forward answered the wrong policy or -1/EINVAL for FIFO. Answer with
+// Linux's own table instead: real-time policies span 1..99, the rest 0..0.
+int klb_sched_get_priority_max(int policy) {
+    if (policy == 1 || policy == 2) return 99;
+    if (policy == 0 || policy == 3 || policy == 5) return 0;
+    errno = EINVAL; return -1;             // EINVAL is 22 on both sides
+}
+int klb_sched_get_priority_min(int policy) {
+    if (policy == 1 || policy == 2) return 1;
+    if (policy == 0 || policy == 3 || policy == 5) return 0;
+    errno = EINVAL; return -1;
+}
+
 int klb_pthread_getattr_np(pthread_t t, bionic_attr *a) {
     klb_pthread_attr_init(a);
     a->stack_size = pthread_get_stacksize_np(t);
@@ -1521,6 +1602,10 @@ int klb_pthread_getschedparam(void *t, int *policy, void *param) {
 }
 int klb_pthread_setschedparam(void *t, int policy, const void *param) {
     (void)t; (void)policy; (void)param;
+    return 0;
+}
+int klb_pthread_setschedprio(void *t, int prio) {
+    (void)t; (void)prio;
     return 0;
 }
 

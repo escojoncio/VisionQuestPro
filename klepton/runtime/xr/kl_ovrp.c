@@ -17,6 +17,7 @@
 #include "kl_ovrp.h"
 #include "../guest/kl_driver.h"
 #include "../guest/kl_slink.h"
+#include "../guest/kl_il2cpp.h"   // kl_il2cpp_method_at, for ovrp_log_chain
 // kl_glfb_note_eye_texture (the capture's eye-FBO seam) and
 // kl_glfb_last_render_stage (which stage the guest actually drew into — see
 // klovrp_EndFrame). Up here rather than beside SetupEyeTexture2 now that the
@@ -222,6 +223,65 @@ static void ovrp_hit(const char *name) {
 #pragma clang diagnostic pop
 }
 
+// Who tore the display down? ovrp_hit names ONE caller, and for a teardown that
+// is the provider's own Stop routine (libOculusXRPlugin+0x1500c in Attack on
+// Titan VR) — which says nothing about whether Unity's lifecycle, a managed
+// XR-management call or a focus/quit event started it. This walks the AAPCS64
+// frame chain from here and names up to six GUEST return addresses (host frames,
+// including the handler that called us, are skipped), with the IL2CPP method
+// when the resolver knows the pc.
+//
+// Every step is bounds-checked against the current thread's stack before it is
+// read: a guest frame compiled without a frame record would otherwise send the
+// walk through garbage. Guest threads are host pthreads (klb_pthread_create),
+// so the stack bounds are always available. noinline so that frame 0 is this
+// function's own record.
+__attribute__((noinline))
+static void ovrp_log_chain(const char *what, long arg) {
+    pthread_t self = pthread_self();
+    char *hi = (char *)pthread_get_stackaddr_np(self);          // Darwin: the HIGH end
+    char *lo = hi - pthread_get_stacksize_np(self);
+    void **fp = (void **)__builtin_frame_address(0);
+    char line[1024];
+    size_t at = 0;
+    int shown = 0;
+    line[0] = 0;
+    for (int depth = 0; depth < 32 && shown < 6; depth++) {
+        if ((char *)fp < lo || (char *)(fp + 2) > hi || ((uintptr_t)fp & 0xf)) break;
+        void *ret  = (void *)((uintptr_t)fp[1] & 0x0000ffffffffffffULL);   // no PAC bits
+        void **next = (void **)fp[0];
+        if (ret) {
+            size_t off = 0;
+            const char *img = kl_addr_image(ret, &off);
+            if (img) {
+                const char *mm = kl_il2cpp_method_at(ret);
+                int w = mm ? snprintf(line + at, sizeof line - at, " <- %s+0x%zx [%s]", img, off, mm)
+                           : snprintf(line + at, sizeof line - at, " <- %s+0x%zx", img, off);
+                if (w < 0 || (size_t)w >= sizeof line - at) { line[at] = 0; break; }
+                at += (size_t)w;
+                shown++;
+            }
+        }
+        if (next <= fp) break;                  // stacks grow down; anything else is junk
+        fp = next;
+    }
+    uint64_t tid = 0; pthread_threadid_np(NULL, &tid);
+    fprintf(stderr, "  [ovrp] %s(%ld) tid=%llu guest chain:%s\n", what, arg,
+            (unsigned long long)tid, shown ? line : " (no guest frame found)");
+}
+
+// The frame-loop calls' RESULTS: the first five of each, and every one that is
+// not success. In Attack on Titan VR the loop ran exactly one
+// WaitToBeginFrame/BeginFrame4/EndFrame4 and then the provider destroyed its
+// distortion window, so whether one of our answers was a failure the provider
+// reacts to is the first thing to rule out.
+static void ovrp_log_ret(const char *name, uint64_t rc, unsigned *n) {
+    unsigned c = (*n)++;
+    if (c < 5 || (int64_t)rc < 0)
+        fprintf(stderr, "  [ovrp] %s #%u -> %lld%s\n", name, c, (long long)(int64_t)rc,
+                (int64_t)rc < 0 ? " (FAILURE)" : "");
+}
+
 // Log each distinct argument value an input-family entry point is called with
 // (node id, controller mask), once each, with the caller's image — names which
 // node/mask values the guest actually uses, and whether the poller is libunity
@@ -255,6 +315,13 @@ static void ovrp_log_arg(const char *name, int arg, void *ra) {
 // return value is simply ignored by the caller.
 static uint64_t klovrp_ok(const char *name) {
     ovrp_hit(name);
+    // The distortion window's teardown is answered here (it is in the plain
+    // success list), and it is the call worth a full caller chain: see
+    // ovrp_log_chain. Bounded, since a restart loop would repeat it.
+    if (strncmp(name, "ovrp_DestroyDistortionWindow", 28) == 0) {
+        static unsigned n;
+        if (n++ < 8) ovrp_log_chain(name, 0);
+    }
     return OVRP_SUCCESS;
 }
 
@@ -2699,7 +2766,9 @@ static uint64_t klovrp_BeginFrame4(int guest_frame_index, uint64_t extra) {
         fprintf(stderr, "  [ovrp] frameloop BeginFrame4 #%u frameIdx=%d tid=%llu\n",
                 n, guest_frame_index, (unsigned long long)tid);
       } n++; }
-    return klovrp_begin_frame_impl(guest_frame_index);
+    uint64_t r = klovrp_begin_frame_impl(guest_frame_index);
+    { static unsigned nr; ovrp_log_ret("BeginFrame4", r, &nr); }
+    return r;
 }
 
 // The guest has finished submitting this frame's eyes. Only now is the stage
@@ -2999,7 +3068,11 @@ static uint64_t klovrp_EndFrame4(int guest_frame_index, const void *layer_submit
                         (unsigned long long)w[i]);
         }
       } n++; }
-    if (!layer_submits && layer_submit_count) return OVRP_FAIL_INVALID_PARAM;
+    static unsigned nr_end;
+    if (!layer_submits && layer_submit_count) {
+        ovrp_log_ret("EndFrame4", (uint64_t)(int64_t)OVRP_FAIL_INVALID_PARAM, &nr_end);
+        return OVRP_FAIL_INVALID_PARAM;
+    }
     klovrp_census_submits(layer_submits, layer_submit_count);
     klovrp_passthrough_scan(layer_submits, layer_submit_count);
 // The list of everything that is NOT the eye layer, for the compositors.
@@ -3039,6 +3112,7 @@ static uint64_t klovrp_EndFrame4(int guest_frame_index, const void *layer_submit
         // frame-completion point either way.
         kl_vulkan_frame_done(named < 0 ? 0 : named);
     }
+    ovrp_log_ret("EndFrame4", r, &nr_end);
     return r;
 }
 
@@ -3933,6 +4007,7 @@ static uint64_t klovrp_WaitToBeginFrame(long frame_index) {
     // The CAPI return is an ovrpResult, not a frame id — the frame index is the
     // CALLER's input. Returning a counter here read as success only by luck
     // (positive ovrpResults are success variants); say success plainly.
+    { static unsigned nr; ovrp_log_ret("WaitToBeginFrame", OVRP_SUCCESS, &nr); }
     return OVRP_SUCCESS;
 }
 
@@ -6214,6 +6289,9 @@ static uint64_t klovrp_SetOverlayQuad3(void) {
 
 static uint64_t klovrp_DestroyLayer(int layer_id) {
     ovrp_hit("ovrp_DestroyLayer");
+    // Bounded: AC Nexus frees OVROverlay panels through EnqueueDestroyLayer
+    // (which lands here) many times a session.
+    { static unsigned n; if (n++ < 8) ovrp_log_chain("ovrp_DestroyLayer", layer_id); }
     struct klovrp_layer *l = klovrp_layer(layer_id);
     // The teardown mirror. The GL names are NOT deleted here, and the slot keeps
     // them: this arrives on the provider's gfx-thread stop, the eye textures are

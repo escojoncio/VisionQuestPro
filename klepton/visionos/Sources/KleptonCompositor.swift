@@ -53,6 +53,7 @@ import CoreVideo
 import QuartzCore
 import ImageIO
 import CoreGraphics
+import CoreText
 import UniformTypeIdentifiers
 
 // What the drawable costs, and therefore how much of the display we can afford
@@ -223,6 +224,10 @@ final class KleptonCompositor {
     /// the guest frame being composited, filled by prepareTAA before the render pass.
     private lazy var taa: KleptonTAA? = KleptonTAA(device: device)
     private var taaOut: [Int: MTLTexture] = [:]
+    private var taaPose: kl_ovrp_render_pose?
+    private var taaFlip: [Bool] = [false, false]
+    // The guest fence the VPKTAA job must wait on (GL guests), set with the composite's own.
+    private var taaWait: (MTLSharedEvent, UInt64)?
     private var depthState: MTLDepthStencilState?
     /// Always-pass, no write — for coplanar draws after the first. See where
     /// `depthState` is built for why the two cannot be one.
@@ -1827,9 +1832,11 @@ final class KleptonCompositor {
         cmdLock.lock(); let doneNow = cmdCompleted; cmdLock.unlock()
         let outstanding = cmdCommitted - doneNow
         let haveGuestContent = projLayerCount > 0
+        taaWait = nil
         if let ev = guestFrameEvent, glFence != 0, !noFence,
            haveGuestContent, outstanding <= maxFenceBacklog {
             cmd.encodeWaitForEvent(ev, value: glFence)
+            taaWait = (ev, glFence)
         } else if glFence != 0 && !noFence && (!haveGuestContent || outstanding > maxFenceBacklog) {
             fenceBacklogSkips += 1
             if !warnedFenceBacklog {
@@ -2026,6 +2033,7 @@ final class KleptonCompositor {
         if guestLive { capGuestFrames += 1 }
         let capNow = guestLive && FrameCapture.enabled
             && (FrameCapture.frames.contains(capGuestFrames) || capGuestFrames == overlayCapFrame)
+        hudCount(rendered: rendered, haveRendered: haveRendered)
         for (di, drawable) in drawables.enumerated() {
             // Per drawable, not once: each one is presented separately and each
             // is reprojected by the system against its own anchor.
@@ -2108,6 +2116,101 @@ final class KleptonCompositor {
     ///
     /// The `.dedicated` layout keeps the old per-view pass, with that view's
     /// own single-layer rate map, because there is nothing to amplify.
+    // MARK: - FPS HUD (KL_FPS_HUD=1, app setting «Mostrar FPS»)
+    //
+    // A small head-locked panel: guest frames/s, compositor presents/s, VPKTAA state. Drawn
+    // with the overlay pipeline through kl_overlay_build, like any guest Quad layer, from a
+    // CoreGraphics bitmap refreshed twice a second.
+    static let fpsHudEnabled: Bool = (getenv("KL_FPS_HUD").map { String(cString: $0) } ?? "0") == "1"
+    private var hudTex: MTLTexture?
+    private var hudWindowStart = Date()
+    private var hudPresents = 0, hudGuestFrames = 0
+    private var hudLastSerial: UInt64 = 0
+    private var hudLine = "…"
+    private var hudDepth: MTLDepthStencilState?
+
+    private func hudCount(rendered: kl_ovrp_render_pose, haveRendered: Bool) {
+        guard Self.fpsHudEnabled else { return }
+        hudPresents += 1
+        if haveRendered, UInt64(rendered.serial) != hudLastSerial {
+            hudLastSerial = UInt64(rendered.serial)
+            hudGuestFrames += 1
+        }
+        let dt = Date().timeIntervalSince(hudWindowStart)
+        if dt >= 0.5 {
+            let game = Double(hudGuestFrames) / dt, comp = Double(hudPresents) / dt
+            let res = haveRendered && rendered.viewport_of.0 > 0
+                ? "\(rendered.viewport_of.0)x\(rendered.viewport_of.1)" : "-"
+            hudLine = String(format: "Juego %.0f fps  Visor %.0f Hz  %@  VPKTAA %@",
+                             game, comp, res, taaOut.isEmpty ? "off" : "on")
+            hudGuestFrames = 0; hudPresents = 0; hudWindowStart = Date()
+            hudTex = makeHudTexture(hudLine) ?? hudTex
+        }
+    }
+
+    private func makeHudTexture(_ text: String) -> MTLTexture? {
+        let w = 1024, h = 80
+        guard let cs = CGColorSpace(name: CGColorSpace.sRGB),
+              let ctx = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: w * 4,
+                                  space: cs, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return nil }
+        ctx.setFillColor(CGColor(red: 0, green: 0, blue: 0, alpha: 0.6))
+        ctx.fill(CGRect(x: 0, y: 0, width: w, height: h))
+        let font = CTFontCreateWithName("Menlo-Bold" as CFString, 30, nil)
+        let attrs: [NSAttributedString.Key: Any] = [
+            NSAttributedString.Key(kCTFontAttributeName as String): font,
+            NSAttributedString.Key(kCTForegroundColorAttributeName as String): CGColor(red: 0.3, green: 1, blue: 0.4, alpha: 1)]
+        let line = CTLineCreateWithAttributedString(NSAttributedString(string: text, attributes: attrs))
+        ctx.textPosition = CGPoint(x: 16, y: 26)
+        CTLineDraw(line, ctx)
+        guard let data = ctx.data else { return nil }
+        let d = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba8Unorm_srgb, width: w, height: h,
+                                                         mipmapped: false)
+        d.usage = [.shaderRead]
+        d.storageMode = .shared
+        guard let t = device.makeTexture(descriptor: d) else { return nil }
+        t.replace(region: MTLRegionMake2D(0, 0, w, h), mipmapLevel: 0, withBytes: data, bytesPerRow: w * 4)
+        return t
+    }
+
+    private func drawFpsHud(_ enc: MTLRenderCommandEncoder, viewIndices: [Int],
+                            drawable: LayerRenderer.Drawable, originFromHead: simd_float4x4) {
+        guard Self.fpsHudEnabled, let tex = hudTex, let pipe = overlayPipeline, let sampler else { return }
+        var ov = kl_ovrp_overlay()
+        ov.layer_id = -99
+        ov.shape = 0
+        ov.tex_w = Int32(tex.width); ov.tex_h = Int32(tex.height)
+        // Head-locked, 1 m ahead and a little below the line of sight; identity orientation.
+        ov.pose = (0, 0, 0, 1, 0, -0.22, -1.0)
+        ov.size = (0.42, 0.033)
+        ov.head_locked = 1
+        ov.origin_top_left = 1
+        var uniforms: [kl_overlay_uniforms] = []
+        for vi in viewIndices {
+            var u = kl_overlay_build(&ov, Int32(vi), originFromHead,
+                                     Self.headFromView(drawable.views[vi].transform,
+                                                       midpoint: eyeMidpointInDevice),
+                                     drawable.computeProjection(viewIndex: vi))
+            u.srgb_decode = 0   // our own sRGB texture: decoded by the sampler already
+            uniforms.append(u)
+        }
+        // Always on top: the HUD must not be hidden by guest geometry nearer than 1 m.
+        if hudDepth == nil {
+            let d = MTLDepthStencilDescriptor()
+            d.depthCompareFunction = .always
+            d.isDepthWriteEnabled = true
+            hudDepth = device.makeDepthStencilState(descriptor: d)
+        }
+        if let hudDepth { enc.setDepthStencilState(hudDepth) }
+        enc.setRenderPipelineState(pipe)
+        enc.setFragmentTexture(tex, index: 0)
+        enc.setFragmentSamplerState(sampler, index: 0)
+        uniforms.withUnsafeBytes { buf in
+            enc.setVertexBytes(buf.baseAddress!, length: buf.count, index: 0)
+            enc.setFragmentBytes(buf.baseAddress!, length: buf.count, index: 0)
+        }
+        enc.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
+    }
+
     private func encodeComposite(_ drawable: LayerRenderer.Drawable,
                                  cmd: MTLCommandBuffer, stage: Int, completeStage: Int,
                                  rendered: kl_ovrp_render_pose, haveRendered: Bool,
@@ -2156,23 +2259,29 @@ final class KleptonCompositor {
         return n
     }
 
-    /// A group of views sharing one attachment, and therefore one render pass.
-    /// Runs VPKTAA once per eye (a compute pass each, before the composite's render pass) and
-    /// leaves the results in `taaOut`. Only the shared-array eye layout (both eyes in one
-    /// 2-slice array, or one array per eye) is handled; anything else composites untouched.
+    /// VPKTAA (async, KleptonTAA.submit): hands a NEW guest frame to the VPKTAA queue and
+    /// picks up the newest FINISHED resolve, whose pose replaces `rendered` for the eye quads
+    /// (taaPose) so picture and pose always belong to the same guest frame. Both eyes or none.
+    /// Only the shared-array eye layout is handled; anything else composites untouched.
     private func prepareTAA(cmd: MTLCommandBuffer, stage: Int, completeStage: Int,
                             rendered: kl_ovrp_render_pose, haveRendered: Bool) {
         taaOut.removeAll(keepingCapacity: true)
-        // Jitter is only served to the game while this resolve really runs (else it would shimmer).
-        defer { kl_ovrp_set_taa_active(taaOut.count == 2 ? 1 : 0) }
-        guard let taa, completeStage >= 0, kl_ovrp_eye_layer_live() != 0,
-              projLayerCount == 0 else { return }
-        for eye in 0..<2 {
-            guard let a = eyeSource(eye, stage) else { continue }
-            if let t = taa.resolve(cmd: cmd, eye: eye, source: a.texture, slice: a.slice,
-                                   flipY: a.flipY, rendered: rendered, haveRendered: haveRendered) {
-                taaOut[eye] = t
-            }
+        taaPose = nil
+        guard let taa else { return }
+        // Jitter is only served to the game while resolves really run (else it would shimmer).
+        defer { kl_ovrp_set_taa_active(taa.running ? 1 : 0) }
+        guard completeStage >= 0, kl_ovrp_eye_layer_live() != 0, projLayerCount == 0 else {
+            taa.invalidate(); return
+        }
+        if haveRendered {
+            var srcs: [(MTLTexture, Int, Bool)] = []
+            for eye in 0..<2 { if let a = eyeSource(eye, stage) { srcs.append((a.texture, a.slice, a.flipY)) } }
+            if srcs.count == 2 { taa.submit(sources: srcs, rendered: rendered, wait: taaWait) }
+        }
+        if let p = taa.acquire(for: cmd) {
+            taaOut[0] = p.out[0]; taaOut[1] = p.out[1]
+            taaFlip = p.flipY
+            taaPose = p.pose
         }
     }
 
@@ -2184,6 +2293,10 @@ final class KleptonCompositor {
                              rendered: kl_ovrp_render_pose, haveRendered: Bool,
                              originFromHead: simd_float4x4) -> Int {
         guard let first = viewIndices.first else { return 0 }
+        // VPKTAA picture on screen: reproject it with the pose of the guest frame it was
+        // resolved from (one frame older than `rendered` while the next resolve runs).
+        let rendered = taaPose ?? rendered
+        let haveRendered = taaPose != nil ? true : haveRendered
         let firstMap = drawable.views[first].textureMap
 
         let pass = MTLRenderPassDescriptor()
@@ -2292,8 +2405,8 @@ final class KleptonCompositor {
             var alloc = (completeStage < 0 || kl_ovrp_eye_layer_live() == 0) ? nil : a
             // VPKTAA: the resolved picture replaces the guest's, same geometry (slice 0 of its
             // own array, same flip).
-            if let got = alloc, let t = taaOut[vi] {
-                alloc = EyeAllocation(texture: t, slice: 0, flipY: got.flipY)
+            if alloc != nil, let t = taaOut[vi] {
+                alloc = EyeAllocation(texture: t, slice: 0, flipY: taaFlip[vi == 0 ? 0 : 1])
             }
             var u = withUnsafePointer(to: rendered) { r in
                 kl_reproject_build(haveRendered ? r : nil, Int32(vi),
@@ -2530,6 +2643,7 @@ final class KleptonCompositor {
         let panels = encodeOverlays(enc, viewIndices: viewIndices, drawable: drawable,
                                     originFromHead: originFromHead,
                                     writeDepth: visible == 0)
+        drawFpsHud(enc, viewIndices: viewIndices, drawable: drawable, originFromHead: originFromHead)
         enc.endEncoding()
         // "How many eyes got a picture", which is what the caller counts black
         // frames with — and a panel IS a picture. Without this a guest that
@@ -3400,7 +3514,7 @@ final class KleptonCompositor {
         // same thing from scratch off a log that never remarked on it. Three
         // consecutive reports — six seconds — of the cadence disagreeing with
         // the latched period by more than 10% is not a hitch.
-        if displayPeriod > 0 && cadenceN >= 30 && abs(periods - 1.0) > 0.10 {
+        if displayPeriod > 0 && cadenceN >= 15 && abs(periods - 1.0) > 0.10 {
             cadenceDisagreed += 1
             if cadenceDisagreed == 3 {
                 NSLog(String(format: "[cp] THE PANEL IS NO LONGER RUNNING AT THE RATE WE "

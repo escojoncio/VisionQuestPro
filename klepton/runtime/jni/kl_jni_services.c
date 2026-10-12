@@ -30,6 +30,7 @@
 #include "kl_va.h"
 #include <zlib.h>
 #include "kl_jni_int.h"
+#include "kl_hostvideo.h"   // kl_hostvideo_surface_layer, for the loading screen
 
 // ---- org.fmod.FmodAndroidAudioManager — FMOD's Java device census ----
 //
@@ -1277,6 +1278,25 @@ static klj_val klj_LoadingScreen_stopUpdating(void *env, void *self,
     kl_loadingvideo_stop();
     return (klj_val){.j = 0};
 }
+// startUpdatingLoadingScreen(path, context, surface, w, h) is the opposite
+// half: the game hands its Java loading screen a Surface to draw into. That
+// Java code is in the APK's dex, which never runs here, and the host already
+// plays the loading video on its own; so this only records what was asked
+// (which layer the Surface names, if it is one of ours) and returns. Without a
+// binding the static call aborted the run ("no host implementation").
+static klj_val klj_LoadingScreen_startUpdating(void *env, void *self,
+                                               const klj_val *a, int n) {
+    (void)env; (void)self;
+    const char *path = n > 0 && a[0].l ? klj_str(a[0].l) : NULL;
+    void *surface    = n > 2 ? a[2].l : NULL;
+    int layer        = surface ? kl_hostvideo_surface_layer(surface) : -1;
+    int w            = n > 3 ? (int)a[3].j : 0;
+    int h            = n > 4 ? (int)a[4].j : 0;
+    KLJ_LOG("LoadingScreen.startUpdatingLoadingScreen path=\"%s\" surface=%p layer=%d %dx%d"
+            " (Java loading screen not run; host drives the loading video)",
+            path ? path : "(null)", surface, layer, w, h);
+    return (klj_val){.j = 0};
+}
 static klj_val klj_UbiJavaInterface_injectActivity(void *env, void *self,
                                                    const klj_val *a, int n) {
     (void)env; (void)self; (void)a; (void)n;
@@ -1892,6 +1912,9 @@ const klj_binding klj_bind_services[] = {
     // AC Nexus native loading screen - hide the host skybox when the game asks.
     {"com/nexusvr/loadingscreen/LoadingScreen", "stopUpdatingLoadingScreen",
      "()V", klj_LoadingScreen_stopUpdating},
+    {"com/nexusvr/loadingscreen/LoadingScreen", "startUpdatingLoadingScreen",
+     "(Ljava/lang/String;Landroid/content/Context;Landroid/view/Surface;II)V",
+     klj_LoadingScreen_startUpdating},
     {"java/lang/Object", "getApplication", "()Landroid/app/Application;",
      klj_ActivityThread_getApplication},
     {"android/content/Context", "getApplicationInfo", "()Landroid/content/pm/ApplicationInfo;", klj_Context_getApplicationInfo},
