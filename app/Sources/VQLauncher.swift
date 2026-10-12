@@ -254,6 +254,11 @@ struct VQSettingsView: View {
                         Stepper(VQL("Nitidez: \(Int(settings.vpktaaSharpness * 100)) %", "Sharpness: \(Int(settings.vpktaaSharpness * 100)) %"),
                                 value: $settings.vpktaaSharpness, in: 0...1, step: 0.1)
                     }
+                    Picker(VQL("Resolución base", "Base resolution"), selection: $settings.avpResolution) {
+                        Text(VQL("Original", "Original")).tag(false)
+                        Text("Vision Pro").tag(true)
+                    }
+                    .pickerStyle(.segmented)
                     Stepper(VQL("Resolución de render: \(Int(settings.renderScale * 100)) %", "Render resolution: \(Int(settings.renderScale * 100)) %"),
                             value: $settings.renderScale, in: 0.5...1.5, step: 0.05)
                     Toggle(VQL("ASW desactivado (todos los frames reales)", "ASW off (every frame real)"), isOn: $settings.aswDisabled)

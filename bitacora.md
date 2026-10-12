@@ -13,6 +13,16 @@
 - Fallo resuelto en la 2.ª build: `KL_TARGET_DEFAULT_NAME` no existe sin el proyecto de Klepton → `kl_app.c` define
   `KL_TARGET_DEFAULT "(ninguno)"`.
 
+## Batman log 18 (2026-10-12): sin mejora visual; ventana inmersiva OK
+- Ventana del launcher se cierra al abrir el inmersivo (verificado en log). NaN de cámara sigue (2029), sin NONFINITE.
+  `gpu.diag viewport views=2 w=256 h=256` (primer draw multiview, pase pequeño).
+- Diagnóstico nuevo: `FrameCapture` (KleptonCompositor.swift, `KL_CAPTURE=1`, ajuste «Capturas de diagnóstico»):
+  PNG de ambas capas del ojo + salida del compositor en frames 120/600/1200 → `Documents/Registros/capture-*.png`
+  (compartibles). `kl_ovrp.c`: línea `first-call <fn> <- imagen+off` por función; `NONUNIT-QUAT` normaliza;
+  `out GetNodePoseState node=…`.
+- Resolución base (ajuste «Resolución base» Original/Vision Pro, `vq.resAVP`, por defecto Original):
+  `KL_OVRP_EYE_BASE=original` → área Quest 3 (2064×2208) con el aspecto del frustum del visor; luego escala y tope.
+
 ## Batman log 17 (2026-10-12): audio OK (`[sl] play state -> PLAYING`), juego corre, imagen totalmente corrupta
 - Sin `gpu.err` de draws; `missing_pipelines` solo f13–f19. 3119 errores NaN de cámara, sin `NONFINITE` en poses.
 - VPEngine `spirv/src/lower.cpp`: SubpassData con multiview (`o_.viewCount>1`) → `D2Array` y fetch en capa = ViewIndex
