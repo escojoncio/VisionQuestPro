@@ -235,3 +235,21 @@ int klh_fcntl(int fd, int cmd, kl_va *va) {
 int klh_ioctl(int fd, unsigned long req, kl_va *va) {
     return kl_ioctl(fd, req, (uintptr_t)kl_va_gp(va));
 }
+
+// __android_log_buf_print(bufID, prio, tag, fmt, ...): the buffer id is irrelevant here.
+int klh_android_log_buf_print(int buf, int prio, const char *tag, const char *fmt, kl_va *va) {
+    (void)buf;
+    return klh_android_log_print(prio, tag, fmt, va);
+}
+
+// __android_log_assert(cond, tag, fmt, ...): logs and aborts, like liblog.
+int klh_android_log_assert(const char *cond, const char *tag, const char *fmt, kl_va *va) {
+    fprintf(stderr, "F/%s: assert%s%s: ", tag ? tag : "", cond ? " " : "", cond ? cond : "");
+    if (fmt) {
+        KL_MARSHAL(fmt, va, KL_VA_PRINTF);
+        vfprintf(stderr, fmt, _ap);
+    }
+    fputc('\n', stderr);
+    fflush(stderr);
+    abort();
+}

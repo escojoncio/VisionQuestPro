@@ -13,6 +13,21 @@
 - Fallo resuelto en la 2.ª build: `KL_TARGET_DEFAULT_NAME` no existe sin el proyecto de Klepton → `kl_app.c` define
   `KL_TARGET_DEFAULT "(ninguno)"`.
 
+## Batman log 15 (2026-10-12): audio abre; fatal `__android_log_is_loggable`
+- OpenSL OK: `GetConfiguration("androidPerformanceMode") -> 1`, Oboe sigue, CoreAudio arranca. Muere en el frame 3 por
+  import sin resolver `__android_log_is_loggable` (Oboe, dentro del sink de Meta). Sin `gpu.err`, sin NONFINITE (pero
+  0 draws aún: arreglo SubpassData sin ejercitar).
+- `libc/kl_shim.c`: liblog `__android_log_is_loggable(_len)` (INFO+), `_buf_write`, `_buf_print`, `_assert` (aborta
+  con mensaje), `_set/get_minimum_priority`, `_write_log_message`; libdl `android_get_exported_namespace`,
+  `android_create_namespace` (NULL, log `[dl]`), `android_link_namespaces` (0). Varargs: `kl_va_thunks.S`
+  `klv_android_log_buf_print` (4), `klv_android_log_assert` (3); handlers en `kl_va_handlers.c`.
+- `setBufferSizeInFrames ErrorUnimplemented`: interno de Oboe con OpenSL+callback, inocuo.
+### Pendiente
+- Multiview + subpassLoad: shader declara texture2d (SubpassData Arrayed=0) y metal2 liga vista 2DArray de 2 capas →
+  desajuste/ojo derecho con capa 0. Arreglo: `texDim` D2Array si el módulo usa multiview + capa=ViewIndex en el fetch.
+- Candidatos de imports aún sin shim (auditoría): `android_dlopen_ext`, `clock_nanosleep`, `sched_setscheduler`,
+  `sched_getcpu`, `__sched_cpualloc/free`, `AChoreographer_*`.
+
 ## Batman log 14 (2026-10-12): imagen corrupta + sin audio
 - Gráficos (confirmado): 20 draws/frame saltadas `unbound_kind5_slot4/2`. SPIR-V `Dim::SubpassData` lleva siempre
   `Sampled=2` → `lower.cpp` lo declaraba StorageTexture (kind 5) mientras el layout Vulkan liga INPUT_ATTACHMENT como
