@@ -9,6 +9,17 @@
 - Base de CPU/sistema: Klepton (MIT). Ya parchea x18, carga sin JIT, bionic/NDK/JNI/ovrp. Gráficos: VPEngine sustituye
   a MoltenVK.
 
+## Klepton: puntos de integración (leído en shinyquagsire23/Klepton, commit de 2026-09-03)
+- Hoy: un juego por app, convertido en Mac (`visionos/mkguest.sh` → `build/klepton-ld`) y metido en `Frameworks/<target>/`.
+- `tools/klepton_ld.c` (776 líneas, C puro, escribe Mach-O sin linker; parchea x18 y TLS; sección `__TEXT,__klelf`) →
+  compilable dentro de la app para convertir en el visor.
+- `runtime/kl_image.c` `kl_load_auto`: busca traducciones en `KL_DYLIB_DIR` (`<lib>.dylib` o `<lib>.framework/<lib>`).
+- `runtime/kl_target.c` `synthesize()`: objetivo genérico Unity (entry `libmain`) para árboles fuera de la tabla.
+- ANGLE se carga con `dlopen` (`gfx/kl_glfb.c`) → opcional; se omite (GLES fuera de la v1).
+- `gfx/kl_vulkan.c` (6070 líneas): `libvulkan.so` del invitado → `dlopen` de MoltenVK + `VK_EXT_metal_objects` para dar el
+  `MTLTexture` del ojo al compositor. **Punto de entrada de VPEngine**: un driver Vulkan propio (dylib con
+  `vkGetInstanceProcAddr`) cargado en lugar de MoltenVK, que también expone `VK_EXT_metal_objects`.
+
 ## Pendiente (siguiente sesión)
 1. Fase 1: `tools/vqanalyze` (APK/OBB, motor, Vulkan/GLES, variante Quest 3, alineación de segmentos, uso de x18,
    imports por librería). Necesita el juego de prueba elegido por el usuario.
