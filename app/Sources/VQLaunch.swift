@@ -35,6 +35,7 @@ enum VQLaunch {
         let psoCache = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("VisionQuestPro/PipelineCache/\(game.id)", isDirectory: true)
         setenv("VP_PIPELINE_CACHE_DIR", psoCache.path, 1)
+        VQPrewarm.run()
         VQLanguage.apply(game, useSystem: VQSettings.shared.systemLanguage)
         VQOVRPluginVersion.apply(apk: game.apk)
         VQLog.log("Arranque: \(game.id) (\(game.package)) tree=\(choice.prepared.tree.path) dylibs=\(choice.prepared.dylibs.path) "
@@ -42,6 +43,10 @@ enum VQLaunch {
         let rc = kl_app_configure_game(game.id, choice.prepared.tree.path, game.apk.path, choice.prepared.dylibs.path,
                                        files.path, obbRel, documents)
         VQLog.log("Arranque: kl_app_configure_game -> \(rc): \(String(cString: kl_app_status()))")
+        // Re-push the settings now that the driver is loaded and stderr reaches the log
+        // (the first push in applyToEnvironment can predate both).
+        let fwd = vq_gfx_config_forward()
+        VQLog.log("Gráficos: ajustes enviados a VPVulkan \(fwd == 1 ? "sí" : "no (driver no cargado)")")
         return rc
     }
 
@@ -71,6 +76,8 @@ final class VQSettings: ObservableObject {
     @Published var vpktaa: Bool { didSet { save() } }
     @Published var vpktaaPercent: Double { didSet { save() } }  // 0...100
     @Published var vpktaaSharpness: Double { didSet { save() } } // 0...1
+    /// 16x anisotropic filtering on the game's mipmapped linear samplers (VPVulkan).
+    @Published var aniso16: Bool { didSet { save() } }
     @Published var renderScale: Double { didSet { save() } }    // 0.5...1.5
     // Resolution base: false = the game's original (Quest 3 budget), true = Vision Pro's request.
     @Published var avpResolution: Bool { didSet { save() } }
@@ -84,6 +91,8 @@ final class VQSettings: ObservableObject {
     @Published var posture: String { didSet { save() } }   // "auto" | "seated" | "standing"
     /// Run the game in the system language when it ships it, else English (LANG for Klepton's Locale/AConfiguration).
     @Published var systemLanguage: Bool { didSet { save() } }
+    /// Compile the game's known shaders/pipelines before it starts (VPVulkan recipe store).
+    @Published var precompileShaders: Bool { didSet { save() } }
 
     private init() {
         let d = UserDefaults.standard
@@ -99,15 +108,17 @@ final class VQSettings: ObservableObject {
         vpktaa = d.object(forKey: "vq.vpktaa") as? Bool ?? true
         vpktaaPercent = d.object(forKey: "vq.vpktaaPercent") as? Double ?? 80
         vpktaaSharpness = d.object(forKey: "vq.vpktaaSharp") as? Double ?? 0.5
+        aniso16 = d.object(forKey: "vq.aniso16") as? Bool ?? true
         renderScale = d.object(forKey: "vq.renderScale") as? Double ?? 1
         avpResolution = d.object(forKey: "vq.resAVP") as? Bool ?? false
         aswDisabled = d.object(forKey: "vq.aswOff") as? Bool ?? true
         quest3Profile = d.object(forKey: "vq.quest3v2") as? Bool ?? true  // Quest 3 for every game by default
         forceVulkan = d.object(forKey: "vq.forceVulkan") as? Bool ?? true
-        diagCaptures = d.object(forKey: "vq.diagCaptures") as? Bool ?? true
+        diagCaptures = d.object(forKey: "vq.diagCaptures2") as? Bool ?? false
         useVPEngine = d.object(forKey: "vq.vpengine") as? Bool ?? true
         posture = d.string(forKey: "vq.posture") ?? "auto"
         systemLanguage = d.object(forKey: "vq.sysLang") as? Bool ?? true
+        precompileShaders = d.object(forKey: "vq.precompile") as? Bool ?? true
     }
 
     /// First Apple Vision Pro (M2) is RealityDevice14,x; a later one is taken as an M5
@@ -137,15 +148,17 @@ final class VQSettings: ObservableObject {
         d.set(vpktaa, forKey: "vq.vpktaa")
         d.set(vpktaaPercent, forKey: "vq.vpktaaPercent")
         d.set(vpktaaSharpness, forKey: "vq.vpktaaSharp")
+        d.set(aniso16, forKey: "vq.aniso16")
         d.set(renderScale, forKey: "vq.renderScale")
         d.set(avpResolution, forKey: "vq.resAVP")
         d.set(aswDisabled, forKey: "vq.aswOff")
         d.set(quest3Profile, forKey: "vq.quest3v2")
         d.set(forceVulkan, forKey: "vq.forceVulkan")
-        d.set(diagCaptures, forKey: "vq.diagCaptures")
+        d.set(diagCaptures, forKey: "vq.diagCaptures2")
         d.set(useVPEngine, forKey: "vq.vpengine")
         d.set(posture, forKey: "vq.posture")
         d.set(systemLanguage, forKey: "vq.sysLang")
+        d.set(precompileShaders, forKey: "vq.precompile")
     }
 
     /// VPVulkan inside the app, if this build carries it.
@@ -236,11 +249,17 @@ final class VQSettings: ObservableObject {
         c.vpktaa_enabled = vpktaa ? 1 : 0
         c.vpktaa_percent = Float(vpktaaPercent)
         c.vpktaa_sharpness = Float(vpktaaSharpness)
+        c.anisotropy = aniso16 ? 16 : 0
         c.render_scale = Float(renderScale)
         c.asw_disabled = aswDisabled ? 1 : 0
         c.quest3_profile = quest3Profile ? 1 : 0
         _ = vq_gfx_config_apply(&c)
-        VQLog.log("Gráficos: foveado Quest siempre apagado; foveado propio \(foveation), VPKTAA \(vpktaa) \(Int(vpktaaPercent)) % nitidez \(vpktaaSharpness), escala \(renderScale), ASW apagado \(aswDisabled), perfil Quest 3 \(quest3Profile)")
+        // VPKTAA runs in Klepton's compositor (KleptonTAA.swift), for every driver.
+        setenv("KL_VPKTAA", vpktaa ? "1" : "0", 1)
+        setenv("KL_VPKTAA_PCT", String(format: "%.0f", vpktaaPercent), 1)
+        setenv("KL_VPKTAA_SHARP", String(format: "%.2f", vpktaaSharpness), 1)
+        vq_prewarm_set_enabled(precompileShaders ? 1 : 0)
+        VQLog.log("Gráficos: foveado Quest siempre apagado; foveado propio \(foveation), VPKTAA \(vpktaa) \(Int(vpktaaPercent)) % nitidez \(vpktaaSharpness), anisotrópico x16 \(aniso16), escala \(renderScale), ASW apagado \(aswDisabled), perfil Quest 3 \(quest3Profile)")
         VQLog.log("Ajustes: sin red \(offline), log del juego \(guestLog), vigilante \(Int(watchdogSeconds)) s")
     }
 }
@@ -338,5 +357,36 @@ enum VQOVRPluginVersion {
         } else {
             VQLog.log("OVRPlugin: sin versión en libOVRPlugin.so; se usa la de Klepton")
         }
+    }
+}
+
+/// Shader precompilation before the game boots: VPVulkan rebuilds every pipeline recipe stored by
+/// earlier runs (VP_PIPELINE_CACHE_DIR) on all cores and saves the Metal binary archive, so the
+/// game's own pipeline creation is cache hits instead of 200-400 ms compiles mid-play.
+/// Runs on the boot thread (configure()); progress is published for VQLoadingView.
+final class VQPrewarm: ObservableObject {
+    static let shared = VQPrewarm()
+    @Published var done: UInt32 = 0
+    @Published var total: UInt32 = 0
+    @Published var active = false
+
+    static func run() {
+        guard VQSettings.shared.precompileShaders else {
+            VQLog.log("Shaders: precompilación desactivada en ajustes")
+            return
+        }
+        let count = vq_prewarm_count()  // 0 as well when VPVulkan is not the driver
+        guard count > 0 else {
+            VQLog.log("Shaders: nada que precompilar (primera vez con este juego o sin VPVulkan)")
+            return
+        }
+        DispatchQueue.main.async { shared.total = count; shared.done = 0; shared.active = true }
+        let start = Date()
+        let n = vq_prewarm_run({ done, total, _ in
+            DispatchQueue.main.async { VQPrewarm.shared.done = done; VQPrewarm.shared.total = total }
+        }, nil)
+        let ms = Int(Date().timeIntervalSince(start) * 1000)
+        DispatchQueue.main.async { shared.active = false }
+        VQLog.log("Shaders: precompilados \(n) pipelines en \(ms) ms")
     }
 }

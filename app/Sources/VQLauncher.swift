@@ -268,7 +268,9 @@ struct VQSettingsView: View {
                     .pickerStyle(.segmented)
                     Stepper(VQL("Resolución de render: \(Int(settings.renderScale * 100)) %", "Render resolution: \(Int(settings.renderScale * 100)) %"),
                             value: $settings.renderScale, in: 0.5...1.5, step: 0.05)
+                    Toggle(VQL("Filtrado anisotrópico x16", "16x anisotropic filtering"), isOn: $settings.aniso16)
                     Toggle(VQL("ASW desactivado (todos los frames reales)", "ASW off (every frame real)"), isOn: $settings.aswDisabled)
+                    Toggle(VQL("Precompilar shaders antes de jugar", "Precompile shaders before playing"), isOn: $settings.precompileShaders)
                     Toggle(VQL("Perfil Quest 3", "Quest 3 profile"), isOn: $settings.quest3Profile)
                     Toggle(VQL("Forzar Vulkan en juegos Unity", "Force Vulkan in Unity games"), isOn: $settings.forceVulkan)
                     Toggle(VQL("Capturas de diagnóstico", "Diagnostic captures"), isOn: $settings.diagCaptures)
@@ -318,11 +320,15 @@ struct VQLoadingView: View {
     let status: String
     let showLog: () -> Void
     @State private var pulse = false
+    @ObservedObject private var prewarm = VQPrewarm.shared
 
     private var failed: Bool { finished && !succeeded }
     private var phrase: String {
         if failed { return VQL("No se pudo iniciar el juego", "The game could not start") }
         if finished || openedSpace { return VQL("Iniciando VR…", "Starting VR…") }
+        if prewarm.active {
+            return VQL("Preparando shaders \(prewarm.done) / \(prewarm.total)", "Preparing shaders \(prewarm.done) / \(prewarm.total)")
+        }
         if running { return VQL("Cargando juego…", "Loading game…") }
         return VQL("Preparando…", "Preparing…")
     }
@@ -345,7 +351,13 @@ struct VQLoadingView: View {
                 .font(.largeTitle.bold()).multilineTextAlignment(.center).lineLimit(2)
 
             VStack(spacing: 10) {
-                if !failed { ProgressView().controlSize(.large) }
+                if !failed {
+                    if prewarm.active && prewarm.total > 0 {
+                        ProgressView(value: Double(prewarm.done), total: Double(prewarm.total)).frame(maxWidth: 360)
+                    } else {
+                        ProgressView().controlSize(.large)
+                    }
+                }
                 Text(phrase).font(.title3).foregroundStyle(.secondary)
                 if failed, !status.isEmpty {
                     Text(status).font(.callout).foregroundStyle(.orange).multilineTextAlignment(.center)
