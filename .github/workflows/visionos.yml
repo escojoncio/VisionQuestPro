@@ -1,0 +1,115 @@
+# VisionQuestPro for Apple Vision Pro: Klepton's runtime + the launcher, MoltenVK v1.4.2, VPEngine's
+# signature code. Unsigned IPA, published as the release "visionos" (VisionQuestPro.ipa).
+#
+# Only when asked for: by hand (Actions > visionos > Run workflow) or a push whose commit message
+# has [build] in it. Klepton's runtime and MoltenVK are cached while their sources do not change.
+name: visionos
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  app:
+    if: github.event_name == 'workflow_dispatch' || contains(github.event.head_commit.message, '[build]')
+    concurrency:
+      group: visionos
+      cancel-in-progress: true
+    runs-on: macos-26
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+      - name: VPEngine (the signature code)
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/VPEngine
+          path: vpengine
+          fetch-depth: 1
+          sparse-checkout: |
+            runtime
+          sparse-checkout-cone-mode: true
+
+      - uses: actions/cache@v4
+        id: mvk
+        with:
+          path: klepton/vendor-moltenvk/out
+          key: moltenvk-xros-v1.4.2-${{ hashFiles('klepton/tools/mvk_fetch.sh', 'klepton/tools/mvk_retarget.sh') }}
+      - name: MoltenVK v1.4.2
+        if: steps.mvk.outputs.cache-hit != 'true'
+        run: |
+          set -o pipefail
+          cd klepton
+          bash tools/mvk_fetch.sh
+          bash tools/mvk_retarget.sh
+          rm -rf vendor-moltenvk/dist vendor-moltenvk/*.tar
+
+      - uses: actions/cache@v4
+        id: rt
+        with:
+          path: klepton/build/xros/libklepton.a
+          key: libklepton-xros-${{ hashFiles('klepton/runtime/**', 'klepton/Makefile') }}-mvk142
+      - name: Klepton runtime (libklepton.a for visionOS)
+        if: steps.rt.outputs.cache-hit != 'true'
+        run: |
+          set -o pipefail
+          cd klepton
+          make -j1 build/xros/libklepton.a XROS_PLATFORMS=xros 2>&1 | tee ../runtime.log
+
+      - name: Apple's certificates (the chain a signed library carries)
+        run: |
+          mkdir -p build/VPEngineCertificates
+          for C in AppleWWDRCAG3 AppleWWDRCAG4 AppleWWDRCAG5 AppleWWDRCAG6; do
+            curl -sSfL --retry 4 --retry-delay 5 -o build/VPEngineCertificates/$C.cer https://www.apple.com/certificateauthority/$C.cer || echo "no $C"
+          done
+          curl -sSfL --retry 4 --retry-delay 5 -o build/VPEngineCertificates/AppleRootCA-G3.cer https://www.apple.com/certificateauthority/AppleRootCA-G3.cer || true
+          curl -sSfL --retry 4 --retry-delay 5 -o build/VPEngineCertificates/AppleIncRootCertificate.cer https://www.apple.com/appleca/AppleIncRootCertificate.cer
+          ls -la build/VPEngineCertificates
+
+      - name: The app
+        run: |
+          set -o pipefail
+          brew install xcodegen || true
+          xcodegen generate --spec project.yml
+          xcodebuild -project VisionQuestPro.xcodeproj -scheme VisionQuestPro \
+            -sdk xros -configuration Release -destination 'generic/platform=visionOS' \
+            -derivedDataPath build/dd \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
+            build 2>&1 | tee app.log | grep -E 'error:|warning: .*VQ|BUILD (SUCCEEDED|FAILED)' || true
+          grep -q 'BUILD SUCCEEDED' app.log
+          APP=$(find build/dd/Build/Products -name 'VisionQuestPro.app' -maxdepth 3 | head -n 1)
+          ls -la "$APP" "$APP/Frameworks" | tee -a app.log
+          mkdir -p build/ipa/Payload
+          cp -R "$APP" build/ipa/Payload/
+          (cd build/ipa && zip -qry ../VisionQuestPro.ipa Payload)
+          ls -la build/VisionQuestPro.ipa
+
+      - name: Logs (on failure)
+        if: failure()
+        run: |
+          for f in runtime.log app.log; do
+            [ -f "$f" ] || continue
+            echo "=== $f (errors)"; grep -nE 'error|Error' "$f" | head -80
+            echo "=== $f (tail)"; tail -60 "$f"
+          done
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: logs
+          path: |
+            runtime.log
+            app.log
+          if-no-files-found: ignore
+
+      - name: Publish the app as a release
+        if: success() && github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete visionos --yes --cleanup-tag || true
+          gh release create visionos build/VisionQuestPro.ipa \
+            --target "$GITHUB_SHA" --prerelease \
+            --title "VisionQuestPro para Apple Vision Pro" \
+            --notes "App sin firmar, compilada de ${GITHUB_SHA::7}. Klepton + launcher con conversión en el visor; Vulkan con MoltenVK."
