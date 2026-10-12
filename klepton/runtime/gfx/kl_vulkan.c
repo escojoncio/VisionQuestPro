@@ -3801,10 +3801,17 @@ static void klvk_spoof_props(VkPhysicalDeviceProperties *p) {
     p->vendorID = 0x5143;                 // Qualcomm
     p->deviceID = 0x43051401;             // an Adreno 740-class id (plausible)
     snprintf(p->deviceName, sizeof p->deviceName, "Adreno (TM) 740");
+    // Unity 2022's Vulkan detection (libunity: vendor 0x5143 branch) refuses a
+    // Qualcomm GPU whose driverVersion lacks bit 31 — real Adreno drivers are
+    // 512.x, encoded VK_MAKE_VERSION(512, ...) which sets it. MoltenVK's small
+    // number made Unity show "does not match the hardware requirements" and
+    // fall back to GLES. Report a Quest 3 driver: 512.744.0.
+    p->driverVersion = VK_MAKE_VERSION(512, 744, 0);
     static int said;
     if (!said) { said = 1;
         VKI("GPU identity spoofed to '%s' vendor %#x for the guest's "
-            "hardware check (KL_VK_SPOOF_ADRENO)\n", p->deviceName, p->vendorID); }
+            "hardware check (KL_VK_SPOOF_ADRENO), driverVersion %#x\n", p->deviceName,
+            p->vendorID, p->driverVersion); }
 }
 static void VKAPI_CALL klvk_GetPhysicalDeviceProperties(
         VkPhysicalDevice pd, VkPhysicalDeviceProperties *props) {

@@ -142,3 +142,11 @@
 ### Comprobar en el siguiente log
 - `Bundle.containsKey("unity") -> true` y línea `CommandLine:` de Unity; luego `vkCreateDevice`.
 - Si Unity no lee `unity`: la detección rechaza algo de la GPU. Siguiente paso: registrar todas las consultas vkGetPhysicalDevice* de la instancia de Unity (apiVersion 1.1 de MoltenVK vs 1.3 de Adreno; driverVersion con vendor Qualcomm).
+
+## 2026-10-12 — Causa real del rechazo Vulkan: driverVersion (desensamblado de libunity)
+- Log 4: `-force-vulkan` llega (`Bundle.containsKey("unity") -> true`, `getString`), Unity reintenta Vulkan pero vuelve a rechazar. `force-vulkan` no salta la detección.
+- libunity 2022.3.45 (Batman), función de detección en 0xdaa154 (log «Vulkan detection: %d», resultado 0 sin Vulkan / 1 rechazado / 2 válido). Lee VkPhysicalDeviceProperties y conmuta por vendorID:
+  - Qualcomm 0x5143: nombre «Adreno (TM) 4xx» → rechazado (0xdcc858). Si no, 0xdcc8e8 (Qualcomm y global <0) → exige `driverVersion >= 0x80000000`; si no, apiVersion >= 1.0.49.
+  - ARM 0x13b5 (Mali-T…), NVIDIA, Intel, ImgTec: mínimos propios. Otro vendor (Apple): válido solo si API Android > 29.
+- MoltenVK da un driverVersion pequeño → rechazo. Arreglo: `kl_vulkan.c` `klvk_spoof_props` pone `driverVersion = VK_MAKE_VERSION(512,744,0)` (= 0x802e8000, como un driver Adreno 512.x real); se registra en la línea del spoof.
+- Para otros juegos Unity 2022 la misma regla aplica: con vendor Qualcomm hace falta bit 31 en driverVersion.
