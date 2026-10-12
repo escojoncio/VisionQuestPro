@@ -24,7 +24,13 @@ enum VQLaunch {
         guard let files = VQFolder.shared.saves(for: game.id) else { return 1 }
         // The OBB dir the game is told (relative to its files dir): the folder holding its .obb,
         // else the game folder itself (loose data).
-        let obbFolder = game.obbs.first?.deletingLastPathComponent() ?? game.folder
+        // VRP-style copies keep loose data (no .obb extension) in `<game>/<package>/`: use that
+        // folder when it exists, as the Quest's /sdcard/Android/obb/<package>/ (AC Nexus `start0`).
+        let pkgDir = game.folder.appendingPathComponent(game.package, isDirectory: true)
+        var isDir: ObjCBool = false
+        let hasPkgDir = !game.package.isEmpty
+            && FileManager.default.fileExists(atPath: pkgDir.path, isDirectory: &isDir) && isDir.boolValue
+        let obbFolder = game.obbs.first?.deletingLastPathComponent() ?? (hasPkgDir ? pkgDir : game.folder)
         let obbRel = relativePath(from: files, to: obbFolder)
         let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0].path
         // Graphics libraries ride in the app (Frameworks/), not beside the converted game.
@@ -87,6 +93,8 @@ final class VQSettings: ObservableObject {
     @Published var resolutionBase: String { didSet { save() } }
     /// Head-locked FPS counter in the compositor (KL_FPS_HUD).
     @Published var showFps: Bool { didSet { save() } }
+    /// Keep the game's own MSAA (default). Off: render 1x (VPVK_FORCE_1X).
+    @Published var gameMSAA: Bool { didSet { save() } }
     @Published var aswDisabled: Bool { didSet { save() } }
     @Published var quest3Profile: Bool { didSet { save() } }
     @Published var forceVulkan: Bool { didSet { save() } }
@@ -113,7 +121,7 @@ final class VQSettings: ObservableObject {
         sharpZone = d.object(forKey: "vq.fovSharp") as? Double ?? 0.35
         periphery = d.object(forKey: "vq.fovPeriphery") as? Double ?? 0.5
         fovHeight = d.object(forKey: "vq.fovHeight") as? Double ?? 0
-        vpktaa = d.object(forKey: "vq.vpktaa3") as? Bool ?? true  // VPKTAA on by default (game MSAA off)
+        vpktaa = d.object(forKey: "vq.vpktaa4") as? Bool ?? false  // off by default: game MSAA is the default AA
         vpktaaPercent = d.object(forKey: "vq.vpktaaPercent") as? Double ?? 80
         vpktaaSharpness = d.object(forKey: "vq.vpktaaSharp2") as? Double ?? 0.3
         // Older builds stored a bool (vq.aniso16); off there stays off.
@@ -127,6 +135,7 @@ final class VQSettings: ObservableObject {
             resolutionBase = (d.object(forKey: "vq.resAVP") as? Bool ?? false) ? "compositor" : "original"
         }
         showFps = d.object(forKey: "vq.showFps") as? Bool ?? false
+        gameMSAA = d.object(forKey: "vq.gameMSAA") as? Bool ?? true
         aswDisabled = d.object(forKey: "vq.aswOff") as? Bool ?? true
         quest3Profile = d.object(forKey: "vq.quest3v2") as? Bool ?? true  // Quest 3 for every game by default
         forceVulkan = d.object(forKey: "vq.forceVulkan") as? Bool ?? true
@@ -164,7 +173,7 @@ final class VQSettings: ObservableObject {
         d.set(sharpZone, forKey: "vq.fovSharp")
         d.set(periphery, forKey: "vq.fovPeriphery")
         d.set(fovHeight, forKey: "vq.fovHeight")
-        d.set(vpktaa, forKey: "vq.vpktaa3")
+        d.set(vpktaa, forKey: "vq.vpktaa4")
         d.set(vpktaaPercent, forKey: "vq.vpktaaPercent")
         d.set(vpktaaSharpness, forKey: "vq.vpktaaSharp2")
         d.set(anisoLevel, forKey: "vq.anisoLevel")
@@ -172,6 +181,7 @@ final class VQSettings: ObservableObject {
         d.set(renderScale, forKey: "vq.renderScale")
         d.set(resolutionBase, forKey: "vq.resBase")
         d.set(showFps, forKey: "vq.showFps")
+        d.set(gameMSAA, forKey: "vq.gameMSAA")
         d.set(aswDisabled, forKey: "vq.aswOff")
         d.set(quest3Profile, forKey: "vq.quest3v2")
         d.set(forceVulkan, forKey: "vq.forceVulkan")
@@ -277,7 +287,7 @@ final class VQSettings: ObservableObject {
         setenv("VPVK_ANISO", String(anisoLevel), 1)  // read by VPVulkan even if the dlsym forward misses
         // Per-pass GPU timing in VPEngine (gpu.passtime lines, one rendering frame every 90).
         if perfDiag { setenv("VP_PASS_TIMING", "90", 1) } else { unsetenv("VP_PASS_TIMING") }
-        c.force_single_sample = 1  // the game's MSAA is always off, for every game, with or without VPKTAA
+        c.force_single_sample = gameMSAA ? 0 : 1  // game MSAA kept by default; independent of VPKTAA
         setenv("KL_FPS_HUD", showFps ? "1" : "0", 1)
         setenv("VPVK_FORCE_1X", c.force_single_sample != 0 ? "1" : "0", 1)
         c.render_scale = Float(renderScale)
@@ -289,7 +299,7 @@ final class VQSettings: ObservableObject {
         setenv("KL_VPKTAA_PCT", String(format: "%.0f", vpktaaPercent), 1)
         setenv("KL_VPKTAA_SHARP", String(format: "%.2f", vpktaaSharpness), 1)
         vq_prewarm_set_enabled(precompileShaders ? 1 : 0)
-        VQLog.log("Gráficos: foveado Quest siempre apagado; foveado propio \(foveation), VPKTAA \(vpktaa) \(Int(vpktaaPercent)) % nitidez \(vpktaaSharpness), anisotrópico x\(anisoLevel), diagnóstico de rendimiento \(perfDiag), escala \(renderScale), ASW apagado \(aswDisabled), perfil Quest 3 \(quest3Profile), MSAA del juego apagado, FPS en pantalla \(showFps)")
+        VQLog.log("Gráficos: foveado Quest siempre apagado; foveado propio \(foveation), VPKTAA \(vpktaa) \(Int(vpktaaPercent)) % nitidez \(vpktaaSharpness), anisotrópico x\(anisoLevel), diagnóstico de rendimiento \(perfDiag), escala \(renderScale), ASW apagado \(aswDisabled), perfil Quest 3 \(quest3Profile), MSAA del juego \(gameMSAA), FPS en pantalla \(showFps)")
         VQLog.log("Ajustes: sin red \(offline), log del juego \(guestLog), vigilante \(Int(watchdogSeconds)) s")
     }
 }

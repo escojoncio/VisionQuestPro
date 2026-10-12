@@ -138,6 +138,35 @@ void kl_vulkan_layer_rekey(int old_key, int new_key);
 // composites its frame into. NULL until the scratch exists. w/h report 4096.
 void *kl_vulkan_wild_scratch_mtl(int *w, int *h);
 
+// Application SpaceWarp storage (VPKTAA phase 1): the motion-vector and depth
+// images ovrp_GetLayerTextureSpaceWarp hands the guest for the EYE layer, one
+// pair per swapchain stage. Same shape as the eye images: under the Array
+// (multiview) layout one image per stage with two array layers, both eyes get
+// the same handle and the eye is the slice; under Stereo one image per eye.
+// `vk_format` is a VkFormat (int so this header stays Vulkan-free). The
+// motion-vector image is a colour target the guest renders into; the depth
+// image a depth/stencil target. Both are SAMPLED so a compositor can read them.
+// Returns the VkImage as a 64-bit handle, 0 on failure. Only kl_ovrp calls it,
+// and only with KL_VPKTAA=1.
+#define KLVK_ASW_MOTION 0
+#define KLVK_ASW_DEPTH  1
+unsigned long long kl_vulkan_spacewarp_image(int stage, int eye, int kind,
+                                             unsigned w, unsigned h,
+                                             int vk_format, int layers);
+// The MTLTexture behind one of those, for the compositor / VPKTAA. `slice` is
+// the array layer holding `eye` (0 under Stereo). NULL when nothing was
+// allocated for that (stage, eye, kind). For a depth image the texture is the
+// depth/stencil texture MoltenVK made (D24S8 is served as depth32Float_stencil8
+// on Apple GPUs) — a sampler needs a depth-plane view of it.
+void *kl_vulkan_spacewarp_mtl(int eye, int stage, int kind,
+                              int *w, int *h, int *slice);
+// Monotonic count of guest commands RECORDED that write the (stage, kind)
+// image: a render pass / dynamic rendering that has it as an attachment, or a
+// copy/blit into it. Recorded, not executed — a per-frame "the guest wrote its
+// motion vectors" signal is "this count moved since the previous frame on this
+// stage", which is what kl_ovrp files into the frame record.
+unsigned kl_vulkan_spacewarp_writes(int stage, int kind);
+
 // Write both eyes of a stage out as PNGs. Called at frame submission, which on
 // this path is ovrp_EndFrame4 — the guest's own assertion that it has finished
 // drawing them.

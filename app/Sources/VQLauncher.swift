@@ -247,7 +247,14 @@ struct VQSettingsView: View {
                         Stepper(VQL("Altura: \(Int(settings.fovHeight * 100)) %", "Height: \(Int(settings.fovHeight * 100)) %"),
                                 value: $settings.fovHeight, in: -0.5...0.5, step: 0.05)
                     }
-                    Toggle(VQL("VPKTAA (sustituye al AA/MSAA del juego)", "VPKTAA (replaces the game's AA/MSAA)"), isOn: $settings.vpktaa)
+                    Toggle(VQL("MSAA del juego", "Game's MSAA"), isOn: $settings.gameMSAA)
+                    Text(VQL("El antialiasing original del juego. Recomendado activado.",
+                             "The game's own antialiasing. Recommended on."))
+                        .font(.caption)
+                    Toggle(VQL("VPKTAA (experimental)", "VPKTAA (experimental)"), isOn: $settings.vpktaa)
+                    Text(VQL("Antialiasing temporal propio sobre la imagen final del juego. Sin vectores de movimiento del juego puede verse más borroso y con estelas; junto con el MSAA del juego cuesta más GPU.",
+                             "Our own temporal antialiasing on the game's final picture. Without the game's motion vectors it can look blurrier and trail; together with the game's MSAA it costs more GPU."))
+                        .font(.caption)
                     if settings.vpktaa {
                         Stepper(VQL("Intensidad del suavizado: \(Int(settings.vpktaaPercent)) %", "Smoothing strength: \(Int(settings.vpktaaPercent)) %"),
                                 value: $settings.vpktaaPercent, in: 0...100, step: 5)

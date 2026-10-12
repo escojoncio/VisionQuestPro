@@ -148,6 +148,10 @@ void       *klj_want(void *clazz, const char *name, const char *sig, char kind);
 klj_val     klj_call(void *env, void *self, void *mid, kl_va *va, char want);
 void        klj_field_store(void *obj, void *fid, klj_val v);
 kl_jint     klj_ExceptionCheck(void *env);
+// Raise a Java exception of class `cls` (with message) on this thread, for a
+// host binding whose Java original throws; the binding then returns its zero.
+void        klj_throw_new(const char *cls, const char *msg);
+const char *klj_throwable_message(void *obj);
 void       *klj_GetObjectClass(void *env, void *obj);
 kl_jint     klj_PushLocalFrame(void *env, kl_jint cap);
 void       *klj_PopLocalFrame(void *env, void *result);

@@ -309,7 +309,22 @@ typedef struct {
     // 0 = probing, 1 = jitter (guest re-reads the frustum every frame),
     // 2 = no jitter (guest does not, or jitter not requested).
     int      jitter_mode;
+    // Application SpaceWarp (VPKTAA phase 1). Bit flags, 0 for every guest
+    // that never asked for SpaceWarp storage and whenever KL_VPKTAA is off:
+    //   KL_OVRP_ASW_STORAGE  motion-vector (+ depth) images exist for `stage`
+    //                        (kl_vulkan_spacewarp_mtl answers for it)
+    //   KL_OVRP_ASW_MV       the guest recorded a write into this stage's
+    //                        motion-vector image during this frame
+    //   KL_OVRP_ASW_DEPTH    ...and into its SpaceWarp depth image
+    // "During this frame" = since the previous EndFrame that filed this stage.
+    int      asw;
+    // The eye layer's ovrpLayerSubmit.LayerSubmitFlags (+0x44) this frame, raw.
+    int      asw_submit_flags;
 } kl_ovrp_render_pose;
+
+#define KL_OVRP_ASW_STORAGE 1
+#define KL_OVRP_ASW_MV      2
+#define KL_OVRP_ASW_DEPTH   4
 
 // What the guest rendered `stage` with. Returns 0 (and leaves *out untouched)
 // if nothing has been recorded for that stage yet.

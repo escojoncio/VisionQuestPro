@@ -264,6 +264,13 @@ void kl_jni_pin_object(void *obj) {
     if (o) o->pinned++;
     pthread_mutex_unlock(&g_lock);
 }
+// Undo one kl_jni_pin_object: the object is retired again at its frame's pop.
+void kl_jni_unpin_object(void *obj) {
+    pthread_mutex_lock(&g_lock);
+    klj_object *o = klj_as_object(obj);
+    if (o && o->pinned > 0) o->pinned--;
+    pthread_mutex_unlock(&g_lock);
+}
 
 
 // Same as kl_jni_new_object, but carries a payload. Used for the object
@@ -477,10 +484,93 @@ void *kl_jni_class(const char *name) { return klj_FindClass(NULL, name); }
     return c;
 }
 
-static void *klj_ExceptionOccurred(void *env) { (void)env; return NULL; }
-static void  klj_ExceptionDescribe(void *env) { (void)env; }
-static void  klj_ExceptionClear(void *env)    { (void)env; }
- kl_jint klj_ExceptionCheck(void *env)  { (void)env; return 0; }
+// ---- Java exceptions ----
+// One pending throwable per thread, as in a real VM. Only host bindings that
+// mirror a Java method which THROWS on Android raise one (klj_throw_new): the
+// first is ZipFile(String) on a missing file, where Unity's OBB check catches
+// FileNotFoundException to skip an absent patch OBB — answering a NULL object
+// with no exception made it read an empty GUID from the missing file and
+// report "Application OBB has mismatching GUID ... got ''".
+//
+// Dropped (named once) when the guest makes its next Call*/NewObject without
+// having cleared it: calling into Java with an exception pending is undefined
+// behaviour in JNI, and a guest that never checks would otherwise see a stale
+// exception at some unrelated later ExceptionCheck. KL_JNI_EXCEPTIONS=0 turns
+// throwing off and restores the old NULL-only answer.
+static __thread void *t_exc;
+
+static int klj_exceptions_on(void) {
+    static int on = -1;
+    if (on < 0) on = kl_env_on("KL_JNI_EXCEPTIONS", 1);
+    return on;
+}
+
+// The pending exception is pinned while pending (it must outlive the guest's local frames
+// until it is looked at) and unpinned when it is cleared or replaced.
+static void klj_exc_set(void *e) {
+    if (e) kl_jni_pin_object(e);
+    if (t_exc) kl_jni_unpin_object(t_exc);
+    t_exc = e;
+}
+
+void klj_throw_new(const char *cls, const char *msg) {
+    if (!klj_exceptions_on() || !cls) return;
+    void *e = klj_new_object_data(cls, msg ? strdup(msg) : NULL);
+    if (msg) klj_own(e, free);
+    klj_exc_set(e);             // pinned until cleared
+    static int said;
+    if (said < 16) {
+        said++;
+        KLJ_LOG("throw %s(\"%s\") to the guest", cls, msg ? msg : "");
+    }
+}
+
+static int klj_is_throwable(const char *cls);   // walks g_supers, defined below
+
+// The message carried by a throwable we made (NULL for anything else: only a
+// class that chains to java/lang/Throwable has a C string as its payload here).
+const char *klj_throwable_message(void *obj) {
+    klj_object *o = klj_as_object(obj);
+    if (!o || !o->cls || !klj_is_throwable(o->cls)) return NULL;
+    return (const char *)o->data;
+}
+
+static void klj_exc_drop_stale(void) {
+    if (!t_exc) return;
+    static int said;
+    if (said < 8) {
+        said++;
+        klj_object *o = klj_as_object(t_exc);
+        KLJ_LOG("pending %s dropped: the guest called into Java without clearing it",
+                o ? o->cls : "exception");
+    }
+    klj_exc_set(NULL);
+}
+
+static void *klj_ExceptionOccurred(void *env) { (void)env; return t_exc; }
+static void  klj_ExceptionDescribe(void *env) {
+    (void)env;
+    if (!t_exc) return;
+    klj_object *o = klj_as_object(t_exc);
+    const char *m = klj_throwable_message(t_exc);
+    KLJ_LOG("ExceptionDescribe: %s: %s", o ? o->cls : "?", m ? m : "");
+    klj_exc_set(NULL);          // JNI: Describe also clears
+}
+static void  klj_ExceptionClear(void *env)    { (void)env; klj_exc_set(NULL); }
+ kl_jint klj_ExceptionCheck(void *env)  { (void)env; return t_exc != NULL; }
+static kl_jint klj_Throw(void *env, void *obj) {
+    (void)env;
+    if (!obj) return -1;
+    klj_exc_set(obj);
+    return 0;
+}
+static kl_jint klj_ThrowNew(void *env, void *clazz, const char *msg) {
+    (void)env;
+    if (!clazz) return -1;
+    if (!klj_exceptions_on()) return 0;
+    klj_throw_new(klj_class_name(clazz), msg);
+    return 0;
+}
 
 static __attribute__((noreturn)) void klj_FatalError(void *env, const char *msg) {
     (void)env;
@@ -618,8 +708,27 @@ static const struct { const char *cls, *super; } g_supers[] = {
     // objects actually are — which is also what makes IsInstanceOf answer
     // correctly for a guest that checks.
     {"java/security/cert/X509Certificate",     "java/security/cert/Certificate"},
+    // The throwables klj_throw_new raises, so IsInstanceOf(e, IOException) and
+    // the Throwable bindings (getMessage/toString) reach them.
+    {"java/io/FileNotFoundException",          "java/io/IOException"},
+    {"java/lang/NullPointerException",         "java/lang/RuntimeException"},
+    {"java/util/zip/ZipException",             "java/io/IOException"},
+    {"java/io/IOException",                    "java/lang/Exception"},
+    {"java/lang/RuntimeException",             "java/lang/Exception"},
+    {"java/lang/Exception",                    "java/lang/Throwable"},
     {NULL, NULL},
 };
+
+static int klj_is_throwable(const char *cls) {
+    for (const char *cur = cls; cur; ) {
+        if (strcmp(cur, "java/lang/Throwable") == 0) return 1;
+        const char *next = NULL;
+        for (int i = 0; g_supers[i].cls; i++)
+            if (strcmp(g_supers[i].cls, cur) == 0) { next = g_supers[i].super; break; }
+        cur = next;
+    }
+    return 0;
+}
 
 static kl_jint klj_IsInstanceOf(void *env, void *obj, void *clazz) {
     (void)env;
@@ -1109,6 +1218,7 @@ static klj_val klj_call_common(void *env, void *self, void *mid, char want,
                                kl_va *va, const klj_jvalue *args) {
     klj_val zero = {0};
     klj_wanted *w = mid;
+    klj_exc_drop_stale();
     if (!w || w < g_wanted || w >= g_wanted + KLJ_MAX_WANTED) {
         // A jmethodID we never issued is nearly always a NULL one the guest
         // cached from a lookup it did not make, and the useful question is who
@@ -2204,6 +2314,8 @@ static void klj_build_tables(void) {
     ENV(ExceptionDescribe,    klj_ExceptionDescribe);
     ENV(ExceptionClear,       klj_ExceptionClear);
     ENV(ExceptionCheck,       klj_ExceptionCheck);
+    ENV(Throw,                klj_Throw);
+    ENV(ThrowNew,             klj_ThrowNew);
     ENV(FatalError,           klj_FatalError);
     ENV(PushLocalFrame,       klj_PushLocalFrame);
     ENV(PopLocalFrame,        klj_PopLocalFrame);

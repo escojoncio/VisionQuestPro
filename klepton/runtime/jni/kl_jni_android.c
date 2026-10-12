@@ -1312,6 +1312,60 @@ static klj_val klj_ClassLoader_findLibrary(void *env, void *self, const klj_val 
 // staged assets, klj_guest_version fell back to 1.28's 545, and the 1.3 GB of
 // 1.40 data sitting right here under main.1716... was never opened. So the
 // mismatch is named, by both numbers, at the moment we hand the path over.
+// One-shot listing of the obb dir: up to 24 entries, name + size (or "dir").
+static void klj_obb_list(const char *dir) {
+    DIR *d = opendir(dir);
+    if (!d) { KLJ_LOG("obb: %s cannot be opened (errno %d)", dir, errno); return; }
+    struct dirent *e;
+    int n = 0, shown = 0;
+    KLJ_LOG("obb: no main.*.obb in %s — loose contents:", dir);
+    while ((e = readdir(d)) != NULL) {
+        if (e->d_name[0] == '.') continue;
+        n++;
+        if (shown >= 24) continue;
+        char p[1024]; struct stat st;
+        snprintf(p, sizeof p, "%s/%s", dir, e->d_name);
+        if (stat(p, &st) != 0) KLJ_LOG("obb:   %s (stat failed, errno %d)", e->d_name, errno);
+        else if (S_ISDIR(st.st_mode)) KLJ_LOG("obb:   %s/ (dir)", e->d_name);
+        else KLJ_LOG("obb:   %s (%lld bytes)", e->d_name, (long long)st.st_size);
+        shown++;
+    }
+    closedir(d);
+    if (n > shown) KLJ_LOG("obb:   ... %d more", n - shown);
+    if (!n) KLJ_LOG("obb:   (empty)");
+}
+
+// VRP-style layout: "<game>/<package>.apk" + "<game>/<package>/<data>". The app
+// points the obb dir at the folder holding the first *.obb, else at the game
+// folder itself. A title whose obb data has NO .obb extension (Meta "required
+// asset files" — AC Nexus's start0…) therefore got the game ROOT, and every
+// "/sdcard/Android/obb/<pkg>/<file>" the guest opened missed the <package>
+// subfolder where the files really are. Descend into "<dir>/<package>" when it
+// is a directory and <dir> itself holds no main.*.obb (so a root that really is
+// the obb dir is left alone).
+static void klj_obb_descend_package(char *path, size_t cap) {
+    const char *pkg = kl_jni_guest_package();
+    if (!pkg || !*pkg) return;
+    char sub[1024]; struct stat st;
+    snprintf(sub, sizeof sub, "%s/%s", path, pkg);
+    if (stat(sub, &st) != 0 || !S_ISDIR(st.st_mode)) return;
+    DIR *d = opendir(path);
+    if (d) {
+        struct dirent *e;
+        int has_obb = 0;
+        while ((e = readdir(d)) != NULL) {
+            size_t L = strlen(e->d_name);
+            if (strncmp(e->d_name, "main.", 5) == 0 && L > 4 &&
+                strcasecmp(e->d_name + L - 4, ".obb") == 0) { has_obb = 1; break; }
+        }
+        closedir(d);
+        if (has_obb) return;
+    }
+    KLJ_LOG("obb: %s has no main.*.obb but holds a %s/ folder — using that as the obb dir "
+            "(VRP layout with loose asset files)", path, pkg);
+    snprintf(path, cap, "%s", sub);
+}
+
 static void klj_obb_census(const char *dir) {
     long code = 0;
     klj_guest_version(&code, NULL);
@@ -1395,7 +1449,11 @@ static void klj_obb_census(const char *dir) {
         return;
     }
         // No OBB at all is not an error here: 1.28 and Steam Link have none.
-    if (!others) return;
+    // But a title whose data is LOOSE files in its obb dir (Meta "required
+    // asset files": AC Nexus opens /sdcard/Android/obb/<pkg>/start0 by path and
+    // waits on its loading screen until it exists) needs to see what the dir
+    // actually holds, so list it once.
+    if (!others) { klj_obb_list(dir); return; }
     KLJ_LOG("obb: %s holds %s but this guest is versionCode %ld, so it will look "
             "for main.%ld.*.obb and find nothing. That is a MISSING GAME DATA "
             "run — check that apktool.yml was staged beside assets/",
@@ -1433,6 +1491,7 @@ const char *kl_jni_obb_dir(void) {
         }
         snprintf(path, sizeof path, "%s/%s", kl_jni_files_dir(), rel);
         klj_mkdir_p(path);
+        klj_obb_descend_package(path, sizeof path);
         klj_obb_census(path);
     }
     return path;

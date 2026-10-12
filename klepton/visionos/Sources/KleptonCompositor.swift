@@ -2052,6 +2052,18 @@ final class KleptonCompositor {
                 var extra: [(String, MTLTexture)] = []
                 for (e, t) in taaOut.sorted(by: { $0.key < $1.key }) { extra.append(("vpktaa\(e)", t)) }
                 for (id, t) in overlayCapTex.sorted(by: { $0.key < $1.key }) { extra.append(("layer\(id)", t)) }
+                // Application SpaceWarp storage (VPKTAA phase 1): the guest's motion
+                // vectors (PNG: 0.5 + 32 x NDC delta per channel) and its depth (a
+                // depth format: described in the log, not written).
+                for e in 0..<2 {
+                    for (kind, tag) in [(Int32(KLVK_ASW_MOTION), "aswmv"), (Int32(KLVK_ASW_DEPTH), "aswdepth")] {
+                        var aw: Int32 = 0, ah: Int32 = 0, asl: Int32 = 0
+                        if let p = kl_vulkan_spacewarp_mtl(Int32(e), Int32(completeStage), kind, &aw, &ah, &asl) {
+                            let t = Unmanaged<MTLTexture>.fromOpaque(p).takeUnretainedValue() as MTLTexture
+                            if !extra.contains(where: { $0.1 === t }) { extra.append(("\(tag)\(e)", t)) }
+                        }
+                    }
+                }
                 FrameCapture.capture(frame: capGuestFrames, eyes: eyeTex,
                                      output: drawable.colorTextures.first, cmd: cmd, extra: extra)
             }
@@ -2369,6 +2381,14 @@ final class KleptonCompositor {
             // The menu is the video backdrop PLUS the guest's UI quad overlays on
             // top (once it can allocate its layers). Draw them over the skybox so
             // the menu shows through instead of only the loading environment.
+            _ = encodeOverlays(enc, viewIndices: viewIndices, drawable: drawable,
+                               originFromHead: originFromHead, writeDepth: true)
+            enc.endEncoding()
+            return viewIndices.count
+        } else if loadingVideo != nil {
+            // Player up, no video frame yet (start, loop wrap): black + the guest's
+            // overlays. Falling through to the eye showed its stale frame-0 picture
+            // (AC Nexus log 34: purple flashes while the loading video started).
             _ = encodeOverlays(enc, viewIndices: viewIndices, drawable: drawable,
                                originFromHead: originFromHead, writeDepth: true)
             enc.endEncoding()
@@ -4581,12 +4601,16 @@ enum FrameCapture {
         let src = j.buf.contents().assumingMemoryBound(to: Float16.self)
         let dst = out.contents().assumingMemoryBound(to: UInt8.self)
         var bad = 0
+        // SpaceWarp motion vectors are signed NDC deltas of a few hundredths: shown
+        // as 0.5 + 32 x value so zero motion is mid-grey and movement is visible.
+        let mvViz = j.name.contains("-aswmv")
         for i in 0..<n {
             for c in 0..<4 {
                 let v = Float(src[i * 4 + c])
                 var o: Float
                 if !v.isFinite { bad += 1; o = c == 1 ? 0 : 1 }
                 else if c == 3 { o = min(max(v, 0), 1) }
+                else if mvViz { o = min(max(0.5 + v * 32, 0), 1) }
                 else {
                     let x = min(max(v, 0), 1)
                     o = x <= 0.0031308 ? x * 12.92 : 1.055 * powf(x, 1 / 2.4) - 0.055

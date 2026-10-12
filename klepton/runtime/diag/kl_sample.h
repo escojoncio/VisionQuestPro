@@ -23,4 +23,9 @@ void kl_sample_stop_report(FILE *out);
 // never reaches stop_report.
 void kl_sample_report(FILE *out);
 
+// One-shot: print the current frame chain of every thread that is in guest
+// code (module+offset, managed method names in libil2cpp). Independent of the
+// periodic sampler. `why` labels the event.
+void kl_sample_snapshot(FILE *out, const char *why);
+
 #endif
