@@ -23,6 +23,7 @@
 #include "kl_vulkan.h"
 #include "kl_env.h"
 #include "kl_driver.h"   // kl_driver_target_name() — per-target GPU identity spoof
+#include "klepton.h"       // kl_addr_image() — call-site logging (klvk_who)
 
 // Matched on with a prefix test rather than equality: the guest asks by plain
 // soname, but a path can arrive too (kl_dl.c hands through whatever the guest
@@ -3776,6 +3777,23 @@ static VkResult VKAPI_CALL klvk_GetPhysicalDeviceImageFormatProperties(
     }
     return r;
 }
+// ---- who asks: which guest call site queries the GPU ----------------------
+// A title that rejects the device (Unity's "does not match the hardware
+// requirements") decides from these queries; logging each distinct call site
+// as lib+offset lets the decision be read off a disassembly of that lib.
+// One line per (query, call site), first 128.
+static void klvk_who(const char *what, const void *ret) {
+    static struct { const char *w; const void *r; } said[128];
+    static unsigned n;
+    for (unsigned i = 0; i < n; i++)
+        if (said[i].r == ret && said[i].w == what) return;
+    if (n >= 128) return;
+    said[n].w = what; said[n].r = ret; n++;
+    size_t off = 0; const char *img = kl_addr_image(ret, &off);
+    VKI("who: %s <- %s+0x%zx\n", what, img ? img : "?", off);
+}
+#define KLVK_WHO(what) klvk_who(what, __builtin_return_address(0))
+
 // ---- GPU-identity spoof --------------------------------------------------
 // Some titles gate on the GPU they see rather than on Build.MODEL. batman
 // (Batman: Arkham Shadow) is Quest 3 / 3S exclusive: it makes a throwaway
@@ -3815,6 +3833,7 @@ static void klvk_spoof_props(VkPhysicalDeviceProperties *p) {
 }
 static void VKAPI_CALL klvk_GetPhysicalDeviceProperties(
         VkPhysicalDevice pd, VkPhysicalDeviceProperties *props) {
+    KLVK_WHO("vkGetPhysicalDeviceProperties");
     static PFN_vkGetPhysicalDeviceProperties real;
     if (!real && real_gipa)
         real = (PFN_vkGetPhysicalDeviceProperties)
@@ -3825,6 +3844,7 @@ static void VKAPI_CALL klvk_GetPhysicalDeviceProperties(
 }
 static void VKAPI_CALL klvk_GetPhysicalDeviceProperties2(
         VkPhysicalDevice pd, VkPhysicalDeviceProperties2 *props) {
+    KLVK_WHO("vkGetPhysicalDeviceProperties2");
     if (!props) return;
     pd = KLVK_PHYS_OR_SUB(pd, "GetPhysicalDeviceProperties2");
     static PFN_vkGetPhysicalDeviceProperties2 real;
@@ -3877,6 +3897,7 @@ static void VKAPI_CALL klvk_GetPhysicalDeviceProperties2(
 // the match land in the first place; this catches any residual null path.
 static void VKAPI_CALL klvk_GetPhysicalDeviceQueueFamilyProperties(
         VkPhysicalDevice pd, uint32_t *count, VkQueueFamilyProperties *props) {
+    KLVK_WHO("vkGetPhysicalDeviceQueueFamilyProperties");
     static PFN_vkGetPhysicalDeviceQueueFamilyProperties real;
     static int tried;
     if (!tried) { tried = 1; if (real_gipa) real =
@@ -3892,6 +3913,7 @@ static void VKAPI_CALL klvk_GetPhysicalDeviceQueueFamilyProperties(
 // terse; they share the resolve-once + guard shape.
 static void VKAPI_CALL klvk_GetPhysicalDeviceFeatures2(
         VkPhysicalDevice pd, VkPhysicalDeviceFeatures2 *f) {
+    KLVK_WHO("vkGetPhysicalDeviceFeatures2");
     static PFN_vkGetPhysicalDeviceFeatures2 real; static int t;
     if (!t) { t = 1; if (real_gipa) { real = (PFN_vkGetPhysicalDeviceFeatures2)
         real_gipa(g_instance, "vkGetPhysicalDeviceFeatures2");
@@ -3902,6 +3924,7 @@ static void VKAPI_CALL klvk_GetPhysicalDeviceFeatures2(
 }
 static void VKAPI_CALL klvk_GetPhysicalDeviceFeatures(
         VkPhysicalDevice pd, VkPhysicalDeviceFeatures *f) {
+    KLVK_WHO("vkGetPhysicalDeviceFeatures");
     static PFN_vkGetPhysicalDeviceFeatures real; static int t;
     if (!t) { t = 1; if (real_gipa) real = (PFN_vkGetPhysicalDeviceFeatures)
         real_gipa(g_instance, "vkGetPhysicalDeviceFeatures"); }
@@ -3910,6 +3933,7 @@ static void VKAPI_CALL klvk_GetPhysicalDeviceFeatures(
 }
 static void VKAPI_CALL klvk_GetPhysicalDeviceMemoryProperties(
         VkPhysicalDevice pd, VkPhysicalDeviceMemoryProperties *m) {
+    KLVK_WHO("vkGetPhysicalDeviceMemoryProperties");
     static PFN_vkGetPhysicalDeviceMemoryProperties real; static int t;
     if (!t) { t = 1; if (real_gipa) real = (PFN_vkGetPhysicalDeviceMemoryProperties)
         real_gipa(g_instance, "vkGetPhysicalDeviceMemoryProperties"); }
@@ -3980,6 +4004,7 @@ static VkResult VKAPI_CALL klvk_EnumerateDeviceLayerProperties(
 static VkResult VKAPI_CALL klvk_EnumerateDeviceExtensionProperties(
         VkPhysicalDevice pd, const char *layer, uint32_t *count,
         VkExtensionProperties *props) {
+    KLVK_WHO("vkEnumerateDeviceExtensionProperties");
     static PFN_vkEnumerateDeviceExtensionProperties real; static int t;
     if (!t) { t = 1; if (real_gipa) real = (PFN_vkEnumerateDeviceExtensionProperties)
         real_gipa(g_instance, "vkEnumerateDeviceExtensionProperties"); }
@@ -4115,6 +4140,7 @@ static VkResult VKAPI_CALL klvk_GetPhysicalDeviceFragmentShadingRatesKHR(
 // forward otherwise, so every other target is unaffected.
 static VkResult VKAPI_CALL klvk_EnumeratePhysicalDevices(
         VkInstance inst, uint32_t *count, VkPhysicalDevice *devs) {
+    KLVK_WHO("vkEnumeratePhysicalDevices");
     static PFN_vkEnumeratePhysicalDevices real;
     if (!real && real_gipa) real = (PFN_vkEnumeratePhysicalDevices)
         real_gipa(inst ? inst : g_instance, "vkEnumeratePhysicalDevices");

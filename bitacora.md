@@ -150,3 +150,10 @@
   - ARM 0x13b5 (Mali-T…), NVIDIA, Intel, ImgTec: mínimos propios. Otro vendor (Apple): válido solo si API Android > 29.
 - MoltenVK da un driverVersion pequeño → rechazo. Arreglo: `kl_vulkan.c` `klvk_spoof_props` pone `driverVersion = VK_MAKE_VERSION(512,744,0)` (= 0x802e8000, como un driver Adreno 512.x real); se registra en la línea del spoof.
 - Para otros juegos Unity 2022 la misma regla aplica: con vendor Qualcomm hace falta bit 31 en driverVersion.
+
+## 2026-10-12 — Log 5: driverVersion no bastó; registro de quién consulta la GPU
+- driverVersion 0x802e8000 aplicado (línea del spoof), aviso de hardware sigue. La salida `printf_console` de Unity (p. ej. «Vulkan detection: %d», «[Vulkan init] …») no aparece en el log: build release, no se puede leer el resultado directamente.
+- libunity: la selección de API (0x89eb.. → 0x89ece4 muestra el aviso `gles-api-check`) recorre la lista de APIs; 0x89e4b0 es la comprobación GLES/EGL. Selección de GPU Vulkan en 0xdb11cc: si el plugin XR da un `xrDevice` que no está en la lista enumerada → NULL → Vulkan descartado. Ninguna llamada a Properties2 con ID/LUID en el log.
+- `kl_vulkan.c`: `klvk_who`/`KLVK_WHO` registra cada sitio de llamada distinto (`who: <vk fn> <- lib+off`, máx. 128) en EnumeratePhysicalDevices, Get*Properties(2), Features(2), QueueFamilyProperties, MemoryProperties, EnumerateDeviceExtensionProperties. Include `klepton.h` para `kl_addr_image`.
+### Siguiente
+- Con las líneas `who:` de libunity, situar cada llamada en el desensamblado (detección 0xdaa154, selección 0xdb11cc) y ver qué rama descarta Vulkan.
