@@ -941,6 +941,22 @@ static int32_t klaa_getXRunCount(klaa_stream *s) {
 // this is false, and false is also what makes FMOD choose its ordinary timing
 // model rather than one built on a promise we cannot keep.
 static int32_t klaa_isMMapUsed(klaa_stream *s) { (void)s; return 0; }
+// Oboe (MetaXRAudio's OculusEndpointSink) asks the global MMAP policy before
+// opening. There is no MMAP path here: AAUDIO_POLICY_NEVER (1), and a request
+// to change it is accepted and changes nothing, which is what NEVER means.
+static int32_t klaa_getMMapPolicy(void) { return 1; }
+static aaudio_result_t klaa_setMMapPolicy(int32_t p) { (void)p; return AAUDIO_OK; }
+// Position of the frame the device consumed most recently, stamped now on the
+// clock the guest asked for (Linux CLOCK_MONOTONIC=1 / BOOTTIME=7 both map to
+// the host monotonic clock). Oboe uses it for latency, never for correctness.
+static aaudio_result_t klaa_getTimestamp(klaa_stream *s, int32_t clk, int64_t *pos, int64_t *ns) {
+    (void)clk;
+    if (!s || !pos || !ns) return AAUDIO_ERROR_NULL;
+    struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t);
+    *pos = klaa_getFramesRead(s);
+    *ns = (int64_t)t.tv_sec * 1000000000LL + t.tv_nsec;
+    return AAUDIO_OK;
+}
 
 // The guest's idiom is "ask to start, then wait for STARTING to become
 // something else". Our start is synchronous, so the state has already moved
@@ -1044,6 +1060,9 @@ static const klaa_entry g_aaudio[] = {
     A("AAudioStream_getSessionId",                 klaa_getSessionId),
     A("AAudioStream_getXRunCount",                 klaa_getXRunCount),
     A("AAudioStream_isMMapUsed",                   klaa_isMMapUsed),
+    A("AAudio_getMMapPolicy",                      klaa_getMMapPolicy),
+    A("AAudio_setMMapPolicy",                      klaa_setMMapPolicy),
+    A("AAudioStream_getTimestamp",                 klaa_getTimestamp),
 };
 #undef A
 
