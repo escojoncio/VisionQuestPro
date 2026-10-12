@@ -898,7 +898,14 @@ static uint64_t klovrp_GetPredictedDisplayTime(int node, double *out) {
     ovrp_hit("ovrp_GetPredictedDisplayTime");
     (void)node;
     if (!out) return -1001;
-    *out = kl_ovrp_predicted_display_time();
+    double t = kl_ovrp_predicted_display_time();
+    if (!isfinite(t) || t <= 0.0) {
+        static int nf; if (!nf++)
+            fprintf(stderr, "  [ovrp] NONFINITE ovrp_GetPredictedDisplayTime %f -> monotonic\n", t);
+        struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
+        t = (double)ts.tv_sec + (double)ts.tv_nsec * 1e-9;
+    }
+    *out = t;
     return OVRP_SUCCESS;
 }
 
@@ -1059,7 +1066,13 @@ double kl_ovrp_predicted_display_time(void) {
 
 static float klovrp_GetSystemDisplayFrequency(void) {
     ovrp_hit("ovrp_GetSystemDisplayFrequency");
-    return kl_ovrp_display_frequency();
+    float hz = kl_ovrp_display_frequency();
+    if (!isfinite(hz) || hz <= 1.0f) {
+        static int nf; if (!nf++)
+            fprintf(stderr, "  [ovrp] NONFINITE ovrp_GetSystemDisplayFrequency %f -> 90\n", (double)hz);
+        hz = 90.0f;
+    }
+    return hz;
 }
 
 // The ...2 shape: ovrpResult with a float out-param, where the un-suffixed form
@@ -1073,7 +1086,13 @@ static float klovrp_GetSystemDisplayFrequency(void) {
 static uint64_t klovrp_GetSystemDisplayFrequency2(float *out) {
     ovrp_hit("ovrp_GetSystemDisplayFrequency2");
     if (!out) return -1001;
-    *out = kl_ovrp_display_frequency();
+    float hz = kl_ovrp_display_frequency();
+    if (!isfinite(hz) || hz <= 1.0f) {
+        static int nf; if (!nf++)
+            fprintf(stderr, "  [ovrp] NONFINITE ovrp_GetSystemDisplayFrequency2 %f -> 90\n", (double)hz);
+        hz = 90.0f;
+    }
+    *out = hz;
     return OVRP_SUCCESS;
 }
 
@@ -1376,7 +1395,15 @@ static uint64_t klovrp_GetUserIPD2(float *out) {
     klovrp_eye_offset(0, &lx, &ly, &lz);
     klovrp_eye_offset(1, &rx, &ry, &rz);
     float dx = rx - lx, dy = ry - ly, dz = rz - lz;
-    *out = sqrtf(dx * dx + dy * dy + dz * dz);
+    float ipd = sqrtf(dx * dx + dy * dy + dz * dz);
+    if (!isfinite(ipd) || ipd < 0.04f || ipd > 0.09f) {
+        static int nf; if (!nf++)
+            fprintf(stderr, "  [ovrp] NONFINITE ovrp_GetUserIPD2 %f -> 0.063\n", (double)ipd);
+        if (!isfinite(ipd) || ipd <= 0.0f) ipd = 0.063f;
+    }
+    *out = ipd;
+    { static int said; if (!said++)
+        fprintf(stderr, "  [ovrp] ovrp_GetUserIPD2 -> %.4f (first call)\n", (double)ipd); }
     return OVRP_SUCCESS;
 }
 
@@ -1468,6 +1495,16 @@ static uint64_t klovrp_GetNodeFrustum2(int node, void *out) {
     f[3] = t[3];    // DownTan  <- bottom
     f[4] = t[0];    // LeftTan  <- left
     f[5] = t[1];    // RightTan <- right
+    for (int i = 2; i < 6; i++) if (!isfinite(f[i]) || f[i] <= 0.01f) {
+        static int nf; if (nf++ < 8)
+            fprintf(stderr, "  [ovrp] NONFINITE ovrp_GetNodeFrustum2 node=%d field=%d val=%f -> 1.0\n",
+                    node, i, (double)f[i]);
+        f[i] = 1.0f;
+    }
+    { static int said[3]; int k = (unsigned)node < 3 ? node : 2;
+      if (!said[k]++)
+        fprintf(stderr, "  [ovrp] ovrp_GetNodeFrustum2 node=%d -> near=%.3f far=%.1f up=%.4f down=%.4f left=%.4f right=%.4f\n",
+                node, (double)f[0], (double)f[1], (double)f[2], (double)f[3], (double)f[4], (double)f[5]); }
     return OVRP_SUCCESS;
 }
 
@@ -3542,6 +3579,17 @@ uint64_t klovrp_GetNodePoseState_impl(int step, int node, void *out) {
         static int nq; if (nq++ < 16)
             fprintf(stderr, "  [ovrp] ZERO-QUAT pose node=%d step=%d\n", node, step);
         f[0] = f[1] = f[2] = 0.0f; f[3] = 1.0f;
+    }
+    // ovrpPoseStatef.Time (double at +0x50) was left 0 by the memset. The real
+    // plugin reports the sample's display time; a managed consumer that divides
+    // a pose delta by a time delta gets 0/0 = NaN from two zero timestamps.
+    {
+        double tm = kl_ovrp_predicted_display_time();
+        if (!isfinite(tm) || tm <= 0.0) {
+            struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
+            tm = (double)ts.tv_sec + (double)ts.tv_nsec * 1e-9;
+        }
+        memcpy((char *)out + 0x50, &tm, sizeof tm);
     }
     return OVRP_SUCCESS;
 }

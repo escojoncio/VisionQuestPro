@@ -1490,6 +1490,8 @@ final class KleptonCompositor {
         // lifecycle report, and belongs to the guest's end of the run rather than
         // to this one — has been written before this returns.
         if syncGuest { kl_app_lifecycle_report() } else { kl_app_guest_stop() }
+        // VisionQuestPro: the space is gone — bring the launcher back (or exit).
+        Task { @MainActor in Lifecycle.immersiveEnded() }
     }
 
     /// What each swapchain stage actually holds, per report interval.
