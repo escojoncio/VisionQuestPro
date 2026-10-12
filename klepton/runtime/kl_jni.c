@@ -1436,7 +1436,9 @@ static const char *klj_field_sval(const klj_field *f) {
     // only the hardware identity changes; if a run shows batman also gates on the
     // OS version, bump SDK_INT/RELEASE for it too.
     const char *t = kl_driver_target_name();
-    if (t && strcmp(t, "batman") == 0) {
+    // KL_QUEST3=1 (VisionQuestPro sets it for every game): the same Quest 3
+    // identity for any title, not target by target.
+    if ((t && strcmp(t, "batman") == 0) || kl_env_on("KL_QUEST3", 0)) {
         if (!strcmp(f->name, "MODEL"))    return "Quest 3";
         if (!strcmp(f->name, "DEVICE"))   return "eureka";
         if (!strcmp(f->name, "PRODUCT"))  return "eureka";
