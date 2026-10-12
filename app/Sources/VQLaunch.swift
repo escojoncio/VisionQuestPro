@@ -161,6 +161,7 @@ final class VQSettings: ObservableObject {
         // The launcher already decided; BootView must boot straight away.
         setenv("KL_AUTOBOOT", "1", 1)
         setenv("KL_IMMERSIVE", "1", 1)
+        setenv("KL_VK_SPOOF_ADRENO", "1", 1)  // Quest titles check the GPU identity before choosing Vulkan
         // Eye texture size the game is told (Klepton's ovrp side) and headset identity:
         // 11 = ovrpSystemHeadset Meta_Quest_3; off: Klepton's per-game default (Quest 2 / Quest).
         setenv("KL_OVRP_EYE_SCALE", String(format: "%.2f", renderScale), 1)
