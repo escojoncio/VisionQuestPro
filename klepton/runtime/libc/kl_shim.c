@@ -1867,11 +1867,35 @@ static int  kl_cxa_atexit(void (*f)(void *), void *a, void *d) { (void)f;(void)a
 static void kl_cxa_finalize(void *d) { (void)d; }
 static void kl_android_log_write(int p, const char *t, const char *m) {
     fprintf(stderr, "[%d/%s] %s\n", p, t ? t : "", m ? m : ""); }
+// liblog: everything at INFO or above is loggable (Oboe gates its verbose output on this).
+static int g_log_min_prio = 4; /* ANDROID_LOG_INFO */
+static int kl_android_log_is_loggable(int prio, const char *tag, int def) {
+    (void)tag; int min = def > 0 ? (def > g_log_min_prio ? def : g_log_min_prio) : g_log_min_prio;
+    return prio >= min; }
+static int kl_android_log_is_loggable_len(int prio, const char *tag, size_t len, int def) {
+    (void)len; return kl_android_log_is_loggable(prio, tag, def); }
+static int kl_android_log_buf_write(int buf, int p, const char *t, const char *m) {
+    (void)buf; kl_android_log_write(p, t, m); return 1; }
+static int kl_android_log_set_minimum_priority(int p) { int o = g_log_min_prio; g_log_min_prio = p; return o; }
+static int kl_android_log_get_minimum_priority(void) { return g_log_min_prio; }
+struct kl_android_log_message { size_t size; int32_t buffer_id; int32_t priority;
+    const char *tag; const char *file; uint32_t line; const char *message; };
+static void kl_android_log_write_log_message(struct kl_android_log_message *m) {
+    if (m) kl_android_log_write(m->priority, m->tag, m->message); }
+// libdl linker namespaces: none on this platform. NULL/false makes callers
+// (Meta's libaudiotapper) take their documented fallback instead of aborting.
+static void *kl_android_get_exported_namespace(const char *n) {
+    fprintf(stderr, "  [dl] android_get_exported_namespace(\"%s\") -> NULL\n", n ? n : "?"); return NULL; }
+static void *kl_android_create_namespace(const char *n, const char *a, const char *b, uint64_t t,
+                                         const char *c, void *p) {
+    (void)a;(void)b;(void)t;(void)c;(void)p;
+    fprintf(stderr, "  [dl] android_create_namespace(\"%s\") -> NULL\n", n ? n : "?"); return NULL; }
+static int kl_android_link_namespaces(void *a, void *b, const char *l) { (void)a;(void)b;(void)l; return 0; }
 
 // ---------- externs ----------
 #define X(n) extern int n(void);
 X(klv_printf) X(klv_fprintf) X(klv_sprintf) X(klv_snprintf) X(klv_asprintf)
-X(klv_dprintf) X(klv_syslog) X(klv_warnx) X(klv_android_log_print) X(klv_sscanf) X(klv_fscanf)
+X(klv_dprintf) X(klv_syslog) X(klv_warnx) X(klv_android_log_print) X(klv_android_log_buf_print) X(klv_android_log_assert) X(klv_sscanf) X(klv_fscanf)
 X(klv_open) X(klv_fcntl) X(klv_ioctl) X(klv_strtold) X(klv_wcstold) X(klv_strtold_l)
 X(klb_errno) X(klb_gettid) X(klb_sysprop_find) X(klb_sysprop_get) X(klb_sysprop_read)
 X(klb_prctl) X(klb_sched_getaffinity) X(klb_sched_setaffinity)
@@ -2218,6 +2242,17 @@ static const kl_entry g_shim[] = {
 
     // logging / misc
     E("__android_log_write", kl_android_log_write),
+    E("__android_log_is_loggable", kl_android_log_is_loggable),
+    E("__android_log_is_loggable_len", kl_android_log_is_loggable_len),
+    E("__android_log_buf_write", kl_android_log_buf_write),
+    E("__android_log_buf_print", klv_android_log_buf_print),
+    E("__android_log_assert", klv_android_log_assert),
+    E("__android_log_set_minimum_priority", kl_android_log_set_minimum_priority),
+    E("__android_log_get_minimum_priority", kl_android_log_get_minimum_priority),
+    E("__android_log_write_log_message", kl_android_log_write_log_message),
+    E("android_get_exported_namespace", kl_android_get_exported_namespace),
+    E("android_create_namespace", kl_android_create_namespace),
+    E("android_link_namespaces", kl_android_link_namespaces),
     // __android_log_vprint(prio, tag, fmt, va_list) — NOT vfprintf's shape. It
     // was bound to kl_vfprintf once, which put `prio` in the FILE* slot and
     // segfaulted in flockfile the first time Unity logged through it. The
