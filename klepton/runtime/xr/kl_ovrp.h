@@ -301,6 +301,14 @@ typedef struct {
     // alone cannot: an angle is a rate times an interval, so a large delta is
     // either a fast head or a stale pose and the two want opposite fixes.
     uint64_t submit_ns;
+    // VPKTAA sub-pixel jitter: the offset the guest's projection was shifted by
+    // for this frame, per eye, in TANGENT units (dx right, dy up). `tangents`
+    // above stays the UNjittered frustum (the composite's quad); the guest
+    // actually rendered with x in [-l+dx, r+dx], y in [-b+dy, t+dy].
+    float    jitter[2][2];
+    // 0 = probing, 1 = jitter (guest re-reads the frustum every frame),
+    // 2 = no jitter (guest does not, or jitter not requested).
+    int      jitter_mode;
 } kl_ovrp_render_pose;
 
 // What the guest rendered `stage` with. Returns 0 (and leaves *out untouched)
@@ -796,5 +804,8 @@ enum {
 // the rest of this seam: see the note above `kl_ovrp_haptics_pull`.
 void kl_ovrp_haptics_apply(int hand, float amplitude, float seconds);
 void kl_ovrp_haptics_stop(int hand);
+
+// Compositor → shim: 1 while the VPKTAA resolve runs (gates projection jitter).
+void kl_ovrp_set_taa_active(int on);
 
 #endif

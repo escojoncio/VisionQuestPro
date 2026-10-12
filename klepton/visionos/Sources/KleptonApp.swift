@@ -230,7 +230,10 @@ struct KleptonApp: App {
         // before kl_app_configure, so a static read always saw the pre-target
         // default. Observing the object means .full takes hold reactively before
         // the space opens, for the native VR kind (GTA Vice City). KL_FULL wins.
-        .immersionStyle(selection: .constant(chroma.immersionFull ? .full : .mixed),
+        // ...and leaves .full for .mixed while the guest shows passthrough
+        // (KleptonChroma.passthroughLive): a real binding, so it changes live.
+        .immersionStyle(selection: Binding(get: { chroma.immersionStyle },
+                                           set: { _ in }),
                         in: .mixed, .full)
         // See Immersive.systemOverlays. On the scene, not on a view inside it:
         // a CompositorLayer has no view hierarchy for the View-level modifier to
@@ -616,6 +619,7 @@ struct BootView: View {
             // it on the main actor before the space opens; the scene observes it.
             DispatchQueue.main.async {
                 KleptonChroma.shared.immersionFull = !Immersive.mixed
+                KleptonChroma.shared.startPassthroughWatch()
             }
 
             let logPath = String(cString: kl_app_log_path())

@@ -52,6 +52,7 @@
 // "not supported" and the extension is then never advertised).
 #include "kl_vulkan.h"
 #include "klepton.h"
+#include "kl_passthrough.h"
 
 // ------------------------------------------------------- transcribed from the spec
 // Only what we actually read or write. Every layout below is copied field for
@@ -1218,7 +1219,9 @@ static XrResult klxr_GetViewConfigurationProperties(void *instance, XrSystemId s
     return KLXR_SUCCESS;
 }
 
-// OPAQUE only. The guest's picture covers the display and nothing of the room
+// OPAQUE first, then ALPHA_BLEND (unless KL_PASSTHROUGH=off): the host now
+// composites an ALPHA_BLEND frame over the room (kl_passthrough). Historic note:
+// with OPAQUE only, the guest's picture covers the display and nothing of the room
 // shows through it — which is what every compositor path in this project does
 // (kl_reproject draws the eye texture as the whole scene). ADDITIVE and
 // ALPHA_BLEND are the passthrough modes, and offering one has the guest leave
@@ -1233,10 +1236,13 @@ static XrResult klxr_EnumerateEnvironmentBlendModes(void *instance, XrSystemId s
     if (system_id != KLXR_SYSTEM_ID) KLXR_RET(KLXR_ERROR_SYSTEM_INVALID);
     if (view_config_type != KLXR_VIEW_CONFIG_PRIMARY_STEREO)
         KLXR_RET(KLXR_ERROR_VIEW_CONFIGURATION_TYPE_UNSUPPORTED);
-    XrResult r = klxr_two_call(capacity, count_out, 1);
+    XrResult r = klxr_two_call(capacity, count_out, kl_passthrough_mode() != 1 ? 2 : 1);
     if (r != KLXR_SUCCESS || capacity == 0) return r;
     if (!modes) KLXR_RET(KLXR_ERROR_VALIDATION_FAILURE);
     modes[0] = KLXR_BLEND_OPAQUE;
+    // ALPHA_BLEND second (passthrough): the host now composites the eye layer
+    // over the room when a guest picks it (kl_passthrough). OPAQUE stays first.
+    if (capacity >= 2 && kl_passthrough_mode() != 1) modes[1] = 3;
     return KLXR_SUCCESS;
 }
 
@@ -5308,6 +5314,7 @@ static void klxr_pose_trace_report(klxr_session *s) {
     memset(worst_m, 0, sizeof worst_m);
 }
 
+static void klxr_passthrough_scan(const XrFrameEndInfo *info);   // XR_FB_passthrough section
 static XrResult klxr_EndFrame(void *session, const XrFrameEndInfo *info) {
     KLXR_TRACE("xrEndFrame");
     klxr_session *s = klxr_sess(session);
@@ -5316,6 +5323,7 @@ static XrResult klxr_EndFrame(void *session, const XrFrameEndInfo *info) {
     if (info->type != XR_TYPE_FRAME_END_INFO) KLXR_RET(KLXR_ERROR_VALIDATION_FAILURE);
     klxr_log_chain("xrEndFrame", info->next);
     if (!s->running) KLXR_RET(KLXR_ERROR_SESSION_NOT_RUNNING);
+    klxr_passthrough_scan(info);
     if (!s->frame_begun) KLXR_RET(KLXR_ERROR_CALL_ORDER_INVALID);
     s->frame_begun = 0;
     s->frames_ended++;
@@ -6495,31 +6503,67 @@ static XrResult klxr_ResultToString(void *instance, XrResult value, char *buffer
 }
 
 // ---------------------------------------------------------------- XR_FB_passthrough
-// Stub passthrough: some guests require the extension and drive these, but nothing
-// here composites a passthrough layer (visionOS supplies the environment). The
-// handles are sentinels the guest only ever hands back to us; start/pause/style
-// record nothing and succeed.
+// The room behind the guest is Vision Pro's own passthrough (a .mixed immersive
+// space), so these are stateful no-ops: the handles are sentinels the guest only
+// hands back to us, and what is tracked is whether passthrough is RUNNING and the
+// layer RESUMED. klxr_passthrough_scan (xrEndFrame) then decides per frame whether
+// a live XrCompositionLayerPassthroughFB was submitted, and tells the host
+// (kl_passthrough_note_frame) so it composites the eye layer over the room.
 static char g_pt_handle, g_pt_layer_handle;
+static int  g_pt_running, g_pt_layer_live;
+#define KLXR_PT_RUNNING_AT_CREATION 0x1u   // XR_PASSTHROUGH_IS_RUNNING_AT_CREATION_BIT_FB
+typedef struct { int32_t type; const void *next; uint64_t flags; } klxr_pt_create_info;
+typedef struct { int32_t type; const void *next; void *passthrough; uint64_t flags;
+                 int32_t purpose; } klxr_pt_layer_create_info;
 static XrResult klxr_CreatePassthroughFB(void *session, const void *info, void **out) {
-    (void)session; (void)info;
+    (void)session;
     if (!out) KLXR_RET(KLXR_ERROR_VALIDATION_FAILURE);
     *out = &g_pt_handle;
+    g_pt_running = info && (((const klxr_pt_create_info *)info)->flags & KLXR_PT_RUNNING_AT_CREATION);
+    fprintf(stderr, "[pt] xrCreatePassthroughFB (running=%d)\n", g_pt_running);
     return KLXR_SUCCESS;
 }
-static XrResult klxr_DestroyPassthroughFB(void *pt) { (void)pt; return KLXR_SUCCESS; }
-static XrResult klxr_PassthroughStartFB(void *pt)   { (void)pt; return KLXR_SUCCESS; }
-static XrResult klxr_PassthroughPauseFB(void *pt)   { (void)pt; return KLXR_SUCCESS; }
+static XrResult klxr_DestroyPassthroughFB(void *pt) { (void)pt; g_pt_running = 0; return KLXR_SUCCESS; }
+static XrResult klxr_PassthroughStartFB(void *pt)   { (void)pt; g_pt_running = 1; return KLXR_SUCCESS; }
+static XrResult klxr_PassthroughPauseFB(void *pt)   { (void)pt; g_pt_running = 0; return KLXR_SUCCESS; }
 static XrResult klxr_CreatePassthroughLayerFB(void *session, const void *info, void **out) {
-    (void)session; (void)info;
+    (void)session;
     if (!out) KLXR_RET(KLXR_ERROR_VALIDATION_FAILURE);
     *out = &g_pt_layer_handle;
+    const klxr_pt_layer_create_info *ci = info;
+    g_pt_layer_live = ci && (ci->flags & KLXR_PT_RUNNING_AT_CREATION);
+    fprintf(stderr, "[pt] xrCreatePassthroughLayerFB (purpose=%d running=%d)\n",
+            ci ? ci->purpose : -1, g_pt_layer_live);
     return KLXR_SUCCESS;
 }
-static XrResult klxr_DestroyPassthroughLayerFB(void *l)      { (void)l; return KLXR_SUCCESS; }
-static XrResult klxr_PassthroughLayerPauseFB(void *l)        { (void)l; return KLXR_SUCCESS; }
-static XrResult klxr_PassthroughLayerResumeFB(void *l)       { (void)l; return KLXR_SUCCESS; }
+static XrResult klxr_DestroyPassthroughLayerFB(void *l)      { (void)l; g_pt_layer_live = 0; return KLXR_SUCCESS; }
+static XrResult klxr_PassthroughLayerPauseFB(void *l)        { (void)l; g_pt_layer_live = 0; return KLXR_SUCCESS; }
+static XrResult klxr_PassthroughLayerResumeFB(void *l)       { (void)l; g_pt_layer_live = 1; return KLXR_SUCCESS; }
 static XrResult klxr_PassthroughLayerSetStyleFB(void *l, const void *style) {
     (void)l; (void)style; return KLXR_SUCCESS;
+}
+
+#define KLXR_TYPE_COMPOSITION_LAYER_PASSTHROUGH_FB 1000118003
+#define KLXR_LAYER_UNPREMULTIPLIED_ALPHA 0x4u   // XR_COMPOSITION_LAYER_UNPREMULTIPLIED_ALPHA_BIT
+#define KLXR_BLEND_ALPHA_BLEND 3                 // XR_ENVIRONMENT_BLEND_MODE_ALPHA_BLEND
+#define KLXR_BLEND_ADDITIVE    2
+static void klxr_passthrough_scan(const XrFrameEndInfo *info) {
+    int pt_idx = -1, eye_idx = -1, unpremul = 0;
+    for (uint32_t i = 0; i < info->layerCount; i++) {
+        const XrCompositionLayerBaseHeader *l = info->layers[i];
+        if (!l) continue;
+        if (l->type == KLXR_TYPE_COMPOSITION_LAYER_PASSTHROUGH_FB) {
+            if (pt_idx < 0) pt_idx = (int)i;
+        } else if (l->type == XR_TYPE_COMPOSITION_LAYER_PROJECTION && eye_idx < 0) {
+            eye_idx = (int)i;
+            unpremul = (l->layerFlags & KLXR_LAYER_UNPREMULTIPLIED_ALPHA) != 0;
+        }
+    }
+    int by_layer = pt_idx >= 0 && g_pt_running && g_pt_layer_live;
+    int by_blend = info->environmentBlendMode == KLXR_BLEND_ALPHA_BLEND ||
+                   info->environmentBlendMode == KLXR_BLEND_ADDITIVE;
+    kl_passthrough_note_frame(by_layer || by_blend, by_layer ? pt_idx : -1,
+                              by_layer ? (eye_idx < 0 || pt_idx < eye_idx) : 1, unpremul);
 }
 
 // ---------------------------------------------------------------- XR_FB_foveation (off)

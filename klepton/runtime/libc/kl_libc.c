@@ -406,6 +406,7 @@ static void stat_to_bionic(const struct stat *d, bionic_stat *b) {
 // helper is forward-declared rather than reordering the file.
 const char *kl_guest_path(const char *path, char *buf, size_t cap);
 static void kl_fs_trace(const char *op, const char *path, const char *extra, int failed);
+static void kl_media_probe_log(const char *op, const char *path, const char *host, int failed);
 
 // hl2 (HL2Q3VR): the engine exec's autoexec.cfg at startup, but that file isn't
 // staged, so we serve it synthetically (see klb_fopen). The engine's `exec`
@@ -675,10 +676,12 @@ int klb_stat(const char *p, bionic_stat *b)  { char kp[1024]; const char *q = kl
                                                    }
                                                }
                                                kl_fs_trace("stat", p, NULL, r != 0);
+                                               kl_media_probe_log("stat", p, q, r != 0);
                                                if (!r) stat_to_bionic(&s, b); return r; }
 int klb_lstat(const char *p, bionic_stat *b) { char kp[1024]; const char *q = kl_guest_path(p, kp, sizeof kp);
                                                struct stat s; int r = lstat(q, &s);
                                                kl_fs_trace("lstat", p, NULL, r != 0);
+                                               kl_media_probe_log("lstat", p, q, r != 0);
                                                if (!r) stat_to_bionic(&s, b); return r; }
 int klb_fstat(int fd, bionic_stat *b)        { long long osz; int handled;
                                                if (kl_obbmap_fstat_size(fd, &osz, &handled), handled) {
@@ -1623,6 +1626,34 @@ const char *kl_guest_path(const char *path, char *buf, size_t cap) {
 
 #define KL_GUEST_PATH(p) char _kp[1024]; const char *_p = kl_guest_path((p), _kp, sizeof _kp)
 
+
+// Video-cutscene decision point. Unity titles that play cutscenes through
+// Meta's NativeVideoPlayer gate Play() on System.IO.File.Exists(<obbdir>/<name>)
+// (Batman: Arkham Shadow, StereoVideoPlayer.Play @il2cpp+0x1da9d34 -> File.Exists
+// @0x2fd8228 -> stat()); a false answer silently skips the video and the flow
+// moves on. Always log every media-file probe (once per path) so the log shows
+// whether the guest reached that check and what it was told.
+static void kl_media_probe_log(const char *op, const char *path, const char *host, int failed) {
+    if (!path) return;
+    int saved = errno;   // the guest reads errno after we return
+    size_t n = strlen(path);
+    static const char *ext[] = {".mp4", ".m4v", ".mov", ".webm", ".mkv", ".MP4"};
+    int hit = 0;
+    for (unsigned i = 0; i < sizeof ext / sizeof *ext; i++) {
+        size_t e = strlen(ext[i]);
+        if (n >= e && strcmp(path + n - e, ext[i]) == 0) { hit = 1; break; }
+    }
+    if (!hit) { errno = saved; return; }
+    static char seen[32][256]; static int nseen;
+    for (int i = 0; i < nseen; i++) if (strncmp(seen[i], path, 255) == 0) { errno = saved; return; }
+    if (nseen < 32) { strncpy(seen[nseen], path, 255); seen[nseen][255] = 0; nseen++; }
+    else { errno = saved; return; }   // bounded: log the first 32 distinct probes
+    fprintf(stderr, "  [video] %s(\"%s\")%s%s -> %s\n", op, path,
+            host && strcmp(host, path) ? " host " : "", host && strcmp(host, path) ? host : "",
+            failed ? strerror(saved) : "exists");
+    errno = saved;
+}
+
 // ---------- file-op tracing ----------
 // KL_TRACE_FS=1 reports every guest file operation and its result. The guest
 // swallows its own errno and reports something several layers removed ("Not
@@ -1788,6 +1819,7 @@ int klb_access(const char *path, int mode) {
     // access()/stat()s "<libdir>/filesystem_stdio.so" before loading it.
     if (r != 0 && errno == ENOENT && (mode == F_OK || mode == R_OK) && kl_can_dlopen(_p)) r = 0;
     kl_fs_trace("access", path, NULL, r != 0);
+    kl_media_probe_log("access", path, _p, r != 0);
     return r;
 }
 // These four existed to TRACE, and were never given the path rewrite — which

@@ -27,6 +27,7 @@
 // signal at all — see klovrp_end_frame_impl).
 #include "kl_egl.h"
 #include "kl_vulkan.h"
+#include "kl_passthrough.h"
 
 #define KL_OVRP_MAX 512
 static struct { const char *name; unsigned calls; } g_ovrp[KL_OVRP_MAX];
@@ -1248,17 +1249,33 @@ void kl_ovrp_set_eye_texture_size(int w, int h) {
     // ~4.56 Mpx per eye) instead of the display's request, reshaped to the
     // display's aspect so it matches the frustum tangents pushed alongside it.
     const char *base = getenv("KL_OVRP_EYE_BASE");
-    if (base && !strcmp(base, "original")) {
-        float area = 2064.0f * 2208.0f, aspect = (float)w / (float)h;
+    // KL_OVRP_EYE_BASE=native: the Vision Pro panel's own pixel density across
+    // the eye's field of view. KL_AVP_NATIVE_W/H is the M2 per-eye panel-density
+    // reference (~3660x3200, panel pixels mapped through the lens over the
+    // per-eye FOV); its pixel budget is reshaped to the frustum aspect, which
+    // comes from the tangents (left+right)/(top+bottom) when known, else from
+    // the display's request. "compositor" (or "display") keeps the request.
+#define KL_AVP_NATIVE_W 3660.0f
+#define KL_AVP_NATIVE_H 3200.0f
+    const int native = base && !strcmp(base, "native");
+    if (base && (!strcmp(base, "original") || native)) {
+        float area = native ? KL_AVP_NATIVE_W * KL_AVP_NATIVE_H : 2064.0f * 2208.0f;
+        float aspect = (float)w / (float)h;
+        if (native) {
+            extern float kl_ovrp_eye_tan_aspect(void);
+            float ta = kl_ovrp_eye_tan_aspect();
+            if (ta > 0.2f && ta < 5.0f) aspect = ta;
+        }
         h = (int)(sqrtf(area / aspect) + 0.5f);
         w = (int)((float)h * aspect + 0.5f);
+        if (native) fprintf(stderr, "  [ovrp] eye base native -> %dx%d per eye\n", w, h);
     }
     float scale = kl_env_float("KL_OVRP_EYE_SCALE", 1.0f);
     if (scale > 0.05f && scale <= 4.0f) {
         w = (int)((float)w * scale + 0.5f);
         h = (int)((float)h * scale + 0.5f);
     }
-    int cap = kl_env_int("KL_OVRP_EYE_MAX", 3072);
+    int cap = kl_env_int("KL_OVRP_EYE_MAX", native ? 4096 : 3072);
     if (cap > 0 && (w > cap || h > cap)) {
         // Preserve the aspect ratio: clamping the axes independently would
         // change the shape of the picture, and the frustum tangents pushed
@@ -1312,6 +1329,13 @@ static uint64_t klovrp_GetDesiredEyeTextureFormat(void) {
 // used; a frontend that knows the display's real field of view overwrites it
 // through kl_ovrp_set_eye_frustum.
 static float g_eye_tan[2][4] = {{1, 1, 1, 1}, {1, 1, 1, 1}};
+
+// Eye 0's frustum aspect (width/height in tangent space), 0 while unset.
+float kl_ovrp_eye_tan_aspect(void) {
+    float wv = g_eye_tan[0][0] + g_eye_tan[0][1], hv = g_eye_tan[0][2] + g_eye_tan[0][3];
+    if (wv == 2.0f && hv == 2.0f) return 0.0f;   // still the 1,1,1,1 default
+    return hv > 0 ? wv / hv : 0.0f;
+}
 
 void kl_ovrp_set_eye_frustum(int eye, float left, float right, float top, float bottom) {
     if ((unsigned)eye > 1) return;
@@ -1577,6 +1601,8 @@ static uint64_t klovrp_GetUserEyeHeight2(float *out) {
 // table has `zNear, zFar` adjacent (ovrpFrustum2f) and `UpTan, DownTan,
 // LeftTan, RightTan` adjacent (ovrpFovf), in declaration order, which pins both
 // the struct layout and this transposition.
+static void klovrp_jit_frustum(int eye, float *f);
+static void klovrp_jit_frame_begin(kl_ovrp_render_pose *r);
 static uint64_t klovrp_GetNodeFrustum2(int node, void *out) {
     ovrp_hit("ovrp_GetNodeFrustum2");
     // WHICH node the guest asks about, once per (node, caller).
@@ -1618,6 +1644,9 @@ static uint64_t klovrp_GetNodeFrustum2(int node, void *out) {
                     node, i, (double)f[i]);
         f[i] = 1.0f;
     }
+    // VPKTAA sub-pixel jitter (no-op unless KL_VPKTAA=1 and the guest has
+    // been seen re-reading this every frame). See klovrp_jit_frustum.
+    if (node == 0 || node == 1) klovrp_jit_frustum(node, f);
     { static int said[3]; int k = (unsigned)node < 3 ? node : 2;
       if (!said[k]++)
         fprintf(stderr, "  [ovrp] ovrp_GetNodeFrustum2 node=%d -> near=%.3f far=%.1f up=%.4f down=%.4f left=%.4f right=%.4f\n",
@@ -2623,6 +2652,7 @@ static uint64_t klovrp_begin_frame_impl(int guest_frame_index) {
     // actually told to render with, unified or not.
     for (int e = 0; e < 2; e++)
         memcpy(r->tangents[e], klovrp_eye_tan(e), sizeof r->tangents[e]);
+    klovrp_jit_frame_begin(r);
     // Cleared, not carried: the render viewport is a per-frame statement the
     // guest makes at EndFrame4, and a rect left over from the previous frame
     // would keep cropping after the guest stopped asking for it. Zero reads as
@@ -2693,6 +2723,7 @@ static int klovrp_submit_viewports(const void *layer_submits, int count, int vp[
 static int klovrp_submit_stage(const void *layer_submits, int count);
 // ...and the census of the whole list, for the same forward-declaration reason.
 static void klovrp_census_submits(const void *layer_submits, int count);
+static void klovrp_passthrough_scan(const void *layer_submits, int count);
 // ...and the overlay list a compositor draws on top of the eye picture.
 static void klovrp_record_overlays(const void *layer_submits, int count);
 
@@ -2968,6 +2999,7 @@ static uint64_t klovrp_EndFrame4(int guest_frame_index, const void *layer_submit
       } n++; }
     if (!layer_submits && layer_submit_count) return OVRP_FAIL_INVALID_PARAM;
     klovrp_census_submits(layer_submits, layer_submit_count);
+    klovrp_passthrough_scan(layer_submits, layer_submit_count);
 // The list of everything that is NOT the eye layer, for the compositors.
     // Before this, all of it was dropped here.
     klovrp_record_overlays(layer_submits, layer_submit_count);
@@ -3061,6 +3093,7 @@ void kl_ovrp_frame_begin_external(void) {
     // actually told to render with, unified or not.
     for (int e = 0; e < 2; e++)
         memcpy(r->tangents[e], klovrp_eye_tan(e), sizeof r->tangents[e]);
+    klovrp_jit_frame_begin(r);
     r->serial = s;
     r->stage = -1;
     r->complete = 0;
@@ -5240,6 +5273,81 @@ static const char *klovrp_shape_name(int shape) {
 // (layer, shape, stage, viewport, pose, flags) combination, printed when it
 // first appears and when it changes. A title that submits one eye layer forever
 // pays one line for the run.
+// ---------------------------------------------------------------------------
+// Insight Passthrough. Vision Pro's own passthrough is the real environment of a
+// .mixed immersive space, so the guest's passthrough is honoured by telling the
+// host (kl_passthrough_active) to show the eye layer over the room with its alpha.
+// Init succeeds; capabilities say colour, no depth. "Active" is decided per frame
+// from what the guest SUBMITS: a Reconstruction/SurfaceProjected passthrough layer
+// in the ovrp_EndFrame4 list (a paused/hidden OVRPassthroughLayer is simply not
+// submitted). Index before the eye layer = underlay.
+static int g_pt_initialized;
+static uint64_t klovrp_InitializeInsightPassthrough(void) {
+    ovrp_hit("ovrp_InitializeInsightPassthrough");
+    if (kl_passthrough_mode() == 1)
+        fprintf(stderr, "  [pt] InitializeInsightPassthrough: ok (mode off: shown as VR)\n");
+    else
+        fprintf(stderr, "  [pt] InitializeInsightPassthrough: ok\n");
+    g_pt_initialized = 1;
+    return OVRP_SUCCESS;
+}
+static uint64_t klovrp_GetInsightPassthroughInitialized(void) {
+    ovrp_hit("ovrp_GetInsightPassthroughInitialized");
+    return g_pt_initialized ? OVRP_TRUE : 0;
+}
+// Returns the init ovrpResult itself: Success once initialised, else
+// ovrpFailure_NotInitialized (-1002).
+static uint64_t klovrp_GetInsightPassthroughInitializationState(void) {
+    ovrp_hit("ovrp_GetInsightPassthroughInitializationState");
+    return g_pt_initialized ? OVRP_SUCCESS : (uint64_t)(int64_t)-1002;
+}
+static uint64_t klovrp_IsInsightPassthroughSupported(int *supported) {
+    ovrp_hit("ovrp_IsInsightPassthroughSupported");
+    if (!supported) return OVRP_FAIL_INVALID_PARAM;
+    *supported = 1;
+    return OVRP_SUCCESS;
+}
+// ovrpPassthroughCapabilityFlags: Passthrough=1, Color=2, Depth=4.
+static uint64_t klovrp_GetPassthroughCapabilityFlags(uint32_t *flags) {
+    ovrp_hit("ovrp_GetPassthroughCapabilityFlags");
+    if (!flags) return OVRP_FAIL_INVALID_PARAM;
+    *flags = 1 | 2;
+    return OVRP_SUCCESS;
+}
+// ovrpPassthroughCapabilities { Fields; Flags; MaxColorLutResolution } (uint32 x3),
+// Fields: Flags=1, MaxColorLutResolution=2.
+static uint64_t klovrp_GetPassthroughCapabilities(uint32_t *caps) {
+    ovrp_hit("ovrp_GetPassthroughCapabilities");
+    if (!caps) return OVRP_FAIL_INVALID_PARAM;
+    caps[0] = 1 | 2; caps[1] = 1 | 2; caps[2] = 64;
+    return OVRP_SUCCESS;
+}
+// Styles (opacity, edge, colour maps) are accepted and not rendered: the room
+// is shown as the system shows it.
+static uint64_t klovrp_SetInsightPassthroughStyle(int layer_id, const void *style) {
+    (void)style;
+    ovrp_hit("ovrp_SetInsightPassthroughStyle");
+    static int logged;
+    if (!logged++) fprintf(stderr, "  [pt] SetInsightPassthroughStyle(layer %d): accepted\n", layer_id);
+    return OVRP_SUCCESS;
+}
+static void klovrp_passthrough_scan(const void *layer_submits, int count) {
+    const ovrp_layer_submit *const *list = layer_submits;
+    int pt_idx = -1, pt_id = 0, eye_idx = -1;
+    for (int i = 0; list && i < count; i++) {
+        const ovrp_layer_submit *s = list[i];
+        if (!s) continue;
+        struct klovrp_layer *l = klovrp_layer(s->layer_id);
+        if (!l) continue;
+        if (l->is_eye) { if (eye_idx < 0) eye_idx = i; continue; }
+        int sh = l->desc.shape;
+        if (pt_idx < 0 && (sh == 6 || sh == 7)) { pt_idx = i; pt_id = s->layer_id; }
+    }
+    int present = g_pt_initialized && pt_idx >= 0;
+    // OVRPlugin eye layers are premultiplied unless the guest asks otherwise.
+    kl_passthrough_note_frame(present, pt_id, present && (eye_idx < 0 || pt_idx < eye_idx), 0);
+}
+
 static void klovrp_census_submits(const void *layer_submits, int count) {
     if (!kl_env_on("KL_OVRP_LAYERS", 0)) return;
     const ovrp_layer_submit *const *list = layer_submits;
@@ -6934,6 +7042,15 @@ static const struct { const char *name; void *fn; } g_ovrp_impl[] = {
     {"ovrp_BeginFrame", (void *)klovrp_BeginFrame},
     {"ovrp_BeginFrame4", (void *)klovrp_BeginFrame4},
     {"ovrp_EndFrame", (void *)klovrp_EndFrame},
+    // Insight Passthrough (see klovrp_passthrough_scan).
+    {"ovrp_InitializeInsightPassthrough", (void *)klovrp_InitializeInsightPassthrough},
+    {"ovrp_GetInsightPassthroughInitialized", (void *)klovrp_GetInsightPassthroughInitialized},
+    {"ovrp_GetInsightPassthroughInitializationState", (void *)klovrp_GetInsightPassthroughInitializationState},
+    {"ovrp_IsInsightPassthroughSupported", (void *)klovrp_IsInsightPassthroughSupported},
+    {"ovrp_GetPassthroughCapabilityFlags", (void *)klovrp_GetPassthroughCapabilityFlags},
+    {"ovrp_GetPassthroughCapabilities", (void *)klovrp_GetPassthroughCapabilities},
+    {"ovrp_SetInsightPassthroughStyle", (void *)klovrp_SetInsightPassthroughStyle},
+    {"ovrp_SetInsightPassthroughStyle2", (void *)klovrp_SetInsightPassthroughStyle},
     {"ovrp_GetNodePositionTracked2", (void *)klovrp_GetNodePositionTracked2},
     {"ovrp_GetNodePositionValid", (void *)klovrp_GetNodePositionValid},
     {"ovrp_GetNodeOrientationValid", (void *)klovrp_GetNodeOrientationValid},
@@ -7303,8 +7420,6 @@ static const char *const g_ovrp_bool_yes[] = {
 };
 
 static const char *const g_ovrp_bool_no[] = {
-    // Passthrough never initialised (see g_ovrp_result_unsupported).
-    "ovrp_GetInsightPassthroughInitialized",
     // Unity asks OVRPlugin which rendering-extension hooks it wants (before/after
     // rendering events, etc.). Our replacement has no render-thread bookkeeping,
     // so "no" is the truthful answer — Unity then never issues the events.
@@ -7345,14 +7460,9 @@ static const char *const g_ovrp_bool_no[] = {
 };
 
 static const char *const g_ovrp_result_unsupported[] = {
-    // Insight Passthrough: Meta's camera-composited MR. Vision Pro's passthrough
-    // is the real environment of a mixed immersive space, but Klepton has no seam
-    // that turns the guest's ovrpInsightPassthroughLayer into a transparent
-    // compositor background yet — so init HONESTLY fails and the guest keeps its
-    // non-passthrough (opaque skybox) path instead of building MR layers we
-    // cannot fill. Flip this to success and wire the compositor if a target
-    // turns out to REQUIRE passthrough.
-    "ovrp_InitializeInsightPassthrough",
+    // Insight Passthrough used to be refused here; it is now real (see
+    // klovrp_InitializeInsightPassthrough and kl_passthrough.c).
+    NULL,
 };
 
 static void *klovrp_shared(const char *name) {
@@ -7360,7 +7470,7 @@ static void *klovrp_shared(const char *name) {
         if (strcmp(g_ovrp_result_ok[i], name) == 0)
             return kl_named_stub(name, (void *)klovrp_ok);
     for (size_t i = 0; i < sizeof g_ovrp_result_unsupported / sizeof g_ovrp_result_unsupported[0]; i++)
-        if (strcmp(g_ovrp_result_unsupported[i], name) == 0)
+        if (g_ovrp_result_unsupported[i] && strcmp(g_ovrp_result_unsupported[i], name) == 0)
             return kl_named_stub(name, (void *)klovrp_unsupported);
     for (size_t i = 0; i < sizeof g_ovrp_bool_yes / sizeof g_ovrp_bool_yes[0]; i++)
         if (g_ovrp_bool_yes[i] && strcmp(g_ovrp_bool_yes[i], name) == 0)
@@ -7486,4 +7596,99 @@ void kl_ovrp_report(FILE *f) {
     fprintf(f, "  --- resolved but never called ---\n");
     for (unsigned i = 0; i < g_novrp; i++)
         if (!g_ovrp[i].calls) fprintf(f, "    %s\n", g_ovrp[i].name);
+}
+
+
+// ---------------------------------------------------------------------------
+// VPKTAA sub-pixel jitter (KleptonTAA.swift resolves it)
+//
+// A temporal resolve only adds detail if consecutive frames sample DIFFERENT
+// sub-pixel positions; without that it can only average identical samples
+// (and smear whatever moved). The standard source of those positions is a
+// Halton(2,3) offset folded into the projection the guest renders with.
+//
+// It is only safe if the guest re-reads ovrp_GetNodeFrustum2 every frame: a
+// guest that reads it once would keep one fixed offset forever. So it is
+// PROBED: every frame record notes whether the frustum was read since the
+// previous one; 90 consecutive yes -> jitter on; 600 frames without reaching
+// that, or 3 frames in a row without a read once on -> jitter off for the run
+// (TAA then runs its light no-jitter mode). Whatever was served last is what
+// the frame record carries, so a record never claims a jitter the guest did
+// not get. Called with g_frames.mu held (frame begin) / taking it (frustum).
+static struct {
+    int      state;          // 0 probing, 1 on, 2 off
+    int      read;           // frustum read since the last frame begin
+    int      streak, misses;
+    unsigned frames, idx;
+    float    last[2][2];     // last offset served per eye (tangent units)
+} g_jit;
+
+static int klovrp_jit_want(void) {
+    static int w = -1;
+    if (w < 0) w = kl_env_on("KL_VPKTAA", 0) && kl_env_on("KL_VPKTAA_JITTER", 1);
+    return w;
+}
+
+static float klovrp_halton(unsigned i, unsigned b) {
+    float f = 1.0f, r = 0.0f;
+    while (i > 0) { f /= (float)b; r += f * (float)(i % b); i /= b; }
+    return r;
+}
+
+static int g_taa_live;   // set by the compositor: the VPKTAA resolve ran last frame
+void kl_ovrp_set_taa_active(int on) { __atomic_store_n(&g_taa_live, on ? 1 : 0, __ATOMIC_RELEASE); }
+
+static void klovrp_jit_frustum(int eye, float *f) {
+    if (!klovrp_jit_want()) return;
+    __atomic_store_n(&g_jit.read, 1, __ATOMIC_RELAXED);
+    if (__atomic_load_n(&g_jit.state, __ATOMIC_ACQUIRE) != 1) return;
+    if (!__atomic_load_n(&g_taa_live, __ATOMIC_ACQUIRE)) return;
+    int w = g_eye_storage_w, h = g_eye_storage_h;
+    if (w <= 0 || h <= 0) return;
+    // f: [2]=up [3]=down [4]=left [5]=right (all positive).
+    unsigned k = (__atomic_load_n(&g_jit.idx, __ATOMIC_RELAXED) % 8u) + 1u;
+    float jx = klovrp_halton(k, 2) - 0.5f, jy = klovrp_halton(k, 3) - 0.5f;  // pixels
+    float dx = jx * (f[4] + f[5]) / (float)w;
+    float dy = jy * (f[2] + f[3]) / (float)h;
+    f[4] -= dx; f[5] += dx;   // x range [-l, r] -> [-l+dx, r+dx]
+    f[2] += dy; f[3] -= dy;   // y range [-b, t] -> [-b+dy, t+dy]
+    pthread_mutex_lock(&g_frames.mu);
+    g_jit.last[eye][0] = dx; g_jit.last[eye][1] = dy;
+    g_frames.pending.jitter[eye][0] = dx; g_frames.pending.jitter[eye][1] = dy;
+    pthread_mutex_unlock(&g_frames.mu);
+}
+
+static void klovrp_jit_frame_begin(kl_ovrp_render_pose *r) {
+    if (!klovrp_jit_want()) {
+        memset(r->jitter, 0, sizeof r->jitter);
+        r->jitter_mode = 2;
+        return;
+    }
+    int read = __atomic_exchange_n(&g_jit.read, 0, __ATOMIC_RELAXED);
+    g_jit.frames++;
+    if (g_jit.state == 0) {
+        g_jit.streak = read ? g_jit.streak + 1 : 0;
+        if (g_jit.streak >= 90) {
+            __atomic_store_n(&g_jit.state, 1, __ATOMIC_RELEASE);
+            fprintf(stderr, "  [taa] jitter ON: guest re-reads ovrp_GetNodeFrustum2 every frame "
+                            "(%u frames probed) — Halton(2,3) x8 sub-pixel offsets in the frustum\n",
+                    g_jit.frames);
+        } else if (g_jit.frames >= 600) {
+            __atomic_store_n(&g_jit.state, 2, __ATOMIC_RELEASE);
+            fprintf(stderr, "  [taa] jitter OFF: guest does not re-read the frustum every frame "
+                            "(streak %d after %u frames) — TAA in light no-jitter mode\n",
+                    g_jit.streak, g_jit.frames);
+        }
+    } else if (g_jit.state == 1) {
+        g_jit.misses = read ? 0 : g_jit.misses + 1;
+        if (g_jit.misses >= 3) {
+            __atomic_store_n(&g_jit.state, 2, __ATOMIC_RELEASE);
+            fprintf(stderr, "  [taa] jitter OFF: guest stopped re-reading the frustum "
+                            "(3 frames without a read) — TAA in light no-jitter mode\n");
+        }
+    }
+    __atomic_add_fetch(&g_jit.idx, 1, __ATOMIC_RELAXED);
+    // What the guest holds right now: the last offset it was served.
+    memcpy(r->jitter, g_jit.last, sizeof r->jitter);
+    r->jitter_mode = g_jit.state;
 }

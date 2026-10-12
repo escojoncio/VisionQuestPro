@@ -2157,6 +2157,8 @@ final class KleptonCompositor {
     private func prepareTAA(cmd: MTLCommandBuffer, stage: Int, completeStage: Int,
                             rendered: kl_ovrp_render_pose, haveRendered: Bool) {
         taaOut.removeAll(keepingCapacity: true)
+        // Jitter is only served to the game while this resolve really runs (else it would shimmer).
+        defer { kl_ovrp_set_taa_active(taaOut.count == 2 ? 1 : 0) }
         guard let taa, completeStage >= 0, kl_ovrp_eye_layer_live() != 0,
               projLayerCount == 0 else { return }
         for eye in 0..<2 {
@@ -2192,8 +2194,12 @@ final class KleptonCompositor {
         // colour that changes on a known period can: if it cycles, our
         // content is being composited and the question moves to what we
         // draw; if it is a steady anything, it is not ours at all.
+        // Passthrough frames (kl_passthrough_active) clear to transparent so the
+        // room shows wherever the guest's picture does not reach; the quad itself
+        // carries the guest's (premultiplied) alpha — see kl_chroma_apply.
         pass.colorAttachments[0].clearColor  = probe == 1
-            ? Self.cyclingClear() : MTLClearColorMake(0, 0, 0, 1)
+            ? Self.cyclingClear()
+            : MTLClearColorMake(0, 0, 0, kl_passthrough_active() != 0 ? 0 : 1)
         if firstMap.textureIndex < drawable.depthTextures.count {
             pass.depthAttachment.texture     = drawable.depthTextures[firstMap.textureIndex]
             pass.depthAttachment.loadAction  = .clear

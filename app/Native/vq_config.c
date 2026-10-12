@@ -20,6 +20,7 @@ int vq_gfx_config_forward(void) {
     void (*set_asw)(int) = (void (*)(int))dlsym(RTLD_DEFAULT, "vpvk_config_set_asw_disabled");
     void (*set_q3)(int) = (void (*)(int))dlsym(RTLD_DEFAULT, "vpvk_config_set_quest3_profile");
     void (*set_aniso)(int) = (void (*)(int))dlsym(RTLD_DEFAULT, "vpvk_config_set_anisotropy");
+    void (*set_1x)(int) = (void (*)(int))dlsym(RTLD_DEFAULT, "vpvk_config_set_force_single_sample");
     if (!set_fov || !set_taa) {
         fprintf(stderr, "vq.fov config stored; VPVulkan not loaded (MoltenVK path): own foveation/VPKTAA not applied\n");
         return 0;
@@ -32,6 +33,7 @@ int vq_gfx_config_forward(void) {
     if (set_asw) set_asw(g_cfg.asw_disabled);
     if (set_q3) set_q3(g_cfg.quest3_profile);
     if (set_aniso) set_aniso(g_cfg.anisotropy);
+    if (set_1x) set_1x(g_cfg.force_single_sample);
     fprintf(stderr, "vq.fov config forwarded to VPVulkan\n");
     return 1;
 }
@@ -67,4 +69,14 @@ uint32_t vq_prewarm_run(vq_prewarm_progress progress, void *user) {
         return 0;
     }
     return f(progress, user);
+}
+
+uint32_t vq_precompile_run(const char *dir, vq_prewarm_progress progress, void *user) {
+    typedef uint32_t (*run_fn)(const char *, vq_prewarm_progress, void *);
+    run_fn f = (run_fn)dlsym(RTLD_DEFAULT, "vpvk_precompile_spirv");
+    if (!f) {
+        fprintf(stderr, "vq.precompile skipped: VPVulkan not loaded\n");
+        return 0;
+    }
+    return f(dir, progress, user);
 }

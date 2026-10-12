@@ -261,19 +261,38 @@ struct VQSettingsView: View {
                         Text(VQL("De pie", "Standing")).tag("standing")
                     }
                     .pickerStyle(.segmented)
-                    Picker(VQL("Resolución base", "Base resolution"), selection: $settings.avpResolution) {
-                        Text(VQL("Original", "Original")).tag(false)
-                        Text("Vision Pro").tag(true)
+                    Picker("Passthrough", selection: $settings.passthrough) {
+                        Text(VQL("Automático", "Automatic")).tag("auto")
+                        Text(VQL("Siempre VR", "Always VR")).tag("off")
+                        Text(VQL("Siempre mixto", "Always mixed")).tag("on")
                     }
                     .pickerStyle(.segmented)
+                    Picker(VQL("Resolución base", "Base resolution"), selection: $settings.resolutionBase) {
+                        Text(VQL("Original", "Original")).tag("original")
+                        Text("Vision Pro").tag("compositor")
+                        Text(VQL("Nativa", "Native")).tag("native")
+                    }
+                    .pickerStyle(.segmented)
+                    Text(VQL("Nativa: densidad real de la pantalla del Vision Pro; la más pesada.", "Native: the Vision Pro panel's real density; the heaviest."))
+                        .font(.caption)
+                    Toggle(VQL("Quitar el AA del juego (con VPKTAA)", "Remove the game's AA (with VPKTAA)"), isOn: $settings.dropGameAA)
+                        .disabled(!settings.vpktaa)
                     Stepper(VQL("Resolución de render: \(Int(settings.renderScale * 100)) %", "Render resolution: \(Int(settings.renderScale * 100)) %"),
                             value: $settings.renderScale, in: 0.5...1.5, step: 0.05)
-                    Toggle(VQL("Filtrado anisotrópico x16", "16x anisotropic filtering"), isOn: $settings.aniso16)
+                    Picker(VQL("Filtrado anisotrópico", "Anisotropic filtering"), selection: $settings.anisoLevel) {
+                        Text("Off").tag(0)
+                        Text("x2").tag(2)
+                        Text("x4").tag(4)
+                        Text("x8").tag(8)
+                        Text("x16").tag(16)
+                    }
+                    .pickerStyle(.segmented)
                     Toggle(VQL("ASW desactivado (todos los frames reales)", "ASW off (every frame real)"), isOn: $settings.aswDisabled)
                     Toggle(VQL("Precompilar shaders antes de jugar", "Precompile shaders before playing"), isOn: $settings.precompileShaders)
                     Toggle(VQL("Perfil Quest 3", "Quest 3 profile"), isOn: $settings.quest3Profile)
                     Toggle(VQL("Forzar Vulkan en juegos Unity", "Force Vulkan in Unity games"), isOn: $settings.forceVulkan)
                     Toggle(VQL("Capturas de diagnóstico", "Diagnostic captures"), isOn: $settings.diagCaptures)
+                    Toggle(VQL("Diagnóstico de rendimiento", "Performance diagnostics"), isOn: $settings.perfDiag)
                     Text(VQL("El foveado propio del juego (Quest) está siempre apagado. Foveado y VPKTAA los aplica VPEngine (aún sin efecto con MoltenVK). M5 solo aparece en un Vision Pro M5. Se aplica al lanzar el juego.",
                              "The game's own (Quest) foveation is always off. Foveation and VPKTAA are applied by VPEngine (no effect yet with MoltenVK). M5 only appears on a Vision Pro M5. Applied when the game launches."))
                         .font(.caption)
@@ -326,6 +345,9 @@ struct VQLoadingView: View {
     private var phrase: String {
         if failed { return VQL("No se pudo iniciar el juego", "The game could not start") }
         if finished || openedSpace { return VQL("Iniciando VR…", "Starting VR…") }
+        if prewarm.active && prewarm.compiling {
+            return VQL("Compilando shaders \(prewarm.done) / \(prewarm.total)", "Compiling shaders \(prewarm.done) / \(prewarm.total)")
+        }
         if prewarm.active {
             return VQL("Preparando shaders \(prewarm.done) / \(prewarm.total)", "Preparing shaders \(prewarm.done) / \(prewarm.total)")
         }
