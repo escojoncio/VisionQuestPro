@@ -13,6 +13,31 @@
 - Fallo resuelto en la 2.ª build: `KL_TARGET_DEFAULT_NAME` no existe sin el proyecto de Klepton → `kl_app.c` define
   `KL_TARGET_DEFAULT "(ninguno)"`.
 
+## Batman log 22 (2026-10-12): letras OK; vídeo no arranca; tirones; PS sale al sistema
+- Letras: confirmado `gpu.diag swizzle fmt=9 map=0,0,0,r`.
+- Vídeo: el juego no llegó a NativeVideoPlayer. `OBBVideoWrapper` usa la ruta literal
+  `/storage/emulated/0/Android/obb/com.camouflaj.manta/<X>.mp4` (DRM1..7 = DreamSequence1..7). `kl_libc.c`
+  `kl_guest_path_inner`: `{/sdcard,/storage/emulated/0,/mnt/sdcard}/Android/obb/<pkg>/resto` → `kl_jni_obb_dir()`+resto
+  (con `kl_casefix`, solo si existe); log `[path] … -> obb dir …`. Cuadrado rosa = material del reproductor sin frame.
+  Si sigue sin llamar: siguiente sospechoso `ovr_AssetFile_StatusByName` (devuelve 0 siempre, `kl_ovrplat.c`).
+- Tirones: compilación de pipeline (250–650 ms) bloqueaba el submit vía `pipelineMutex` mientras se añadía al
+  MTLBinaryArchive. VPEngine `metal2/src/metal_backend.mm`: `archiveMutex` aparte; lookup con
+  `FailOnBinaryArchiveMiss` bajo `archiveMutex`; compilación sin lock y sin archive; `maybeSaveArchive` (32 pipelines o
+  30 s); `platform_metal.mm` `cacheRoot` = `VP_PIPELINE_CACHE_DIR` (app: Caches/VisionQuestPro/PipelineCache/<juego>) y
+  guardado al destruir; `entry.cpp` workers = clamp(cores,4,8)-2. Logs `gpu.pso.cache loaded=N` / `saved=N`.
+- Mandos (`KleptonControllers.swift`): `captureSystemButtons` pone `preferredSystemGestureState=.disabled` en home/menu/PS
+  (log `[input] PS buttons captured`, por mando `free|STILL SYSTEM`). PS izq = Start (☰); PS der corto = nada, ≥0,75 s =
+  `kl_ovrp_host_recenter()` (re-mide altura, contador, `GetAppShouldRecenter(2)` true una vez).
+  Touches: `klovrp_raw_touch/near` en `fill_controller_state` (antes los bits de botón iban crudos a Touches); host usa
+  toque capacitivo si existe (`GCTouchedStateInput`), si no pulsado/desviado.
+- Manos: `KleptonChroma.swift` `handMatting` por defecto false (clave `handMattingV2`) → `upperLimbVisibility` oculto.
+- Idioma: `VQLanguage` usa `Locale.preferredLanguages` (antes `Locale.current` = idioma de la app, en). Versión OVRPlugin:
+  `VQOVRPluginVersion` lee `lib/arm64-v8a/libOVRPlugin.so` del APK → `KL_OVRP_VERSION` (la búsqueda en C fallaba: no hay
+  .so en `kl_slink_libdir`).
+- VPKTAA: NO implementado aún en VPEngine (`config.cpp` solo guarda: `applied=no(pass_pending)`); el juego usa su MSAA.
+  Además `vq_gfx_config_forward` no se llamó en el log 22 (sin línea `vk.cfg`). Pendiente: pase VPKTAA + reenvío.
+- Pendiente aparte: aborto final `mutex lock failed: Invalid argument` (última línea del log 22).
+
 ## Batman log 21 (2026-10-12): juego corre; fuentes en cuadrados, vídeos saltados, altura fija
 - Fuentes/letras de mandos = cuadrados: VkComponentMapping ignorado (R8 con a=R). VPEngine `vulkan/src/entry.cpp`
   `vkCreateImageView` traduce el mapeo → `Platform::ViewInfo::swizzle` → `metal2` `ViewDesc::swizzle`,

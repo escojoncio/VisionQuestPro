@@ -28,13 +28,16 @@ struct KLChromaSettings: Codable, Equatable {
     /// a person reaching for a real object wants; off is what a guest that
     /// draws its own hands wants, because two pairs of hands in one place is
     /// worse than either alone.
-    var handMatting = true
+    /// Off by default: Quest games draw their own hands. (Key renamed so an
+    /// older saved `true` does not keep the real hands over the game.)
+    var handMatting = false
 
     /// SIMD3 is not Codable, so the colour rides as three keyed floats. Spelled
     /// out rather than reached for a wrapper: this is the file format, and a
     /// format that is legible in the JSON is one a person can fix by hand.
     private enum CodingKeys: String, CodingKey {
-        case enabled, distMin, distMax, handMatting
+        case enabled, distMin, distMax
+        case handMatting = "handMattingV2"
         case colorR, colorG, colorB
     }
 

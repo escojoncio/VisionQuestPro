@@ -981,10 +981,21 @@ static uint64_t klovrp_GetSystemPowerSavingMode2(int *out) {
 // Recenter is an event that must never fire on a healthy run, and no frontend
 // has asked for one — the un-suffixed form answers 0 and this 2-form is the
 // ovrpResult + int* out version of the same refusal (real 0x1708e0).
+// Exception: a host recenter (right PS long-press, kl_ovrp_host_recenter) arms
+// a one-shot flag; the first reader of either form consumes it, as the real
+// plugin reports a system recenter once.
+static int g_host_recenter_pending;   // atomic
+static int klovrp_take_recenter(void) {
+    return __atomic_exchange_n(&g_host_recenter_pending, 0, __ATOMIC_ACQ_REL);
+}
 static uint64_t klovrp_GetAppShouldRecenter2(int *out) {
     ovrp_hit("ovrp_GetAppShouldRecenter2");
-    if (out) *out = 0;
+    if (out) *out = klovrp_take_recenter();
     return OVRP_SUCCESS;
+}
+static uint64_t klovrp_GetAppShouldRecenter(void) {   // ovrpBool
+    ovrp_hit("ovrp_GetAppShouldRecenter");
+    return (uint64_t)klovrp_take_recenter();
 }
 
 // The time (seconds, monotonic) the guest is told the next frame will be shown,
@@ -1806,6 +1817,14 @@ static void klovrp_eye_latch(float y, const char *why) {
         fprintf(stderr, "  [ovrp] eye height measured by the headset: %.3f m (%s)\n",
                 (double)y, y < 1.35f ? "seated" : "standing");
     }
+}
+static void klovrp_recenter_now(const char *why);
+// Host entry (right PS long-press = Quest Oculus-button hold): re-measure eye
+// height, bump the recenter count and arm the one-shot ShouldRecenter flag.
+void kl_ovrp_host_recenter(void) {
+    fprintf(stderr, "  [input] host recenter requested\n");
+    klovrp_recenter_now("host recenter (PS long-press)");
+    __atomic_store_n(&g_host_recenter_pending, 1, __ATOMIC_RELEASE);
 }
 static void klovrp_recenter_now(const char *why) {
     if (!__atomic_load_n(&g_head_set, __ATOMIC_ACQUIRE)) return;
@@ -3963,6 +3982,33 @@ static float klovrp_fake_trigger(void) {
     return klovrp_fake_phase() ? v : 0.0f;
 }
 
+// Host touches arrive in ovrpButton bit space (shared with the OpenXR decoder);
+// the Touches/NearTouches fields want ovrpRawTouch / ovrpRawNearTouch.
+// NearTouch drives OVRInput's IndexPointing (no index near) and ThumbUp
+// (no thumb near), as on a Quest Touch.
+static uint32_t klovrp_raw_touch(int hand, uint32_t t) {
+    uint32_t r = 0;
+    if (hand == 0) {
+        r |= t & (KL_OVRP_RAW_X | KL_OVRP_RAW_Y | KL_OVRP_RAW_LTHUMBSTICK); // 0x100/0x200/0x400
+        if (t & KL_OVRP_RAW_LINDEX_TRIGGER) r |= 0x1000u;                  // LIndexTrigger
+    } else {
+        r |= t & (KL_OVRP_RAW_A | KL_OVRP_RAW_B | KL_OVRP_RAW_RTHUMBSTICK); // 0x1/0x2/0x4
+        if (t & KL_OVRP_RAW_RINDEX_TRIGGER) r |= 0x10u;                    // RIndexTrigger
+    }
+    return r;
+}
+static uint32_t klovrp_raw_near(int hand, uint32_t t) {
+    uint32_t r = 0;
+    if (hand == 0) {
+        if (t & KL_OVRP_RAW_LINDEX_TRIGGER) r |= 0x1u;                     // LIndexTrigger
+        if (t & (KL_OVRP_RAW_X | KL_OVRP_RAW_Y | KL_OVRP_RAW_LTHUMBSTICK)) r |= 0x2u; // LThumbButtons
+    } else {
+        if (t & KL_OVRP_RAW_RINDEX_TRIGGER) r |= 0x4u;                     // RIndexTrigger
+        if (t & (KL_OVRP_RAW_A | KL_OVRP_RAW_B | KL_OVRP_RAW_RTHUMBSTICK)) r |= 0x8u; // RThumbButtons
+    }
+    return r;
+}
+
 static void fill_controller_state(int mask, void *out, int version) {
     memset(out, 0, version >= 4 ? 0x60 : version == 2 ? 0x40 : 0x30);
     uint32_t m = (uint32_t)mask;
@@ -3981,8 +4027,8 @@ static void fill_controller_state(int mask, void *out, int version) {
     w[0] = conn;                                        // ConnectedControllers
     if (conn & OVRP_CTRL_LTOUCH) {
         w[1] |= in[0].buttons;                          // Buttons
-        w[2] |= in[0].touches;                          // Touches
-        w[3] |= in[0].neartouches;                      // NearTouches
+        w[2] |= klovrp_raw_touch(0, in[0].touches);                          // Touches
+        w[3] |= klovrp_raw_near(0, in[0].touches);                      // NearTouches
         f[4] = in[0].index_trigger;                     // LIndexTrigger
         f[6] = in[0].hand_trigger;                      // LHandTrigger
         f[8] = in[0].stick_x; f[9] = in[0].stick_y;
@@ -3991,8 +4037,8 @@ static void fill_controller_state(int mask, void *out, int version) {
     }
     if (conn & OVRP_CTRL_RTOUCH) {
         w[1] |= in[1].buttons;
-        w[2] |= in[1].touches;
-        w[3] |= in[1].neartouches;
+        w[2] |= klovrp_raw_touch(1, in[1].touches);
+        w[3] |= klovrp_raw_near(1, in[1].touches);
         f[5] = in[1].index_trigger;                     // RIndexTrigger
         f[7] = in[1].hand_trigger;                      // RHandTrigger
         f[10] = in[1].stick_x; f[11] = in[1].stick_y;
@@ -6862,6 +6908,7 @@ static const struct { const char *name; void *fn; } g_ovrp_impl[] = {
     {"ovrp_GetSystemBatteryLevel2", (void *)klovrp_GetSystemBatteryLevel2},
     {"ovrp_GetSystemPowerSavingMode2", (void *)klovrp_GetSystemPowerSavingMode2},
     {"ovrp_GetAppShouldRecenter2", (void *)klovrp_GetAppShouldRecenter2},
+    {"ovrp_GetAppShouldRecenter", (void *)klovrp_GetAppShouldRecenter},
     {"ovrp_GetPredictedDisplayTime", (void *)klovrp_GetPredictedDisplayTime},
     {"ovrp_GetSystemProductName", (void *)klovrp_GetSystemProductName},
     {"ovrp_GetSystemProductName2", (void *)klovrp_GetSystemProductName2},
@@ -7264,7 +7311,7 @@ static const char *const g_ovrp_bool_no[] = {
     "UnityRenderingExtQuery",
     // Events that must never fire on a healthy run (0x9bbdf8 acts on
     // recenter; quit/recreate tear things down).
-    "ovrp_GetAppShouldRecenter", "ovrp_GetAppShouldQuit",
+    "ovrp_GetAppShouldQuit",   // ShouldRecenter: real handler (host recenter)
     "ovrp_GetAppShouldRecreateDistortionWindow",
     // No preview-rect override (return 0 = skip, 0x9bcf9c).
     // ovrp_GetEyeTextureArraySupported / ovrp_GetSystemMultiViewSupported are

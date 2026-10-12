@@ -1492,6 +1492,27 @@ static const char *kl_guest_path_inner(const char *path, char *buf, size_t cap) 
             // A prefix match is not a path match: /sdcardiskette is neither
             // /sdcard nor under it.
             if (path[n] != '/' && path[n] != '\0') continue;
+            // Literal "<ext>/Android/obb/<pkg>[/rest]" (Unity titles hardcode it,
+            // e.g. Arkham Shadow's OBB_PATH for its cutscene mp4s): serve it from
+            // the real obb dir, which on device lives outside <ext>. Only when the
+            // target exists there; otherwise fall through to the plain mapping.
+            if (strncmp(path + n, "/Android/obb/", 13) == 0) {
+                extern const char *kl_jni_obb_dir(void);
+                const char *pkg = path + n + 13;
+                const char *rest = strchr(pkg, '/');
+                const char *od = kl_jni_obb_dir();
+                if (*pkg && od && *od) {
+                    snprintf(buf, cap, "%s%s", od, rest ? rest : "");
+                    kl_casefix(buf, strlen(od));
+                    struct stat st;
+                    if (stat(buf, &st) == 0) {
+                        static int said;
+                        if (!said) { said = 1;
+                            fprintf(stderr, "  [path] %s -> obb dir %s\n", path, buf); }
+                        return buf;
+                    }
+                }
+            }
             snprintf(buf, cap, "%s%s", g_ext_target, path + n);
             // iOS is case-sensitive; the guest mixes case (DATA vs data). Rewrite
             // the suffix to the on-disk spelling, past the known-good target prefix.

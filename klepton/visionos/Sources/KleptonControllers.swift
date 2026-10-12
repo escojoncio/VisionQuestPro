@@ -491,7 +491,7 @@ final class KleptonControllers {
         }
         senseConnected = !accessories.isEmpty
         NSLog("[cp] spatial controllers: \(accessories.map { $0.name })")
-        for c in spatial { Self.census(c) }
+        for c in spatial { Self.census(c); Self.captureSystemButtons(c) }
         let p = AccessoryTrackingProvider(accessories: accessories)
         lock.lock(); accessoryProvider = p; lock.unlock()
         return p
@@ -517,6 +517,57 @@ final class KleptonControllers {
               + "buttons \(p.buttons.keys.sorted()) "
               + "axes \(p.axes.keys.sorted()) "
               + "dpads \(p.dpads.keys.sorted())")
+    }
+
+    nonisolated(unsafe) private static var touchSourceLogged = Set<String>()
+    private static func noteTouchSource(_ src: String) {
+        if touchSourceLogged.insert(src).inserted { NSLog("[input] touch sensing: \(src)") }
+    }
+
+    /// Controllers whose system buttons have been claimed (by identity).
+    nonisolated(unsafe) private static var captured = Set<ObjectIdentifier>()
+    nonisolated(unsafe) private static var capturedLogged = false
+
+    /// Ask visionOS not to consume PS/Home/Menu for system gestures, so they
+    /// reach the guest as Quest Touch buttons. Once per controller object.
+    static func captureSystemButtons(_ c: GCController) {
+        guard captured.insert(ObjectIdentifier(c)).inserted else { return }
+        let p = c.physicalInputProfile
+        var names: [String] = []
+        for (name, el) in p.buttons {
+            let n = name.lowercased()
+            guard n.contains("home") || n.contains("menu") || n.contains("ps")
+                || n.contains("options") || n.contains("share") else { continue }
+            el.preferredSystemGestureState = .disabled
+            names.append("\(name)=\(el.isBoundToSystemGesture ? "STILL SYSTEM" : "free")")
+        }
+        if let h = c.extendedGamepad?.buttonHome {
+            h.preferredSystemGestureState = .disabled
+            names.append("buttonHome=\(h.isBoundToSystemGesture ? "STILL SYSTEM" : "free")")
+        }
+        if let m = c.extendedGamepad?.buttonMenu {
+            m.preferredSystemGestureState = .disabled
+        }
+        if !capturedLogged { capturedLogged = true
+            NSLog("[input] PS buttons captured (system gesture disabled)") }
+        NSLog("[input] \(c.vendorName ?? "?") system gestures: \(names.sorted())")
+    }
+
+    /// Right PS hold timer: >= 0.75 s fires one recenter per hold.
+    nonisolated(unsafe) private static var rPSDownAt: TimeInterval = 0
+    nonisolated(unsafe) private static var rPSFired = false
+    nonisolated(unsafe) private static var rPSDown = false
+    /// `down == nil`: no new input state this poll, keep timing the last one.
+    static func rightPSHold(_ down: Bool?) {
+        let now = ProcessInfo.processInfo.systemUptime
+        if let d = down { rPSDown = d }
+        if !rPSDown { rPSDownAt = 0; rPSFired = false; return }
+        if rPSDownAt == 0 { rPSDownAt = now; return }
+        if !rPSFired && now - rPSDownAt >= 0.75 {
+            rPSFired = true
+            NSLog("[input] right PS long-press -> recenter")
+            kl_ovrp_host_recenter()
+        }
     }
 
     /// Element names seen pressed at least once, across every controller.
@@ -981,6 +1032,7 @@ final class KleptonControllers {
         lock.unlock()
 
         for c in spatial {
+            Self.captureSystemButtons(c)
 
             // Chirality by name (`Self.hand(of:)`), because GCController itself
             // does not carry the hand — Accessory does, and the two objects are
@@ -992,7 +1044,10 @@ final class KleptonControllers {
             // nil is "nothing new since you last asked", NOT "everything is
             // released". Leave this hand's last sample standing — see the
             // clear-on-attachment note above, which is the other half of this.
-            guard let s = c.input.nextInputState() else { continue }
+            guard let s = c.input.nextInputState() else {
+                if hand == 1 { Self.rightPSHold(nil) }
+                continue
+            }
             let b = s.buttons, ax = s.axes, dp = s.dpads
 
             // The PSVR2 Sense element names, per controller. Both controllers
@@ -1003,6 +1058,17 @@ final class KleptonControllers {
             func value(_ n: String) -> Float { b[n]?.pressedInput.value ?? 0 }
             func touched(_ n: String) -> Bool { b[n]?.touchedInput?.isTouched ?? false }
             func axis(_ n: String) -> Float { ax[n]?.absoluteInput?.value ?? 0 }
+            // Capacitive touch when the element publishes it (Sense: face
+            // buttons, stick, trigger); otherwise touch = pressed / deflected.
+            func touchOn(_ n: String, _ stick: SIMD2<Float>?, _ fallback: Bool) -> Bool {
+                if let t = b[n]?.touchedInput {
+                    Self.noteTouchSource("capacitive (GCTouchedStateInput)")
+                    return t.isTouched || fallback
+                }
+                Self.noteTouchSource("fallback (pressed/deflected)")
+                if let v = stick, v.x*v.x + v.y*v.y > 0.01 { return true }
+                return fallback
+            }
 
             // Every element name this controller reports pressed, once each.
             //
@@ -1071,7 +1137,12 @@ final class KleptonControllers {
                        || pressed("Button Options")
             let psish = pressed("Button Home") || pressed("Button PS")
                      || pressed("Button PS Button")
-            let homeish = (hand == 0 && pressed("Button Menu")) || psish
+            // PS buttons follow the Quest Touch layout: LEFT PS = Menu/Start,
+            // RIGHT PS = Oculus button (short press: system menu, a no-op here;
+            // hold >= 0.75 s: recenter).
+            let homeish = (hand == 0 && pressed("Button Menu"))
+            let psStart = hand == 0 && psish
+            if hand == 1 { Self.rightPSHold(psish) }
 
             var st = KleptonHandState()
             st.fromController = true
@@ -1129,8 +1200,12 @@ final class KleptonControllers {
                 if pressed("Thumbstick Button") { bits |= OVRPRawButton.lThumbstick }
                 if st.indexTrigger > 0 { bits |= OVRPRawButton.lIndexTrigger }
                 if st.handTrigger  > 0 { bits |= OVRPRawButton.lHandTrigger }
-                if menuish { bits |= OVRPRawButton.start }
+                if menuish || psStart { bits |= OVRPRawButton.start }
                 if homeish { bits |= OVRPRawButton.back }
+                if touchOn("Thumbstick Button", st.stick, pressed("Thumbstick Button")) {
+                    touch |= OVRPRawButton.lThumbstick
+                }
+                if touchOn("Trigger", nil, st.indexTrigger > 0.02) { touch |= OVRPRawButton.lIndexTrigger }
             } else {
                 if pressed("Button A") { bits |= OVRPRawButton.a }
                 if pressed("Button B") { bits |= OVRPRawButton.b }
@@ -1155,6 +1230,10 @@ final class KleptonControllers {
                 // whatever the user binds to it on the PC.
                 if menuish { bits |= OVRPRawButton.back }
                 if homeish { bits |= OVRPRawButton.back }
+                if touchOn("Thumbstick Button", st.stick, pressed("Thumbstick Button")) {
+                    touch |= OVRPRawButton.rThumbstick
+                }
+                if touchOn("Trigger", nil, st.indexTrigger > 0.02) { touch |= OVRPRawButton.rIndexTrigger }
             }
             // The guest reads stick *direction* bits as well as the axes — and
             // SNAP TURN reads only these (OVRInput.GetDown(Secondary/Primary

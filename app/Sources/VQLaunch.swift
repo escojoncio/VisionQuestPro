@@ -32,7 +32,11 @@ enum VQLaunch {
         setenv("KL_MVK_DIR", frameworks, 1)
         setenv("KL_ANGLE_DIR", frameworks, 1)
         VQSettings.shared.applyToEnvironment()
+        let psoCache = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("VisionQuestPro/PipelineCache/\(game.id)", isDirectory: true)
+        setenv("VP_PIPELINE_CACHE_DIR", psoCache.path, 1)
         VQLanguage.apply(game, useSystem: VQSettings.shared.systemLanguage)
+        VQOVRPluginVersion.apply(apk: game.apk)
         VQLog.log("Arranque: \(game.id) (\(game.package)) tree=\(choice.prepared.tree.path) dylibs=\(choice.prepared.dylibs.path) "
                   + "files=\(files.path) obb=\(obbRel)")
         let rc = kl_app_configure_game(game.id, choice.prepared.tree.path, game.apk.path, choice.prepared.dylibs.path,
@@ -245,9 +249,11 @@ final class VQSettings: ObservableObject {
 /// otherwise English. Klepton answers java.util.Locale and AConfiguration from LANG.
 enum VQLanguage {
     static func apply(_ game: VQGame, useSystem: Bool) {
-        let sys = Locale.current
-        let code = (sys.language.languageCode?.identifier ?? "en").lowercased()
-        let region = sys.region?.identifier ?? ""
+        // The user's preferred system language, not Locale.current (that one follows the app's own
+        // localizations, English only here).
+        let pref = Locale(identifier: Locale.preferredLanguages.first ?? "en-US")
+        let code = (pref.language.languageCode?.identifier ?? "en").lowercased()
+        let region = pref.region?.identifier ?? Locale.current.region?.identifier ?? ""
         var lang = "en_US"
         var reason = "por defecto"
         if !useSystem {
@@ -289,5 +295,48 @@ enum VQLanguage {
                regions.contains(String(n[rr])) || n[rr].allSatisfy(\.isNumber) { return n }
         }
         return nil
+    }
+}
+
+/// The game's own OVRPlugin version (read from lib/arm64-v8a/libOVRPlugin.so inside the APK) → KL_OVRP_VERSION,
+/// so the shim reports what the game's C# was built against.
+enum VQOVRPluginVersion {
+    static func apply(apk: URL) {
+        unsetenv("KL_OVRP_VERSION")
+        var err = [CChar](repeating: 0, count: 256)
+        guard let zip = vq_zip_open(apk.path, &err, err.count) else { return }
+        defer { vq_zip_close(zip) }
+        let i = vq_zip_find(zip, "lib/arm64-v8a/libOVRPlugin.so")
+        var len = 0
+        guard i >= 0, let raw = vq_zip_read(zip, i, 64 << 20, &len, &err, err.count) else {
+            VQLog.log("OVRPlugin: el juego no trae libOVRPlugin.so")
+            return
+        }
+        defer { free(raw) }
+        let bytes = UnsafeBufferPointer(start: raw, count: len)
+        var best: [Int]? = nil
+        var start = 0
+        for j in 0...len {
+            if j == len || bytes[j] == 0 {
+                let n = j - start
+                if n >= 5 && n <= 11, bytes[start] == UInt8(ascii: "1"), bytes[start + 1] == UInt8(ascii: ".") {
+                    let s = String(decoding: bytes[start..<j], as: UTF8.self)
+                    let parts = s.split(separator: ".", omittingEmptySubsequences: false).map { Int($0) }
+                    if parts.count == 3, let a = parts[0], let b = parts[1], let c = parts[2],
+                       a == 1, b >= 10, b < 1000, c >= 0 {
+                        let v = [a, b, c]
+                        if best == nil || best!.lexicographicallyPrecedes(v) { best = v }
+                    }
+                }
+                start = j + 1
+            }
+        }
+        if let v = best {
+            let ver = v.map(String.init).joined(separator: ".")
+            setenv("KL_OVRP_VERSION", ver, 1)
+            VQLog.log("OVRPlugin: versión del juego \(ver)")
+        } else {
+            VQLog.log("OVRPlugin: sin versión en libOVRPlugin.so; se usa la de Klepton")
+        }
     }
 }
