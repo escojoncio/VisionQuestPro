@@ -133,8 +133,16 @@ enum Lifecycle {
         }
         guard klEnvOn("KL_EXIT_ON_BACKGROUND", default: true) else { return }
         NSLog("[app] no window to return to — exiting")
+        // exit() would run C++ static destructors (std::mutex globals) while guest threads still
+        // run and lock them -> "mutex lock failed" abort. Save caches, flush logs, then _exit.
+        if let sym = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "vpvk_flush_caches") {
+            typealias Flush = @convention(c) () -> Void
+            unsafeBitCast(sym, to: Flush.self)()
+            NSLog("[app] VPEngine caches flushed")
+        }
+        UserDefaults.standard.synchronize()
         fflush(nil)
-        exit(0)
+        _exit(0)
     }
 
     static func scenePhaseChanged(to phase: ScenePhase) {

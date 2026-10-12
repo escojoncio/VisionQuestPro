@@ -363,3 +363,10 @@
 - Sin volcado por pase en VPEngine metal2 (pendiente si hace falta).
 ### Comprobar
 - PNG de ojo bien y output mal → fallo en el compositor; ojo ya corrupto → render del juego/traductor.
+
+## 2026-10-12 — VPKTAA en compositor + anisotrópico x16 (sin build aún)
+- `klepton/visionos/Sources/KleptonTAA.swift` (nuevo): compute por ojo y frame del juego (serial), historial ping-pong rgba16f + salida con nitidez RCAS; reproyección solo rotación (delta de pose de render, tangentes de cada frame, recorte viewport), clipping de varianza YCoCg, peso = pct/100·0.95. Reset: 1.er frame, tamaño, tangentes, giro >8°. Log `[taa] VPKTAA on:` + `[taa] stats` cada 30 s. Sin jitter (pendiente) y MSAA del juego intacto.
+- `KleptonCompositor.swift`: `taa`/`taaOut`, `prepareTAA()` al inicio de `encodeComposite`, sustitución de `alloc` en `encodeViews`. Solo si no hay lista de capas proyección (`projLayerCount == 0`).
+- `VQLaunch.swift`: env `KL_VPKTAA`, `KL_VPKTAA_PCT`, `KL_VPKTAA_SHARP`; ajuste `aniso16` (`vq.aniso16`, defecto sí) → `vq_gfx_config.anisotropy`; `vq_gfx_config_forward()` repetido tras `kl_app_configure_game` (antes el envío ocurría antes de que stderr llegara al log → faltaba `vk.cfg`). `VQLauncher.swift`: toggle "Filtrado anisotrópico x16".
+- `vq_config.c/.h`: campo `anisotropy`, dlsym `vpvk_config_set_anisotropy`.
+- Pendiente: verificar en log `vk.cfg anisotropy=16`, `[taa] VPKTAA on`, `Gráficos: ajustes enviados a VPVulkan sí`; jitter Halton en `klovrp_eye_tan` solo si el juego relee el frustum cada frame.

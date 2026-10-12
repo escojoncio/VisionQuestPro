@@ -219,6 +219,10 @@ final class KleptonCompositor {
     // is about the lifecycle rather than the picture.
     private var queue: MTLCommandQueue?
     private var pipeline: MTLRenderPipelineState!
+    /// VPKTAA (KleptonTAA.swift); nil when the setting is off. Per-eye resolved textures for
+    /// the guest frame being composited, filled by prepareTAA before the render pass.
+    private lazy var taa: KleptonTAA? = KleptonTAA(device: device)
+    private var taaOut: [Int: MTLTexture] = [:]
     private var depthState: MTLDepthStencilState?
     /// Always-pass, no write — for coplanar draws after the first. See where
     /// `depthState` is built for why the two cannot be one.
@@ -2102,6 +2106,8 @@ final class KleptonCompositor {
                                  cmd: MTLCommandBuffer, stage: Int, completeStage: Int,
                                  rendered: kl_ovrp_render_pose, haveRendered: Bool,
                                  originFromHead: simd_float4x4) -> Int {
+        prepareTAA(cmd: cmd, stage: stage, completeStage: completeStage,
+                   rendered: rendered, haveRendered: haveRendered)
         // KL_CP_AMPLIFY=0 — back to ONE RENDER PASS PER EYE, selecting the
         // slice on the attachment, with no rate map and no amplification.
         //
@@ -2145,6 +2151,23 @@ final class KleptonCompositor {
     }
 
     /// A group of views sharing one attachment, and therefore one render pass.
+    /// Runs VPKTAA once per eye (a compute pass each, before the composite's render pass) and
+    /// leaves the results in `taaOut`. Only the shared-array eye layout (both eyes in one
+    /// 2-slice array, or one array per eye) is handled; anything else composites untouched.
+    private func prepareTAA(cmd: MTLCommandBuffer, stage: Int, completeStage: Int,
+                            rendered: kl_ovrp_render_pose, haveRendered: Bool) {
+        taaOut.removeAll(keepingCapacity: true)
+        guard let taa, completeStage >= 0, kl_ovrp_eye_layer_live() != 0,
+              projLayerCount == 0 else { return }
+        for eye in 0..<2 {
+            guard let a = eyeSource(eye, stage) else { continue }
+            if let t = taa.resolve(cmd: cmd, eye: eye, source: a.texture, slice: a.slice,
+                                   flipY: a.flipY, rendered: rendered, haveRendered: haveRendered) {
+                taaOut[eye] = t
+            }
+        }
+    }
+
     private func encodeViews(_ viewIndices: [Int],
                              drawable: LayerRenderer.Drawable,
                              layered: Bool,
@@ -2254,7 +2277,12 @@ final class KleptonCompositor {
             // menu, out of the SAME swapchains) that is one screen composited
             // twice, full-field underneath its own panel. kl_ovrp.h has the
             // measurement.
-            let alloc = (completeStage < 0 || kl_ovrp_eye_layer_live() == 0) ? nil : a
+            var alloc = (completeStage < 0 || kl_ovrp_eye_layer_live() == 0) ? nil : a
+            // VPKTAA: the resolved picture replaces the guest's, same geometry (slice 0 of its
+            // own array, same flip).
+            if let got = alloc, let t = taaOut[vi] {
+                alloc = EyeAllocation(texture: t, slice: 0, flipY: got.flipY)
+            }
             var u = withUnsafePointer(to: rendered) { r in
                 kl_reproject_build(haveRendered ? r : nil, Int32(vi),
                                    originFromHead,

@@ -6,6 +6,8 @@
 #include <stdint.h>
 #include <pthread.h>
 #include <sys/stat.h>              // the cloud-save directory is created
+#include <dirent.h>                // asset files: the obb dir is scanned
+#include <strings.h>               // strcasecmp
 #include "klepton.h"
 #include "kl_jni.h"
 #include "guest/kl_driver.h"   // target name, for the per-target KL_PLAT_USER default
@@ -153,8 +155,31 @@ static int plat_is_asset_status_query(const char *name) {
            strcmp(name, "ovr_AssetFile_StatusByName") == 0;
 }
 
+// Asset files that are ALREADY ON DISK, in the game's own obb directory, as
+// loose files the user staged from their own install (Arkham Shadow's cutscene
+// mp4s). Reporting "installed, here is the path" for a file that physically
+// exists describes this host; it fetches nothing. A name with no file behind it
+// keeps the old answer (request 0, honest failure). Delete/Cancel stay refused.
+static int plat_is_asset_local(const char *name) {
+    static const char *const n[] = {
+        "ovr_AssetFile_Status", "ovr_AssetFile_StatusById", "ovr_AssetFile_StatusByName",
+        "ovr_AssetFile_DownloadById", "ovr_AssetFile_DownloadByName",
+        "ovr_Message_GetAssetDetails", "ovr_AssetDetailsArray_GetElement",
+        "ovr_AssetDetails_GetAssetId", "ovr_AssetDetails_GetAssetType",
+        "ovr_AssetDetails_GetDownloadStatus", "ovr_AssetDetails_GetFilepath",
+        "ovr_AssetDetails_GetIapStatus", "ovr_AssetDetails_GetLanguage",
+        "ovr_AssetDetails_GetMetadata",
+        "ovr_Message_GetAssetFileDownloadResult",
+        "ovr_AssetFileDownloadResult_GetAssetId", "ovr_AssetFileDownloadResult_GetFilepath",
+    };
+    for (size_t i = 0; i < sizeof n / sizeof n[0]; i++)
+        if (strcmp(name, n[i]) == 0) return 1;
+    return 0;
+}
+
 static int plat_is_drm(const char *name) {
     if (plat_is_absent_ok(name)) return 0;
+    if (plat_is_asset_local(name)) return 0;
     if (plat_is_iap_catalog(name)) return 0;
     if (plat_is_iap_owned_query(name)) return 0;
     if (plat_is_asset_status_query(name)) return 0;
@@ -250,6 +275,11 @@ static uint64_t klplat_called(const char *name) {
                                                 //   .Application_GetVersion
 #define KLPLAT_MSG_CLOUD_DIR      1990471406u   //   .CloudStorage2_GetUserDirectoryPath
 #define KLPLAT_MSG_ASSET_LIST     1258057588u   //   .AssetFile_GetList (KL_PROBE_ENUM, this APK)
+#define KLPLAT_MSG_ASSET_STATUS      0x02D32F60u // .AssetFile_Status (deprecated; SDK header value)
+#define KLPLAT_MSG_ASSET_STATUS_ID   0x5D955D38u // .AssetFile_StatusById   (in this APK's metadata)
+#define KLPLAT_MSG_ASSET_STATUS_NAME 0x41CFDA50u // .AssetFile_StatusByName (in this APK's metadata)
+#define KLPLAT_MSG_ASSET_DL_ID       0x2D008992u // .AssetFile_DownloadById (in this APK's metadata)
+#define KLPLAT_MSG_ASSET_DL_NAME     0x6336CEFAu // .AssetFile_DownloadByName (in this APK's metadata)
 #define KLPLAT_MSG_ACCESS_TOKEN     0x06A85ABEu  // .User_GetAccessToken (Message<string>)
 #define KLPLAT_MSG_ACHIEVEMENT_DEFS 0x03D3458Du  // .Achievements_GetAllDefinitions (empty array)
 #define KLPLAT_MSG_LOGGED_IN_USER  0x436F345Du  // .User_GetLoggedInUser (Message<User>)
@@ -542,12 +572,202 @@ static const char *klplat_User_GetDisplayName(const void *h) {
     plat_hit("ovr_User_GetDisplayName"); (void)h;
     return "Klepton Player";
 }
-// The list payload's one accessor pair: the handle is the message (the same
-// convention as every other payload here), and its size is zero.
+// ---------------------------------------------------------------------------
+// Asset files on disk. One table, built from the obb dir on first use; entries
+// never move and their strings are owned, so every handle handed to the guest
+// (a pointer to an entry) stays valid for the life of the process. The first
+// g_asset_listed entries are the obb dir's own files (what GetList reports);
+// files found later by name in the files dir are appended after them.
+#define KLPLAT_ASSETS 256
+typedef struct { uint64_t id; char *name; char *path; } klplat_asset;
+static klplat_asset    g_assets[KLPLAT_ASSETS];
+static unsigned        g_nassets, g_asset_listed;
+static pthread_mutex_t g_asset_mu = PTHREAD_MUTEX_INITIALIZER;
+
+static uint64_t asset_id_of(const char *name) {
+    uint64_t h = 1469598103934665603ull;               // FNV-1a over lowercase
+    for (const char *p = name; *p; p++) {
+        unsigned char c = (unsigned char)*p;
+        if (c >= 'A' && c <= 'Z') c = (unsigned char)(c + 32);
+        h ^= c; h *= 1099511628211ull;
+    }
+    return h ? h : 1;
+}
+static const char *asset_base(const char *n) {
+    const char *b = strrchr(n, '/');
+    return b ? b + 1 : n;
+}
+// Caller holds g_asset_mu.
+static klplat_asset *asset_add(const char *dir, const char *name) {
+    for (unsigned i = 0; i < g_nassets; i++)
+        if (strcasecmp(g_assets[i].name, name) == 0) return &g_assets[i];
+    if (g_nassets >= KLPLAT_ASSETS) return NULL;
+    size_t len = strlen(dir) + strlen(name) + 2;
+    char *path = malloc(len);
+    if (!path) return NULL;
+    snprintf(path, len, "%s/%s", dir, name);
+    klplat_asset *a = &g_assets[g_nassets];
+    a->name = strdup(name); a->path = path; a->id = asset_id_of(name);
+    if (!a->name) { free(path); return NULL; }
+    g_nassets++;
+    return a;
+}
+// Caller holds g_asset_mu. A regular file in `dir` whose name matches
+// case-insensitively; returns the on-disk spelling's entry.
+static klplat_asset *asset_scan_dir_for(const char *dir, const char *want) {
+    if (!dir || !*dir) return NULL;
+    DIR *d = opendir(dir);
+    if (!d) return NULL;
+    klplat_asset *hit = NULL;
+    struct dirent *e;
+    while ((e = readdir(d))) {
+        if (strcasecmp(e->d_name, want) != 0) continue;
+        char p[2048]; struct stat st;
+        snprintf(p, sizeof p, "%s/%s", dir, e->d_name);
+        if (stat(p, &st) == 0 && S_ISREG(st.st_mode)) { hit = asset_add(dir, e->d_name); break; }
+    }
+    closedir(d);
+    return hit;
+}
+// Caller holds g_asset_mu.
+static void asset_init(void) {
+    static int done;
+    if (done) return;
+    done = 1;
+    const char *od = kl_jni_obb_dir();
+    DIR *d = od && *od ? opendir(od) : NULL;
+    if (d) {
+        struct dirent *e;
+        while ((e = readdir(d))) {
+            const char *n = e->d_name, *dot = strrchr(n, '.');
+            if (n[0] == '.' || (dot && strcasecmp(dot, ".obb") == 0)) continue;
+            char p[2048]; struct stat st;
+            snprintf(p, sizeof p, "%s/%s", od, n);
+            if (stat(p, &st) == 0 && S_ISREG(st.st_mode)) asset_add(od, n);
+        }
+        closedir(d);
+    }
+    g_asset_listed = g_nassets;
+    fprintf(stderr, "  [plat] AssetFile table: %u file(s) in obb dir %s\n",
+            g_asset_listed, od ? od : "(none)");
+}
+static klplat_asset *asset_by_name(const char *name) {
+    if (!name || !*name) return NULL;
+    pthread_mutex_lock(&g_asset_mu);
+    asset_init();
+    const char *b = asset_base(name);
+    klplat_asset *a = NULL;
+    for (unsigned i = 0; i < g_nassets && !a; i++)
+        if (strcasecmp(g_assets[i].name, name) == 0 ||
+            strcasecmp(g_assets[i].name, b) == 0) a = &g_assets[i];
+    if (!a) a = asset_scan_dir_for(kl_jni_obb_dir(), b);
+    if (!a) a = asset_scan_dir_for(kl_jni_files_dir(), b);
+    pthread_mutex_unlock(&g_asset_mu);
+    return a;
+}
+static klplat_asset *asset_by_id(uint64_t id) {
+    klplat_asset *a = NULL;
+    pthread_mutex_lock(&g_asset_mu);
+    asset_init();
+    for (unsigned i = 0; i < g_nassets && !a; i++)
+        if (g_assets[i].id == id) a = &g_assets[i];
+    pthread_mutex_unlock(&g_asset_mu);
+    return a;
+}
+// The message's int payload carries the table index; payload handles are the
+// entry itself.
+static uint64_t asset_reply(const char *what, uint32_t type, const char *key,
+                            klplat_asset *a) {
+    if (!a) {
+        fprintf(stderr, "  [plat] AssetFile %s(\"%s\") -> not found (request 0)\n",
+                what, key);
+        return 0;
+    }
+    fprintf(stderr, "  [plat] AssetFile %s(\"%s\") -> installed %s\n",
+            what, key, a->path);
+    return klplat_request(what, type, (int32_t)(a - g_assets));
+}
+static uint64_t klplat_AssetFile_StatusByName(const char *name) {
+    plat_hit("ovr_AssetFile_StatusByName");
+    return asset_reply("StatusByName", KLPLAT_MSG_ASSET_STATUS_NAME,
+                       name ? name : "", asset_by_name(name));
+}
+static uint64_t klplat_AssetFile_StatusById(uint64_t id) {
+    plat_hit("ovr_AssetFile_StatusById");
+    char k[24]; snprintf(k, sizeof k, "%llu", (unsigned long long)id);
+    return asset_reply("StatusById", KLPLAT_MSG_ASSET_STATUS_ID, k, asset_by_id(id));
+}
+static uint64_t klplat_AssetFile_Status(uint64_t id) {
+    plat_hit("ovr_AssetFile_Status");
+    char k[24]; snprintf(k, sizeof k, "%llu", (unsigned long long)id);
+    return asset_reply("Status", KLPLAT_MSG_ASSET_STATUS, k, asset_by_id(id));
+}
+// Download of a file that is already here: completes at once with its path.
+// Absent file -> request 0, nothing is fetched or invented.
+static uint64_t klplat_AssetFile_DownloadByName(const char *name) {
+    plat_hit("ovr_AssetFile_DownloadByName");
+    return asset_reply("DownloadByName", KLPLAT_MSG_ASSET_DL_NAME,
+                       name ? name : "", asset_by_name(name));
+}
+static uint64_t klplat_AssetFile_DownloadById(uint64_t id) {
+    plat_hit("ovr_AssetFile_DownloadById");
+    char k[24]; snprintf(k, sizeof k, "%llu", (unsigned long long)id);
+    return asset_reply("DownloadById", KLPLAT_MSG_ASSET_DL_ID, k, asset_by_id(id));
+}
+static const klplat_asset *asset_of_msg(const klplat_msg *m) {
+    if (!m || m->payload < 0 || (unsigned)m->payload >= g_nassets) return NULL;
+    return &g_assets[m->payload];
+}
+static uint64_t klplat_Message_GetAssetDetails(const klplat_msg *m) {
+    plat_hit("ovr_Message_GetAssetDetails");
+    return (uint64_t)(uintptr_t)asset_of_msg(m);
+}
+static uint64_t klplat_Message_GetAssetFileDownloadResult(const klplat_msg *m) {
+    plat_hit("ovr_Message_GetAssetFileDownloadResult");
+    return (uint64_t)(uintptr_t)asset_of_msg(m);
+}
+static uint64_t klplat_AssetDetails_GetAssetId(const klplat_asset *a) {
+    plat_hit("ovr_AssetDetails_GetAssetId");
+    return a ? a->id : 0;
+}
+static const char *klplat_AssetDetails_GetFilepath(const klplat_asset *a) {
+    plat_hit("ovr_AssetDetails_GetFilepath");
+    return a ? a->path : "";
+}
+static const char *klplat_AssetDetails_GetAssetType(const void *a) {
+    plat_hit("ovr_AssetDetails_GetAssetType"); (void)a; return "default";
+}
+static const char *klplat_AssetDetails_GetDownloadStatus(const void *a) {
+    plat_hit("ovr_AssetDetails_GetDownloadStatus"); (void)a; return "installed";
+}
+static const char *klplat_AssetDetails_GetIapStatus(const void *a) {
+    plat_hit("ovr_AssetDetails_GetIapStatus"); (void)a; return "free";
+}
+static const char *klplat_AssetDetails_GetMetadata(const void *a) {
+    plat_hit("ovr_AssetDetails_GetMetadata"); (void)a; return "";
+}
+// No language pack: NULL handle; the SDK's LanguagePackInfo wrapper may still
+// read its fields through it, so those answer "" for any handle.
+static uint64_t klplat_AssetDetails_GetLanguage(const void *a) {
+    plat_hit("ovr_AssetDetails_GetLanguage"); (void)a; return 0;
+}
+static const char *klplat_LanguagePackInfo_str(const void *h) {
+    plat_hit("ovr_LanguagePackInfo_Get*"); (void)h; return "";
+}
+// GetList's array: the obb dir's own files, all installed.
 static uint64_t klplat_AssetFileDeliveryList_GetSize(const void *h) {
     plat_hit("ovr_AssetDetailsArray_GetSize");
     (void)h;
-    return 0;
+    pthread_mutex_lock(&g_asset_mu);
+    asset_init();
+    unsigned n = g_asset_listed;
+    pthread_mutex_unlock(&g_asset_mu);
+    return n;
+}
+static uint64_t klplat_AssetDetailsArray_GetElement(const void *h, uint64_t i) {
+    plat_hit("ovr_AssetDetailsArray_GetElement");
+    (void)h;
+    return i < g_asset_listed ? (uint64_t)(uintptr_t)&g_assets[i] : 0;
 }
 
 static uint64_t klplat_Entitlement_GetIsViewerEntitled(void) {
@@ -758,8 +978,7 @@ static const char *const g_plat_request[] = {
     "ovr_IAP_GetProductsBySKU", "ovr_IAP_GetNextProductArrayPage",
     // Owned-inventory query: honest failure, grants nothing (see plat_is_iap_owned_query).
     "ovr_IAP_GetViewerPurchases", "ovr_IAP_GetViewerPurchasesDeltaAsync",
-    // Asset-file status query: honest failure, grants nothing (see plat_is_asset_status_query).
-    "ovr_AssetFile_Status", "ovr_AssetFile_StatusById", "ovr_AssetFile_StatusByName",
+    // Asset-file status: now answered from disk in g_plat_impl (plat_is_asset_local).
     "ovr_RichPresence_Clear", "ovr_RichPresence_Set",
     "ovr_RichPresence_SetDestination", "ovr_RichPresence_SetIsJoinable",
     // Asking who is logged in is not an ownership question; with no platform
@@ -1042,6 +1261,27 @@ static const struct { const char *name; void *fn; } g_plat_impl[] = {
     // names no content, delivers no content, and unblocks the reader.
     {"ovr_Message_GetAssetDetailsArray",       (void *)klplat_Message_GetPayload},
     {"ovr_AssetDetailsArray_GetSize",          (void *)klplat_AssetFileDeliveryList_GetSize},
+    // Asset files already on disk (see plat_is_asset_local).
+    {"ovr_AssetDetailsArray_GetElement",       (void *)klplat_AssetDetailsArray_GetElement},
+    {"ovr_AssetFile_Status",                   (void *)klplat_AssetFile_Status},
+    {"ovr_AssetFile_StatusById",               (void *)klplat_AssetFile_StatusById},
+    {"ovr_AssetFile_StatusByName",             (void *)klplat_AssetFile_StatusByName},
+    {"ovr_AssetFile_DownloadById",             (void *)klplat_AssetFile_DownloadById},
+    {"ovr_AssetFile_DownloadByName",           (void *)klplat_AssetFile_DownloadByName},
+    {"ovr_Message_GetAssetDetails",            (void *)klplat_Message_GetAssetDetails},
+    {"ovr_Message_GetAssetFileDownloadResult", (void *)klplat_Message_GetAssetFileDownloadResult},
+    {"ovr_AssetDetails_GetAssetId",            (void *)klplat_AssetDetails_GetAssetId},
+    {"ovr_AssetDetails_GetAssetType",          (void *)klplat_AssetDetails_GetAssetType},
+    {"ovr_AssetDetails_GetDownloadStatus",     (void *)klplat_AssetDetails_GetDownloadStatus},
+    {"ovr_AssetDetails_GetFilepath",           (void *)klplat_AssetDetails_GetFilepath},
+    {"ovr_AssetDetails_GetIapStatus",          (void *)klplat_AssetDetails_GetIapStatus},
+    {"ovr_AssetDetails_GetLanguage",           (void *)klplat_AssetDetails_GetLanguage},
+    {"ovr_AssetDetails_GetMetadata",           (void *)klplat_AssetDetails_GetMetadata},
+    {"ovr_AssetFileDownloadResult_GetAssetId", (void *)klplat_AssetDetails_GetAssetId},
+    {"ovr_AssetFileDownloadResult_GetFilepath",(void *)klplat_AssetDetails_GetFilepath},
+    {"ovr_LanguagePackInfo_GetEnglishName",    (void *)klplat_LanguagePackInfo_str},
+    {"ovr_LanguagePackInfo_GetNativeName",     (void *)klplat_LanguagePackInfo_str},
+    {"ovr_LanguagePackInfo_GetTag",            (void *)klplat_LanguagePackInfo_str},
     // The user access token and the achievement catalogue — two request-style
     // calls the game issues during platform init and gates its menu on. Both
     // complete with benign, empty/offline data (see the handlers above) rather
