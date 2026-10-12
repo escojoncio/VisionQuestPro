@@ -36,6 +36,10 @@ targets:
         embed: true
         link: false
         codeSign: true
+      - framework: build/VPVulkan.framework
+        embed: true
+        link: false
+        codeSign: true
     settings:
       base:
         PRODUCT_NAME: VisionQuestPro

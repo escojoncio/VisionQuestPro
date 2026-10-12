@@ -9,6 +9,19 @@
 - Fallo resuelto en la 2.ª build: `KL_TARGET_DEFAULT_NAME` no existe sin el proyecto de Klepton → `kl_app.c` define
   `KL_TARGET_DEFAULT "(ninguno)"`.
 
+## VPEngine como driver Vulkan + firma dentro de la app (2026-10-12)
+- `scripts/build-vpvulkan.sh` (CI, paso cacheado por hash de `vpengine/gpu/**`): CMake visionOS de VPEngine `gpu/`,
+  objetivo `VPVulkan` → `build/VPVulkan.framework` (`install_name @rpath/VPVulkan.framework/VPVulkan`, Info.plist propio);
+  `project.yml` lo embebe (codeSign). Checkout de VPEngine con `runtime` + `gpu`.
+- `VQSettings.useVPEngine` (UserDefaults `vq.vpengine`, por defecto sí; interruptor en «Gráficos»). `selectDriver()`
+  (desde `applyToEnvironment`): `dlopen(Frameworks/VPVulkan.framework/VPVulkan, RTLD_GLOBAL)` antes del juego y
+  `KL_MVK_DYLIB` = esa ruta (Klepton `kl_vulkan.c` `mvk_open` la usa); si falla o se apaga → MoltenVK. Log `Gráficos:`.
+- Firma (lección de VPEngine: solo se aceptaron copias firmadas dentro del contenedor de la app, con id y requisitos de
+  la app): `VQPrepare` separa conversión y firma. Conversión sin firmar en `QUEST/Cache/<j>/dylibs` (stamp `kld-2`,
+  sin certificado); copias firmadas en `Library/Application Support/VisionQuestPro/Signed/<j>/` con `sign.txt`
+  (stamp conversión|huella certificado + variante). `KL_DYLIB_DIR` apunta a las firmadas. Variante elegida con dlopen
+  de la 1.ª librería, como antes.
+
 ## Foveado Quest apagado + ajustes gráficos en la app (2026-10-12)
 - Foveado del juego **siempre apagado** (log `vq.fov`):
   - `klepton/runtime/xr/kl_ovrp.c` `ovrp_hit`: 1.ª llamada a cualquier `*Foveation*`/`*TiledMultiRes*` → línea

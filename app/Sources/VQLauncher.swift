@@ -223,6 +223,8 @@ struct VQSettingsView: View {
                             value: $settings.watchdogSeconds, in: 30...600, step: 30)
                 }
                 Section(VQL("Gráficos", "Graphics")) {
+                    Toggle(VQL("Motor gráfico VPEngine (apagado: MoltenVK)", "VPEngine graphics (off: MoltenVK)"),
+                           isOn: $settings.useVPEngine)
                     Picker(VQL("Foveado", "Foveation"), selection: $settings.foveation) {
                         Text(VQL("Apagado", "Off")).tag(VQSettings.Foveation.off)
                         Text("M2").tag(VQSettings.Foveation.m2)
