@@ -175,3 +175,11 @@
 - Arreglo: `klepton/runtime/xr/kl_ovrp.c` `klovrp_GetDisplayAdapterId2` → `*out = NULL` (log `display adapter id -> NULL`); `KL_OVRP_ADAPTER_LUID=1` restaura el buffer LUID. Revertido el LUID a cero de `kl_vulkan.c` (entrada anterior), innecesario.
 ### Comprobar
 - `who: vkGetPhysicalDeviceQueueFamilyProperties <- libunity.so+0xdaa774`, `vkCreateDevice`, sin aviso de hardware ni `[egl] context`.
+
+## 2026-10-12 — Log 8: **Vulkan funcionando** en Batman; parada en ovr_AssetFile_StatusByName
+- Con `ovrp_GetDisplayAdapterId2` → NULL: sin aviso de hardware; Unity selecciona GPU, consulta colas/extensiones/Properties2/Features2 y `vkCreateDevice ok — 8 extension(s), queue family 0`. Llega a `frame pump` (~1,3 GB), carga plugins, audio, haptics. El contexto `[egl] GLES 3` posterior es auxiliar.
+- Fin: `kl_ovrplat.c` abortaba en `ovr_AssetFile_StatusByName` (familia AssetFile = marcador DRM).
+- Arreglo: `plat_is_asset_status_query` (`ovr_AssetFile_Status`, `StatusById`, `StatusByName`) sale de `plat_is_drm` y entra en `g_plat_request` → request id 0 («no se pudo hacer la petición», sin mensaje de estado; no concede nada). `ovr_AssetFile_Download*` sigue abortando.
+- Ruido: decenas de `guest dlopen("libOVRPlugin.so")`/`libovrplatformloader.so` repetidos (pendiente: registrar solo el primero).
+### Comprobar
+- Qué hace Batman con el fallo de la petición (sigue o sale) y siguiente parada.
