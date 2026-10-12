@@ -594,6 +594,14 @@ static VkResult klvk_CreateDevice(VkPhysicalDevice phys, const VkDeviceCreateInf
     extlist keep = {{0}, 0};
     for (uint32_t i = 0; ci && i < ci->enabledExtensionCount; i++) {
         const char *e = ci->ppEnabledExtensionNames[i];
+        // VisionQuestPro: the game's foveation is always off (VPEngine's own
+        // applies), whatever the driver underneath supports.
+        if (!strncmp(e, "VK_EXT_fragment_density_map", 27) ||
+            !strcmp(e, "VK_KHR_fragment_shading_rate") ||
+            !strcmp(e, "VK_QCOM_fragment_density_map_offset")) {
+            fprintf(stderr, "vq.fov vk device ext %s dropped (foveation off)\n", e);
+            continue;
+        }
         if (have && !ext_supported(have, nhave, e)) {
             VKI("device ext %s NOT supported by MoltenVK — dropped\n", e);
             continue;
@@ -3969,9 +3977,31 @@ static VkResult VKAPI_CALL klvk_EnumerateDeviceExtensionProperties(
     if (!t) { t = 1; if (real_gipa) real = (PFN_vkEnumerateDeviceExtensionProperties)
         real_gipa(g_instance, "vkEnumerateDeviceExtensionProperties"); }
     pd = KLVK_PHYS_OR_SUB(pd, "EnumerateDeviceExtensionProperties");
-    if (real) return real(pd, layer, count, props);
-    if (count) *count = 0;
-    return VK_SUCCESS;
+    if (!count) return VK_SUCCESS;
+    if (!real) { *count = 0; return VK_SUCCESS; }
+    // VisionQuestPro: hide the foveation extensions (density map / shading
+    // rate) so the game never takes its own foveated path.
+    uint32_t n = 0;
+    VkResult r = real(pd, layer, &n, NULL);
+    if (r != VK_SUCCESS) return r;
+    VkExtensionProperties *all = calloc(n ? n : 1, sizeof *all);
+    if (!all) return VK_ERROR_OUT_OF_HOST_MEMORY;
+    r = real(pd, layer, &n, all);
+    if (r != VK_SUCCESS && r != VK_INCOMPLETE) { free(all); return r; }
+    uint32_t k = 0;
+    for (uint32_t i = 0; i < n; i++) {
+        const char *e = all[i].extensionName;
+        if (!strncmp(e, "VK_EXT_fragment_density_map", 27) ||
+            !strcmp(e, "VK_KHR_fragment_shading_rate") ||
+            !strcmp(e, "VK_QCOM_fragment_density_map_offset")) continue;
+        all[k++] = all[i];
+    }
+    if (!props) { *count = k; free(all); return VK_SUCCESS; }
+    uint32_t w = *count < k ? *count : k;
+    memcpy(props, all, w * sizeof *all);
+    *count = w;
+    free(all);
+    return w < k ? VK_INCOMPLETE : VK_SUCCESS;
 }
 static void VKAPI_CALL klvk_GetPhysicalDeviceMemoryProperties2(
         VkPhysicalDevice pd, VkPhysicalDeviceMemoryProperties2 *props) {

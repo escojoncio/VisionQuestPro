@@ -575,6 +575,8 @@ enum { KLXR_VIEW_CONFIG_PRIMARY_STEREO = 2 };
     X(xrPerfSettingsSetPerformanceLevelEXT)                                    \
     X(xrSetAndroidApplicationThreadKHR)                                        \
     X(xrEnumerateColorSpacesFB) X(xrSetColorSpaceFB)                          \
+    X(xrCreateFoveationProfileFB) X(xrDestroyFoveationProfileFB)               \
+    X(xrUpdateSwapchainFB)                                                     \
     X(xrCreatePassthroughFB) X(xrDestroyPassthroughFB)                         \
     X(xrPassthroughStartFB) X(xrPassthroughPauseFB)                            \
     X(xrCreatePassthroughLayerFB) X(xrDestroyPassthroughLayerFB)               \
@@ -1022,6 +1024,18 @@ static const char *klxr_ext_at(uint32_t i, uint32_t *version_out) {
     return g_ext_live[i].name;
 }
 
+// Quest-side foveation extensions (VisionQuestPro: never advertised, never applied).
+static int klxr_is_foveation_ext(const char *name) {
+    static const char *const fov[] = {
+        "XR_FB_foveation", "XR_FB_foveation_configuration", "XR_FB_foveation_vulkan",
+        "XR_META_foveation_eye_tracked", "XR_META_vulkan_swapchain_create_info",
+        "XR_FB_swapchain_update_state", "XR_FB_swapchain_update_state_vulkan",
+    };
+    for (size_t i = 0; i < sizeof fov / sizeof fov[0]; i++)
+        if (!strcmp(name, fov[i])) return 1;
+    return 0;
+}
+
 // Is a name in the advertised list? xrCreateInstance validates the app's
 // requested extensions against exactly this, so asking one function keeps the
 // answer identical to what was enumerated.
@@ -1266,6 +1280,13 @@ static XrResult klxr_CreateInstance(const XrInstanceCreateInfo *info, void **ins
     for (uint32_t i = 0; i < info->enabledExtensionCount; i++) {
         const char *name = info->enabledExtensionNames[i];
         int known = klxr_ext_advertised(name);
+        // Quest foveation is always OFF on this host (VPEngine applies its own).
+        // These are never advertised; a guest that enables them blindly is let
+        // through and its entry points answer success with no effect.
+        if (!known && klxr_is_foveation_ext(name)) {
+            fprintf(stderr, "vq.fov xr ext=%s requested -> accepted, ignored (foveation off)\n", name);
+            continue;
+        }
         fprintf(stderr, "  [xr]   extension: %-40s %s\n", name,
                 known ? "enabled" : "NOT PRESENT");
         if (!known) { g_instance.magic = 0; KLXR_RET(KLXR_ERROR_EXTENSION_NOT_PRESENT); }
@@ -4235,6 +4256,12 @@ static XrResult klxr_CreateSwapchain(void *session, const XrSwapchainCreateInfo 
     if (!info || !swapchain) KLXR_RET(KLXR_ERROR_VALIDATION_FAILURE);
     if (info->type != XR_TYPE_SWAPCHAIN_CREATE_INFO) KLXR_RET(KLXR_ERROR_VALIDATION_FAILURE);
     klxr_log_chain("xrCreateSwapchain", info->next);
+    // XrSwapchainCreateInfoFoveationFB (type 1000114000): the guest asks for a
+    // swapchain with a fragment density map. Ignored: no density map is made.
+    struct klxr_base { int32_t type; const struct klxr_base *next; };
+    for (const struct klxr_base *n = (const struct klxr_base *)info->next; n; n = n->next)
+        if (n->type == 1000114000)
+            fprintf(stderr, "vq.fov xr swapchain density-map request ignored\n");
 
     uint32_t nfmt = 0;
     const int64_t *fmts = klxr_formats_for(s, &nfmt);
@@ -6495,6 +6522,25 @@ static XrResult klxr_PassthroughLayerSetStyleFB(void *l, const void *style) {
     (void)l; (void)style; return KLXR_SUCCESS;
 }
 
+// ---------------------------------------------------------------- XR_FB_foveation (off)
+// Reached only by a guest that enabled the extension without it being
+// advertised (see xrCreateInstance). Success with no effect: profiles are
+// dummy handles and xrUpdateSwapchainFB never attaches anything.
+static XrResult klxr_CreateFoveationProfileFB(void *session, const void *info, void **out) {
+    (void)session; (void)info;
+    static int dummy;
+    if (out) *out = &dummy;
+    fprintf(stderr, "vq.fov xrCreateFoveationProfileFB -> dummy profile (level 0)\n");
+    return KLXR_SUCCESS;
+}
+static XrResult klxr_DestroyFoveationProfileFB(void *p) { (void)p; return KLXR_SUCCESS; }
+static XrResult klxr_UpdateSwapchainFB(void *sc, const void *state) {
+    (void)sc; (void)state;
+    static unsigned n;
+    if (n++ < 4) fprintf(stderr, "vq.fov xrUpdateSwapchainFB ignored (foveation off)\n");
+    return KLXR_SUCCESS;
+}
+
 // ---------------------------------------------------------------- dispatch
 // The table is built entirely out of refusals above, and everything we actually
 // implement replaces its row here. One list, so an entry point cannot be served
@@ -6551,6 +6597,10 @@ static void klxr_install(void) {
                                    (void *)klxr_SetAndroidApplicationThreadKHR},
         {"xrEnumerateColorSpacesFB", (void *)klxr_EnumerateColorSpacesFB},
         {"xrSetColorSpaceFB",        (void *)klxr_SetColorSpaceFB},
+        // XR_FB_foveation family: accepted, no effect (VisionQuestPro)
+        {"xrCreateFoveationProfileFB",  (void *)klxr_CreateFoveationProfileFB},
+        {"xrDestroyFoveationProfileFB", (void *)klxr_DestroyFoveationProfileFB},
+        {"xrUpdateSwapchainFB",         (void *)klxr_UpdateSwapchainFB},
         // XR_FB_passthrough (stubbed — see above)
         {"xrCreatePassthroughFB",       (void *)klxr_CreatePassthroughFB},
         {"xrDestroyPassthroughFB",      (void *)klxr_DestroyPassthroughFB},

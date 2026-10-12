@@ -9,6 +9,34 @@
 - Fallo resuelto en la 2.ª build: `KL_TARGET_DEFAULT_NAME` no existe sin el proyecto de Klepton → `kl_app.c` define
   `KL_TARGET_DEFAULT "(ninguno)"`.
 
+## Foveado Quest apagado + ajustes gráficos en la app (2026-10-12)
+- Foveado del juego **siempre apagado** (log `vq.fov`):
+  - `klepton/runtime/xr/kl_ovrp.c` `ovrp_hit`: 1.ª llamada a cualquier `*Foveation*`/`*TiledMultiRes*` → línea
+    `vq.fov ovrp <nombre> -> off`. Comportamiento previo de Klepton conservado: `GetTiledMultiResSupported` = no,
+    `GetTiledMultiResLevel` = 0, `GetFoveationEyeTrackedSupported` = 0, `GetLayerTextureFoveation` = UNSUPPORTED,
+    setters (`SetTiledMultiResLevel/Dynamic`, `SetFoveationEyeTracked`) = éxito sin efecto.
+  - `kl_openxr.c`: `klxr_is_foveation_ext` (XR_FB_foveation, _configuration, _vulkan, XR_META_foveation_eye_tracked,
+    XR_META_vulkan_swapchain_create_info, XR_FB_swapchain_update_state(_vulkan)): no se anuncian; si el juego las
+    habilita igualmente, `xrCreateInstance` las acepta e ignora. Nuevos `xrCreateFoveationProfileFB` (perfil ficticio),
+    `xrDestroyFoveationProfileFB`, `xrUpdateSwapchainFB` = éxito sin efecto (filas añadidas a `KL_XR_ENTRY_POINTS`).
+    `xrCreateSwapchain` registra e ignora `XrSwapchainCreateInfoFoveationFB` (tipo 1000114000).
+  - `gfx/kl_vulkan.c`: `vkEnumerateDeviceExtensionProperties` oculta `VK_EXT_fragment_density_map*`,
+    `VK_KHR_fragment_shading_rate`, `VK_QCOM_fragment_density_map_offset`; `klvk_CreateDevice` los descarta si se piden.
+- Ajustes en la app (`VQSettings` en `app/Sources/VQLaunch.swift`, UserDefaults `vq.fov*`, `vq.vpktaa*`,
+  `vq.renderScale`, `vq.aswOff`, `vq.quest3`; sección «Gráficos» en `VQLauncher.swift`): foveado apagado/M2/M5/
+  personalizado (zona nítida, periferia, altura; M5 solo si `VQSettings.isM5`, misma regla que PTVisionPro), VPKTAA
+  (activado, %, nitidez), resolución de render (→ `KL_OVRP_EYE_SCALE`), ASW desactivado (Klepton ya nunca da texturas
+  SpaceWarp), perfil Quest 3 (→ `KL_OVRP_HEADSET=11`; apagado por defecto: JNI/Build.MODEL de Klepton dicen Quest 2).
+- `app/Native/vq_config.c/.h` (+ bridging header): `vq_gfx_config_apply` guarda, registra y reenvía por `dlsym` a
+  `vpvk_config_set_*` de VPVulkan (VPEngine `gpu/vulkan/include/vpvk/config.h`); con MoltenVK solo registra.
+- Verificado: sintaxis de los .c con clang en Linux (sin errores en las zonas tocadas), `vq_config.c` con gcc -Wall.
+  Swift sin compilar en local (CI).
+
+### Pendiente (foveado/VPKTAA)
+- Cargar libVPVulkan en lugar de MoltenVK (`KL_MVK_DYLIB`) y llamar `vq_gfx_config_forward()` tras el dlopen.
+- VPEngine: rate map en pases multiview de ojo y pase VPKTAA final (ver VPEngine `docs/VULKAN.md` «Foveado y VPKTAA»).
+- Comprobar en el visor que `KL_OVRP_HEADSET=11` no rompe el mapeo de mandos (si falla, dejar perfil Quest 3 apagado).
+
 ## Paso 1 — app VisionQuestPro (2026-10-12)
 - `klepton/`: copia de Klepton `ce74582` (MIT, `klepton/LICENSE`; detalle en `THIRD-PARTY-NOTICES.md`).
   - `tools/klepton_ld.c`: `-DKLEPTON_LD_INPROC` → `klepton_ld_run(in,out,err,len)` (die → longjmp, libera mmap/img/pool/out,
