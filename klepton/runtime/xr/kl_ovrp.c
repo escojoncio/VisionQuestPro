@@ -351,8 +351,10 @@ static uint64_t klovrp_GetAudioInId2(const void **out)       { return klovrp_Get
 // answer and hands the MATCH to vkGetPhysicalDeviceQueueFamilyProperties. The
 // old zeroed answer (via GetDeviceId2) matched nothing once MoltenVK 1.4.2 began
 // reporting a real, non-zero LUID, so Unity selected a NULL VkPhysicalDevice and
-// crashed in MVKPhysicalDevice::getQueueFamilies. Report the real LUID (first 8
-// bytes of the 32-byte id) so the match lands. A GLES guest has no Vulkan
+// crashed in MVKPhysicalDevice::getQueueFamilies. The id answered is the cached
+// one from kl_vulkan, which is now ZERO by default (Quest-like; Unity 2022 compares
+// it to VkPhysicalDevice handles) and forced into deviceLUID too, so both paths
+// agree. KL_ADAPTER_LUID_REAL=1 restores the driver's LUID. A GLES guest has no Vulkan
 // instance; kl_vulkan_display_luid leaves the id empty, the prior behaviour.
 static uint64_t klovrp_GetDisplayAdapterId2(const void **out) {
     ovrp_hit("ovrp_GetDisplayAdapterId2");

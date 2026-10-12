@@ -1212,6 +1212,22 @@ static void cache_display_luid(VkInstance inst) {
     if (!idp.deviceLUIDValid) return;
     memcpy(g_display_luid, idp.deviceLUID, 8 /* VK_LUID_SIZE */);
     g_display_luid_valid = 1;
+    // Android has no adapter LUID: on a Quest the display adapter id comes back
+    // zero. Unity 2022's Vulkan init (Batman, libunity 0xdaa73c -> 0xdb11cc)
+    // takes the XR adapter id as a VkPhysicalDevice HANDLE and keeps only an
+    // enumerated device equal to it — a non-zero LUID matches no handle, the
+    // selection is NULL, GfxDevice creation fails and Unity falls back to GLES.
+    // With zero it picks by device type, as on a Quest. Older Unity (AC Nexus)
+    // matches deviceLUID from Properties2 instead; that read is forced to this
+    // same value below, so zero still matches there. KL_ADAPTER_LUID_REAL=1
+    // keeps the driver's LUID.
+    if (!kl_env_on("KL_ADAPTER_LUID_REAL", 0)) {
+        memset(g_display_luid, 0, sizeof g_display_luid);
+        VKI("display adapter id reported as zero (Quest-like; driver LUID "
+            "%02x%02x%02x%02x%02x%02x%02x%02x kept out)\n",
+            idp.deviceLUID[0], idp.deviceLUID[1], idp.deviceLUID[2], idp.deviceLUID[3],
+            idp.deviceLUID[4], idp.deviceLUID[5], idp.deviceLUID[6], idp.deviceLUID[7]);
+    }
     VKI("cached display adapter LUID %02x%02x%02x%02x%02x%02x%02x%02x\n",
         g_display_luid[0], g_display_luid[1], g_display_luid[2], g_display_luid[3],
         g_display_luid[4], g_display_luid[5], g_display_luid[6], g_display_luid[7]);
