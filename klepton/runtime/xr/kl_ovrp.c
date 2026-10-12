@@ -1145,6 +1145,15 @@ void kl_ovrp_set_eye_texture_size(int w, int h) {
     // display with a much larger logical resolution than a Quest therefore
     // turns straight into hundreds of MiB and into fill cost, so what the
     // display asks for is scaled and capped rather than taken on trust.
+    // KL_OVRP_EYE_BASE=original: the game's own budget (Quest 3, 2064x2208 =
+    // ~4.56 Mpx per eye) instead of the display's request, reshaped to the
+    // display's aspect so it matches the frustum tangents pushed alongside it.
+    const char *base = getenv("KL_OVRP_EYE_BASE");
+    if (base && !strcmp(base, "original")) {
+        float area = 2064.0f * 2208.0f, aspect = (float)w / (float)h;
+        h = (int)(sqrtf(area / aspect) + 0.5f);
+        w = (int)((float)h * aspect + 0.5f);
+    }
     float scale = kl_env_float("KL_OVRP_EYE_SCALE", 1.0f);
     if (scale > 0.05f && scale <= 4.0f) {
         w = (int)((float)w * scale + 0.5f);
@@ -1166,9 +1175,9 @@ void kl_ovrp_set_eye_texture_size(int w, int h) {
     // the whole swapchain Unity will hold.
     double mib = (double)w * h * 8.0 * 2.0 * kl_ovrp_stage_count() / (1024 * 1024);
     fprintf(stderr, "  [ovrp] eye texture size %dx%d -> %dx%d; the display asked "
-                    "for %dx%d (scale %.2f, cap %d). %.0f MiB of swapchain, "
+                    "for %dx%d (base %s, scale %.2f, cap %d). %.0f MiB of swapchain, "
                     "before Unity's own ~1.2x\n",
-            g_eye_w, g_eye_h, w, h, req_w, req_h, scale, cap, mib);
+            g_eye_w, g_eye_h, w, h, req_w, req_h, base ? base : "display", scale, cap, mib);
     g_eye_w = w;
     g_eye_h = h;
 }

@@ -67,6 +67,8 @@ final class VQSettings: ObservableObject {
     @Published var vpktaaPercent: Double { didSet { save() } }  // 0...100
     @Published var vpktaaSharpness: Double { didSet { save() } } // 0...1
     @Published var renderScale: Double { didSet { save() } }    // 0.5...1.5
+    // Resolution base: false = the game's original (Quest 3 budget), true = Vision Pro's request.
+    @Published var avpResolution: Bool { didSet { save() } }
     @Published var aswDisabled: Bool { didSet { save() } }
     @Published var quest3Profile: Bool { didSet { save() } }
     @Published var forceVulkan: Bool { didSet { save() } }
@@ -89,6 +91,7 @@ final class VQSettings: ObservableObject {
         vpktaaPercent = d.object(forKey: "vq.vpktaaPercent") as? Double ?? 80
         vpktaaSharpness = d.object(forKey: "vq.vpktaaSharp") as? Double ?? 0.5
         renderScale = d.object(forKey: "vq.renderScale") as? Double ?? 1
+        avpResolution = d.object(forKey: "vq.resAVP") as? Bool ?? false
         aswDisabled = d.object(forKey: "vq.aswOff") as? Bool ?? true
         quest3Profile = d.object(forKey: "vq.quest3v2") as? Bool ?? true  // Quest 3 for every game by default
         forceVulkan = d.object(forKey: "vq.forceVulkan") as? Bool ?? true
@@ -124,6 +127,7 @@ final class VQSettings: ObservableObject {
         d.set(vpktaaPercent, forKey: "vq.vpktaaPercent")
         d.set(vpktaaSharpness, forKey: "vq.vpktaaSharp")
         d.set(renderScale, forKey: "vq.renderScale")
+        d.set(avpResolution, forKey: "vq.resAVP")
         d.set(aswDisabled, forKey: "vq.aswOff")
         d.set(quest3Profile, forKey: "vq.quest3v2")
         d.set(forceVulkan, forKey: "vq.forceVulkan")
@@ -178,6 +182,8 @@ final class VQSettings: ObservableObject {
         // Eye texture size the game is told (Klepton's ovrp side) and headset identity:
         // 11 = ovrpSystemHeadset Meta_Quest_3; off: Klepton's per-game default (Quest 2 / Quest).
         setenv("KL_OVRP_EYE_SCALE", String(format: "%.2f", renderScale), 1)
+        setenv("KL_OVRP_EYE_BASE", avpResolution ? "display" : "original", 1)
+        VQLog.log("Gráficos: resolución base \(avpResolution ? "Vision Pro" : "original (Quest 3)")")
         // Quest 3 identity for every game, in every place a title can check it: Android Build
         // (MODEL/DEVICE eureka), OVRPlugin headset type, OpenXR system name and the GPU.
         if quest3Profile {
