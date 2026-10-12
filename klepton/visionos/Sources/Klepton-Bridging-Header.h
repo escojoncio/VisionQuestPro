@@ -41,6 +41,7 @@
 // VisionQuestPro: the launcher's C side (APK reader, in-process klepton-ld) and
 // VPEngine's signature (runtime/vp_codesign.h, vp_pkcs12.h, from VPEngine at build time).
 #import "vq_apk.h"
+#import "vq_config.h"
 #import "vp_codesign.h"
 #import "vp_pkcs12.h"
 #include <dlfcn.h>

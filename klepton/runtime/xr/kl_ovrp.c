@@ -188,6 +188,12 @@ static int kl_ovrp_verbose(void) {
 static void ovrp_hit(const char *name) {
     int s = ovrp_slot(name);
     if (s >= 0) g_ovrp[s].calls++;
+    // VisionQuestPro: Quest foveation (fixed/dynamic/eye-tracked) is always off;
+    // supported queries say no, levels read 0, setters are accepted with no
+    // effect. One line per entry point so the log shows what the game tried.
+    if (s >= 0 && g_ovrp[s].calls == 1 &&
+        (strstr(name, "Foveation") || strstr(name, "TiledMultiRes")))
+        fprintf(stderr, "vq.fov ovrp %s -> off (no effect)\n", name);
     if (kl_ovrp_verbose() && s >= 0) {
         unsigned c = g_ovrp[s].calls;
         if (c <= 20 || kl_ovrp_verbose() >= 2 || (c % 120) == 0)

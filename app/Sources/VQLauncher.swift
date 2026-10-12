@@ -222,6 +222,36 @@ struct VQSettingsView: View {
                     Stepper(VQL("Vigilante de arranque: \(Int(settings.watchdogSeconds)) s", "Boot watchdog: \(Int(settings.watchdogSeconds)) s"),
                             value: $settings.watchdogSeconds, in: 30...600, step: 30)
                 }
+                Section(VQL("Gráficos", "Graphics")) {
+                    Picker(VQL("Foveado", "Foveation"), selection: $settings.foveation) {
+                        Text(VQL("Apagado", "Off")).tag(VQSettings.Foveation.off)
+                        Text("M2").tag(VQSettings.Foveation.m2)
+                        if VQSettings.isM5 { Text("M5").tag(VQSettings.Foveation.m5) }
+                        Text(VQL("Personalizado", "Custom")).tag(VQSettings.Foveation.custom)
+                    }
+                    if settings.foveation == .custom {
+                        Stepper(VQL("Zona nítida: \(Int(settings.sharpZone * 100)) %", "Sharp zone: \(Int(settings.sharpZone * 100)) %"),
+                                value: $settings.sharpZone, in: 0.05...1, step: 0.05)
+                        Stepper(VQL("Periferia: \(Int(settings.periphery * 100)) %", "Periphery: \(Int(settings.periphery * 100)) %"),
+                                value: $settings.periphery, in: 0.1...1, step: 0.05)
+                        Stepper(VQL("Altura: \(Int(settings.fovHeight * 100)) %", "Height: \(Int(settings.fovHeight * 100)) %"),
+                                value: $settings.fovHeight, in: -0.5...0.5, step: 0.05)
+                    }
+                    Toggle(VQL("VPKTAA (sustituye al AA/MSAA del juego)", "VPKTAA (replaces the game's AA/MSAA)"), isOn: $settings.vpktaa)
+                    if settings.vpktaa {
+                        Stepper(VQL("VPKTAA: \(Int(settings.vpktaaPercent)) %", "VPKTAA: \(Int(settings.vpktaaPercent)) %"),
+                                value: $settings.vpktaaPercent, in: 0...100, step: 5)
+                        Stepper(VQL("Nitidez: \(Int(settings.vpktaaSharpness * 100)) %", "Sharpness: \(Int(settings.vpktaaSharpness * 100)) %"),
+                                value: $settings.vpktaaSharpness, in: 0...1, step: 0.1)
+                    }
+                    Stepper(VQL("Resolución de render: \(Int(settings.renderScale * 100)) %", "Render resolution: \(Int(settings.renderScale * 100)) %"),
+                            value: $settings.renderScale, in: 0.5...1.5, step: 0.05)
+                    Toggle(VQL("ASW desactivado (todos los frames reales)", "ASW off (every frame real)"), isOn: $settings.aswDisabled)
+                    Toggle(VQL("Perfil Quest 3", "Quest 3 profile"), isOn: $settings.quest3Profile)
+                    Text(VQL("El foveado propio del juego (Quest) está siempre apagado. Foveado y VPKTAA los aplica VPEngine (aún sin efecto con MoltenVK). M5 solo aparece en un Vision Pro M5. Se aplica al lanzar el juego.",
+                             "The game's own (Quest) foveation is always off. Foveation and VPKTAA are applied by VPEngine (no effect yet with MoltenVK). M5 only appears on a Vision Pro M5. Applied when the game launches."))
+                        .font(.caption)
+                }
                 Section(VQL("Carpeta QUEST", "QUEST folder")) {
                     Text(model.folderPath ?? VQL("No elegida", "Not chosen")).font(.caption)
                     Button(VQL("Elegir otra…", "Choose another…")) { pickingFolder = true }
