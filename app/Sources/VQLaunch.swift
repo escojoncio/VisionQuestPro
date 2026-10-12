@@ -69,6 +69,7 @@ final class VQSettings: ObservableObject {
     @Published var renderScale: Double { didSet { save() } }    // 0.5...1.5
     @Published var aswDisabled: Bool { didSet { save() } }
     @Published var quest3Profile: Bool { didSet { save() } }
+    @Published var forceVulkan: Bool { didSet { save() } }
     /// Vulkan driver: VPEngine's own (VPVulkan) or MoltenVK (to compare, or if VPEngine fails).
     @Published var useVPEngine: Bool { didSet { save() } }
 
@@ -89,6 +90,7 @@ final class VQSettings: ObservableObject {
         renderScale = d.object(forKey: "vq.renderScale") as? Double ?? 1
         aswDisabled = d.object(forKey: "vq.aswOff") as? Bool ?? true
         quest3Profile = d.object(forKey: "vq.quest3v2") as? Bool ?? true  // Quest 3 for every game by default
+        forceVulkan = d.object(forKey: "vq.forceVulkan") as? Bool ?? true
         useVPEngine = d.object(forKey: "vq.vpengine") as? Bool ?? true
     }
 
@@ -122,6 +124,7 @@ final class VQSettings: ObservableObject {
         d.set(renderScale, forKey: "vq.renderScale")
         d.set(aswDisabled, forKey: "vq.aswOff")
         d.set(quest3Profile, forKey: "vq.quest3v2")
+        d.set(forceVulkan, forKey: "vq.forceVulkan")
         d.set(useVPEngine, forKey: "vq.vpengine")
     }
 
@@ -162,6 +165,10 @@ final class VQSettings: ObservableObject {
         setenv("KL_AUTOBOOT", "1", 1)
         setenv("KL_IMMERSIVE", "1", 1)
         setenv("KL_VK_SPOOF_ADRENO", "1", 1)  // Quest titles check the GPU identity before choosing Vulkan
+        // Unity player argument (the "unity" launch extra): use Vulkan even when Unity's own
+        // device detection would fall back to GLES, which has no driver here.
+        if forceVulkan { setenv("KL_UNITY_ARGS", "-force-vulkan", 1) } else { unsetenv("KL_UNITY_ARGS") }
+        VQLog.log("Gráficos: forzar Vulkan en Unity \(forceVulkan)")
         // Eye texture size the game is told (Klepton's ovrp side) and headset identity:
         // 11 = ovrpSystemHeadset Meta_Quest_3; off: Klepton's per-game default (Quest 2 / Quest).
         setenv("KL_OVRP_EYE_SCALE", String(format: "%.2f", renderScale), 1)
