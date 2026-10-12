@@ -13,6 +13,21 @@
 - Fallo resuelto en la 2.ª build: `KL_TARGET_DEFAULT_NAME` no existe sin el proyecto de Klepton → `kl_app.c` define
   `KL_TARGET_DEFAULT "(ninguno)"`.
 
+## Batman log 17 (2026-10-12): audio OK (`[sl] play state -> PLAYING`), juego corre, imagen totalmente corrupta
+- Sin `gpu.err` de draws; `missing_pipelines` solo f13–f19. 3119 errores NaN de cámara, sin `NONFINITE` en poses.
+- VPEngine `spirv/src/lower.cpp`: SubpassData con multiview (`o_.viewCount>1`) → `D2Array` y fetch en capa = ViewIndex
+  (MSL `read(c.xy, c.z)`). `vulkan/src/pipelines.cpp`: diag única `gpu.diag viewport views=… x y w h` (+ viewport h<0).
+- `kl_ovrp.c`: `ovrpPoseStatef.Time` (double +0x50) ya no es 0 (tiempo de display previsto) — hipótesis del NaN
+  (Δpose/Δt). Saneo+log `[ovrp] NONFINITE <fn>` en GetNodeFrustum2 (y línea por nodo), GetPredictedDisplayTime,
+  GetSystemDisplayFrequency(2), GetUserIPD2.
+- UI (`KleptonApp.swift`, `KleptonCompositor.swift`, `app/Sources/VQLauncher.swift`): ventana `main` se cierra al abrir
+  el espacio inmersivo (`spaceOpened`); background con inmersivo abierto no sale; `Lifecycle.immersiveEnded()` reabre
+  launcher → `VQEndedView`. Arranque con `VQLoadingView` (nombre, estado, «Ver registro»); log intacto en fichero.
+### Siguiente si sigue corrupta
+- subpassLoad lee como textura el adjunto del mismo pase (indefinido en Metal) → usar framebuffer fetch `[[color(n)]]`
+  (metal2 ya tiene `fetch.textureSlot`). Comprobar `gpu.diag viewport` (h negativo → invertir en metal2).
+- Si no hay `NONFINITE` y siguen los NaN: cámara 1832x1920 no-XR (JNI Display).
+
 ## Batman log 15 (2026-10-12): audio abre; fatal `__android_log_is_loggable`
 - OpenSL OK: `GetConfiguration("androidPerformanceMode") -> 1`, Oboe sigue, CoreAudio arranca. Muere en el frame 3 por
   import sin resolver `__android_log_is_loggable` (Oboe, dentro del sink de Meta). Sin `gpu.err`, sin NONFINITE (pero

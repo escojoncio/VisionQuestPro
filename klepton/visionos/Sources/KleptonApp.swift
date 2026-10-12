@@ -111,8 +111,35 @@ enum Immersive {
 /// `KL_EXIT_ON_BACKGROUND=0` keeps the old behaviour, which is what a debugging
 /// session wants when the headset comes off with a capture still open.
 enum Lifecycle {
+    // VisionQuestPro: the launcher window is dismissed once the game's immersive space is up
+    // (so it does not float over the game). Main-thread state.
+    /// True between a successful openImmersiveSpace and the end of the compositor's loop.
+    static var immersiveOpen = false
+    static var lastPhase: ScenePhase = .active
+    /// Captured from BootView before the launcher window is dismissed, to bring it back.
+    static var reopenLauncher: OpenWindowAction?
+
+    /// The immersive space has ended (compositor loop over). The guest cannot run twice in one
+    /// process, so the launcher comes back in its "game ended" state; if the app is already in
+    /// the background (nothing left to show it in), exit as before.
+    @MainActor static func immersiveEnded() {
+        immersiveOpen = false
+        NSLog("[app] immersive space ended (phase \(lastPhase))")
+        if lastPhase != .background, let open = reopenLauncher {
+            VQModel.shared.ended = true
+            open(id: VQMainWindow.id)
+            NSLog("[app] launcher window reopened")
+            return
+        }
+        guard klEnvOn("KL_EXIT_ON_BACKGROUND", default: true) else { return }
+        NSLog("[app] no window to return to — exiting")
+        fflush(nil)
+        exit(0)
+    }
+
     static func scenePhaseChanged(to phase: ScenePhase) {
-        NSLog("[app] scene phase -> \(phase)")
+        NSLog("[app] scene phase -> \(phase) (immersive open: \(immersiveOpen))")
+        lastPhase = phase
         // Coming back is the audio's cue, and it needs one: this OS silently
         // stops calling CoreAudio's render callback across a scene transition —
         // the boot window being closed while the immersive space runs is one,
@@ -127,6 +154,12 @@ enum Lifecycle {
         // platform lies about.
         if phase == .active { kl_audio_resume() }
         guard phase == .background else { return }
+        // Dismissing the launcher window while the game's space runs must not kill the game.
+        // If the space really is gone too, immersiveEnded() makes the exit decision.
+        if immersiveOpen {
+            NSLog("[app] backgrounded with the immersive space open — staying alive")
+            return
+        }
         guard klEnvOn("KL_EXIT_ON_BACKGROUND", default: true) else {
             NSLog("[app] backgrounded; KL_EXIT_ON_BACKGROUND=0, staying alive")
             return
@@ -154,7 +187,7 @@ struct KleptonApp: App {
     var body: some Scene {
         // VisionQuestPro: the launcher (VQLauncher.swift) is the window; BootView is its
         // "running" page.
-        WindowGroup { VQRootView() }
+        WindowGroup(id: VQMainWindow.id) { VQRootView() }
             .defaultSize(width: 1280, height: 800)
             // On the app's phase, not this window's: closing the boot window
             // while the immersive space is up is not backgrounding, and must
@@ -291,6 +324,10 @@ struct BootView: View {
     @FocusState private var kbFocused: Bool
     @Environment(\.openImmersiveSpace) private var openImmersiveSpace
     @Environment(\.openWindow) private var openWindow
+    @Environment(\.dismissWindow) private var dismissWindow
+    // VisionQuestPro: the boot log stays in the log file; the window shows a loading screen
+    // unless the player asks to see it.
+    @State private var showLog = false
     // The game-facing builds (hl1/hl2/portal) show a launcher: a chosen game
     // folder plus per-title options, and boot on a button rather than on their own.
     // Observe the active files object so the Start button tracks file readiness;
@@ -365,10 +402,22 @@ struct BootView: View {
                     openedSpace = true
                     let r = await openImmersiveSpace(id: Immersive.id)
                     NSLog("[cp] openImmersiveSpace (after handoff) -> \(r)")
+                    await MainActor.run { spaceOpened(r) }
                 }
             }
             try? await Task.sleep(for: .milliseconds(200))
         }
+    }
+
+    /// VisionQuestPro: once the game's space is up, the launcher window goes away (it must not
+    /// float over the game). Lifecycle keeps the app alive while the space is open and
+    /// reopens the launcher when it ends.
+    private func spaceOpened(_ result: OpenImmersiveSpaceAction.Result) {
+        guard case .opened = result else { return }
+        Lifecycle.immersiveOpen = true
+        Lifecycle.reopenLauncher = openWindow
+        NSLog("[app] immersive space open — dismissing the launcher window")
+        dismissWindow(id: VQMainWindow.id)
     }
 
     // One typed character to the guest, as the Android keycode SDL expects. The
@@ -381,8 +430,14 @@ struct BootView: View {
     }
 
     private var bootReport: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        Group {
+          if !showLog {
+            VQLoadingView(running: running, finished: finished, succeeded: succeeded,
+                          openedSpace: openedSpace, status: status) { showLog = true }
+          } else {
+          VStack(alignment: .leading, spacing: 12) {
             HStack {
+                Button { showLog = false } label: { Image(systemName: "chevron.backward") }
                 if let title = klLauncherTitle() {
                     // A game build presents as the game, not the runtime.
                     Text(title).font(.largeTitle.bold())
@@ -460,6 +515,8 @@ struct BootView: View {
                     Text(status).font(.footnote).foregroundStyle(.secondary)
                 }
             }
+          }
+          }
         }
         .padding(24)
         // The system-keyboard bridge for immersive text entry — hidden, and it
@@ -651,6 +708,7 @@ struct BootView: View {
                     Task {
                         let r = await openImmersiveSpace(id: Immersive.id)
                         NSLog("[cp] openImmersiveSpace -> \(r)")
+                        await MainActor.run { spaceOpened(r) }
                     }
                 }
             }

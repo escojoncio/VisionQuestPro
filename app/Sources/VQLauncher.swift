@@ -16,6 +16,7 @@ final class VQModel: ObservableObject {
     @Published var progress: Double = 0
     @Published var progressText = ""
     @Published var running = false        // BootView is showing
+    @Published var ended = false          // the game's immersive space has closed
     @Published var certificate: String? = VQSigner.current
 
     private init() {
@@ -69,11 +70,18 @@ final class VQModel: ObservableObject {
     }
 }
 
+/// The launcher window's scene id (dismissed while the game's immersive space is open).
+enum VQMainWindow {
+    static let id = "main"
+}
+
 struct VQRootView: View {
     @ObservedObject private var model = VQModel.shared
 
     var body: some View {
-        if model.running {
+        if model.ended {
+            VQEndedView()
+        } else if model.running {
             BootView()
         } else {
             VQLauncherView()
@@ -284,5 +292,90 @@ struct VQSettingsView: View {
             }
         }
         .frame(minWidth: 640, minHeight: 640)
+    }
+}
+
+/// What the player sees while the game boots: name, a quiet animation and a short status. The
+/// boot log still goes to the log file (and to "Ver registro").
+struct VQLoadingView: View {
+    let running: Bool
+    let finished: Bool
+    let succeeded: Bool
+    let openedSpace: Bool
+    let status: String
+    let showLog: () -> Void
+    @State private var pulse = false
+
+    private var failed: Bool { finished && !succeeded }
+    private var phrase: String {
+        if failed { return VQL("No se pudo iniciar el juego", "The game could not start") }
+        if finished || openedSpace { return VQL("Iniciando VR…", "Starting VR…") }
+        if running { return VQL("Cargando juego…", "Loading game…") }
+        return VQL("Preparando…", "Preparing…")
+    }
+
+    var body: some View {
+        VStack(spacing: 28) {
+            Spacer()
+            ZStack {
+                Circle().fill(.thinMaterial).frame(width: 140, height: 140)
+                    .scaleEffect(pulse ? 1.08 : 0.94)
+                    .opacity(pulse ? 0.9 : 0.5)
+                Image(systemName: failed ? "exclamationmark.triangle.fill" : "visionpro")
+                    .font(.system(size: 54, weight: .light))
+                    .foregroundStyle(failed ? AnyShapeStyle(Color.orange) : AnyShapeStyle(.primary))
+            }
+            .animation(.easeInOut(duration: 1.4).repeatForever(autoreverses: true), value: pulse)
+            .onAppear { pulse = true }
+
+            Text(VQLaunch.choice?.game.name ?? "VisionQuestPro")
+                .font(.largeTitle.bold()).multilineTextAlignment(.center).lineLimit(2)
+
+            VStack(spacing: 10) {
+                if !failed { ProgressView().controlSize(.large) }
+                Text(phrase).font(.title3).foregroundStyle(.secondary)
+                if failed, !status.isEmpty {
+                    Text(status).font(.callout).foregroundStyle(.orange).multilineTextAlignment(.center)
+                }
+            }
+            Spacer()
+            HStack(spacing: 16) {
+                Button(action: showLog) { Label(VQL("Ver registro", "Show log"), systemImage: "doc.text.magnifyingglass") }
+                    .buttonStyle(.bordered)
+                ShareLink(items: VQLog.shareable) { Label(VQL("Compartir registros", "Share logs"), systemImage: "square.and.arrow.up") }
+                    .buttonStyle(.bordered)
+            }
+            .font(.callout)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .padding(32)
+    }
+}
+
+/// Shown when the game's immersive space has closed. The runtime boots a guest once per process,
+/// so playing again needs the app to start again.
+struct VQEndedView: View {
+    var body: some View {
+        VStack(spacing: 24) {
+            Spacer()
+            Image(systemName: "checkmark.circle").font(.system(size: 60, weight: .light)).foregroundStyle(.secondary)
+            Text(VQLaunch.choice?.game.name ?? "VisionQuestPro").font(.largeTitle.bold()).multilineTextAlignment(.center)
+            Text(VQL("Partida cerrada. Para volver a jugar, cierra la app y ábrela de nuevo.",
+                     "Game closed. To play again, close the app and open it again."))
+                .font(.title3).foregroundStyle(.secondary).multilineTextAlignment(.center)
+            Spacer()
+            HStack(spacing: 16) {
+                ShareLink(items: VQLog.shareable) { Label(VQL("Compartir registros", "Share logs"), systemImage: "square.and.arrow.up") }
+                    .buttonStyle(.bordered)
+                Button {
+                    VQLog.log("Cerrar app tras la partida")
+                    fflush(nil)
+                    exit(0)
+                } label: { Label(VQL("Cerrar app", "Close app"), systemImage: "xmark.circle") }
+                    .buttonStyle(.borderedProminent)
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .padding(32)
     }
 }
