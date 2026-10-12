@@ -6,6 +6,9 @@
   en un dylib firmado (firma propia de VPEngine, `runtime/vp_codesign.c`) y se carga con `dlopen`; un cargador propio
   aplica relocaciones ELF y resuelve imports contra capas bionic/JNI/OpenXR/Vulkan propias.
 
+- Base de CPU/sistema: Klepton (MIT). Ya parchea x18, carga sin JIT, bionic/NDK/JNI/ovrp. Gráficos: VPEngine sustituye
+  a MoltenVK.
+
 ## Pendiente (siguiente sesión)
 1. Fase 1: `tools/vqanalyze` (APK/OBB, motor, Vulkan/GLES, variante Quest 3, alineación de segmentos, uso de x18,
    imports por librería). Necesita el juego de prueba elegido por el usuario.
