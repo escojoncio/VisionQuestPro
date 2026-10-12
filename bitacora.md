@@ -13,6 +13,10 @@
 - Fallo resuelto en la 2.ª build: `KL_TARGET_DEFAULT_NAME` no existe sin el proyecto de Klepton → `kl_app.c` define
   `KL_TARGET_DEFAULT "(ninguno)"`.
 
+## Batman log 12 (2026-10-12)
+- MMap OK; Oboe cae a OpenSL (correcto). Sink de Meta pide `AudioDeviceInfo.TYPE_BLUETOOTH_A2DP` → campo ausente.
+  Arreglo `klepton/runtime/kl_jni.c` g_fields: todas las `AudioDeviceInfo.TYPE_*` y `AudioManager.GET_DEVICES_INPUTS/ALL`.
+
 ## Batman log 11 (2026-10-12)
 - getDevices OK → OculusEndpointSink abre Oboe 1.7 → fatal `AAudio_getMMapPolicy`. Arreglo `klepton/runtime/media/kl_aaudio.c`:
   `AAudio_getMMapPolicy` (=1 NEVER), `AAudio_setMMapPolicy` (no-op OK), `AAudioStream_getTimestamp` (frames leídos + monotonic).
