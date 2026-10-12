@@ -35,7 +35,7 @@ enum VQLaunch {
         let psoCache = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("VisionQuestPro/PipelineCache/\(game.id)", isDirectory: true)
         setenv("VP_PIPELINE_CACHE_DIR", psoCache.path, 1)
-        VQPrewarm.run()
+        VQPrewarm.run(gameFolder: game.folder, cache: psoCache)
         VQLanguage.apply(game, useSystem: VQSettings.shared.systemLanguage)
         VQOVRPluginVersion.apply(apk: game.apk)
         VQLog.log("Arranque: \(game.id) (\(game.package)) tree=\(choice.prepared.tree.path) dylibs=\(choice.prepared.dylibs.path) "
@@ -77,10 +77,16 @@ final class VQSettings: ObservableObject {
     @Published var vpktaaPercent: Double { didSet { save() } }  // 0...100
     @Published var vpktaaSharpness: Double { didSet { save() } } // 0...1
     /// 16x anisotropic filtering on the game's mipmapped linear samplers (VPVulkan).
-    @Published var aniso16: Bool { didSet { save() } }
+    /// Forced anisotropic filtering level for material samplers: 0 (off), 2, 4, 8 or 16.
+    @Published var anisoLevel: Int { didSet { save() } }
+    /// "Diagnóstico de rendimiento": per-pass GPU time lines (gpu.passtime) in the log.
+    @Published var perfDiag: Bool { didSet { save() } }
     @Published var renderScale: Double { didSet { save() } }    // 0.5...1.5
     // Resolution base: false = the game's original (Quest 3 budget), true = Vision Pro's request.
-    @Published var avpResolution: Bool { didSet { save() } }
+    /// "original" (Quest 3 budget) | "compositor" (visionOS drawable) | "native" (AVP panel density, heaviest).
+    @Published var resolutionBase: String { didSet { save() } }
+    /// Drop the game's MSAA (render 1x) when VPKTAA is on.
+    @Published var dropGameAA: Bool { didSet { save() } }
     @Published var aswDisabled: Bool { didSet { save() } }
     @Published var quest3Profile: Bool { didSet { save() } }
     @Published var forceVulkan: Bool { didSet { save() } }
@@ -89,6 +95,8 @@ final class VQSettings: ObservableObject {
     @Published var useVPEngine: Bool { didSet { save() } }
     /// Initial posture for the OVRPlugin eye height (KL_OVRP_POSTURE); auto re-measure always on.
     @Published var posture: String { didSet { save() } }   // "auto" | "seated" | "standing"
+    /// Passthrough (KL_PASSTHROUGH): "auto" follows the game, "off" always VR, "on" always mixed.
+    @Published var passthrough: String { didSet { save() } }
     /// Run the game in the system language when it ships it, else English (LANG for Klepton's Locale/AConfiguration).
     @Published var systemLanguage: Bool { didSet { save() } }
     /// Compile the game's known shaders/pipelines before it starts (VPVulkan recipe store).
@@ -105,18 +113,29 @@ final class VQSettings: ObservableObject {
         sharpZone = d.object(forKey: "vq.fovSharp") as? Double ?? 0.35
         periphery = d.object(forKey: "vq.fovPeriphery") as? Double ?? 0.5
         fovHeight = d.object(forKey: "vq.fovHeight") as? Double ?? 0
-        vpktaa = d.object(forKey: "vq.vpktaa") as? Bool ?? true
+        vpktaa = d.object(forKey: "vq.vpktaa2") as? Bool ?? false  // off until the jittered TAA is validated
         vpktaaPercent = d.object(forKey: "vq.vpktaaPercent") as? Double ?? 80
-        vpktaaSharpness = d.object(forKey: "vq.vpktaaSharp") as? Double ?? 0.5
-        aniso16 = d.object(forKey: "vq.aniso16") as? Bool ?? true
+        vpktaaSharpness = d.object(forKey: "vq.vpktaaSharp2") as? Double ?? 0.3
+        // Older builds stored a bool (vq.aniso16); off there stays off.
+        anisoLevel = d.object(forKey: "vq.anisoLevel") as? Int
+            ?? ((d.object(forKey: "vq.aniso16") as? Bool) == false ? 0 : 16)
+        perfDiag = d.object(forKey: "vq.perfDiag") as? Bool ?? false
         renderScale = d.object(forKey: "vq.renderScale") as? Double ?? 1
-        avpResolution = d.object(forKey: "vq.resAVP") as? Bool ?? false
+        if let rb = d.string(forKey: "vq.resBase"), ["original", "compositor", "native"].contains(rb) {
+            resolutionBase = rb
+        } else {
+            resolutionBase = (d.object(forKey: "vq.resAVP") as? Bool ?? false) ? "compositor" : "original"
+        }
+        dropGameAA = d.object(forKey: "vq.dropGameAA") as? Bool ?? true
         aswDisabled = d.object(forKey: "vq.aswOff") as? Bool ?? true
         quest3Profile = d.object(forKey: "vq.quest3v2") as? Bool ?? true  // Quest 3 for every game by default
         forceVulkan = d.object(forKey: "vq.forceVulkan") as? Bool ?? true
         diagCaptures = d.object(forKey: "vq.diagCaptures2") as? Bool ?? false
         useVPEngine = d.object(forKey: "vq.vpengine") as? Bool ?? true
         posture = d.string(forKey: "vq.posture") ?? "auto"
+        if let pt = d.string(forKey: "vq.passthrough"), ["auto", "off", "on"].contains(pt) {
+            passthrough = pt
+        } else { passthrough = "auto" }
         systemLanguage = d.object(forKey: "vq.sysLang") as? Bool ?? true
         precompileShaders = d.object(forKey: "vq.precompile") as? Bool ?? true
     }
@@ -145,18 +164,21 @@ final class VQSettings: ObservableObject {
         d.set(sharpZone, forKey: "vq.fovSharp")
         d.set(periphery, forKey: "vq.fovPeriphery")
         d.set(fovHeight, forKey: "vq.fovHeight")
-        d.set(vpktaa, forKey: "vq.vpktaa")
+        d.set(vpktaa, forKey: "vq.vpktaa2")
         d.set(vpktaaPercent, forKey: "vq.vpktaaPercent")
-        d.set(vpktaaSharpness, forKey: "vq.vpktaaSharp")
-        d.set(aniso16, forKey: "vq.aniso16")
+        d.set(vpktaaSharpness, forKey: "vq.vpktaaSharp2")
+        d.set(anisoLevel, forKey: "vq.anisoLevel")
+        d.set(perfDiag, forKey: "vq.perfDiag")
         d.set(renderScale, forKey: "vq.renderScale")
-        d.set(avpResolution, forKey: "vq.resAVP")
+        d.set(resolutionBase, forKey: "vq.resBase")
+        d.set(dropGameAA, forKey: "vq.dropGameAA")
         d.set(aswDisabled, forKey: "vq.aswOff")
         d.set(quest3Profile, forKey: "vq.quest3v2")
         d.set(forceVulkan, forKey: "vq.forceVulkan")
         d.set(diagCaptures, forKey: "vq.diagCaptures2")
         d.set(useVPEngine, forKey: "vq.vpengine")
         d.set(posture, forKey: "vq.posture")
+        d.set(passthrough, forKey: "vq.passthrough")
         d.set(systemLanguage, forKey: "vq.sysLang")
         d.set(precompileShaders, forKey: "vq.precompile")
     }
@@ -226,10 +248,12 @@ final class VQSettings: ObservableObject {
         // Eye texture size the game is told (Klepton's ovrp side) and headset identity:
         // 11 = ovrpSystemHeadset Meta_Quest_3; off: Klepton's per-game default (Quest 2 / Quest).
         setenv("KL_OVRP_POSTURE", posture, 1)
+        setenv("KL_PASSTHROUGH", passthrough, 1)
+        VQLog.log("Passthrough: \(passthrough)")
         VQLog.log("Gráficos: postura \(posture)")
         setenv("KL_OVRP_EYE_SCALE", String(format: "%.2f", renderScale), 1)
-        setenv("KL_OVRP_EYE_BASE", avpResolution ? "display" : "original", 1)
-        VQLog.log("Gráficos: resolución base \(avpResolution ? "Vision Pro" : "original (Quest 3)")")
+        setenv("KL_OVRP_EYE_BASE", resolutionBase, 1)
+        VQLog.log("Gráficos: resolución base \(resolutionBase)")
         // Quest 3 identity for every game, in every place a title can check it: Android Build
         // (MODEL/DEVICE eureka), OVRPlugin headset type, OpenXR system name and the GPU.
         if quest3Profile {
@@ -249,7 +273,12 @@ final class VQSettings: ObservableObject {
         c.vpktaa_enabled = vpktaa ? 1 : 0
         c.vpktaa_percent = Float(vpktaaPercent)
         c.vpktaa_sharpness = Float(vpktaaSharpness)
-        c.anisotropy = aniso16 ? 16 : 0
+        c.anisotropy = Int32(anisoLevel)
+        setenv("VPVK_ANISO", String(anisoLevel), 1)  // read by VPVulkan even if the dlsym forward misses
+        // Per-pass GPU timing in VPEngine (gpu.passtime lines, one rendering frame every 90).
+        if perfDiag { setenv("VP_PASS_TIMING", "90", 1) } else { unsetenv("VP_PASS_TIMING") }
+        c.force_single_sample = (vpktaa && dropGameAA) ? 1 : 0
+        setenv("VPVK_FORCE_1X", c.force_single_sample != 0 ? "1" : "0", 1)
         c.render_scale = Float(renderScale)
         c.asw_disabled = aswDisabled ? 1 : 0
         c.quest3_profile = quest3Profile ? 1 : 0
@@ -259,7 +288,7 @@ final class VQSettings: ObservableObject {
         setenv("KL_VPKTAA_PCT", String(format: "%.0f", vpktaaPercent), 1)
         setenv("KL_VPKTAA_SHARP", String(format: "%.2f", vpktaaSharpness), 1)
         vq_prewarm_set_enabled(precompileShaders ? 1 : 0)
-        VQLog.log("Gráficos: foveado Quest siempre apagado; foveado propio \(foveation), VPKTAA \(vpktaa) \(Int(vpktaaPercent)) % nitidez \(vpktaaSharpness), anisotrópico x16 \(aniso16), escala \(renderScale), ASW apagado \(aswDisabled), perfil Quest 3 \(quest3Profile)")
+        VQLog.log("Gráficos: foveado Quest siempre apagado; foveado propio \(foveation), VPKTAA \(vpktaa) \(Int(vpktaaPercent)) % nitidez \(vpktaaSharpness), anisotrópico x\(anisoLevel), diagnóstico de rendimiento \(perfDiag), escala \(renderScale), ASW apagado \(aswDisabled), perfil Quest 3 \(quest3Profile)")
         VQLog.log("Ajustes: sin red \(offline), log del juego \(guestLog), vigilante \(Int(watchdogSeconds)) s")
     }
 }
@@ -369,12 +398,17 @@ final class VQPrewarm: ObservableObject {
     @Published var done: UInt32 = 0
     @Published var total: UInt32 = 0
     @Published var active = false
+    @Published var compiling = false  // first run: harvested SPIR-V being compiled ("Compilando shaders")
 
-    static func run() {
+    /// Bump when the harvest or the SPIR-V -> MSL translator changes: the first-run precompile repeats.
+    static let firstRunVersion = 1
+
+    static func run(gameFolder: URL, cache: URL) {
         guard VQSettings.shared.precompileShaders else {
             VQLog.log("Shaders: precompilación desactivada en ajustes")
             return
         }
+        firstRun(gameFolder: gameFolder, cache: cache)
         let count = vq_prewarm_count()  // 0 as well when VPVulkan is not the driver
         guard count > 0 else {
             VQLog.log("Shaders: nada que precompilar (primera vez con este juego o sin VPVulkan)")
@@ -388,5 +422,43 @@ final class VQPrewarm: ObservableObject {
         let ms = Int(Date().timeIntervalSince(start) * 1000)
         DispatchQueue.main.async { shared.active = false }
         VQLog.log("Shaders: precompilados \(n) pipelines en \(ms) ms")
+    }
+
+    /// First play of a game (or new translator version): every SPIR-V module in the game's data is
+    /// harvested (APK/OBB/Unity bundles) and compiled before the game boots, so no shader compiles
+    /// mid-play even the first time. Cached: a stamp file marks it done for this version.
+    static func firstRun(gameFolder: URL, cache: URL) {
+        let fm = FileManager.default
+        let stamp = cache.appendingPathComponent("firstrun.v\(firstRunVersion)")
+        if fm.fileExists(atPath: stamp.path) { return }
+        // Only with VPVulkan loaded (MoltenVK path has no precompiler): avoids re-scanning every launch.
+        guard dlsym(UnsafeMutableRawPointer(bitPattern: -2), "vpvk_precompile_spirv") != nil else {
+            VQLog.log("Shaders: sin VPVulkan, no se precompilan")
+            return
+        }
+        try? fm.createDirectory(at: cache, withIntermediateDirectories: true)
+        let spirv = cache.appendingPathComponent("spirv", isDirectory: true)
+        DispatchQueue.main.async { shared.done = 0; shared.total = 0; shared.compiling = true; shared.active = true }
+        var stats = VqHarvestStats()
+        var err = [CChar](repeating: 0, count: 256)
+        let rc = vq_harvest_spirv(gameFolder.path, spirv.path, &stats, { done, total, _ in
+            DispatchQueue.main.async { VQPrewarm.shared.done = done; VQPrewarm.shared.total = total }
+        }, nil, { line, _ in
+            if let line = line { VQLog.log(String(cString: line)) }
+        }, &err, err.count)
+        if rc != 0 {
+            VQLog.log("Shaders: harvest falló: \(String(cString: err))")
+        } else {
+            DispatchQueue.main.async { shared.done = 0; shared.total = stats.unique }
+            let start = Date()
+            let libs = vq_precompile_run(spirv.path, { done, total, _ in
+                DispatchQueue.main.async { VQPrewarm.shared.done = done; VQPrewarm.shared.total = total }
+            }, nil)
+            VQLog.log("Shaders: primera vez: \(stats.unique) módulos SPIR-V, \(libs) librerías Metal en "
+                      + "\(Int(Date().timeIntervalSince(start) * 1000)) ms")
+            // Only mark done when VPVulkan ran it (libs > 0) or nothing was found.
+            if libs > 0 || stats.unique == 0 { fm.createFile(atPath: stamp.path, contents: Data()) }
+        }
+        DispatchQueue.main.async { shared.compiling = false; shared.active = false }
     }
 }

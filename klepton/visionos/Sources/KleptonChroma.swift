@@ -119,6 +119,37 @@ final class KleptonChroma: ObservableObject {
     /// .mixed until the target says otherwise.
     @Published var immersionFull = false
 
+    /// The guest is showing passthrough (kl_passthrough_active, debounced ~0.5 s
+    /// so a one-frame gap in the layer list does not flip the space). Only read
+    /// while immersionFull: a .mixed target is already showing the room.
+    @Published var passthroughLive = false
+
+    /// The style the ImmersiveSpace selects — .full only when the target wants
+    /// it AND the guest is not asking for passthrough. Changes live.
+    var immersionStyle: any ImmersionStyle {
+        if immersionFull && !passthroughLive { return FullImmersionStyle.full }
+        return MixedImmersionStyle.mixed
+    }
+
+    private var ptTimer: Timer?
+    private var ptSince = Date.distantPast
+    /// Polls kl_passthrough_active() on the main run loop (10 Hz) and publishes
+    /// passthroughLive once the guest's answer has held for 0.5 s. Idempotent.
+    func startPassthroughWatch() {
+        guard ptTimer == nil else { return }
+        ptTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
+            guard let self else { return }
+            let want = kl_passthrough_active() != 0
+            if want == self.passthroughLive { self.ptSince = .distantPast; return }
+            if self.ptSince == .distantPast { self.ptSince = Date(); return }
+            if Date().timeIntervalSince(self.ptSince) >= 0.5 {
+                self.ptSince = .distantPast
+                self.passthroughLive = want
+                NSLog("[pt] immersion -> %@", want ? "mixed (passthrough)" : "full (VR)")
+            }
+        }
+    }
+
     private func publish() {
         var rgb = [settings.color.x, settings.color.y, settings.color.z]
         kl_reproject_set_chroma(settings.enabled ? 1 : 0, &rgb,

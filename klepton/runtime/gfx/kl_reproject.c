@@ -9,6 +9,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "kl_reproject.h"
+#include "../xr/kl_passthrough.h"
 #include "kl_env.h"
 
 // KL_REPROJECT_NOCANT=1 — treat device_from_view as having no rotation.
@@ -165,8 +166,9 @@ static const char kl_msl_reproject[] =
 "static float4 kl_eye_sample(texture2d_array<float> tex, sampler samp,\n"
 "                            float2 uv, uint slice, uint srgbDecode)\n"
 "{\n"
-"    float3 c = tex.sample(samp, uv, slice).rgb;\n"
-"    return float4(srgbDecode != 0u ? kl_srgb_to_linear(c) : c, 1.0);\n"
+"    float4 t = tex.sample(samp, uv, slice);\n"
+"    float3 c = t.rgb;\n"
+"    return float4(srgbDecode != 0u ? kl_srgb_to_linear(c) : c, t.a);\n"
 "}\n"
 "\n"
 // `slice` travels as a flat varying because the fragment stage has no
@@ -259,9 +261,14 @@ static const char kl_msl_reproject[] =
 // `(rgb * mask) - (key * (1 - mask))` — which pulls the spill of the key colour
 // out of edge pixels instead of leaving a green fringe around everything.
 // Alpha carries the matte, and the compositor blends against passthrough.
+// `on` is a bit set: 1 = chroma key, 2 = passthrough (keep the guest's alpha;
+// otherwise alpha is forced to 1 exactly as before), 4 = that alpha is straight,
+// so premultiply here (the drawable is composited premultiplied).
 "static float4 kl_chroma_apply(float4 c, uint on, float3 key, float2 range)\n"
 "{\n"
-"    if (on == 0u) return c;\n"
+"    if ((on & 2u) == 0u) c.a = 1.0;\n"
+"    else { c.a = saturate(c.a); if ((on & 4u) != 0u) c.rgb *= c.a; }\n"
+"    if ((on & 1u) == 0u) return c;\n"
 "    float mask = kl_colorclose_hsv(kl_rgb2hsv(c.rgb), kl_rgb2hsv(key), range);\n"
 "    return float4((c.rgb * mask) - (key * (1.0 - mask)), c.a * mask);\n"
 "}\n"
@@ -381,7 +388,9 @@ static const char kl_msl_reproject[] =
 "                                  texture2d_array<float> tex1 [[texture(1)]],\n"
 "                                  sampler samp [[sampler(0)]])\n"
 "{\n"
-"    return kl_eye_sample2(tex, tex1, samp, in.uv, in.slice, in.srgb, in.src);\n"
+"    float4 c = kl_eye_sample2(tex, tex1, samp, in.uv, in.slice, in.srgb, in.src);\n"
+"    c.a = 1.0;\n"
+"    return c;\n"
 "}\n"
 "\n"
 // The eye texture over the whole viewport, ignoring the quad, the poses and the
@@ -411,7 +420,9 @@ static const char kl_msl_reproject[] =
 "                                texture2d_array<float> tex1 [[texture(1)]],\n"
 "                                sampler samp [[sampler(0)]])\n"
 "{\n"
-"    return kl_eye_sample2(tex, tex1, samp, in.uv, in.slice, in.srgb, in.src);\n"
+"    float4 c = kl_eye_sample2(tex, tex1, samp, in.uv, in.slice, in.srgb, in.src);\n"
+"    c.a = 1.0;\n"
+"    return c;\n"
 "}\n";
 
 // The pass that existed before reprojection: a full-screen triangle, three
@@ -785,6 +796,10 @@ kl_reproject_uniforms kl_reproject_build(const kl_ovrp_render_pose *rendered, in
     // exactly this call and no other.
     u.chroma_on = (uint32_t)kl_reproject_chroma(u.chroma_key, &u.chroma_min,
                                                 &u.chroma_max);
+    // Passthrough (kl_passthrough): keep the guest's alpha so the room shows
+    // through where it cleared to alpha 0. Bits documented at kl_chroma_apply.
+    if (kl_passthrough_active())
+        u.chroma_on |= 2u | (kl_passthrough_unpremultiplied() ? 4u : 0u);
 
     if (rendered && rendered->serial) {
         const float *t = rendered->tangents[(unsigned)eye > 1 ? 0 : eye];

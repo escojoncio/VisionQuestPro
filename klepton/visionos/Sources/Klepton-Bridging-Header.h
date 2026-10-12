@@ -16,6 +16,7 @@
 #import "kl_glfb.h"
 #import "kl_ovrp.h"
 #import "kl_openxr.h"
+#import "kl_passthrough.h"
 #import "kl_reproject.h"
 // ...and by one more for audio: kl_audio owns the CoreAudio output unit, but
 // the AVAudioSession it needs on this platform can only be configured from
@@ -44,6 +45,7 @@
 // VPEngine's signature (runtime/vp_codesign.h, vp_pkcs12.h, from VPEngine at build time).
 #import "vq_apk.h"
 #import "vq_config.h"
+#import "vq_harvest.h"
 #import "vp_codesign.h"
 #import "vp_pkcs12.h"
 #include <dlfcn.h>

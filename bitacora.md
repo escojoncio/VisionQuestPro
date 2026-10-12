@@ -13,6 +13,34 @@
 - Fallo resuelto en la 2.ª build: `KL_TARGET_DEFAULT_NAME` no existe sin el proyecto de Klepton → `kl_app.c` define
   `KL_TARGET_DEFAULT "(ninguno)"`.
 
+## Batman log 24 (2026-10-12) → build siguiente
+- Log 24: AssetFile solo pregunta por Audio_*.obb (no mp4); vídeo sigue sin arrancar; VPKTAA borroso (sin jitter, 95 %
+  historial); GPU por frame de juego ~39 ms (log 23 ~11 ms en la misma fase: sospechosos contención GPU con el TAA del
+  compositor y aniso x16 en todos los samplers).
+- Vídeo (descompilado con resolver IL2CPP propio, scratchpad): StereoVideoPlayer.Play @0x1da9d34 → path =
+  Path.Combine(getObbDir, VideoFileName) → si !File.Exists vuelve false (se salta). PlayEnumerator espera Wwise
+  AllSoundBanksLoaded (con timeout) → AndroidVideoPlayer.Play → OVROverlay Equirect (shape 5) isExternalSurface →
+  GetLayerAndroidSurfaceObject → NativeVideoPlayer. Diagnóstico nuevo `kl_libc.c` `kl_media_probe_log`: `[video] stat(...)`
+  para .mp4/.m4v/.mov/.webm/.mkv en stat/lstat/access.
+- VPKTAA rehecho (`KleptonTAA.swift`): salida en rejilla sin jitter (3x3 Blackman-Harris), historial Catmull-Rom, clip
+  varianza YCoCg, inverse-luma, RCAS aparte; peso 0.5–0.92; reproyección solo rotación (sin profundidad del juego:
+  `GetLayerTexture2` da depth=0). Jitter Halton(2,3)x8 en `klovrp_GetNodeFrustum2` (`klovrp_jit_frustum`) solo si el juego
+  relee el frustum cada frame y si el resolve corre (`kl_ovrp_set_taa_active` desde `prepareTAA`). Por defecto OFF
+  (`vq.vpktaa2`), nitidez 0.3 (`vq.vpktaaSharp2`).
+- Rendimiento: aniso por nivel (`vq.anisoLevel`, Off/2/4/8/16, def. 16) solo en samplers lineales con mips y Repeat/
+  Mirrored (`vkCreateSampler`); `VPVK_ANISO`. Diagnóstico `VP_PASS_TIMING` (ajuste «Diagnóstico de rendimiento») →
+  `gpu.passtime`. `vpvk::logConfig()` en vkCreateDevice → `vk.cfg effective …` (antes los vk.cfg salían antes de abrir el log).
+- Resolución base 3 opciones (`vq.resBase`: original/compositor/native; nativa = 3660x3200 ref. con aspecto del frustum).
+- MSAA del juego a 1x con VPKTAA (`vpvk_config_set_force_single_sample`, ajuste `dropGameAA`): imágenes 1x, resolve →
+  render directo / copia; `vk.msaa forced 1x`.
+- Shaders 1.ª vez: `app/Native/vq_harvest.c` (UnityFS v6–8 + LZ4 propio, ZIP, busca SPIR-V por magia, dedupe) →
+  `<cache>/spirv/*.spv`; VPEngine `precompile.cpp` `vpvk_precompile_spirv` (reflexión, MSL, compileShaderNow) +
+  `msl_index.bin`; runtime `gpu.shader.lib hit/miss`. En el APK de Batman: 49 módulos (falta medir shaders_assets_all.bundle
+  en el visor). Vertex con layout supuesto (puede fallar). VQPrewarm.firstRun con stamp `firstrun.vN`.
+- Passthrough automático: `kl_passthrough.c/.h`, OVRPlugin Insight y XR_FB_passthrough con estado; capa forma 6/7 o
+  blend ALPHA → `kl_passthrough_active`; compositor clear transparente + alfa; `KleptonChroma.immersionStyle` con
+  histéresis 0,5 s; ajuste «Passthrough» Auto/VR/Mixto (`KL_PASSTHROUGH`).
+
 ## Batman log 22 (2026-10-12): letras OK; vídeo no arranca; tirones; PS sale al sistema
 - Letras: confirmado `gpu.diag swizzle fmt=9 map=0,0,0,r`.
 - Vídeo: el juego no llegó a NativeVideoPlayer. `OBBVideoWrapper` usa la ruta literal
