@@ -1455,6 +1455,15 @@ static uint64_t klovrp_GetNodeFrustum2(int node, void *out) {
     // near-symmetric display makes true enough to be honest.
     const float *t = klovrp_eye_tan(node == 1 ? 1 : 0);
     float *f = (float *)out;
+    // zNear/zFar (ovrpFrustum2f's first two floats) were left as whatever the
+    // guest's struct held — 0/0 in Arkham Shadow — and the guest builds its
+    // camera from them: a 0-depth frustum is a NaN projection, which surfaced as
+    // NaN collider transforms under TrackedHeadset/Camera and "screen position
+    // out of view frustum". Filled with the near/far the real runtime reports
+    // for a default eye (Quest defaults: 0.1 m / 1000 m).
+    if (!out) return (uint64_t)(int64_t)OVRP_FAIL_INVALID_PARAM;
+    f[0] = 0.1f;    // zNear
+    f[1] = 1000.0f; // zFar
     f[2] = t[2];    // UpTan    <- top
     f[3] = t[3];    // DownTan  <- bottom
     f[4] = t[0];    // LeftTan  <- left

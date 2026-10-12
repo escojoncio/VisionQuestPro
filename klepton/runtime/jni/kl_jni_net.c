@@ -267,20 +267,38 @@ static klj_val klj_EOS_LibraryLoader_load(void *env, void *self, const klj_val *
     return (klj_val){.l = NULL};
 }
 
-// The output devices AudioManager knows about. Answered as an empty array, which
-// is the one honest answer available: we do not enumerate host audio hardware, and
-// every field of an AudioDeviceInfo — id, type, sample rates, channel masks —
-// would have to be invented to fill even one entry.
-//
-// Empty is not a silent zero of the trap-6d kind. Unity uses this list to notice
-// device *changes* (headphones, Bluetooth) and to pick a non-default output; with
-// nothing to choose from it stays on the default path, which is the OpenSL device
-// that already works. If something later needs a populated list, the trace will
-// name the AudioDeviceInfo getter it calls rather than leaving us to guess.
+// The output devices AudioManager knows about: one built-in speaker, 48 kHz
+// stereo, which is exactly what the host session opens (see [au] in the log).
+// An empty list was tolerable for Unity, but Meta's OculusEndpointSink (the
+// Wwise output of MetaXRAudioWwise) needs a default device and refuses to start
+// without one — and with it goes every sound the game makes. Inputs (flag
+// GET_DEVICES_INPUTS=1) stay empty: the microphone is off.
+static klj_val klj_int_array1(int v) {
+    void *arr = klj_new_array('I', NULL, 1);
+    ((int32_t *)klj_arr(arr)->data)[0] = v;
+    return (klj_val){.l = arr};
+}
+static klj_val klj_ADI_id(void *e, void *s, const klj_val *a, int n)    { (void)e;(void)s;(void)a;(void)n; return (klj_val){.j = 1}; }
+static klj_val klj_ADI_type(void *e, void *s, const klj_val *a, int n)  { (void)e;(void)s;(void)a;(void)n; return (klj_val){.j = 2}; } // TYPE_BUILTIN_SPEAKER
+static klj_val klj_ADI_true(void *e, void *s, const klj_val *a, int n)  { (void)e;(void)s;(void)a;(void)n; return (klj_val){.j = 1}; }
+static klj_val klj_ADI_false(void *e, void *s, const klj_val *a, int n) { (void)e;(void)s;(void)a;(void)n; return (klj_val){.j = 0}; }
+static klj_val klj_ADI_rates(void *e, void *s, const klj_val *a, int n) { (void)e;(void)s;(void)a;(void)n; return klj_int_array1(48000); }
+static klj_val klj_ADI_counts(void *e, void *s, const klj_val *a, int n){ (void)e;(void)s;(void)a;(void)n; return klj_int_array1(2); }
+static klj_val klj_ADI_masks(void *e, void *s, const klj_val *a, int n) { (void)e;(void)s;(void)a;(void)n; return klj_int_array1(12); } // CHANNEL_OUT_STEREO
+static klj_val klj_ADI_enc(void *e, void *s, const klj_val *a, int n)   { (void)e;(void)s;(void)a;(void)n; return klj_int_array1(4); }  // ENCODING_PCM_FLOAT
+static klj_val klj_ADI_name(void *e, void *s, const klj_val *a, int n)  { (void)e;(void)s;(void)a;(void)n; return (klj_val){.l = kl_jni_new_string("Vision Pro")}; }
+static klj_val klj_self(void *e, void *s, const klj_val *a, int n)     { (void)e;(void)a;(void)n; return (klj_val){.l = s}; }
+static klj_val klj_ADI_addr(void *e, void *s, const klj_val *a, int n)  { (void)e;(void)s;(void)a;(void)n; return (klj_val){.l = kl_jni_new_string("")}; }
+
 static klj_val klj_AudioManager_getDevices(void *env, void *self, const klj_val *a, int n) {
-    (void)env; (void)self; (void)a; (void)n;
-    KLJ_LOG("AudioManager.getDevices() -> empty (host devices are not enumerated)");
-    return (klj_val){.l = klj_new_array('L', "android/media/AudioDeviceInfo", 0)};
+    (void)env; (void)self;
+    int flags = n > 0 ? (int)(int32_t)a[0].j : 2;
+    int outputs = (flags & 2) != 0;              // GET_DEVICES_OUTPUTS
+    void *arr = klj_new_array('L', "android/media/AudioDeviceInfo", outputs ? 1 : 0);
+    if (outputs) ((void **)klj_arr(arr)->data)[0] = kl_jni_new_object("android/media/AudioDeviceInfo");
+    KLJ_LOG("AudioManager.getDevices(flags=%d) -> %s", flags,
+            outputs ? "1 output: built-in speaker, 48000 Hz, 2 ch" : "empty (no inputs)");
+    return (klj_val){.l = arr};
 }
 
 // MediaRouter.getSelectedRoute(type). Android always returns a route here — the
@@ -515,6 +533,21 @@ const klj_binding klj_bind_net[] = {
     {"android/content/Context", "getContentResolver", "()Landroid/content/ContentResolver;", klj_Context_getContentResolver},
     {"android/provider/Settings$Secure", "getString", "(Landroid/content/ContentResolver;Ljava/lang/String;)Ljava/lang/String;", klj_Settings_Secure_getString},
     {"android/media/AudioManager", "getDevices", "(I)[Landroid/media/AudioDeviceInfo;", klj_AudioManager_getDevices},
+    // getProductName answers a String; a guest that calls toString() on the
+    // CharSequence gets the same object back, as Java's String.toString does.
+    {"java/lang/CharSequence", "toString", "()Ljava/lang/String;", klj_self},
+    {"java/lang/String",       "toString", "()Ljava/lang/String;", klj_self},
+    {"android/media/AudioDeviceInfo", "getId",            "()I",  klj_ADI_id},
+    {"android/media/AudioDeviceInfo", "getType",          "()I",  klj_ADI_type},
+    {"android/media/AudioDeviceInfo", "isSink",           "()Z",  klj_ADI_true},
+    {"android/media/AudioDeviceInfo", "isSource",         "()Z",  klj_ADI_false},
+    {"android/media/AudioDeviceInfo", "getSampleRates",   "()[I", klj_ADI_rates},
+    {"android/media/AudioDeviceInfo", "getChannelCounts", "()[I", klj_ADI_counts},
+    {"android/media/AudioDeviceInfo", "getChannelMasks",  "()[I", klj_ADI_masks},
+    {"android/media/AudioDeviceInfo", "getChannelIndexMasks", "()[I", klj_ADI_masks},
+    {"android/media/AudioDeviceInfo", "getEncodings",     "()[I", klj_ADI_enc},
+    {"android/media/AudioDeviceInfo", "getProductName",   "()Ljava/lang/CharSequence;", klj_ADI_name},
+    {"android/media/AudioDeviceInfo", "getAddress",       "()Ljava/lang/String;", klj_ADI_addr},
     {"android/media/MediaRouter", "getSelectedRoute", "(I)Landroid/media/MediaRouter$RouteInfo;", klj_MediaRouter_getSelectedRoute},
     {"java/lang/Thread", "start", "()V", klj_Thread_start},
     // UE4 names its own threads through Java — see klj_Thread_currentThread.
