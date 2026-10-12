@@ -18,7 +18,7 @@
   `gpu.diag viewport views=2 w=256 h=256` (primer draw multiview, pase pequeño).
 - Diagnóstico nuevo: `FrameCapture` (KleptonCompositor.swift, `KL_CAPTURE=1`, ajuste «Capturas de diagnóstico»):
   PNG de ambas capas del ojo + salida del compositor en frames 120/600/1200 → `Documents/Registros/capture-*.png`
-  (compartibles). `kl_ovrp.c`: línea `first-call <fn> <- imagen+off` por función; `NONUNIT-QUAT` normaliza;
+  (compartibles; también en `QUEST/Registros` vía `KL_CAPTURE_DIR`). `kl_ovrp.c`: línea `first-call <fn> <- imagen+off` por función; `NONUNIT-QUAT` normaliza;
   `out GetNodePoseState node=…`.
 - Resolución base (ajuste «Resolución base» Original/Vision Pro, `vq.resAVP`, por defecto Original):
   `KL_OVRP_EYE_BASE=original` → área Quest 3 (2064×2208) con el aspecto del frustum del visor; luego escala y tope.
