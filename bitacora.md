@@ -2,6 +2,27 @@
 
 Historial completo de sesiones anteriores: `git log -p bitacora.md` (compactada el 2026-10-12 tras el log 25).
 
+## Batman log 26 (2026-10-12) → build siguiente
+- Rendimiento resuelto: ~90 fps de juego, compositor 100 Hz, ningún frame >12 ms de GPU.
+- Corrupción breve al inicio y en el visor de personajes: draws saltados por pipelines compilándose (caché de recetas
+  vaciada por el cambio de traductor). VPEngine ahora retiene el frame (`gpu.hold`, ver su bitácora).
+- Mapa cargando visible en vez de negro: el juego funde con `ovrp_SetColorScaleAndOffset` (9319 llamadas) y era no-op.
+  `kl_ovrp.c` `klovrp_SetColorScaleAndOffset` (HFA s0–s3/s4–s7, bool w0) → `kl_reproject_set_fade`; `kl_reproject.c`
+  `kl_reproject_uniforms.fade_on/fade_scale/fade_offset` (+ `KLReproj`, varyings planos) aplicado en `kl_reproject_f`
+  (rgb·scale+offset). Overlays: con `all` y sin color propio. Log `[ovrp] colour fade …` (transiciones).
+  `KL_OVRP_FADE=0` lo desactiva.
+- Cuadrado rosa: la capa Quad 2048x128 es el icono de carga (tira de 16 fotogramas). `ovrp_EnqueueSubmitLayer2` lee
+  ahora la cola de la firma (args 9–13 en pila: overrideTextureRectMatrix, &TextureRectMatrixf, overridePerLayerColor,
+  &scale, &offset) → `kl_ovrp_overlay.rect_on/rect/scale_bias/color_on/color_scale/color_offset`; `kl_overlay_build`
+  → `kl_overlay_uniforms` (+ `KLOv`); `kl_ov_f`: tex_uv = q·sb.xy + sb.zw, descarte fuera del rect, clamp medio texel,
+  color por capa (`KL_OVERLAY_RECT=0` desactiva). Log `[ovrp] layer N submit tail: …`.
+- Textura de la capa: `kl_vulkan.c` `klvk_layer_mark_written` (attachment de framebuffer, CmdCopyImage/BlitImage destino;
+  flag en `g_layer_img[i].written`, se limpia al reclamar/expulsar, viaja con rekey) + `kl_vulkan_layer_written(key)`;
+  `KleptonCompositor.swift` (quad y equirect) usa la imagen propia de la capa si el juego la escribió, si no texL.
+### Comprobar en el log 27
+- `gpu.hold` en el arranque/visor (sin `missing_pipelines` visibles); `[ovrp] colour fade` con scale 0 en las cargas;
+  `layer N image … written by the guest`; `submit tail: rect=1 src=[k/16 …]`; icono animado sobre negro.
+
 ## Batman log 25 (2026-10-12) → build siguiente
 - **Rendimiento**: meseta de 38–41 ms de GPU por frame de render (~22 fps de juego, ~95 en zonas ligeras) según hacia
   dónde se mira; pases idénticos en frames rápidos y lentos. Causa en VPEngine: todos los locales SPIR-V en un único
@@ -20,7 +41,7 @@ Historial completo de sesiones anteriores: `git log -p bitacora.md` (compactada 
 - Ruido: `klovrp_Update3` dejaba `calls` de Update2 en 0 cada frame → 11k líneas `first-call ovrp_Update2`; ahora no
   baja de 1.
 - Diagnóstico nuevo (VPEngine): `gpu.shader.mem … dyn_slots=` por shader y `gpu.time … enc_ms=` en frames lentos.
-### Comprobar en el log 26
+### Comprobado en el log 26 (rendimiento OK; resto en la entrada del log 26)
 - `gpu.time` de la zona pesada (debería bajar de ~39 ms); si sigue alto: `enc_ms` (qué pase) y `gpu.shader.mem` con
   `dyn_slots>0`.
 - Sin `wild handle 0xe`; el cuadrado del inicio muestra contenido (indicador de carga / texto).
