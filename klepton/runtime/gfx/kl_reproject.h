@@ -230,6 +230,12 @@ typedef struct {
 // always takes it; overlays take it when `all_layers` and they carry no colour of
 // their own.
 void kl_reproject_set_fade(int on, const float scale[4], const float offset[4], int all_layers);
+// The colour an overlay is drawn with: its own (kl_ovrp_overlay.color_on, from
+// the OVRPlugin submit tail or an OpenXR XrCompositionLayerColorScaleBiasKHR),
+// else the global fade when it was applied to all layers. Fills scale/offset
+// (identity when off) and returns 1 when a colour applies. Shared by the quad
+// uniforms (kl_overlay_build) and the equirect pass (KLEq in the compositor).
+int kl_overlay_color(const kl_ovrp_overlay *ov, float scale[4], float offset[4]);
 
 // The overlay shader — `kl_ov_v` / `kl_ov_f`, a 4-vertex triangle strip with no
 // vertex buffer, buffer(0) an array indexed by [[amplification_id]] exactly as

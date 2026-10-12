@@ -483,6 +483,9 @@ final class KleptonCompositor {
     private var recenterXform = matrix_identity_float4x4
     private var cmdCommitted = 0
     private var capGuestFrames = 0
+    // Overlay layers: captured once, ~45 guest frames after each first composite (KL_CAPTURE).
+    private var overlayCapFrame = -1
+    private var overlayCapTex: [Int32: MTLTexture] = [:]
     private let cmdLock = NSLock()
     private var cmdCompleted = 0
     private var cmdError: Error?
@@ -2022,7 +2025,7 @@ final class KleptonCompositor {
         let guestLive = completeStage >= 0 && kl_ovrp_eye_layer_live() != 0
         if guestLive { capGuestFrames += 1 }
         let capNow = guestLive && FrameCapture.enabled
-            && FrameCapture.frames.contains(capGuestFrames)
+            && (FrameCapture.frames.contains(capGuestFrames) || capGuestFrames == overlayCapFrame)
         for (di, drawable) in drawables.enumerated() {
             // Per drawable, not once: each one is presented separately and each
             // is reprojected by the system against its own anchor.
@@ -2038,8 +2041,11 @@ final class KleptonCompositor {
                     if let a = eyeSource(e, completeStage),
                        !eyeTex.contains(where: { $0 === a.texture }) { eyeTex.append(a.texture) }
                 }
+                var extra: [(String, MTLTexture)] = []
+                for (e, t) in taaOut.sorted(by: { $0.key < $1.key }) { extra.append(("vpktaa\(e)", t)) }
+                for (id, t) in overlayCapTex.sorted(by: { $0.key < $1.key }) { extra.append(("layer\(id)", t)) }
                 FrameCapture.capture(frame: capGuestFrames, eyes: eyeTex,
-                                     output: drawable.colorTextures.first, cmd: cmd)
+                                     output: drawable.colorTextures.first, cmd: cmd, extra: extra)
             }
             drawable.encodePresent(commandBuffer: cmd)
         }
@@ -2862,6 +2868,10 @@ final class KleptonCompositor {
             drawn += 1
             if !loggedOverlayDraw.contains(ov.layer_id) {
                 loggedOverlayDraw.insert(ov.layer_id)
+                if FrameCapture.enabled {
+                    overlayCapTex[ov.layer_id] = texture
+                    overlayCapFrame = capGuestFrames + 45
+                }
                 NSLog("[cp] compositing overlay layer \(ov.layer_id): "
                       + "\(ov.size.0)x\(ov.size.1) m at (\(ov.pose.4), \(ov.pose.5), "
                       + "\(ov.pose.6))"
@@ -2879,9 +2889,10 @@ final class KleptonCompositor {
         return drawn
     }
     /// Matches `struct KLEq` in kl_msl_equirect (kl_reproject.c) byte for byte:
-    /// two float4x4, five uint, hscale/hspan/vspan, float4 uv_rect: 176 bytes,
-    /// 16-aligned (uvRect lands at offset 160 in both). One per amplified
-    /// view, indexed by [[amplification_id]].
+    /// two float4x4, five uint, hscale/hspan/vspan, float4 uv_rect (offset 160),
+    /// then colorOn (176), colorScale (180) and colorOffset (196) as plain
+    /// 4-byte scalars: 212 bytes, stride 224 in both. One per amplified view,
+    /// indexed by [[amplification_id]].
     private struct KLEqUniform {
         var invProj: simd_float4x4 = matrix_identity_float4x4
         var worldRot: simd_float4x4 = matrix_identity_float4x4
@@ -2894,6 +2905,9 @@ final class KleptonCompositor {
         var hspan: Float = 0      // >0: angular mode, radians across uvRect
         var vspan: Float = 0
         var uvRect: SIMD4<Float> = .zero   // z == 0: whole texture (legacy)
+        var colorOn: UInt32 = 0            // kl_overlay_color; 0 = off
+        var colorScale: (Float, Float, Float, Float) = (1, 1, 1, 1)
+        var colorOffset: (Float, Float, Float, Float) = (0, 0, 0, 0)
     }
 
     /// The 3x3 rotation of a rigid transform, re-homed as a 4x4 with no
@@ -2964,6 +2978,11 @@ final class KleptonCompositor {
             return false
         }
         let texture = Unmanaged<MTLTexture>.fromOpaque(t).takeUnretainedValue()
+        // The layer's own colour, else the global fade applied to all layers —
+        // the same rule the quad pass takes through kl_overlay_build.
+        var ovc = ov
+        var cs = [Float](repeating: 1, count: 4), co = [Float](repeating: 0, count: 4)
+        let colorOn: UInt32 = kl_overlay_color(&ovc, &cs, &co) != 0 ? 1 : 0
         var uniforms: [KLEqUniform] = []
         for vi in viewIndices {
             let proj = drawable.computeProjection(viewIndex: vi)
@@ -2978,6 +2997,9 @@ final class KleptonCompositor {
             u.visible = 1
             u.test = Self.eqTest
             u.hscale = Self.eqHScale
+            u.colorOn = colorOn
+            u.colorScale = (cs[0], cs[1], cs[2], cs[3])
+            u.colorOffset = (co[0], co[1], co[2], co[3])
             uniforms.append(u)
         }
         enc.setRenderPipelineState(pipe)
@@ -4362,7 +4384,8 @@ final class LoadingVideoPlayer {
 // logs and returns; nothing here can stop a frame from presenting.
 enum FrameCapture {
     static let enabled: Bool = (getenv("KL_CAPTURE").map { String(cString: $0) } ?? "0") == "1"
-    static let frames: Set<Int> = [120, 600, 1200]
+    // 2 and 30: the first guest frames (the full-view pink flash at immersive open).
+    static let frames: Set<Int> = [2, 30, 120, 600, 1200]
     static let maxWidth = 1024
     private static let queue = DispatchQueue(label: "klepton.capture", qos: .utility)
 
@@ -4386,13 +4409,16 @@ enum FrameCapture {
 
     private static func supported(_ f: MTLPixelFormat) -> Bool {
         f == .rgba8Unorm || f == .rgba8Unorm_srgb || f == .bgra8Unorm || f == .bgra8Unorm_srgb
+            || f == .rgba16Float   // VPKTAA output/history: converted to 8-bit sRGB on the CPU
     }
 
     /// Encodes the copies into `cmd` (before present) and writes PNGs once it completes.
-    static func capture(frame: Int, eyes: [MTLTexture], output: MTLTexture?, cmd: MTLCommandBuffer) {
+    static func capture(frame: Int, eyes: [MTLTexture], output: MTLTexture?, cmd: MTLCommandBuffer,
+                        extra: [(String, MTLTexture)] = []) {
         var sources: [(String, MTLTexture)] = []
         for (i, t) in eyes.enumerated() { sources.append(("eyetex\(i)", t)) }
         if let o = output { sources.append(("output", o)) }
+        sources.append(contentsOf: extra)
         NSLog("[cap] frame \(frame): \(eyes.count) eye texture(s), output=\(output != nil)")
         var jobs: [Job] = []
         guard let blit = cmd.makeBlitCommandEncoder() else {
@@ -4405,7 +4431,8 @@ enum FrameCapture {
             if !supported(t.pixelFormat) {
                 NSLog("[cap] \(tag): pixel format \(t.pixelFormat.rawValue) not handled (only RGBA8/BGRA8) — skipped"); continue
             }
-            let w = t.width, h = t.height, bpr = w * 4
+            let bppx = t.pixelFormat == .rgba16Float ? 8 : 4
+            let w = t.width, h = t.height, bpr = w * bppx
             let slices = (t.textureType == .type2DArray) ? t.arrayLength : 1
             for s in 0..<slices {
                 guard let buf = t.device.makeBuffer(length: bpr * h, options: .storageModeShared) else {
@@ -4417,6 +4444,7 @@ enum FrameCapture {
                           to: buf, destinationOffset: 0,
                           destinationBytesPerRow: bpr, destinationBytesPerImage: bpr * h)
                 let name = tag == "output" ? "capture-\(frame)-output\(s).png"
+                         : !tag.hasPrefix("eyetex") ? "capture-\(frame)-\(tag)-\(s).png"
                          : (eyes.count == 1 ? "capture-\(frame)-eye\(s).png"
                                             : "capture-\(frame)-\(tag)-eye\(s).png")
                 jobs.append(Job(name: name, buf: buf, w: w, h: h, fmt: t.pixelFormat))
@@ -4431,7 +4459,37 @@ enum FrameCapture {
         }
     }
 
-    private static func write(_ j: Job) {
+    // rgba16Float (linear) -> RGBA8 sRGB-encoded, in a new buffer the PNG path below can read.
+    // NaN/Inf become magenta so a poisoned VPKTAA history is obvious in the picture.
+    private static func halfToRGBA8(_ j: Job) -> Job? {
+        let n = j.w * j.h
+        guard let out = j.buf.device.makeBuffer(length: n * 4, options: .storageModeShared) else { return nil }
+        let src = j.buf.contents().assumingMemoryBound(to: Float16.self)
+        let dst = out.contents().assumingMemoryBound(to: UInt8.self)
+        var bad = 0
+        for i in 0..<n {
+            for c in 0..<4 {
+                let v = Float(src[i * 4 + c])
+                var o: Float
+                if !v.isFinite { bad += 1; o = c == 1 ? 0 : 1 }
+                else if c == 3 { o = min(max(v, 0), 1) }
+                else {
+                    let x = min(max(v, 0), 1)
+                    o = x <= 0.0031308 ? x * 12.92 : 1.055 * powf(x, 1 / 2.4) - 0.055
+                }
+                dst[i * 4 + c] = UInt8(min(max(o * 255 + 0.5, 0), 255))
+            }
+        }
+        if bad > 0 { NSLog("[cap] \(j.name): \(bad) NaN/Inf channel(s) in the half-float source") }
+        return Job(name: j.name, buf: out, w: j.w, h: j.h, fmt: .rgba8Unorm_srgb)
+    }
+
+    private static func write(_ jIn: Job) {
+        var j = jIn
+        if j.fmt == .rgba16Float {
+            guard let c = halfToRGBA8(jIn) else { NSLog("[cap] \(jIn.name): half-float conversion failed"); return }
+            j = c
+        }
         try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let url = directory.appendingPathComponent(j.name)
         let bgra = j.fmt == .bgra8Unorm || j.fmt == .bgra8Unorm_srgb

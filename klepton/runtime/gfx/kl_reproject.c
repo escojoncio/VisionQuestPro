@@ -142,6 +142,24 @@ static int klr_fade(float scale[4], float offset[4], int *all) {
     return on;
 }
 
+int kl_overlay_color(const kl_ovrp_overlay *ov, float scale[4], float offset[4]) {
+    for (int i = 0; i < 4; i++) { scale[i] = 1.0f; offset[i] = 0.0f; }
+    if (!ov) return 0;
+    if (ov->color_on) {
+        memcpy(scale, ov->color_scale, 4 * sizeof(float));
+        memcpy(offset, ov->color_offset, 4 * sizeof(float));
+        return 1;
+    }
+    float fs[4], fo[4];
+    int all = 0;
+    if (klr_fade(fs, fo, &all) && all) {
+        memcpy(scale, fs, sizeof fs);
+        memcpy(offset, fo, sizeof fo);
+        return 1;
+    }
+    return 0;
+}
+
 int kl_reproject_srgb_decode(void) {
     int forced;
     if (klr_srgb_forced(&forced)) return forced;
@@ -604,6 +622,13 @@ static const char kl_msl_equirect[] =
 "    float hspan;\n"   // >0: angular mode (host video) - radians covered by uv_rect
 "    float vspan;\n"
 "    float4 uv_rect;\n" // x0,y0,w,h of the source in the texture (0,0,1,1 = all)
+// Appended after the 176-byte head, scalars and float[4] only (4-byte aligned,
+// no padding): colorOn at 176, colorScale at 180, colorOffset at 196; the struct
+// rounds to 224 here and in KLEqUniform (KleptonCompositor.swift). 0 = off, so a
+// caller that never fills them draws as before. Filled from kl_overlay_color.
+"    uint  colorOn;\n"
+"    float colorScale[4];\n"
+"    float colorOffset[4];\n"
 "};\n"
 "vertex EqOut kl_eq_v(uint vid [[vertex_id]],\n"
 "                     constant KLEq *us [[buffer(0)]],\n"
@@ -656,6 +681,13 @@ static const char kl_msl_equirect[] =
 "        c.rgb = select(hi, lo, c.rgb <= float3(0.04045));\n"
 "    }\n"
 "    if (u.test == 3u) return float4(max(c.rgb, float3(0.2)), 1.0);\n"
+// The layer's colour (or the global fade): rgb scaled and biased, and since the
+// panorama is drawn opaque its alpha term fades it towards black instead.
+"    if (u.colorOn != 0u) {\n"
+"        c.rgb = c.rgb * float3(u.colorScale[0], u.colorScale[1], u.colorScale[2])\n"
+"              + float3(u.colorOffset[0], u.colorOffset[1], u.colorOffset[2]);\n"
+"        c.rgb *= saturate(u.colorScale[3] + u.colorOffset[3]);\n"
+"    }\n"
 "    c.a = 1.0;\n"
 "    return c;\n"
 "}\n";
@@ -1017,17 +1049,7 @@ kl_overlay_uniforms kl_overlay_build(const kl_ovrp_overlay *ov, int eye,
             memcpy(u.rect, ov->rect[e], sizeof u.rect);
             memcpy(u.scale_bias, ov->scale_bias[e], sizeof u.scale_bias);
         }
-        float fs[4], fo[4];
-        int all = 0;
-        if (ov->color_on) {
-            u.color_on = 1;
-            memcpy(u.color_scale, ov->color_scale, sizeof u.color_scale);
-            memcpy(u.color_offset, ov->color_offset, sizeof u.color_offset);
-        } else if (klr_fade(fs, fo, &all) && all) {
-            u.color_on = 1;
-            memcpy(u.color_scale, fs, sizeof u.color_scale);
-            memcpy(u.color_offset, fo, sizeof u.color_offset);
-        }
+        u.color_on = (uint32_t)kl_overlay_color(ov, u.color_scale, u.color_offset);
     }
 
     // Which part of the layer texture this eye reads. The guest states it in

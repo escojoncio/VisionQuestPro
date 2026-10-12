@@ -6585,15 +6585,39 @@ static uint64_t klovrp_GetLayerTexturePtr(int layer_id, int stage, int eye,
     if (color && kl_vulkan_guest_active() && !getenv("KL_OVRP_TEXPTR_RAW"))
         out = (uint64_t)(uintptr_t)klovrp_texcell(layer_id, stage, eye, color);
     if (texture_ptr) *texture_ptr = out;
-    // TEMP diagnostic: the guest was seen creating an image view on a wild
-    // pointer right after this call - if these args do not read as a plausible
-    // (layer, stage, eye, ptr) then the signature is wrong and the real texture
-    // out-param is being left uninitialised.
-    fprintf(stderr, "  [ovrp] GetLayerTexturePtr(layer=%d stage=%d eye=%d ptr=%p) "
-                    "wrote %#llx (VkImage %#llx%s) depth=%#llx result=%llu\n",
-            layer_id, stage, eye, (void *)texture_ptr, (unsigned long long)out,
-            (unsigned long long)color, out != color ? " via cell" : "", (unsigned long long)depth,
-            (unsigned long long)r);
+    // Diagnostic: if these args do not read as a plausible (layer, stage, eye,
+    // ptr) the signature is wrong and the real out-param is left uninitialised.
+    // Throttled (Unity asks every frame): the first 16 calls, then only when a
+    // (layer, stage, eye) hands out a different value than it last did, capped.
+    static struct { int layer, stage, eye; uint64_t out, color; } said_tab[64];
+    static int said_n, said_lines, said_calls;
+    int say = said_calls++ < 16;
+    if (!say && said_lines < 128) {
+        int k = 0;
+        for (; k < said_n; k++)
+            if (said_tab[k].layer == layer_id && said_tab[k].stage == stage &&
+                said_tab[k].eye == eye) break;
+        if (k == said_n) {
+            if (said_n < (int)(sizeof said_tab / sizeof said_tab[0])) {
+                said_n++;
+                say = 1;
+            }
+        } else if (said_tab[k].out != out || said_tab[k].color != color) {
+            say = 1;
+        }
+        if (k < said_n) {
+            said_tab[k].layer = layer_id; said_tab[k].stage = stage; said_tab[k].eye = eye;
+            said_tab[k].out = out; said_tab[k].color = color;
+        }
+    }
+    if (say) {
+        said_lines++;
+        fprintf(stderr, "  [ovrp] GetLayerTexturePtr(layer=%d stage=%d eye=%d ptr=%p) "
+                        "wrote %#llx (VkImage %#llx%s) depth=%#llx result=%llu (call %d)\n",
+                layer_id, stage, eye, (void *)texture_ptr, (unsigned long long)out,
+                (unsigned long long)color, out != color ? " via cell" : "",
+                (unsigned long long)depth, (unsigned long long)r, said_calls);
+    }
     return r;
 }
 
@@ -7066,8 +7090,13 @@ void *kl_ovrp_dlopen(const char *soname) {
     if (!kl_ovrp_claims(soname)) return NULL;
     const char *b = strrchr(soname, '/');
     b = b ? b + 1 : soname;
-    fprintf(stderr, "  [ovrp] guest dlopen(\"%s\") -> synthetic OVRPlugin "
-                    "(the real one NEEDs libvrapi.so)\n", b);
+    // Unity re-dlopens the plugin on every lookup, so the line is said for the
+    // first three and then at powers of two with the running count.
+    static int opens;
+    int n = ++opens;
+    if (n <= 3 || (n & (n - 1)) == 0)
+        fprintf(stderr, "  [ovrp] guest dlopen(\"%s\") -> synthetic OVRPlugin "
+                        "(the real one NEEDs libvrapi.so) [open #%d]\n", b, n);
     return (void *)g_ovrp_handle;
 }
 

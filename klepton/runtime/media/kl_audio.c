@@ -403,8 +403,11 @@ int kl_audio_open(unsigned rate, unsigned channels, unsigned bits) {
     // longer one is a dropout — so a driver that knows its audio arrives over a
     // jittery link raises this floor (kl_audio_set_latency_ms). KL_AUDIO_LATENCY_MS
     // still overrides both.
+    // 40 ms (was 80): with a local mixer the guest never starves its own feed, and the
+    // picture reaches the eye ~20-25 ms after render — 80 ms of fill put the sound a
+    // noticeable ~60 ms behind it (Batman log 28). g_target still grows to 2 guest buffers.
     unsigned lat_ms = kl_env_int("KL_AUDIO_LATENCY_MS",
-                                 g_latency_override_ms ? g_latency_override_ms : 80);
+                                 g_latency_override_ms ? g_latency_override_ms : 40);
     if (lat_ms < 10) lat_ms = 10;
     if (lat_ms > 500) lat_ms = 500;
 
