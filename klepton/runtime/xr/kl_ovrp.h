@@ -154,6 +154,9 @@ void kl_ovrp_set_hand_motion(int hand, float px, float py, float pz,
                              float qx, float qy, float qz, float qw,
                              float vx, float vy, float vz,
                              float avx, float avy, float avz);
+// Host-initiated recenter (Quest Oculus-button hold): eye height re-measured,
+// recenter count bumped, ovrp_GetAppShouldRecenter{,2} true once.
+void kl_ovrp_host_recenter(void);
 void kl_ovrp_set_controller_input(int hand, uint32_t buttons, uint32_t touches,
                                   float index_trigger, float hand_trigger,
                                   float stick_x, float stick_y);
