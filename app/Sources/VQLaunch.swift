@@ -88,7 +88,7 @@ final class VQSettings: ObservableObject {
         vpktaaSharpness = d.object(forKey: "vq.vpktaaSharp") as? Double ?? 0.5
         renderScale = d.object(forKey: "vq.renderScale") as? Double ?? 1
         aswDisabled = d.object(forKey: "vq.aswOff") as? Bool ?? true
-        quest3Profile = d.object(forKey: "vq.quest3") as? Bool ?? false  // Klepton presents Quest 2 (JNI agrees)
+        quest3Profile = d.object(forKey: "vq.quest3v2") as? Bool ?? true  // Quest 3 for every game by default
         useVPEngine = d.object(forKey: "vq.vpengine") as? Bool ?? true
     }
 
@@ -121,7 +121,7 @@ final class VQSettings: ObservableObject {
         d.set(vpktaaSharpness, forKey: "vq.vpktaaSharp")
         d.set(renderScale, forKey: "vq.renderScale")
         d.set(aswDisabled, forKey: "vq.aswOff")
-        d.set(quest3Profile, forKey: "vq.quest3")
+        d.set(quest3Profile, forKey: "vq.quest3v2")
         d.set(useVPEngine, forKey: "vq.vpengine")
     }
 
@@ -165,7 +165,15 @@ final class VQSettings: ObservableObject {
         // Eye texture size the game is told (Klepton's ovrp side) and headset identity:
         // 11 = ovrpSystemHeadset Meta_Quest_3; off: Klepton's per-game default (Quest 2 / Quest).
         setenv("KL_OVRP_EYE_SCALE", String(format: "%.2f", renderScale), 1)
-        if quest3Profile { setenv("KL_OVRP_HEADSET", "11", 1) } else { unsetenv("KL_OVRP_HEADSET") }
+        // Quest 3 identity for every game, in every place a title can check it: Android Build
+        // (MODEL/DEVICE eureka), OVRPlugin headset type, OpenXR system name and the GPU.
+        if quest3Profile {
+            setenv("KL_QUEST3", "1", 1)
+            setenv("KL_OVRP_HEADSET", "11", 1)
+            setenv("KL_XR_SYSTEM_NAME", "Meta Quest 3", 1)
+        } else {
+            unsetenv("KL_QUEST3"); unsetenv("KL_OVRP_HEADSET"); unsetenv("KL_XR_SYSTEM_NAME")
+        }
         // ASW: Klepton never hands out SpaceWarp textures (ovrp_GetLayerTextureSpaceWarp
         // -> unsupported), so every frame is real; the setting is passed on for VPVulkan.
         var c = vq_gfx_config()

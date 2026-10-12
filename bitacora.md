@@ -120,3 +120,4 @@
 - Log: VPVulkan carga, Unity crea instancia y enumera GPU pero nunca llama vkCreateDevice; crea contexto GLES2 y aborta (sin ANGLE).
 - Causa: comprobación de hardware del juego. El nombre "Adreno (TM) 740 (VPVulkan)" y deviceID 0x43050a01 no coinciden; el spoof de Klepton solo se activaba con target "batman".
 - Arreglo: VPVulkan informa "Adreno (TM) 740" / 0x43051401 y un LUID válido; la app fija KL_VK_SPOOF_ADRENO=1 siempre.
+- Identidad Quest 3 genérica: `KL_QUEST3=1` hace que Android Build (Quest 3/eureka), cabeza OVRPlugin (11), nombre OpenXR ("Meta Quest 3") y GPU (Adreno 740) se presenten como Quest 3 en todos los juegos, no por target. Ajuste "Perfil Quest 3" activado por defecto (clave nueva vq.quest3v2).
