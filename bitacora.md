@@ -269,3 +269,10 @@
 - Ruido: decenas de `guest dlopen("libOVRPlugin.so")`/`libovrplatformloader.so` repetidos (pendiente: registrar solo el primero).
 ### Comprobar
 - Qué hace Batman con el fallo de la petición (sigue o sale) y siguiente parada.
+
+## 2026-10-12 — Capturas de diagnóstico (log 18: imagen corrupta en el visor)
+- `KleptonCompositor.swift` `FrameCapture` (`KL_CAPTURE=1`): en los frames de imagen del guest 120/600/1200 (`capGuestFrames`, solo frames con capa de ojo viva) copia por blit, antes de `encodePresent`, todas las capas de la(s) textura(s) de ojo (`eyeSource`) y del `colorTextures[0]` del drawable a MTLBuffer compartido; en `addCompletedHandler` → PNG ≤1024 de ancho en `Documents/Registros/capture-<frame>-eye<N>.png` / `-output<N>.png`. Logs `[cap] <tex>: fmt/type/usage/storage/fbOnly…` y `[cap] saved …`. Solo RGBA8/BGRA8 (sRGB o no); otros formatos, MSAA o framebufferOnly se saltan con log.
+- Ajuste «Capturas de diagnóstico» (`VQSettings.diagCaptures`, `vq.diagCaptures`, por defecto ON) → `KL_CAPTURE`. `VQLog.shareable` incluye `captures`; `VQLog.start()` borra las PNG de la sesión anterior.
+- Sin volcado por pase en VPEngine metal2 (pendiente si hace falta).
+### Comprobar
+- PNG de ojo bien y output mal → fallo en el compositor; ojo ya corrupto → render del juego/traductor.

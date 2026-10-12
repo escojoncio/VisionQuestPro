@@ -70,6 +70,7 @@ final class VQSettings: ObservableObject {
     @Published var aswDisabled: Bool { didSet { save() } }
     @Published var quest3Profile: Bool { didSet { save() } }
     @Published var forceVulkan: Bool { didSet { save() } }
+    @Published var diagCaptures: Bool { didSet { save() } }
     /// Vulkan driver: VPEngine's own (VPVulkan) or MoltenVK (to compare, or if VPEngine fails).
     @Published var useVPEngine: Bool { didSet { save() } }
 
@@ -91,6 +92,7 @@ final class VQSettings: ObservableObject {
         aswDisabled = d.object(forKey: "vq.aswOff") as? Bool ?? true
         quest3Profile = d.object(forKey: "vq.quest3v2") as? Bool ?? true  // Quest 3 for every game by default
         forceVulkan = d.object(forKey: "vq.forceVulkan") as? Bool ?? true
+        diagCaptures = d.object(forKey: "vq.diagCaptures") as? Bool ?? true
         useVPEngine = d.object(forKey: "vq.vpengine") as? Bool ?? true
     }
 
@@ -125,6 +127,7 @@ final class VQSettings: ObservableObject {
         d.set(aswDisabled, forKey: "vq.aswOff")
         d.set(quest3Profile, forKey: "vq.quest3v2")
         d.set(forceVulkan, forKey: "vq.forceVulkan")
+        d.set(diagCaptures, forKey: "vq.diagCaptures")
         d.set(useVPEngine, forKey: "vq.vpengine")
     }
 
@@ -169,6 +172,9 @@ final class VQSettings: ObservableObject {
         // device detection would fall back to GLES, which has no driver here.
         if forceVulkan { setenv("KL_UNITY_ARGS", "-force-vulkan", 1) } else { unsetenv("KL_UNITY_ARGS") }
         VQLog.log("Gráficos: forzar Vulkan en Unity \(forceVulkan)")
+        // Frame captures (PNG in Documents/Registros) at compositor frames 120/600/1200.
+        setenv("KL_CAPTURE", diagCaptures ? "1" : "0", 1)
+        VQLog.log("Gráficos: capturas de diagnóstico \(diagCaptures)")
         // Eye texture size the game is told (Klepton's ovrp side) and headset identity:
         // 11 = ovrpSystemHeadset Meta_Quest_3; off: Klepton's per-game default (Quest 2 / Quest).
         setenv("KL_OVRP_EYE_SCALE", String(format: "%.2f", renderScale), 1)

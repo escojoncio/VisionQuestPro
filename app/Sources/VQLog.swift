@@ -27,6 +27,7 @@ enum VQLog {
         let previous = directory.appendingPathComponent("app-anterior.txt")
         try? FileManager.default.removeItem(at: previous)
         try? FileManager.default.moveItem(at: appLog, to: previous)
+        for old in captures { try? FileManager.default.removeItem(at: old) }  // previous session's PNGs
         FileManager.default.createFile(atPath: appLog.path, contents: nil)
         handle = try? FileHandle(forWritingTo: appLog)
         let info = Bundle.main.infoDictionary ?? [:]
@@ -46,6 +47,14 @@ enum VQLog {
     static var shareable: [URL] {
         [appLog, directory.appendingPathComponent("app-anterior.txt"), bootLog, crashLog]
             .filter { FileManager.default.fileExists(atPath: $0.path) }
+            + captures
+    }
+
+    /// Frame captures written by the compositor (capture-<frame>-*.png).
+    static var captures: [URL] {
+        ((try? FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)) ?? [])
+            .filter { $0.lastPathComponent.hasPrefix("capture-") && $0.pathExtension == "png" }
+            .sorted { $0.lastPathComponent < $1.lastPathComponent }
     }
 
     /// The last `bytes` of a log, for showing in the app.
