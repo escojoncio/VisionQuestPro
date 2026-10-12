@@ -115,3 +115,8 @@
   libc++_shared 8, libOculusXRPlugin 4, libil2cpp 1 (solo guardado/restaurado de contexto, inocuo). Solo 4 funciones
   tienen un registro x9–x17 libre en toda la función → hace falta renombrado por vivacidad (x18 nunca vive a través de
   llamadas en AAPCS64, así que basta un temporal libre en cada rango vivo de x18). Script: análisis por FDE de `.eh_frame`.
+
+## 2026-10-12 — Batman caía a GLES
+- Log: VPVulkan carga, Unity crea instancia y enumera GPU pero nunca llama vkCreateDevice; crea contexto GLES2 y aborta (sin ANGLE).
+- Causa: comprobación de hardware del juego. El nombre "Adreno (TM) 740 (VPVulkan)" y deviceID 0x43050a01 no coinciden; el spoof de Klepton solo se activaba con target "batman".
+- Arreglo: VPVulkan informa "Adreno (TM) 740" / 0x43051401 y un LUID válido; la app fija KL_VK_SPOOF_ADRENO=1 siempre.
