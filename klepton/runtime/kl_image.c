@@ -87,6 +87,10 @@ typedef struct { uint32_t sh_name, sh_type; uint64_t sh_flags, sh_addr, sh_offse
 #define R_AARCH64_GLOB_DAT  1025
 #define R_AARCH64_JUMP_SLOT 1026
 #define R_AARCH64_RELATIVE  1027
+#define R_AARCH64_TLS_DTPMOD64 1028
+#define R_AARCH64_TLS_DTPREL64 1029
+#define R_AARCH64_TLSDESC   1031
+#define PT_TLS 7
 #define STB_WEAK 2
 
 struct kl_image {
@@ -112,6 +116,7 @@ struct kl_image {
     unsigned    missing_n, missing_cap;
     const char **weak;         // ...and the weak ones, deliberately left NULL
     unsigned    weak_n, weak_cap;
+    unsigned    tls_mod;       // 1-based ELF TLS module id, 0 = not yet registered
     void       *dl_handle;     // set when the image arrived as a translated
                                // Mach-O dylib; then dyld owns the mapping
 };
@@ -373,6 +378,9 @@ void kl_interpose(const char *name, void *fn) {
     g_interpose_n++;
 }
 
+typedef struct { uint64_t mod, off; } kl_tls_index;
+void *kl_tls_get_addr(const kl_tls_index *ti);   // also the asm resolver's callee
+
 static uint64_t sym_value(kl_image *img, uint32_t idx, const char **name_out) {
     const Elf64_Sym *s = &img->symtab[idx];
     const char *nm = img->strtab + s->st_name;
@@ -381,6 +389,7 @@ static uint64_t sym_value(kl_image *img, uint32_t idx, const char **name_out) {
         if (!strcmp(nm, g_interpose[i].name))
             return (uint64_t)(uintptr_t)g_interpose[i].fn;
     if (s->st_shndx != 0) return (uint64_t)(uintptr_t)(img->base + s->st_value);
+    if (!strcmp(nm, "__tls_get_addr")) return (uint64_t)(uintptr_t)kl_tls_get_addr;
     void *ext = kl_shim_lookup(nm);
     // Not a shim: try other already-loaded guest images. Android's linker binds
     // an .so's imports against its DT_NEEDED chain; our chain is the image
@@ -389,6 +398,102 @@ static uint64_t sym_value(kl_image *img, uint32_t idx, const char **name_out) {
     // falling to an unresolved stub.
     if (!ext) ext = kl_guest_sym_global(nm);
     return (uint64_t)(uintptr_t)ext;      // 0 if unresolved
+}
+
+// ---------- ELF TLS (general-dynamic / TLSDESC) ----------
+// A current NDK (API 29+) emits real ELF TLS instead of emutls. Static offsets
+// from the thread pointer are impossible here — the guest's TP is Darwin's TSD
+// base (tpidrro_el0), not a bionic TCB with a static TLS area behind it — so
+// every module gets one pthread key and a lazily built per-thread block copied
+// from its PT_TLS template. TLSDESC slots point at a resolver that returns
+// (block + offset) - TP, which is exactly what the guest then adds TP back to.
+static struct { const uint8_t *init; size_t filesz, memsz, align; pthread_key_t key; } g_tls[64];
+static unsigned g_tls_n;
+static pthread_mutex_t g_tls_lock = PTHREAD_MUTEX_INITIALIZER;
+
+// Registered from bind_dynamic with the phdrs it already walks, so this works
+// identically for the mmap path and translated dylibs.
+static void tls_register(kl_image *img, const Elf64_Phdr *ph, int phnum, uint64_t lo) {
+    for (int i = 0; i < phnum; i++) {
+        if (ph[i].p_type != PT_TLS || img->tls_mod) continue;
+        pthread_mutex_lock(&g_tls_lock);
+        if (g_tls_n < 64) {
+            unsigned k = g_tls_n;
+            g_tls[k].init = img->base + ph[i].p_vaddr - lo;
+            g_tls[k].filesz = ph[i].p_filesz;
+            g_tls[k].memsz = ph[i].p_memsz;
+            g_tls[k].align = ph[i].p_align < 16 ? 16 : ph[i].p_align;
+            if (pthread_key_create(&g_tls[k].key, free) == 0) img->tls_mod = ++g_tls_n;
+        }
+        pthread_mutex_unlock(&g_tls_lock);
+        fprintf(stderr, "  [klepton] %s: ELF TLS module %u (%llu bytes, %llu initialised)\n",
+                img->path, img->tls_mod, (unsigned long long)ph[i].p_memsz,
+                (unsigned long long)ph[i].p_filesz);
+    }
+}
+static unsigned tls_module(kl_image *img) { return img->tls_mod; }
+
+void *kl_tls_get_addr(const kl_tls_index *ti) {
+    if (!ti || ti->mod == 0 || ti->mod > g_tls_n) return NULL;
+    unsigned k = (unsigned)ti->mod - 1;
+    uint8_t *b = pthread_getspecific(g_tls[k].key);
+    if (!b) {
+        size_t sz = g_tls[k].memsz ? g_tls[k].memsz : 1;
+        if (posix_memalign((void **)&b, g_tls[k].align, sz) != 0) return NULL;
+        memcpy(b, g_tls[k].init, g_tls[k].filesz);
+        memset(b + g_tls[k].filesz, 0, sz - g_tls[k].filesz);
+        pthread_setspecific(g_tls[k].key, b);
+    }
+    return b + ti->off;
+}
+
+// TLSDESC resolver: x0 = &descriptor {resolver, arg}. Returns in x0 the offset
+// from TP; every other register (including q0-q31) is preserved, as the ABI
+// requires — the call site is inline code that assumes nothing is clobbered.
+void kl_tlsdesc_dynamic(void);
+__asm__(
+    ".text\n.p2align 2\n.globl _kl_tlsdesc_dynamic\n_kl_tlsdesc_dynamic:\n"
+    "stp x29, x30, [sp, #-16]!\n mov x29, sp\n"
+    "sub sp, sp, #656\n"
+    "stp x1, x2, [sp, #0]\n stp x3, x4, [sp, #16]\n stp x5, x6, [sp, #32]\n"
+    "stp x7, x8, [sp, #48]\n stp x9, x10, [sp, #64]\n stp x11, x12, [sp, #80]\n"
+    "stp x13, x14, [sp, #96]\n stp x15, x16, [sp, #112]\n str x17, [sp, #128]\n"
+    "stp q0, q1, [sp, #144]\n stp q2, q3, [sp, #176]\n stp q4, q5, [sp, #208]\n"
+    "stp q6, q7, [sp, #240]\n stp q8, q9, [sp, #272]\n stp q10, q11, [sp, #304]\n"
+    "stp q12, q13, [sp, #336]\n stp q14, q15, [sp, #368]\n stp q16, q17, [sp, #400]\n"
+    "stp q18, q19, [sp, #432]\n stp q20, q21, [sp, #464]\n stp q22, q23, [sp, #496]\n"
+    "stp q24, q25, [sp, #528]\n stp q26, q27, [sp, #560]\n stp q28, q29, [sp, #592]\n"
+    "stp q30, q31, [sp, #624]\n"
+    "ldr x0, [x0, #8]\n bl _kl_tls_get_addr\n"
+    "mrs x1, tpidrro_el0\n sub x0, x0, x1\n"
+    "ldp q30, q31, [sp, #624]\n ldp q28, q29, [sp, #592]\n ldp q26, q27, [sp, #560]\n"
+    "ldp q24, q25, [sp, #528]\n ldp q22, q23, [sp, #496]\n ldp q20, q21, [sp, #464]\n"
+    "ldp q18, q19, [sp, #432]\n ldp q16, q17, [sp, #400]\n ldp q14, q15, [sp, #368]\n"
+    "ldp q12, q13, [sp, #336]\n ldp q10, q11, [sp, #304]\n ldp q8, q9, [sp, #272]\n"
+    "ldp q6, q7, [sp, #240]\n ldp q4, q5, [sp, #208]\n ldp q2, q3, [sp, #176]\n"
+    "ldp q0, q1, [sp, #144]\n"
+    "ldr x17, [sp, #128]\n ldp x15, x16, [sp, #112]\n ldp x13, x14, [sp, #96]\n"
+    "ldp x11, x12, [sp, #80]\n ldp x9, x10, [sp, #64]\n ldp x7, x8, [sp, #48]\n"
+    "ldp x5, x6, [sp, #32]\n ldp x3, x4, [sp, #16]\n ldp x1, x2, [sp, #0]\n"
+    "add sp, sp, #656\n ldp x29, x30, [sp], #16\n ret\n");
+
+// A TLS symbol reference resolves only inside its own module here; a TLS import
+// from another image would need that image's module id, which nothing has asked
+// for yet. Refused loudly rather than bound to the wrong block.
+static int tls_target(kl_image *img, const Elf64_Rela *r, uint64_t *off_out) {
+    uint32_t sidx = ELF64_R_SYM(r->r_info);
+    uint64_t v = 0;
+    if (sidx) {
+        const Elf64_Sym *s = &img->symtab[sidx];
+        if (s->st_shndx == 0) {
+            err("%s: TLS import '%s' from another module is not supported",
+                img->path, img->strtab + s->st_name);
+            return -1;
+        }
+        v = s->st_value;
+    }
+    *off_out = v + (uint64_t)r->r_addend;
+    return 0;
 }
 
 static int apply_relocs(kl_image *img, const Elf64_Rela *r, size_t count) {
@@ -440,6 +545,28 @@ static int apply_relocs(kl_image *img, const Elf64_Rela *r, size_t count) {
             if (type == R_AARCH64_ABS64) img->stats.abs64++;
             else if (type == R_AARCH64_GLOB_DAT) img->stats.glob_dat++;
             else img->stats.jump_slot++;
+            break;
+        }
+        case R_AARCH64_TLSDESC: {
+            uint64_t off; unsigned mod = tls_module(img);
+            if (!mod) { err("%s: TLSDESC without PT_TLS", img->path); return -1; }
+            if (tls_target(img, r, &off) != 0) return -1;
+            kl_tls_index *ti = malloc(sizeof *ti);      // lives as long as the image
+            ti->mod = mod; ti->off = off;
+            slot[0] = (uint64_t)(uintptr_t)kl_tlsdesc_dynamic;
+            slot[1] = (uint64_t)(uintptr_t)ti;
+            break;
+        }
+        case R_AARCH64_TLS_DTPMOD64: {
+            unsigned mod = tls_module(img);
+            if (!mod) { err("%s: DTPMOD64 without PT_TLS", img->path); return -1; }
+            *slot = mod;
+            break;
+        }
+        case R_AARCH64_TLS_DTPREL64: {
+            uint64_t off;
+            if (tls_target(img, r, &off) != 0) return -1;
+            *slot = off;
             break;
         }
         default:
@@ -563,6 +690,7 @@ static int bind_dynamic(kl_image *img, const Elf64_Phdr *ph, int phnum, uint64_t
         }
     }
     if (!img->symtab || !img->strtab) { err("missing DT_SYMTAB/DT_STRTAB"); return -1; }
+    tls_register(img, ph, phnum, lo);
 
     // Order is independent — RELA, RELR and APS2 relocate disjoint slots — but
     // every relative table must run before kl_run_init: the .init_array pointers

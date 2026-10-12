@@ -15,6 +15,7 @@
 #include <unistd.h>
 #include <dirent.h>
 #include <sys/stat.h>
+#include <sys/mount.h>
 #include "klepton.h"
 #include "kl_jni.h"
 #include "kl_fault.h"
@@ -509,7 +510,81 @@ static klj_val klj_AVPro_FinaliseCryptor(void *env, void *self, const klj_val *a
     return (klj_val){.j = (uint64_t)moved};
 }
 
+// ---- android.os.StatFs ------------------------------------------------------
+// Unity (and the Oculus asset-file path) asks for free space before it reads or
+// stages content. Answered from the host statfs() of the same path; a guest
+// path the host does not know (/sdcard/...) falls back to the app's home volume,
+// which is where every guest byte actually lives. Captured once at
+// construction, exactly like the Java class (restat() re-reads).
+typedef struct { uint64_t bsize, blocks, bfree, bavail; } klj_statfs;
+
+static void klj_statfs_fill(klj_statfs *f, const char *path) {
+    struct statfs sf;
+    const char *home = getenv("HOME");
+    if (!path || statfs(path, &sf) != 0) {
+        if (!home || statfs(home, &sf) != 0) { memset(f, 0, sizeof *f); return; }
+    }
+    f->bsize = sf.f_bsize; f->blocks = sf.f_blocks;
+    f->bfree = sf.f_bfree; f->bavail = sf.f_bavail;
+}
+static klj_val klj_StatFs_init(void *env, void *clazz, const klj_val *a, int n) {
+    (void)env; (void)clazz;
+    const char *path = n > 0 ? klj_str(a[0].l) : NULL;
+    klj_statfs *f = calloc(1, sizeof *f);
+    klj_statfs_fill(f, path);
+    void *obj = kl_jni_new_object("android/os/StatFs");
+    klj_as_object(obj)->data = f;
+    klj_as_object(obj)->destroy = free;
+    KLJ_LOG("new StatFs(\"%s\") -> %llu MB free of %llu MB", path ? path : "(null)",
+            (unsigned long long)(f->bavail * f->bsize >> 20),
+            (unsigned long long)(f->blocks * f->bsize >> 20));
+    return (klj_val){.l = obj};
+}
+static klj_statfs *klj_statfs_of(void *self) {
+    klj_object *o = klj_as_object(self);
+    static klj_statfs zero;
+    return (o && o->data) ? (klj_statfs *)o->data : &zero;
+}
+static klj_val klj_StatFs_restat(void *env, void *self, const klj_val *a, int n) {
+    (void)env; klj_object *o = klj_as_object(self);
+    if (o && o->data) klj_statfs_fill(o->data, n > 0 ? klj_str(a[0].l) : NULL);
+    return (klj_val){.j = 0};
+}
+#define KLJ_STATFS_GET(fn, expr) \
+    static klj_val fn(void *env, void *self, const klj_val *a, int n) { \
+        (void)env; (void)a; (void)n; klj_statfs *f = klj_statfs_of(self); \
+        return (klj_val){.j = (uint64_t)(expr)}; }
+KLJ_STATFS_GET(klj_StatFs_blockSize,   f->bsize)
+KLJ_STATFS_GET(klj_StatFs_blockCount,  f->blocks)
+KLJ_STATFS_GET(klj_StatFs_freeBlocks,  f->bfree)
+KLJ_STATFS_GET(klj_StatFs_availBlocks, f->bavail)
+KLJ_STATFS_GET(klj_StatFs_totalBytes,  f->blocks * f->bsize)
+KLJ_STATFS_GET(klj_StatFs_freeBytes,   f->bfree * f->bsize)
+KLJ_STATFS_GET(klj_StatFs_availBytes,  f->bavail * f->bsize)
+// The int-returning originals (pre-API 18) saturate rather than wrap.
+#define KLJ_STATFS_GET_I(fn, expr) \
+    static klj_val fn(void *env, void *self, const klj_val *a, int n) { \
+        (void)env; (void)a; (void)n; klj_statfs *f = klj_statfs_of(self); \
+        uint64_t v = (uint64_t)(expr); return (klj_val){.j = v > 0x7fffffffu ? 0x7fffffffu : v}; }
+KLJ_STATFS_GET_I(klj_StatFs_blockSizeI,   f->bsize)
+KLJ_STATFS_GET_I(klj_StatFs_blockCountI,  f->blocks)
+KLJ_STATFS_GET_I(klj_StatFs_freeBlocksI,  f->bfree)
+KLJ_STATFS_GET_I(klj_StatFs_availBlocksI, f->bavail)
+
 const klj_binding klj_bind_io[] = {
+    {"android/os/StatFs", "<init>", "(Ljava/lang/String;)V", klj_StatFs_init},
+    {"android/os/StatFs", "restat", "(Ljava/lang/String;)V", klj_StatFs_restat},
+    {"android/os/StatFs", "getBlockSizeLong",       "()J", klj_StatFs_blockSize},
+    {"android/os/StatFs", "getBlockCountLong",      "()J", klj_StatFs_blockCount},
+    {"android/os/StatFs", "getFreeBlocksLong",      "()J", klj_StatFs_freeBlocks},
+    {"android/os/StatFs", "getAvailableBlocksLong", "()J", klj_StatFs_availBlocks},
+    {"android/os/StatFs", "getTotalBytes",          "()J", klj_StatFs_totalBytes},
+    {"android/os/StatFs", "getFreeBytes",           "()J", klj_StatFs_freeBytes},
+    {"android/os/StatFs", "getAvailableBytes",      "()J", klj_StatFs_availBytes},
+    {"android/os/StatFs", "getBlockSize",           "()I", klj_StatFs_blockSizeI},
+    {"android/os/StatFs", "getBlockCount",          "()I", klj_StatFs_blockCountI},
+    {"android/os/StatFs", "getFreeBlocks",          "()I", klj_StatFs_freeBlocksI},
+    {"android/os/StatFs", "getAvailableBlocks",     "()I", klj_StatFs_availBlocksI},
     {"com/renderheads/AVPro/Video/Manager", "SHA256", "([B)[B", klj_AVPro_SHA256},
     {"com/renderheads/AVPro/Video/Manager", "KeyDerivationPBKDF",
      "(Ljava/nio/ByteBuffer;Ljava/nio/ByteBuffer;ILjava/nio/ByteBuffer;)I", klj_AVPro_KeyDerivationPBKDF},
