@@ -51,6 +51,9 @@ import ARKit
 import AVFoundation
 import CoreVideo
 import QuartzCore
+import ImageIO
+import CoreGraphics
+import UniformTypeIdentifiers
 
 // What the drawable costs, and therefore how much of the display we can afford
 // to actually use. Three settings here decide that, and they are entangled:
@@ -475,6 +478,7 @@ final class KleptonCompositor {
     nonisolated(unsafe) static var pendingRecenter = false
     private var recenterXform = matrix_identity_float4x4
     private var cmdCommitted = 0
+    private var capGuestFrames = 0
     private let cmdLock = NSLock()
     private var cmdCompleted = 0
     private var cmdError: Error?
@@ -2006,7 +2010,13 @@ final class KleptonCompositor {
         pushEyeOffsets(main)
 
         var encoded = 0
-        for drawable in drawables {
+        // KL_CAPTURE: guest-picture frames counted here; at 120/600/1200 the
+        // eye textures and the drawable are copied out (FrameCapture below).
+        let guestLive = completeStage >= 0 && kl_ovrp_eye_layer_live() != 0
+        if guestLive { capGuestFrames += 1 }
+        let capNow = guestLive && FrameCapture.enabled
+            && FrameCapture.frames.contains(capGuestFrames)
+        for (di, drawable) in drawables.enumerated() {
             // Per drawable, not once: each one is presented separately and each
             // is reprojected by the system against its own anchor.
             drawable.deviceAnchor = displayAnchor
@@ -2014,6 +2024,16 @@ final class KleptonCompositor {
                                        completeStage: completeStage,
                                        rendered: rendered, haveRendered: haveRendered,
                                        originFromHead: originFromHead)
+            if capNow && di == 0 {
+                // Before encodePresent: after it the drawable is no longer ours.
+                var eyeTex: [MTLTexture] = []
+                for e in 0..<2 {
+                    if let a = eyeSource(e, completeStage),
+                       !eyeTex.contains(where: { $0 === a.texture }) { eyeTex.append(a.texture) }
+                }
+                FrameCapture.capture(frame: capGuestFrames, eyes: eyeTex,
+                                     output: drawable.colorTextures.first, cmd: cmd)
+            }
             drawable.encodePresent(commandBuffer: cmd)
         }
 
@@ -3923,5 +3943,119 @@ final class LoadingVideoPlayer {
         if let endObserver { NotificationCenter.default.removeObserver(endObserver) }
         endObserver = nil
         if let cache { CVMetalTextureCacheFlush(cache, 0) }
+    }
+}
+
+
+// MARK: - Diagnostic frame capture (KL_CAPTURE=1)
+//
+// Copies the eye texture(s) the guest submitted and the compositor's output
+// drawable to CPU on chosen frames and writes them as PNG into
+// Documents/Registros (shared with the logs). Diagnostic only: every failure
+// logs and returns; nothing here can stop a frame from presenting.
+enum FrameCapture {
+    static let enabled: Bool = (getenv("KL_CAPTURE").map { String(cString: $0) } ?? "0") == "1"
+    static let frames: Set<Int> = [120, 600, 1200]
+    static let maxWidth = 1024
+    private static let queue = DispatchQueue(label: "klepton.capture", qos: .utility)
+
+    private static var directory: URL {
+        FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("Registros", isDirectory: true)
+    }
+
+    private struct Job { let name: String; let buf: MTLBuffer; let w: Int; let h: Int; let fmt: MTLPixelFormat }
+
+    private static func describe(_ t: MTLTexture) -> String {
+        "fmt=\(t.pixelFormat.rawValue) type=\(t.textureType.rawValue) \(t.width)x\(t.height) "
+        + "slices=\(t.arrayLength) usage=\(t.usage.rawValue) storage=\(t.storageMode.rawValue) "
+        + "fbOnly=\(t.isFramebufferOnly) samples=\(t.sampleCount) mips=\(t.mipmapLevelCount)"
+    }
+
+    private static func supported(_ f: MTLPixelFormat) -> Bool {
+        f == .rgba8Unorm || f == .rgba8Unorm_srgb || f == .bgra8Unorm || f == .bgra8Unorm_srgb
+    }
+
+    /// Encodes the copies into `cmd` (before present) and writes PNGs once it completes.
+    static func capture(frame: Int, eyes: [MTLTexture], output: MTLTexture?, cmd: MTLCommandBuffer) {
+        var sources: [(String, MTLTexture)] = []
+        for (i, t) in eyes.enumerated() { sources.append(("eyetex\(i)", t)) }
+        if let o = output { sources.append(("output", o)) }
+        NSLog("[cap] frame \(frame): \(eyes.count) eye texture(s), output=\(output != nil)")
+        var jobs: [Job] = []
+        guard let blit = cmd.makeBlitCommandEncoder() else {
+            NSLog("[cap] frame \(frame): no blit encoder — skipped"); return
+        }
+        for (tag, t) in sources {
+            NSLog("[cap] \(tag): \(describe(t))")
+            if t.isFramebufferOnly { NSLog("[cap] \(tag): framebufferOnly — cannot be copied, skipped"); continue }
+            if t.sampleCount != 1 { NSLog("[cap] \(tag): multisampled — skipped"); continue }
+            if !supported(t.pixelFormat) {
+                NSLog("[cap] \(tag): pixel format \(t.pixelFormat.rawValue) not handled (only RGBA8/BGRA8) — skipped"); continue
+            }
+            let w = t.width, h = t.height, bpr = w * 4
+            let slices = (t.textureType == .type2DArray) ? t.arrayLength : 1
+            for s in 0..<slices {
+                guard let buf = t.device.makeBuffer(length: bpr * h, options: .storageModeShared) else {
+                    NSLog("[cap] \(tag): could not allocate \(bpr * h) bytes — skipped"); continue
+                }
+                blit.copy(from: t, sourceSlice: s, sourceLevel: 0,
+                          sourceOrigin: MTLOrigin(x: 0, y: 0, z: 0),
+                          sourceSize: MTLSize(width: w, height: h, depth: 1),
+                          to: buf, destinationOffset: 0,
+                          destinationBytesPerRow: bpr, destinationBytesPerImage: bpr * h)
+                let name = tag == "output" ? "capture-\(frame)-output\(s).png"
+                         : (eyes.count == 1 ? "capture-\(frame)-eye\(s).png"
+                                            : "capture-\(frame)-\(tag)-eye\(s).png")
+                jobs.append(Job(name: name, buf: buf, w: w, h: h, fmt: t.pixelFormat))
+            }
+        }
+        blit.endEncoding()
+        if jobs.isEmpty { return }
+        let finalJobs = jobs  // immutable copy: a @Sendable handler may not capture a var
+        cmd.addCompletedHandler { b in
+            if let e = b.error { NSLog("[cap] frame \(frame): command buffer error \(e) — captures may be garbage") }
+            queue.async { for j in finalJobs { write(j) } }
+        }
+    }
+
+    private static func write(_ j: Job) {
+        try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let url = directory.appendingPathComponent(j.name)
+        let bgra = j.fmt == .bgra8Unorm || j.fmt == .bgra8Unorm_srgb
+        // Byte order in memory: RGBA -> big-endian + premultipliedLast/noneSkipLast;
+        // BGRA -> little-endian 32 + noneSkipFirst. Alpha is ignored (opaque).
+        let info: UInt32 = bgra
+            ? CGBitmapInfo.byteOrder32Little.rawValue | CGImageAlphaInfo.noneSkipFirst.rawValue
+            : CGBitmapInfo.byteOrder32Big.rawValue | CGImageAlphaInfo.noneSkipLast.rawValue
+        // Stored values are already sRGB-encoded for both _srgb and unorm formats
+        // as far as a viewer is concerned; tag as sRGB, no conversion.
+        guard let cs = CGColorSpace(name: CGColorSpace.sRGB),
+              let provider = CGDataProvider(dataInfo: nil, data: j.buf.contents(), size: j.w * j.h * 4,
+                                            releaseData: { _, _, _ in }),
+              let full = CGImage(width: j.w, height: j.h, bitsPerComponent: 8, bitsPerPixel: 32,
+                                 bytesPerRow: j.w * 4, space: cs, bitmapInfo: CGBitmapInfo(rawValue: info),
+                                 provider: provider, decode: nil, shouldInterpolate: false,
+                                 intent: .defaultIntent)
+        else { NSLog("[cap] \(j.name): CGImage failed"); return }
+        var img = full
+        let ow = min(maxWidth, j.w), oh = max(1, j.h * ow / j.w)
+        if ow != j.w {
+            if let ctx = CGContext(data: nil, width: ow, height: oh, bitsPerComponent: 8, bytesPerRow: 0,
+                                   space: cs, bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue) {
+                ctx.interpolationQuality = .medium
+                ctx.draw(full, in: CGRect(x: 0, y: 0, width: ow, height: oh))
+                if let s = ctx.makeImage() { img = s }
+            }
+        }
+        guard let dest = CGImageDestinationCreateWithURL(url as CFURL, UTType.png.identifier as CFString, 1, nil) else {
+            NSLog("[cap] \(j.name): CGImageDestination failed"); return
+        }
+        CGImageDestinationAddImage(dest, img, nil)
+        if CGImageDestinationFinalize(dest) {
+            NSLog("[cap] saved \(url.path) \(img.width)x\(img.height) fmt=\(j.fmt.rawValue) (source \(j.w)x\(j.h))")
+        } else {
+            NSLog("[cap] \(j.name): PNG write failed")
+        }
     }
 }

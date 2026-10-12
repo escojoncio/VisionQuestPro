@@ -194,6 +194,16 @@ static void ovrp_hit(const char *name) {
     if (s >= 0 && g_ovrp[s].calls == 1 &&
         (strstr(name, "Foveation") || strstr(name, "TiledMultiRes")))
         fprintf(stderr, "vq.fov ovrp %s -> off (no effect)\n", name);
+    // First call of every entry point, with the guest image that made it: names
+    // which caller (libunity / libOculusXRPlugin / libil2cpp) drives what.
+    if (s >= 0 && g_ovrp[s].calls == 1) {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wframe-address"
+        void *ra1 = __builtin_return_address(1);
+#pragma clang diagnostic pop
+        size_t off = 0; const char *img = kl_addr_image(ra1, &off);
+        fprintf(stderr, "  [ovrp] first-call %s <- %s+0x%zx\n", name, img ? img : "?", off);
+    }
     if (kl_ovrp_verbose() && s >= 0) {
         unsigned c = g_ovrp[s].calls;
         if (c <= 20 || kl_ovrp_verbose() >= 2 || (c % 120) == 0)
@@ -1598,10 +1608,11 @@ static uint64_t klovrp_GetTrackingOriginType2(int *out) {
 // entry point aborts.
 static uint64_t klovrp_GetTrackingTransformRelativePose(float *out, int origin) {
     ovrp_hit("ovrp_GetTrackingTransformRelativePose");
-    (void)origin;
     if (!out) return -1001;
     out[0] = 0.0f; out[1] = 0.0f; out[2] = 0.0f; out[3] = 1.0f;  // orientation
     out[4] = 0.0f; out[5] = 0.0f; out[6] = 0.0f;                 // position
+    { static int n; if (n++ < 2)
+        fprintf(stderr, "  [ovrp] out GetTrackingTransformRelativePose origin=%d -> identity\n", origin); }
     return OVRP_SUCCESS;
 }
 
@@ -3579,7 +3590,24 @@ uint64_t klovrp_GetNodePoseState_impl(int step, int node, void *out) {
         static int nq; if (nq++ < 16)
             fprintf(stderr, "  [ovrp] ZERO-QUAT pose node=%d step=%d\n", node, step);
         f[0] = f[1] = f[2] = 0.0f; f[3] = 1.0f;
+    } else if (fabsf(qn - 1.0f) > 1e-3f) {
+        // Non-unit quaternion: Unity builds a scaled/sheared TRS from it, and the
+        // collider's inverse matrix check is where that shows up as Inf/NaN.
+        static int nn; if (nn++ < 16)
+            fprintf(stderr, "  [ovrp] NONUNIT-QUAT pose node=%d step=%d |q|^2=%f -> normalized\n",
+                    node, step, (double)qn);
+        float inv = 1.0f / sqrtf(qn);
+        f[0] *= inv; f[1] *= inv; f[2] *= inv; f[3] *= inv;
     }
+    // First two answers per node, every float, so a log shows exactly what the
+    // guest's camera/collider chain was built from.
+    { static int said[32]; int k = (unsigned)node < 32 ? node : 31;
+      if (said[k] < 2) { said[k]++;
+        size_t off = 0; const char *img = kl_addr_image(__builtin_return_address(0), &off);
+        fprintf(stderr, "  [ovrp] out GetNodePoseState node=%d step=%d <- %s+0x%zx q=(%.4f %.4f %.4f %.4f) p=(%.3f %.3f %.3f) v=(%.3f %.3f %.3f) av=(%.3f %.3f %.3f)\n",
+                node, step, img ? img : "?", off, (double)f[0], (double)f[1], (double)f[2], (double)f[3],
+                (double)f[4], (double)f[5], (double)f[6], (double)f[7], (double)f[8], (double)f[9],
+                (double)f[13], (double)f[14], (double)f[15]); } }
     // ovrpPoseStatef.Time (double at +0x50) was left 0 by the memset. The real
     // plugin reports the sample's display time; a managed consumer that divides
     // a pose delta by a time delta gets 0/0 = NaN from two zero timestamps.
