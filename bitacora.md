@@ -10,3 +10,15 @@
 1. Fase 1: `tools/vqanalyze` (APK/OBB, motor, Vulkan/GLES, variante Quest 3, alineación de segmentos, uso de x18,
    imports por librería). Necesita el juego de prueba elegido por el usuario.
 2. Comprobar en el visor: TPIDR_EL0 por hilo y x18 (riesgos 1–2 de `docs/PLAN.md`).
+
+## Análisis de Batman: Arkham Shadow (com.camouflaj.manta, solo para estudio)
+- Unity IL2CPP, Vulkan, `com.oculus.supportedDevices=quest3+`, FDM (`xr-vulkan-extension-fragment-density-map-enabled=1`),
+  OculusXRPlugin → libOVRPlugin → libopenxr_loader. Audio Wwise (OpenSL ES). Datos: bundles Addressables sueltos + OBB.
+- 20 `.so` arm64. Relocaciones solo `RELATIVE` (538k), `ABS64`, `GLOB_DAT`, `JUMP_SLOT`. Sin TEXTREL, sin TLSDESC.
+- Ninguna lee `tpidr_el0` → riesgo TLS descartado para este juego.
+- Páginas: todo alineado a 4 KB; texto y datos comparten páginas de 16 KB → el envoltorio debe desplazar datos a frontera
+  de 16 KB y parchear ADRP/ADR/LDR-literal que apunten a ellos (en conversión, firmado; sin JIT).
+- **x18 usado como registro normal** (XNU lo pone a 0 en cambios de contexto): libunity 387 funciones, libOni 32,
+  libc++_shared 8, libOculusXRPlugin 4, libil2cpp 1 (solo guardado/restaurado de contexto, inocuo). Solo 4 funciones
+  tienen un registro x9–x17 libre en toda la función → hace falta renombrado por vivacidad (x18 nunca vive a través de
+  llamadas en AAPCS64, así que basta un temporal libre en cada rango vivo de x18). Script: análisis por FDE de `.eh_frame`.
