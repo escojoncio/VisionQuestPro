@@ -1046,6 +1046,62 @@ static const klj_binding *klj_resolve_binding(const char *cls, const char *name,
     return klj_find_binding("java/lang/Object", name, sig);
 }
 
+// A void method on a class the APK itself ships (not the Android framework,
+// not the Java/Kotlin libraries) is the game's own Java helper: a loading
+// screen, an analytics ping, a platform toast. Its body lives in the APK's dex,
+// which never runs here, so there is nothing to forward the call to - and since
+// it returns nothing, there is also nothing the native caller can be waiting
+// to read back. Aborting on it stopped AC Nexus at
+// LoadingScreen.startUpdatingLoadingScreen; answering it as a no-op is the same
+// outcome as a Java body that did nothing visible. Each such method is named
+// once, so the log still lists every helper we skipped. KL_JNI_STRICT=1 turns
+// this off and restores the abort, for bring-up.
+//
+// A non-void method is never treated this way: inventing its return value is a
+// silent wrong answer, which is exactly what the abort exists to prevent.
+static const char *const klj_framework_prefixes[] = {
+    "android/", "java/", "javax/", "dalvik/", "kotlin/", "kotlinx/",
+    "com/android/", "androidx/", "com/google/android/", NULL,
+};
+
+static int klj_is_framework_class(const char *cls) {
+    if (!cls) return 1;
+    for (const char *const *p = klj_framework_prefixes; *p; p++) {
+        size_t n = strlen(*p);
+        // A C# caller can spell the package with dots; compare the same way the
+        // signature matcher does.
+        if (strlen(cls) >= n && klj_sig_eq_n(cls, *p, n)) return 1;
+    }
+    return 0;
+}
+
+static int klj_game_void_noop(const klj_wanted *w, char have) {
+    if (have != 'V' || w->kind == 'f' || w->kind == 'F') return 0;
+    if (strcmp(w->name, "<init>") == 0) return 0;   // NewObject wants an object back
+    if (klj_is_framework_class(w->cls)) return 0;
+    static int strict = -1;
+    if (strict < 0) strict = kl_env_on("KL_JNI_STRICT", 0);
+    if (strict) return 0;
+
+    static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
+    static const klj_wanted *seen[256];
+    static unsigned nseen;
+    int first = 0;
+    pthread_mutex_lock(&lock);
+    unsigned i = 0;
+    for (; i < nseen; i++) if (seen[i] == w) break;
+    if (i == nseen) {
+        first = 1;
+        if (nseen < sizeof seen / sizeof seen[0]) seen[nseen++] = w;
+        else first = 0;   // table full: stay quiet rather than log per call
+    }
+    pthread_mutex_unlock(&lock);
+    if (first)
+        KLJ_LOG("NO-OP game Java void %s.%s%s (APK-owned, dex not run)",
+                w->cls, w->name, w->sig);
+    return 1;
+}
+
 // Exactly one of `va` / `args` is non-NULL; everything else about a call is
 // identical between the two conventions, so they share this path rather than
 // duplicating the binding lookup and the diagnostics.
@@ -1089,6 +1145,9 @@ static klj_val klj_call_common(void *env, void *self, void *mid, char want,
         }
         return b->fn(env, self, argv, argc);
     }
+
+    if (klj_game_void_noop(w, have))
+        return zero;
 
     KLJ_LOG("no host implementation for %s.%s%s", w->cls, w->name, w->sig);
     if (!g_permissive) {

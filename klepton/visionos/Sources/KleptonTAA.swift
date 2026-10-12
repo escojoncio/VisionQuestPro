@@ -55,9 +55,36 @@ final class KleptonTAA {
     private var rcas: MTLComputePipelineState?
     // [0] = rejected (clipped hard) pixels, [1] = offscreen pixels, [2] = pixels resolved.
     private var statBuf: MTLBuffer?
-    // Per eye: two history textures (ping-pong) and the displayed output.
+    // Per eye: two history textures (ping-pong). The shown pictures live in `slots`.
     private var history: [[MTLTexture]] = [[], []]
-    private var output: [MTLTexture?] = [nil, nil]
+    private var histSize = (0, 0)
+
+    // ASYNC (log 32): the resolve used to be encoded into the COMPOSITOR's command buffer,
+    // ~2x7.6 Mpx of compute ahead of the 100 Hz composite, and the compositor fell to a 20 ms
+    // cadence (50 Hz, deadline missed) — judder and nausea. Now each new guest frame is
+    // resolved on this class's OWN queue, into an output slot, and the compositor shows the
+    // newest COMPLETED slot together with the pose of the guest frame it came from, so a
+    // resolve that is not done yet costs one guest frame of latency (reprojected), never a
+    // missed display deadline. One job in flight at most; slots in use by a composite
+    // command buffer still on the GPU are pinned and never written.
+    struct Published {
+        let slot: Int
+        let pose: kl_ovrp_render_pose
+        let out: [MTLTexture]         // per eye, 2D array slice 0, rgba8 sRGB
+        let flipY: [Bool]
+    }
+    private let queue: MTLCommandQueue?
+    private let lock = NSLock()
+    private var slots: [[MTLTexture]] = []      // slots[k][eye]
+    private var slotSize = (0, 0)
+    private var pins: [Int] = []
+    private var published: Published?
+    private var inflight = false
+    private var inflightSince = Date()
+    private var submittedSerial: UInt64 = 0
+    private var stuckSaid = false
+    private var generation = 0
+    private var gpuMsSum = 0.0, gpuMsN = 0
     private var cur = [0, 0]
     private var lastSerial: [UInt64] = [0, 0]
     private var lastQuat: [simd_quatf?] = [nil, nil]
@@ -84,6 +111,112 @@ final class KleptonTAA {
         }
         statBuf = device.makeBuffer(length: 16, options: .storageModeShared)
         if let b = statBuf { memset(b.contents(), 0, 16) }
+        queue = device.makeCommandQueue()
+        queue?.label = "VPKTAA"
+    }
+
+    /// Output picture: rgba8 sRGB (30 MB per eye at 3072x2465 instead of 60 in rgba16f, three
+    /// slots), written by the RCAS kernel through a non-sRGB view with the encode in the shader
+    /// (sRGB storage writes are not something to rely on), sampled sRGB by the composite.
+    private func makeOut(_ w: Int, _ h: Int, _ label: String) -> (MTLTexture, MTLTexture)? {
+        let d = MTLTextureDescriptor()
+        d.textureType = .type2DArray
+        d.pixelFormat = .rgba8Unorm_srgb
+        d.width = w; d.height = h; d.arrayLength = 1
+        d.usage = [.shaderRead, .shaderWrite, .pixelFormatView]
+        d.storageMode = .private
+        guard let t = device.makeTexture(descriptor: d),
+              let v = t.makeTextureView(pixelFormat: .rgba8Unorm) else { return nil }
+        t.label = label
+        return (t, v)
+    }
+    private var writeViews: [ObjectIdentifier: MTLTexture] = [:]
+
+    /// The newest finished resolve, pinned until `cmd` (the composite that samples it) completes.
+    func acquire(for cmd: MTLCommandBuffer) -> Published? {
+        lock.lock(); defer { lock.unlock() }
+        guard let p = published, p.slot < pins.count else { return nil }
+        pins[p.slot] += 1
+        let slot = p.slot
+        cmd.addCompletedHandler { [weak self] _ in
+            guard let self else { return }
+            self.lock.lock(); if slot < self.pins.count { self.pins[slot] -= 1 }; self.lock.unlock()
+        }
+        return p
+    }
+
+    /// True while VPKTAA is producing pictures (jitter must stay on).
+    var running: Bool { lock.lock(); defer { lock.unlock() }; return published != nil || inflight }
+
+    /// Drop everything shown (guest eye layer gone / size change): the next resolve starts clean.
+    func invalidate() {
+        lock.lock(); published = nil; generation += 1; lock.unlock()
+        lastQuat = [nil, nil]
+    }
+
+    /// Resolve guest frame `rendered.serial` (both eyes) on the VPKTAA queue, if it is new and
+    /// no resolve is in flight. `wait` orders the job after the guest's GPU work (GL guests).
+    func submit(sources: [(MTLTexture, Int, Bool)], rendered: kl_ovrp_render_pose,
+                wait: (MTLSharedEvent, UInt64)?) {
+        guard let queue, sources.count == 2, rendered.serial != 0 else { return }
+        lock.lock()
+        if inflight {
+            let age = Date().timeIntervalSince(inflightSince)
+            lock.unlock()
+            if age > 2 && !stuckSaid {
+                stuckSaid = true
+                NSLog("[taa] resolve in flight for \(String(format: "%.1f", age)) s — guest fence not signalled?")
+            }
+            return
+        }
+        if rendered.serial == submittedSerial { lock.unlock(); return }
+        let w = sources[0].0.width, h = sources[0].0.height
+        if slotSize != (w, h) {
+            // Resize: only once nothing samples the old slots.
+            if pins.contains(where: { $0 > 0 }) { lock.unlock(); return }
+            published = nil
+            slots = []; pins = []; writeViews.removeAll()
+            for k in 0..<3 {
+                var pair: [MTLTexture] = []
+                for e in 0..<2 {
+                    guard let (t, v) = makeOut(w, h, "vpktaa out \(k)/\(e)") else { lock.unlock(); return }
+                    writeViews[ObjectIdentifier(t)] = v
+                    pair.append(t)
+                }
+                slots.append(pair); pins.append(0)
+            }
+            slotSize = (w, h)
+        }
+        // A slot that is neither shown (published) nor sampled by a composite on the GPU.
+        guard let slot = (0..<slots.count).first(where: { $0 != published?.slot && pins[$0] == 0 }) else {
+            lock.unlock(); return
+        }
+        inflight = true; inflightSince = Date()
+        submittedSerial = rendered.serial
+        let gen = generation
+        lock.unlock()
+
+        guard let cmd = queue.makeCommandBuffer() else { lock.lock(); inflight = false; lock.unlock(); return }
+        cmd.label = "VPKTAA \(rendered.serial)"
+        if let (ev, v) = wait { cmd.encodeWaitForEvent(ev, value: v) }
+        var ok = true
+        for eye in 0..<2 {
+            let (src, slice, flip) = sources[eye]
+            if !resolve(cmd: cmd, eye: eye, source: src, slice: slice, flipY: flip,
+                        rendered: rendered, out: slots[slot][eye]) { ok = false; break }
+        }
+        let pub = Published(slot: slot, pose: rendered, out: slots[slot],
+                            flipY: [sources[0].2, sources[1].2])
+        let okFinal = ok
+        cmd.addCompletedHandler { [weak self] cb in
+            guard let self else { return }
+            self.lock.lock()
+            if okFinal && cb.status == .completed && gen == self.generation { self.published = pub }
+            self.gpuMsSum += max(0, cb.gpuEndTime - cb.gpuStartTime) * 1000; self.gpuMsN += 1
+            self.inflight = false
+            self.lock.unlock()
+        }
+        cmd.commit()
     }
 
     private func makeTex(_ w: Int, _ h: Int, _ label: String) -> MTLTexture? {
@@ -102,20 +235,17 @@ final class KleptonTAA {
     /// place of the guest's, or nil to sample the guest's own (VPKTAA unavailable this frame).
     /// The result is on the UNjittered grid of `rendered.tangents`, which is what the
     /// composite builds its quad from.
-    func resolve(cmd: MTLCommandBuffer, eye: Int, source: MTLTexture, slice: Int, flipY: Bool,
-                 rendered: kl_ovrp_render_pose, haveRendered: Bool) -> MTLTexture? {
-        guard let pipeline, let rcas, let statBuf, haveRendered, eye == 0 || eye == 1,
-              source.textureType == .type2DArray else { return nil }
-        // Same guest frame as last time: show the same resolve again.
-        if rendered.serial == lastSerial[eye], let o = output[eye] { reused += 1; return o }
-
+    private func resolve(cmd: MTLCommandBuffer, eye: Int, source: MTLTexture, slice: Int, flipY: Bool,
+                         rendered: kl_ovrp_render_pose, out outTex: MTLTexture) -> Bool {
+        guard let pipeline, let rcas, let statBuf, eye == 0 || eye == 1,
+              source.textureType == .type2DArray,
+              let outView = writeViews[ObjectIdentifier(outTex)] else { return false }
         let w = source.width, h = source.height
         var reset = false
-        if output[eye] == nil || output[eye]!.width != w || output[eye]!.height != h {
-            guard let o = makeTex(w, h, "vpktaa out \(eye)"),
-                  let h0 = makeTex(w, h, "vpktaa hist \(eye)a"),
-                  let h1 = makeTex(w, h, "vpktaa hist \(eye)b") else { return nil }
-            output[eye] = o; history[eye] = [h0, h1]; cur[eye] = 0
+        if history[eye].count != 2 || history[eye][0].width != w || history[eye][0].height != h {
+            guard let h0 = makeTex(w, h, "vpktaa hist \(eye)a"),
+                  let h1 = makeTex(w, h, "vpktaa hist \(eye)b") else { return false }
+            history[eye] = [h0, h1]; cur[eye] = 0
             reset = true
         }
         let t = rendered.tangents
@@ -157,7 +287,7 @@ final class KleptonTAA {
                        sharpness: sharp, slice: UInt32(slice), flipY: flipY ? 1 : 0,
                        reset: reset ? 1 : 0)
         let prevH = history[eye][cur[eye]], nextH = history[eye][cur[eye] ^ 1]
-        guard let enc = cmd.makeComputeCommandEncoder() else { return nil }
+        guard let enc = cmd.makeComputeCommandEncoder() else { return false }
         enc.label = "VPKTAA eye\(eye)"
         let tg = MTLSize(width: 16, height: 16, depth: 1)
         let grid = MTLSize(width: (w + 15) / 16, height: (h + 15) / 16, depth: 1)
@@ -172,7 +302,7 @@ final class KleptonTAA {
         enc.memoryBarrier(scope: .textures)
         enc.setComputePipelineState(rcas)
         enc.setTexture(nextH, index: 0)
-        enc.setTexture(output[eye]!, index: 1)
+        enc.setTexture(outView, index: 1)
         enc.setBytes(&p, length: MemoryLayout<Params>.stride, index: 0)
         enc.dispatchThreadgroups(grid, threadsPerThreadgroup: tg)
         enc.endEncoding()
@@ -196,13 +326,18 @@ final class KleptonTAA {
             lastStats = Date()
             let c = statBuf.contents().assumingMemoryBound(to: UInt32.self)
             let rej = Double(c[0]), off = Double(c[1]), tot = max(1, Double(c[2]))
-            NSLog("[taa] stats (30 s): mode=\(jitterOn ? "jitter" : "nojitter") resolves=\(resolved) "
-                  + "resets=\(resets) reused=\(reused) rejected=\(String(format: "%.1f", rej / tot * 100))% "
-                  + "offscreen=\(String(format: "%.1f", off / tot * 100))%")
+            lock.lock()
+            let gpuMsAvg = gpuMsN > 0 ? gpuMsSum / Double(gpuMsN) : 0
+            gpuMsSum = 0; gpuMsN = 0
+            lock.unlock()
+            // "%@": the message carries '%' signs, which NSLog would read as conversions.
+            NSLog("%@", "[taa] stats (30 s, async queue): mode=\(jitterOn ? "jitter" : "nojitter") resolves=\(resolved) "
+                  + "resets=\(resets) gpu=\(String(format: "%.2f", gpuMsAvg)) ms/frame rejected=\(String(format: "%.1f", rej / tot * 100)) pct "
+                  + "offscreen=\(String(format: "%.1f", off / tot * 100)) pct")
             resolved = 0; resets = 0; reused = 0
             memset(statBuf.contents(), 0, 16)
         }
-        return output[eye]
+        return true
     }
     private var loggedMode: Int32 = -1
 
@@ -342,12 +477,20 @@ final class KleptonTAA {
         }
         histOut.write(float4(max(res, 0.0), resA), uint2(ip), 0);
         }
+        // Counted on 1 pixel in 64: a 32-bit total over 30 s of 2x7.6 Mpx frames overflowed
+        // (log 32 said rejected=132.9 %).
+        if (((gid.x | gid.y) & 7u) != 0u) { rej = 0; off = 0; cnt = 0; }
         uint r1 = simd_sum(rej), r2 = simd_sum(off), r3 = simd_sum(cnt);
         if (lane == 0) {
             if (r1) atomic_fetch_add_explicit(&stats[0], r1, memory_order_relaxed);
             if (r2) atomic_fetch_add_explicit(&stats[1], r2, memory_order_relaxed);
             if (r3) atomic_fetch_add_explicit(&stats[2], r3, memory_order_relaxed);
         }
+    }
+    // Linear -> sRGB transfer (the output is written through a plain rgba8Unorm view).
+    static float3 enc_srgb(float3 c) {
+        c = clamp(c, 0.0, 1.0);
+        return select(1.055 * pow(c, float3(1.0 / 2.4)) - 0.055, c * 12.92, c <= 0.0031308);
     }
     // RCAS (AMD FidelityFX CAS, robust variant) on the resolved picture; history untouched.
     kernel void vpktaa_rcas(texture2d_array<float, access::read> hist [[texture(0)]],
@@ -358,7 +501,7 @@ final class KleptonTAA {
         if (gid.x >= w || gid.y >= h) return;
         int2 ip = int2(gid), mx = int2(w - 1, h - 1);
         float4 e4 = hist.read(gid, 0);
-        if (p.sharpness <= 0.0) { out.write(e4, gid, 0); return; }
+        if (p.sharpness <= 0.0) { out.write(float4(enc_srgb(max(e4.rgb, 0.0)), e4.a), gid, 0); return; }
         float3 e = e4.rgb;
         float3 b = hist.read(uint2(clamp(ip + int2(0, -1), int2(0), mx)), 0).rgb;
         float3 d = hist.read(uint2(clamp(ip + int2(-1, 0), int2(0), mx)), 0).rgb;
@@ -372,7 +515,7 @@ final class KleptonTAA {
         float lobe = max(-0.1875, min(max(lobeRGB.r, max(lobeRGB.g, lobeRGB.b)), 0.0)) * p.sharpness;
         float3 o = (lobe * (b + d + f + hh) + e) / (4.0 * lobe + 1.0);
         if (any(kbad(o))) o = any(kbad(e)) ? float3(0.0) : e;
-        out.write(float4(max(o, 0.0), e4.a), gid, 0);
+        out.write(float4(enc_srgb(max(o, 0.0)), e4.a), gid, 0);
     }
     """
 }

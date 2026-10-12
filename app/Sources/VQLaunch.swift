@@ -85,8 +85,8 @@ final class VQSettings: ObservableObject {
     // Resolution base: false = the game's original (Quest 3 budget), true = Vision Pro's request.
     /// "original" (Quest 3 budget) | "compositor" (visionOS drawable) | "native" (AVP panel density, heaviest).
     @Published var resolutionBase: String { didSet { save() } }
-    /// Drop the game's MSAA (render 1x) when VPKTAA is on.
-    @Published var dropGameAA: Bool { didSet { save() } }
+    /// Head-locked FPS counter in the compositor (KL_FPS_HUD).
+    @Published var showFps: Bool { didSet { save() } }
     @Published var aswDisabled: Bool { didSet { save() } }
     @Published var quest3Profile: Bool { didSet { save() } }
     @Published var forceVulkan: Bool { didSet { save() } }
@@ -126,7 +126,7 @@ final class VQSettings: ObservableObject {
         } else {
             resolutionBase = (d.object(forKey: "vq.resAVP") as? Bool ?? false) ? "compositor" : "original"
         }
-        dropGameAA = d.object(forKey: "vq.dropGameAA2") as? Bool ?? true  // game MSAA always off unless re-enabled
+        showFps = d.object(forKey: "vq.showFps") as? Bool ?? false
         aswDisabled = d.object(forKey: "vq.aswOff") as? Bool ?? true
         quest3Profile = d.object(forKey: "vq.quest3v2") as? Bool ?? true  // Quest 3 for every game by default
         forceVulkan = d.object(forKey: "vq.forceVulkan") as? Bool ?? true
@@ -171,7 +171,7 @@ final class VQSettings: ObservableObject {
         d.set(perfDiag, forKey: "vq.perfDiag")
         d.set(renderScale, forKey: "vq.renderScale")
         d.set(resolutionBase, forKey: "vq.resBase")
-        d.set(dropGameAA, forKey: "vq.dropGameAA2")
+        d.set(showFps, forKey: "vq.showFps")
         d.set(aswDisabled, forKey: "vq.aswOff")
         d.set(quest3Profile, forKey: "vq.quest3v2")
         d.set(forceVulkan, forKey: "vq.forceVulkan")
@@ -277,7 +277,8 @@ final class VQSettings: ObservableObject {
         setenv("VPVK_ANISO", String(anisoLevel), 1)  // read by VPVulkan even if the dlsym forward misses
         // Per-pass GPU timing in VPEngine (gpu.passtime lines, one rendering frame every 90).
         if perfDiag { setenv("VP_PASS_TIMING", "90", 1) } else { unsetenv("VP_PASS_TIMING") }
-        c.force_single_sample = dropGameAA ? 1 : 0  // independent of VPKTAA: MSAA off means off
+        c.force_single_sample = 1  // the game's MSAA is always off, for every game, with or without VPKTAA
+        setenv("KL_FPS_HUD", showFps ? "1" : "0", 1)
         setenv("VPVK_FORCE_1X", c.force_single_sample != 0 ? "1" : "0", 1)
         c.render_scale = Float(renderScale)
         c.asw_disabled = aswDisabled ? 1 : 0
@@ -288,7 +289,7 @@ final class VQSettings: ObservableObject {
         setenv("KL_VPKTAA_PCT", String(format: "%.0f", vpktaaPercent), 1)
         setenv("KL_VPKTAA_SHARP", String(format: "%.2f", vpktaaSharpness), 1)
         vq_prewarm_set_enabled(precompileShaders ? 1 : 0)
-        VQLog.log("Gráficos: foveado Quest siempre apagado; foveado propio \(foveation), VPKTAA \(vpktaa) \(Int(vpktaaPercent)) % nitidez \(vpktaaSharpness), anisotrópico x\(anisoLevel), diagnóstico de rendimiento \(perfDiag), escala \(renderScale), ASW apagado \(aswDisabled), perfil Quest 3 \(quest3Profile)")
+        VQLog.log("Gráficos: foveado Quest siempre apagado; foveado propio \(foveation), VPKTAA \(vpktaa) \(Int(vpktaaPercent)) % nitidez \(vpktaaSharpness), anisotrópico x\(anisoLevel), diagnóstico de rendimiento \(perfDiag), escala \(renderScale), ASW apagado \(aswDisabled), perfil Quest 3 \(quest3Profile), MSAA del juego apagado, FPS en pantalla \(showFps)")
         VQLog.log("Ajustes: sin red \(offline), log del juego \(guestLog), vigilante \(Int(watchdogSeconds)) s")
     }
 }

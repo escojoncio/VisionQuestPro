@@ -648,6 +648,33 @@ static int apply_android_packed(kl_image *img, const uint8_t *blob, size_t sz) {
     return 0;
 }
 
+// Every import this image could not bind, named in ONE line at load. Each one
+// is an abort-by-name only when it is first CALLED, so without this a run
+// reveals missing symbols one crash at a time (Attack on Titan VR stopped on
+// pthread_attr_setschedpolicy from libcri_ware_unity, with no hint whether
+// anything else from that library was also missing). Printed once per load,
+// capped so a library with hundreds of misses cannot flood the log; weak
+// imports left NULL are not included (they are an expected probe, not a miss).
+static void report_missing(const kl_image *img) {
+    if (!img->missing_n) return;
+    const char *base = strrchr(img->path, '/');
+    base = base ? base + 1 : img->path;
+    enum { KL_MISSING_SHOWN = 48 };
+    char line[3072];
+    size_t at = 0;
+    unsigned shown = 0;
+    for (unsigned i = 0; i < img->missing_n && shown < KL_MISSING_SHOWN; i++) {
+        const char *nm = img->missing[i] ? img->missing[i] : "?";
+        int w = snprintf(line + at, sizeof line - at, "%s%s", shown ? ", " : "", nm);
+        if (w < 0 || (size_t)w >= sizeof line - at) break;   // keep whole names only
+        at += (size_t)w;
+        shown++;
+    }
+    line[at] = 0;
+    fprintf(stderr, "  [dl] %s: %u unresolved import(s): %s%s\n", base, img->missing_n,
+            line, shown < img->missing_n ? ", ..." : "");
+}
+
 // Walk PT_DYNAMIC and bind the image: symtab/strtab, DT_INIT_ARRAY, and every
 // relocation. Shared by both loaders — the mmap path below and kl_load_dylib()
 // — because this half is identical either way. It is what lets klepton-ld emit a
@@ -700,6 +727,7 @@ static int bind_dynamic(kl_image *img, const Elf64_Phdr *ph, int phnum, uint64_t
         return -1;
     if (relr) apply_relr(img, relr, relrsz / sizeof(uint64_t));
     if (arela && apply_android_packed(img, arela, arelasz) != 0) return -1;
+    report_missing(img);
     return 0;
 }
 

@@ -2,6 +2,49 @@
 
 Historial completo de sesiones anteriores: `git log -p bitacora.md` (compactada el 2026-10-12 tras el log 25).
 
+## Log 32 (2026-10-13): VPKTAA lento / a saltos → build siguiente
+- Log 32: vpktaa=1 force_1x=1, base «compositor» (eye 3072x2465 vs 2290x2400 del juego), gpu.time media 19 ms
+  (895/1252 > 14 ms → juego ~50 fps), cadencia compositor 12–17 ms con 9–16 frames fuera de plazo por medio segundo:
+  el TAA (2x7,6 Mpx, resolve + RCAS) iba DENTRO del command buffer del compositor. rcas=1.0 (nitidez máxima).
+- `KleptonTAA.swift`: cola Metal propia. `submit` (guest frame nuevo, 1 trabajo en vuelo, espera el fence GL si lo hay
+  vía `taaWait`), 3 slots de salida rgba8 sRGB (escritos por vista rgba8Unorm + `enc_srgb`), `acquire(for: cmd)` fija
+  el slot hasta que acaba el composite, `invalidate` + `generation`. El compositor muestra el último resolve TERMINADO
+  con SU pose (`taaPose` sustituye a `rendered` en `encodeViews`) → nunca pierde plazo por el TAA.
+  Stats: muestreo 1/64 (antes desbordaba uint32: «rejected=132.9»), `NSLog("%@")` (el «%» rompía el formato),
+  `gpu=… ms/frame` medido en la cola TAA.
+- HUD FPS (`KL_FPS_HUD`, ajuste «Mostrar FPS», `vq.showFps`): panel head-locked (overlay pipeline, depth always,
+  `srgb_decode=0`): fps juego (serial), Hz visor, resolución de render, VPKTAA on/off; textura CoreText cada 0,5 s.
+- MSAA del juego apagado siempre (`force_single_sample=1`, quitado `dropGameAA`). Aviso de cadencia con n ≥ 15.
+- Ajustes: textos explicativos de «Intensidad del suavizado» (peso de historial 0,5–0,92) y «Nitidez» (RCAS).
+- `kl_pthread.c` inheritsched con numeración bionic (EXPLICIT 0, INHERIT 1).
+
+## Logs 29–31 (2026-10-13): crashes de AC Nexus y Attack on Titan → build siguiente
+- AC Nexus (log 30): abort JNI en `LoadingScreen.startUpdatingLoadingScreen(String,Context,Surface,II)V`.
+  `jni/kl_jni_services.c` `klj_LoadingScreen_startUpdating` (junto a `stopUpdatingLoadingScreen`): registra ruta,
+  surface, capa (`kl_hostvideo_surface_layer`) y w×h; no hace nada más.
+- Genérico `kl_jni.c` `klj_game_void_noop` (en `klj_call_common`, antes del abort): método `V` (no `<init>`) de clase
+  que no es del framework (`android/ java/ javax/ dalvik/ kotlin/ kotlinx/ com/android/ androidx/
+  com/google/android/`) → no-op con `[jni] NO-OP game Java void …` una vez por método. `KL_JNI_STRICT=1` restaura
+  el abort. GetMethodID/GetStaticMethodID nunca fallan (`klj_want`), así que solo hacía falta en la llamada.
+- Attack on Titan (log 31): `pthread_attr_setschedpolicy` sin resolver (libcri_ware_unity). `libc/kl_pthread.c`:
+  attr get/set de stacksize, detachstate, stack, guardsize, schedpolicy, schedparam, scope (PROCESS→95), inheritsched
+  (flags bionic 0x4/0x8) + `pthread_setschedprio`; `sched_get_priority_max/min` con semántica Linux (FIFO/RR 1..99,
+  OTHER/BATCH/IDLE 0, resto EINVAL). Exportados en `kl_shim.c` (X()/E()); quitados los `KL_FWD` de
+  `kl_libc_table.h` (generado: si se regenera, comprobar que no vuelven).
+- `kl_image.c` `report_missing` al final de `bind_dynamic` (ELF y dylib): `[dl] <lib>: N unresolved import(s): …`
+  (máx. 48 nombres) → todos los símbolos que faltan en una sola ejecución.
+- `xr/kl_ovrp.c`: `ovrp_log_chain` (recorre x29 con límites de la pila del hilo, hasta 6 retornos de guest + método
+  IL2CPP) en `DestroyDistortionWindow*` (vía `klovrp_ok`) y `DestroyLayer` (8 primeras); `ovrp_log_ret` para
+  WaitToBeginFrame/BeginFrame4/EndFrame4 (5 primeras y cualquier fallo).
+- Hipótesis AoT pantalla tras frame 0: nuestras respuestas son éxito (Wait/Begin/End devuelven 0); el proveedor
+  Oculus (+0x1500c/+0x1509c) para el display tras el primer EndFrame4 sin pedir ShouldQuit/Recreate (Update3 y
+  GetAppShouldQuit2 nunca llamados). Probable parada del subsistema desde C# (XR Management / script de arranque)
+  tras el `NullReferenceException` (~l.1518) o el error de GUID del OBB (`got ''`, patch OBB ausente).
+### Comprobar en el próximo log
+- AC Nexus: línea `LoadingScreen.startUpdatingLoadingScreen …` y que sigue; lista de `NO-OP game Java void`.
+- AoT: sin fatal de pthread; líneas `[dl] …unresolved import(s)`; `guest chain:` de DestroyDistortionWindow2 /
+  DestroyLayer (¿método IL2CPP?) y `[ovrp] … #N ->`.
+
 ## Batman logs 27/28 (2026-10-12) → build siguiente
 - Log 27: VPKTAA on + MSAA forzado 1x → todo rosa (ojo sin dibujar, arreglo en VPEngine `forcedResolveCopy`); compositor
   a ~58 Hz con VPKTAA a 3072x2465. Log 28: VPKTAA off (`vpktaa=0`); congelaciones `gpu.hold` hasta 1,35 s.
