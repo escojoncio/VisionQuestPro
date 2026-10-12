@@ -1,6 +1,10 @@
 # Bitácora — VisionQuestPro
 
 ## Estado (2026-10-12)
+- Log 16:27 (Batman: Arkham Shadow): abort por `glGetShaderPrecisionFormat` sin implementar (ANGLE no da entrada
+  para él). Arreglo: `klepton/runtime/gfx/kl_egl.c` `klgl_GetShaderPrecisionFormat` en `g_gl_impl` (float 127/127/23,
+  int 31/30/0, como un GPU de 32 bits en todos los niveles). Llegó hasta Unity creando contexto GLES 2 y consultando
+  límites; siguiente fallo pendiente de log.
 - Paso 1 (app genérica Klepton + lanzador + conversión en el visor, Vulkan con MoltenVK, sin ANGLE): **build verde**
   (run 38219167270, commit «kl_app.c: sin objetivo por defecto compilado»). IPA 6,7 MB en release `visionos`
   (`VisionQuestPro.ipa`, con `Frameworks/MoltenVK.framework` y `VPEngineCertificates/`). Nada probado aún en el visor.

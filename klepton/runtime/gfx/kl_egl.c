@@ -1025,7 +1025,26 @@ void kl_egl_dump_shaders(const char *dir) {
     fprintf(stderr, "  [gl] wrote %u shader sources to %s\n", g_nshaders, dir);
 }
 
+// glGetShaderPrecisionFormat: Unity asks it once at start (log 16:27, Batman: Arkham Shadow) to
+// pick shader precisions; reached here only when the host GL gives no entry point for it. The
+// answer is the one a GPU with full 32-bit precision at every level gives (ANGLE-on-Metal's own):
+// floats range 2^-127..2^127 with 23 bits of mantissa, integers -2^31..2^30, for low, medium and
+// high alike. A guest told less would fall back to lower-precision shader variants.
+static void klgl_GetShaderPrecisionFormat(uint32_t shadertype, uint32_t precisiontype,
+                                          int32_t *range, int32_t *precision) {
+    (void)shadertype;
+    int s = gl_slot("glGetShaderPrecisionFormat");
+    if (s >= 0) g_gl[s].calls++;
+    const int is_int = precisiontype >= 0x8DF3 && precisiontype <= 0x8DF5;  // LOW/MEDIUM/HIGH_INT
+    if (range) {
+        range[0] = is_int ? 31 : 127;
+        range[1] = is_int ? 30 : 127;
+    }
+    if (precision) *precision = is_int ? 0 : 23;
+}
+
 static const struct { const char *name; void *fn; } g_gl_impl[] = {
+    {"glGetShaderPrecisionFormat", (void *)klgl_GetShaderPrecisionFormat},
     {"glGetString",   (void *)klgl_GetString},
     {"glGetStringi",  (void *)klgl_GetStringi},
     {"glGetError",    (void *)klgl_GetError},
