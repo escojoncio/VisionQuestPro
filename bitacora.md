@@ -13,6 +13,19 @@
 - Fallo resuelto en la 2.ª build: `KL_TARGET_DEFAULT_NAME` no existe sin el proyecto de Klepton → `kl_app.c` define
   `KL_TARGET_DEFAULT "(ninguno)"`.
 
+## Batman log 14 (2026-10-12): imagen corrupta + sin audio
+- Gráficos (confirmado): 20 draws/frame saltadas `unbound_kind5_slot4/2`. SPIR-V `Dim::SubpassData` lleva siempre
+  `Sampled=2` → `lower.cpp` lo declaraba StorageTexture (kind 5) mientras el layout Vulkan liga INPUT_ATTACHMENT como
+  Texture (kind 3). Arreglo VPEngine `gpu/shader/spirv/src/lower.cpp`: `storage` excluye SubpassData. Pendiente si
+  aparece: multiview + subpassLoad debería leer capa = ViewIndex (hoy D2, xy).
+- Audio (confirmado por secuencia del log): `GetConfiguration(PERFORMANCE_MODE)` devolvía 12 → Oboe 1.7 (SDK 29) aborta
+  open() → `OculusEndpointSink ... Unsupported format` y reintentos abortados; nunca hubo `[sl] play state`. Arreglo
+  `kl_opensl.c` `cfg_slot/cfg_Set/cfg_Get`: guarda y devuelve performanceMode/streamType (consulta de tamaño con v=NULL).
+- NaN cámara: no sale de las poses del shim (revisado). `kl_ovrp.c` `klovrp_GetNodePoseState_impl` sanea y registra
+  `NONFINITE`/`ZERO-QUAT`. Pista: el error es de una cámara con rect 1832x1920 (pantalla Android, no ojo XR).
+### Comprobar log 15
+- `[sl] GetConfiguration(...) -> N`, `[sl] play state -> PLAYING`, sin `eps client`. `gpu.err ... skipped_draws=0`.
+
 ## Batman log 13 (2026-10-12)
 - point_size arreglado: 0 fallos de pipeline; `missing_pipelines` baja a 0 (compilación asíncrona). Quedan 20 draws/frame
   saltadas `unbound_kind5_slot4` (StorageTexture slot 4) → diagnóstico en VPEngine `metal2/src/metal_backend.mm`
