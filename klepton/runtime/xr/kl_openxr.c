@@ -415,6 +415,65 @@ typedef struct { int32_t type; const void *next;
                  float radius, centralAngle, aspectRatio;
                } XrCompositionLayerCylinderKHR;
 
+// XR_KHR_composition_layer_color_scale_bias: chained on a layer's `next`, it
+// asks for out = colour * colorScale + colorBias on that layer. Unity's OpenXR
+// fades (and OVRPlugin-over-OpenXR's SetColorScaleAndOffset) arrive this way.
+// A projection layer's goes to the eye pass's fade (kl_reproject_set_fade), a
+// quad's or cylinder's to the overlay record's per-layer colour.
+#define XR_TYPE_COMPOSITION_LAYER_COLOR_SCALE_BIAS_KHR 1000034000
+typedef struct { float r, g, b, a; } XrColor4f;
+typedef struct { int32_t type; const void *next;
+                 XrColor4f colorScale; XrColor4f colorBias;
+               } XrCompositionLayerColorScaleBiasKHR;
+
+// KL_XR_COLOR_BIAS=0 withholds the extension and ignores the struct (A/B).
+static int klxr_color_bias_on(void) {
+    static int on = -1;
+    if (on < 0) on = kl_env_on("KL_XR_COLOR_BIAS", 1);
+    return on;
+}
+
+// The colour scale/bias chained on a layer, or 0. Bounded walk: a chain is the
+// guest's memory and a cycle in it must not hang the frame loop. Non-finite
+// values fall back to identity. `what` names the layer kind for the log.
+static int klxr_layer_color_bias(const void *next, float scale[4], float bias[4],
+                                 const char *what) {
+    if (!klxr_color_bias_on()) return 0;
+    const XrCompositionLayerColorScaleBiasKHR *cb = NULL;
+    for (int hop = 0; next && hop < 16; hop++) {
+        if (((uintptr_t)next & 7) != 0) break;
+        if (*(const int32_t *)next == XR_TYPE_COMPOSITION_LAYER_COLOR_SCALE_BIAS_KHR) {
+            cb = (const XrCompositionLayerColorScaleBiasKHR *)next;
+            break;
+        }
+        next = *(const void *const *)((const char *)next + 8);
+    }
+    if (!cb) return 0;
+    const float in_s[4] = { cb->colorScale.r, cb->colorScale.g,
+                            cb->colorScale.b, cb->colorScale.a };
+    const float in_b[4] = { cb->colorBias.r, cb->colorBias.g,
+                            cb->colorBias.b, cb->colorBias.a };
+    for (int i = 0; i < 4; i++) {
+        scale[i] = isfinite(in_s[i]) ? in_s[i] : 1.0f;
+        bias[i]  = isfinite(in_b[i]) ? in_b[i] : 0.0f;
+    }
+    // The first few, then only when the value class (identity / not) changes.
+    static int said, last_identity = -1;
+    int identity = scale[0] == 1.0f && scale[1] == 1.0f && scale[2] == 1.0f &&
+                   scale[3] == 1.0f && bias[0] == 0.0f && bias[1] == 0.0f &&
+                   bias[2] == 0.0f && bias[3] == 0.0f;
+    if (said < 48 && (said < 4 || identity != last_identity)) {
+        said++;
+        fprintf(stderr, "  [xr] %s colour scale/bias: scale=[%.3f %.3f %.3f %.3f] "
+                        "bias=[%.3f %.3f %.3f %.3f]%s\n", what,
+                scale[0], scale[1], scale[2], scale[3],
+                bias[0], bias[1], bias[2], bias[3], identity ? " (identity)" : "");
+    }
+    last_identity = identity;
+    return 1;
+}
+void kl_reproject_set_fade(int on, const float scale[4], const float offset[4], int all_layers);
+
 typedef struct { int32_t type; const void *next;
                  int64_t displayTime;
                  int32_t environmentBlendMode;
@@ -810,7 +869,8 @@ static klxr_instance *klxr_inst(void *h) {
 enum { KLXR_GATE_ALWAYS = 0,      // unconditional
        KLXR_GATE_REFRESH = 1,     // ...unless KL_XR_REFRESH_EXT=0
        KLXR_GATE_VULKAN = 2,      // ...only when MoltenVK is actually reachable
-       KLXR_GATE_USER_PRESENCE = 3 };  // ...missioniss only (see below)
+       KLXR_GATE_USER_PRESENCE = 3,    // ...missioniss only (see below)
+       KLXR_GATE_COLOR_BIAS = 4 };     // ...unless KL_XR_COLOR_BIAS=0
 
 static const struct { const char *name; uint32_t version; int gate; } g_extensions[] = {
     { "XR_KHR_opengl_es_enable",       10, KLXR_GATE_ALWAYS },
@@ -898,6 +958,9 @@ static const struct { const char *name; uint32_t version; int gate; } g_extensio
     { "XR_KHR_android_surface_swapchain",     4, KLXR_GATE_ALWAYS },
     { "XR_KHR_composition_layer_cylinder",    4, KLXR_GATE_ALWAYS },
     { "XR_KHR_composition_layer_equirect2",   1, KLXR_GATE_ALWAYS },
+    // A chained struct only, no entry points, and honoured: klxr_layer_color_bias
+    // (projection -> eye-pass fade, quad/cylinder -> per-layer overlay colour).
+    { "XR_KHR_composition_layer_color_scale_bias", 5, KLXR_GATE_COLOR_BIAS },
     { "XR_FB_composition_layer_image_layout", 1, KLXR_GATE_ALWAYS },
     { "XR_FB_composition_layer_settings",     3, KLXR_GATE_ALWAYS },
     // XR_FB_passthrough — some guests REQUIRE it (instance creation fails
@@ -985,6 +1048,8 @@ static int klxr_ext_gate_open(int gate) {
         const char *t = kl_driver_target_name();
         return kl_env_on("KL_XR_USER_PRESENCE", t && !strcmp(t, "missioniss"));
     }
+    case KLXR_GATE_COLOR_BIAS:
+        return klxr_color_bias_on();
     default:
         return 1;
     }
@@ -4717,6 +4782,17 @@ static int klxr_quad_record(const XrCompositionLayerQuad *q, klxr_swapchain *sc,
     o->head_locked = 0;
     o->eye_visibility = q->eyeVisibility;
     o->origin_top_left = sc->session && sc->session->gfx == KLXR_GFX_VULKAN;
+    // Per-layer colour (XR_KHR_composition_layer_color_scale_bias). The cylinder
+    // path copies its `next` into the quad it builds, so it lands here too.
+    // Identity is recorded as off so the global fade can still apply.
+    float cs[4], cb[4];
+    if (klxr_layer_color_bias(q->next, cs, cb, "quad") &&
+        !(cs[0] == 1.0f && cs[1] == 1.0f && cs[2] == 1.0f && cs[3] == 1.0f &&
+          cb[0] == 0.0f && cb[1] == 0.0f && cb[2] == 0.0f && cb[3] == 0.0f)) {
+        o->color_on = 1;
+        memcpy(o->color_scale, cs, sizeof cs);
+        memcpy(o->color_offset, cb, sizeof cb);
+    }
     return 1;
 }
 
@@ -4795,6 +4871,10 @@ static void klxr_quad_census(const kl_ovrp_overlay *o, int placed) {
     // landed in is worth one line.
     kl_ovrp_overlay key = *o;
     key.stage = 0;
+    // Nor the colour VALUES: a fade ramps them every frame. Whether a colour
+    // applies (color_on) is still part of the key.
+    memset(key.color_scale, 0, sizeof key.color_scale);
+    memset(key.color_offset, 0, sizeof key.color_offset);
     int k = o->layer_id & 3;
     if (last_placed[k] == placed && memcmp(&last[k], &key, sizeof key) == 0) return;
     last[k] = key;
@@ -5534,6 +5614,10 @@ static XrResult klxr_EndFrame(void *session, const XrFrameEndInfo *info) {
     // rather than asking the tracker a third time.
     klxr_head_delta fpred = klxr_frame_head_delta(s, s->frame_predicted_time);
     klxr_frame_shape(info);
+    // XR_KHR_composition_layer_color_scale_bias on a projection layer; applied
+    // after the walk (see below the loop).
+    int   proj_bias_on = 0;
+    float proj_bias_s[4] = { 1, 1, 1, 1 }, proj_bias_b[4] = { 0, 0, 0, 0 };
 
     for (uint32_t i = 0; i < info->layerCount; i++) {
         const XrCompositionLayerBaseHeader *layer = info->layers[i];
@@ -5635,6 +5719,12 @@ static XrResult klxr_EndFrame(void *session, const XrFrameEndInfo *info) {
         const XrCompositionLayerProjection *proj =
             (const XrCompositionLayerProjection *)layer;
         uint32_t li = proj_layers++;
+        // Colour scale/bias on a projection layer: the first one this frame wins
+        // and drives the eye pass's fade, which covers every projection layer
+        // (a per-layer split has not been needed by any guest yet).
+        if (!proj_bias_on)
+            proj_bias_on = klxr_layer_color_bias(proj->next, proj_bias_s,
+                                                 proj_bias_b, "projection");
         // This layer's entry in the frame's list, opened before its views are
         // walked so a one-view layer still gets one (with the other eye left at
         // -1, which is how "this layer does not name that eye" is said).
@@ -6260,6 +6350,24 @@ static XrResult klxr_EndFrame(void *session, const XrFrameEndInfo *info) {
     // guarded on nquads: leaving the previous frame's list standing would keep
     // drawing a layer the guest has stopped submitting.
     kl_ovrp_overlays_external(quads, nquads);
+    // The projection layer's colour scale/bias, as the eye pass's fade. Only
+    // touched once this path has set it, so a guest that never chains the
+    // struct leaves the fade to whoever owns it (the OVRPlugin shim's
+    // SetColorScaleAndOffset); dropped again when the guest stops chaining it.
+    {
+        static int xr_fade_owned;
+        int identity = proj_bias_on &&
+            proj_bias_s[0] == 1.0f && proj_bias_s[1] == 1.0f && proj_bias_s[2] == 1.0f &&
+            proj_bias_s[3] == 1.0f && proj_bias_b[0] == 0.0f && proj_bias_b[1] == 0.0f &&
+            proj_bias_b[2] == 0.0f && proj_bias_b[3] == 0.0f;
+        if (proj_bias_on && !identity) {
+            kl_reproject_set_fade(1, proj_bias_s, proj_bias_b, 0);
+            xr_fade_owned = 1;
+        } else if (xr_fade_owned) {
+            kl_reproject_set_fade(0, NULL, NULL, 0);
+            xr_fade_owned = 0;
+        }
+    }
     // The same statement for the eye, which had no way to be told "not this
     // frame" — see kl_ovrp.h. A guest that alternates between a projection pair
     // and a quad shows one or the other, not both at once.

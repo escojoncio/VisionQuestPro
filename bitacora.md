@@ -2,6 +2,44 @@
 
 Historial completo de sesiones anteriores: `git log -p bitacora.md` (compactada el 2026-10-12 tras el log 25).
 
+## Batman logs 27/28 (2026-10-12) → build siguiente
+- Log 27: VPKTAA on + MSAA forzado 1x → todo rosa (ojo sin dibujar, arreglo en VPEngine `forcedResolveCopy`); compositor
+  a ~58 Hz con VPKTAA a 3072x2465. Log 28: VPKTAA off (`vpktaa=0`); congelaciones `gpu.hold` hasta 1,35 s.
+- Rosa a pantalla completa 1–2 s al abrir la inmersiva (todos los juegos): imágenes nuevas sin inicializar.
+  `kl_vulkan.c` `klvk_image_alloc` añade TRANSFER_DST a las de color y `klvk_image_clear_black` las limpia a negro
+  opaco (fence; si expira, desactiva; `KL_VK_CLEAR_NEW=0` lo apaga).
+- App: VPKTAA activado por defecto (`vq.vpktaa3`); «Desactivar el MSAA del juego» independiente del VPKTAA
+  (`vq.dropGameAA2`, def. sí; `force_single_sample = dropGameAA`).
+- Audio: `kl_audio.c` latencia objetivo 80 → 40 ms (`KL_AUDIO_LATENCY_MS`).
+- VPKTAA: guardas NaN/Inf por bits (`kbad`/`kbad1`) en resolve e historial y en RCAS.
+- Capturas (`KL_CAPTURE`, ajuste «Capturas de diagnóstico»): frames 2/30/120/600/1200 + 45 frames tras el primer
+  compuesto de cada capa overlay; añaden salidas VPKTAA (`capture-N-vpktaaE-0.png`, rgba16f → sRGB en CPU, NaN en
+  magenta) y la imagen de cada capa (`capture-N-layerID-0.png`).
+- Murciélago (capa 2, tira 2048x128 de 16 celdas): rect de textura correcto en log 28 (`src=[k/16 …]`), pero se ve
+  cortado y sin animación. Log nuevo: `layer N image … written by the guest (vkCmdCopyImage|vkCmdBlitImage|render
+  target) … source fmt F WxH` + captura de la capa para ver qué contiene.
+### Comprobar en el log 29
+- Sin rosa al abrir; con VPKTAA imagen correcta y `capture-*-vpktaa*`; `[taa] stats`; cadencia del compositor ~100 Hz.
+- `gpu.pso.cache saved` sin fallos; menos/más cortos `gpu.hold`; segunda sesión casi sin ellos.
+
+## Mejoras globales OpenXR/overlays (2026-10-12) → build siguiente
+- OpenXR `XR_KHR_composition_layer_color_scale_bias` (v5, gate `KLXR_GATE_COLOR_BIAS`, `KL_XR_COLOR_BIAS=0` lo oculta e
+  ignora): `kl_openxr.c` `klxr_layer_color_bias` (recorre `next`, máx. 16 saltos, tipo 1000034000). Capa de proyección
+  → `kl_reproject_set_fade(…, all=0)` al final de `xrEndFrame` (solo si este camino lo puso: `xr_fade_owned`; no pisa
+  el fundido de `ovrp_SetColorScaleAndOffset`). Quad/cilindro → `klxr_quad_record` rellena `color_on/color_scale/
+  color_offset` (identidad = off). `klxr_quad_census` ignora los valores de color en la clave (sin spam en fundidos).
+- `subImage.imageRect` del quad: ya cubierto (`viewport` en px → `uv_rect` en `kl_overlay_build`, misma convención de
+  origen que la textura). Equirect OpenXR sigue sin componerse (nombrado una vez); cilindro → quad, hereda color.
+- `kl_reproject.c/.h` `kl_overlay_color(ov, scale, offset)`: color propio, si no fundido global con `all`; usado por
+  `kl_overlay_build` y por el equirect. `kl_msl_equirect` `KLEq` + `colorOn`(176) `colorScale[4]`(180)
+  `colorOffset[4]`(196), stride 224 = `KLEqUniform` (Swift, tuplas de Float). `kl_eq_f`: rgb·scale+offset y
+  ×saturate(scale.a+offset.a) (panorama opaco → funde a negro). `encodeEquirect` lo rellena; vídeo/skybox de carga en 0.
+- Ruido `kl_ovrp.c`: `guest dlopen("libOVRPlugin.so")` solo #1–3 y potencias de 2 (`[open #N]`);
+  `GetLayerTexturePtr` 16 primeras llamadas y luego solo si cambia el valor por (capa, stage, ojo), máx. 128 líneas.
+### Comprobar en el próximo log
+- Juegos OpenXR: `[xr] projection colour scale/bias: …` / `[xr] quad colour scale/bias: …` si el juego lo encadena.
+- Batman: `[ovrp] guest dlopen … [open #N]` pocas veces; `GetLayerTexturePtr … (call N)` acotado.
+
 ## Batman log 26 (2026-10-12) → build siguiente
 - Rendimiento resuelto: ~90 fps de juego, compositor 100 Hz, ningún frame >12 ms de GPU.
 - Corrupción breve al inicio y en el visor de personajes: draws saltados por pipelines compilándose (caché de recetas

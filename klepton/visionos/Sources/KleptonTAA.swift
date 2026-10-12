@@ -220,6 +220,9 @@ final class KleptonTAA {
         return float3(y.x + y.y - y.z, y.x + y.z, y.x - y.y - y.z);
     }
     static float luma(float3 c) { return dot(c, float3(0.2126, 0.7152, 0.0722)); }
+    // NaN/Inf by exponent bits: fast-math may fold the library NaN tests away.
+    static bool3 kbad(float3 v) { return (as_type<uint3>(v) & 0x7f800000u) == 0x7f800000u; }
+    static bool kbad1(float v) { return (as_type<uint>(v) & 0x7f800000u) == 0x7f800000u; }
     // Texture uv (in the crop) -> view direction (x right, y up, -z forward), and back.
     static float3 dirFromUV(float2 uv, float4 t, uint flipY) {
         float x = mix(-t.x, t.y, uv.x);
@@ -290,6 +293,9 @@ final class KleptonTAA {
         }
         float3 c = csum / wsum;
         a /= wsum;
+        // Never let a non-finite value in: one NaN in the history poisons it for good.
+        if (any(kbad(c))) c = 0.0;
+        if (kbad1(a)) a = 1.0;
         if (all(p.jitter == 0.0)) {
             // No jitter: the source grid IS the output grid — take the texel itself, a
             // reconstruction filter here would only blur.
@@ -311,6 +317,8 @@ final class KleptonTAA {
                 if (all(puv >= 0.0) && all(puv <= 1.0)) {
                     hit = true;
                     float4 hist4 = sampleCR(histIn, lin, puv * p.crop, size);
+                    if (any(kbad(hist4.rgb)) || kbad1(hist4.a)) { hit = false; off = 1; }
+                    else {
                     float3 hy = toYCoCg(hist4.rgb);
                     // Clip towards the AABB centre (Playdead/UE4), not a per-channel clamp.
                     float3 cen = 0.5 * (bmax + bmin), ext = max(0.5 * (bmax - bmin), float3(1e-4));
@@ -327,6 +335,7 @@ final class KleptonTAA {
                     float wh = wgt / (1.0 + luma(hcol));
                     res = (c * wc + hcol * wh) / max(wc + wh, 1e-6);
                     resA = mix(a, clamp(hist4.a, amin, amax), wgt);
+                    }
                 }
             }
             if (!hit) off = 1;    // per-pixel reset: current sample only
@@ -362,6 +371,7 @@ final class KleptonTAA {
         float3 lobeRGB = max(-hitMin, hitMax);
         float lobe = max(-0.1875, min(max(lobeRGB.r, max(lobeRGB.g, lobeRGB.b)), 0.0)) * p.sharpness;
         float3 o = (lobe * (b + d + f + hh) + e) / (4.0 * lobe + 1.0);
+        if (any(kbad(o))) o = any(kbad(e)) ? float3(0.0) : e;
         out.write(float4(max(o, 0.0), e4.a), gid, 0);
     }
     """

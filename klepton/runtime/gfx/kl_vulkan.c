@@ -1420,7 +1420,10 @@ static int klvk_layer_image_key(VkImage img) {
 // compositor should show; the submitted texL is the guest's SOURCE texture (Batman:
 // a 2048x128 ETC2 sprite strip) and is only the fallback for a guest that never
 // writes its layer image.
-static void klvk_layer_mark_written(VkImage img) {
+static int klvk_img_info_get(VkImage img, VkFormat *fmt, uint32_t *w, uint32_t *h);
+static void klvk_layer_mark_written_how(VkImage img, const char *how, VkImage src);
+static void klvk_layer_mark_written(VkImage img) { klvk_layer_mark_written_how(img, "render target", VK_NULL_HANDLE); }
+static void klvk_layer_mark_written_how(VkImage img, const char *how, VkImage src) {
     if (!img) return;
     for (int i = 0; i < KLVK_MAX_LAYERS; i++) {
         if (!g_layer_img[i].key) continue;
@@ -1428,8 +1431,11 @@ static void klvk_layer_mark_written(VkImage img) {
             if (g_layer_img[i].s[st][e].img == img) {
                 if (!g_layer_img[i].written) {
                     g_layer_img[i].written = 1;
-                    VKI("layer %d image %#llx written by the guest — compositor samples it\n",
-                        g_layer_img[i].key, (unsigned long long)(uintptr_t)img);
+                    VkFormat sf = 0; uint32_t sw = 0, sh = 0;
+                    if (src) klvk_img_info_get(src, &sf, &sw, &sh);
+                    VKI("layer %d image %#llx written by the guest (%s) — compositor samples it; "
+                        "source fmt %d %ux%u\n", g_layer_img[i].key, (unsigned long long)(uintptr_t)img,
+                        how, (int)sf, sw, sh);
                 }
                 return;
             }
@@ -1523,6 +1529,65 @@ static int klvk_img_reg_ok(VkImage img) {
 // identical and only the description differs. Written out twice it would be two
 // copies of the memory-type fallback, which is exactly the kind of thing that
 // drifts and then differs on the path nobody ran.
+// Fresh colour images start as opaque black. Metal hands back whatever the memory
+// held, and the compositor can sample an eye/layer image before the guest's first
+// draw into it: on device that read as a full-view pink/garbage frame for 1-2 s when
+// the game's immersive view opened. One-off, synchronous, only at allocation.
+static void klvk_image_clear_black(klvk_device *d, VkImage img, uint32_t layers, uint32_t mips) {
+    if (!d || !img || !d->queue || !d->CmdClearColorImage || !kl_env_on("KL_VK_CLEAR_NEW", 1)) return;
+    static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
+    static VkCommandPool pool;
+    static VkCommandBuffer cmd;
+    static VkFence fence;
+    static int broken;
+    pthread_mutex_lock(&mu);
+    if (broken) goto out;
+    if (!pool) {
+        VkCommandPoolCreateInfo pi = {
+            .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
+            .flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT,
+            .queueFamilyIndex = d->queue_family,
+        };
+        VkCommandBufferAllocateInfo ai = {
+            .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+            .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+            .commandBufferCount = 1,
+        };
+        VkFenceCreateInfo fi = { .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO };
+        if (d->CreateCommandPool(d->dev, &pi, NULL, &pool) != VK_SUCCESS) { pool = VK_NULL_HANDLE; goto out; }
+        ai.commandPool = pool;
+        if (d->AllocateCommandBuffers(d->dev, &ai, &cmd) != VK_SUCCESS ||
+            d->CreateFence(d->dev, &fi, NULL, &fence) != VK_SUCCESS) {
+            d->DestroyCommandPool(d->dev, pool, NULL);
+            pool = VK_NULL_HANDLE;
+            goto out;
+        }
+    }
+    {
+        d->ResetCommandBuffer(cmd, 0);
+        VkCommandBufferBeginInfo bi = {
+            .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+            .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
+        };
+        if (d->BeginCommandBuffer(cmd, &bi) != VK_SUCCESS) goto out;
+        VkClearColorValue black = { .float32 = { 0.0f, 0.0f, 0.0f, 1.0f } };
+        VkImageSubresourceRange r = { VK_IMAGE_ASPECT_COLOR_BIT, 0, mips ? mips : 1, 0, layers ? layers : 1 };
+        d->CmdClearColorImage(cmd, img, VK_IMAGE_LAYOUT_GENERAL, &black, 1, &r);
+        if (d->EndCommandBuffer(cmd) != VK_SUCCESS) goto out;
+        VkSubmitInfo si = { .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO, .commandBufferCount = 1, .pCommandBuffers = &cmd };
+        d->ResetFences(d->dev, 1, &fence);
+        if (d->QueueSubmit(d->queue, 1, &si, fence) == VK_SUCCESS &&
+            d->WaitForFences(d->dev, 1, &fence, VK_TRUE, 2000000000ull) != VK_SUCCESS) {
+            // Still pending: its command buffer and fence must not be reset. Stop clearing.
+            pool = VK_NULL_HANDLE;
+            VKI("new-image clear timed out — clears disabled for this run\n");
+            broken = 1;
+        }
+    }
+out:
+    pthread_mutex_unlock(&mu);
+}
+
 static VkImage klvk_image_alloc(klvk_device *d, VkFormat fmt,
                                 unsigned w, unsigned h, uint32_t layers,
                                 uint32_t mips, VkImageUsageFlags usage,
@@ -1548,6 +1613,9 @@ static VkImage klvk_image_alloc(klvk_device *d, VkFormat fmt,
     // is unaffected, so this only ever ADDS a capability.
     if (usage & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT)
         ic.flags |= VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT;
+    // Colour targets also get TRANSFER_DST so they can be cleared once below.
+    int clear_new = (usage & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT) != 0;
+    if (clear_new) ic.usage |= VK_IMAGE_USAGE_TRANSFER_DST_BIT;
     VkImage img = VK_NULL_HANDLE;
     if (d->CreateImage(d->dev, &ic, NULL, &img) != VK_SUCCESS) {
         VKI("image %ux%u (%u layer(s)): vkCreateImage failed\n", w, h, layers);
@@ -1571,6 +1639,7 @@ static VkImage klvk_image_alloc(klvk_device *d, VkFormat fmt,
     }
     if (mem_out) *mem_out = mem;
     klvk_img_reg_add(img);
+    if (clear_new) klvk_image_clear_black(d, img, ic.arrayLayers, ic.mipLevels);
     return img;
 }
 
@@ -2563,7 +2632,7 @@ static void VKAPI_CALL klvk_CmdCopyImage(VkCommandBuffer cb, VkImage src,
         const VkImageCopy *regions) {
     static PFN_vkCmdCopyImage real;
     if (!real) real = (PFN_vkCmdCopyImage)mvk_sym("vkCmdCopyImage");
-    if (dst) klvk_layer_mark_written(dst);
+    if (dst) klvk_layer_mark_written_how(dst, "vkCmdCopyImage", src);
     if (klvk_trace() && klvk_trace_once((unsigned long long)(uintptr_t)src,(unsigned long long)(uintptr_t)dst)) {
         int sk=klvk_layer_image_key(src), dk=klvk_layer_image_key(dst);
         klvk_trace_log("[copy] src %#llx(%s k=%d) -> dst %#llx(%s k=%d) n=%u\n",
@@ -2695,7 +2764,7 @@ static void VKAPI_CALL klvk_CmdBlitImage(VkCommandBuffer cb, VkImage src,
         const VkImageBlit *r, VkFilter f) {
     static PFN_vkCmdBlitImage real;
     if (!real) real = (PFN_vkCmdBlitImage)mvk_sym("vkCmdBlitImage");
-    if (dst) klvk_layer_mark_written(dst);
+    if (dst) klvk_layer_mark_written_how(dst, "vkCmdBlitImage", src);
     if (KLVK_IMG_BAD(src) || KLVK_IMG_BAD(dst)) {
         if (!kl_env_on("KL_VK_WILD_REDIRECT", 0)) return;   // drop, as the copy above
         g_wild_blit_redir++;

@@ -275,8 +275,7 @@ struct VQSettingsView: View {
                     .pickerStyle(.segmented)
                     Text(VQL("Nativa: densidad real de la pantalla del Vision Pro; la más pesada.", "Native: the Vision Pro panel's real density; the heaviest."))
                         .font(.caption)
-                    Toggle(VQL("Quitar el AA del juego (con VPKTAA)", "Remove the game's AA (with VPKTAA)"), isOn: $settings.dropGameAA)
-                        .disabled(!settings.vpktaa)
+                    Toggle(VQL("Desactivar el MSAA del juego", "Disable the game's MSAA"), isOn: $settings.dropGameAA)
                     Stepper(VQL("Resolución de render: \(Int(settings.renderScale * 100)) %", "Render resolution: \(Int(settings.renderScale * 100)) %"),
                             value: $settings.renderScale, in: 0.5...1.5, step: 0.05)
                     Picker(VQL("Filtrado anisotrópico", "Anisotropic filtering"), selection: $settings.anisoLevel) {

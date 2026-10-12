@@ -113,7 +113,7 @@ final class VQSettings: ObservableObject {
         sharpZone = d.object(forKey: "vq.fovSharp") as? Double ?? 0.35
         periphery = d.object(forKey: "vq.fovPeriphery") as? Double ?? 0.5
         fovHeight = d.object(forKey: "vq.fovHeight") as? Double ?? 0
-        vpktaa = d.object(forKey: "vq.vpktaa2") as? Bool ?? false  // off until the jittered TAA is validated
+        vpktaa = d.object(forKey: "vq.vpktaa3") as? Bool ?? true  // VPKTAA on by default (game MSAA off)
         vpktaaPercent = d.object(forKey: "vq.vpktaaPercent") as? Double ?? 80
         vpktaaSharpness = d.object(forKey: "vq.vpktaaSharp2") as? Double ?? 0.3
         // Older builds stored a bool (vq.aniso16); off there stays off.
@@ -126,7 +126,7 @@ final class VQSettings: ObservableObject {
         } else {
             resolutionBase = (d.object(forKey: "vq.resAVP") as? Bool ?? false) ? "compositor" : "original"
         }
-        dropGameAA = d.object(forKey: "vq.dropGameAA") as? Bool ?? true
+        dropGameAA = d.object(forKey: "vq.dropGameAA2") as? Bool ?? true  // game MSAA always off unless re-enabled
         aswDisabled = d.object(forKey: "vq.aswOff") as? Bool ?? true
         quest3Profile = d.object(forKey: "vq.quest3v2") as? Bool ?? true  // Quest 3 for every game by default
         forceVulkan = d.object(forKey: "vq.forceVulkan") as? Bool ?? true
@@ -164,14 +164,14 @@ final class VQSettings: ObservableObject {
         d.set(sharpZone, forKey: "vq.fovSharp")
         d.set(periphery, forKey: "vq.fovPeriphery")
         d.set(fovHeight, forKey: "vq.fovHeight")
-        d.set(vpktaa, forKey: "vq.vpktaa2")
+        d.set(vpktaa, forKey: "vq.vpktaa3")
         d.set(vpktaaPercent, forKey: "vq.vpktaaPercent")
         d.set(vpktaaSharpness, forKey: "vq.vpktaaSharp2")
         d.set(anisoLevel, forKey: "vq.anisoLevel")
         d.set(perfDiag, forKey: "vq.perfDiag")
         d.set(renderScale, forKey: "vq.renderScale")
         d.set(resolutionBase, forKey: "vq.resBase")
-        d.set(dropGameAA, forKey: "vq.dropGameAA")
+        d.set(dropGameAA, forKey: "vq.dropGameAA2")
         d.set(aswDisabled, forKey: "vq.aswOff")
         d.set(quest3Profile, forKey: "vq.quest3v2")
         d.set(forceVulkan, forKey: "vq.forceVulkan")
@@ -277,7 +277,7 @@ final class VQSettings: ObservableObject {
         setenv("VPVK_ANISO", String(anisoLevel), 1)  // read by VPVulkan even if the dlsym forward misses
         // Per-pass GPU timing in VPEngine (gpu.passtime lines, one rendering frame every 90).
         if perfDiag { setenv("VP_PASS_TIMING", "90", 1) } else { unsetenv("VP_PASS_TIMING") }
-        c.force_single_sample = (vpktaa && dropGameAA) ? 1 : 0
+        c.force_single_sample = dropGameAA ? 1 : 0  // independent of VPKTAA: MSAA off means off
         setenv("VPVK_FORCE_1X", c.force_single_sample != 0 ? "1" : "0", 1)
         c.render_scale = Float(renderScale)
         c.asw_disabled = aswDisabled ? 1 : 0
