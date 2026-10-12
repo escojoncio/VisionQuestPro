@@ -188,6 +188,7 @@ extern const klj_binding klj_bind_io[];
 extern const klj_binding klj_bind_sdl[];
 extern const klj_binding klj_bind_ue4[];
 extern const klj_binding klj_bind_electra[];
+extern const klj_binding klj_bind_hostvideo[];
 extern const klj_binding klj_bind_fmod[];
 extern const klj_binding klj_bind_jkxr[];
 extern const klj_binding klj_bind_services[];

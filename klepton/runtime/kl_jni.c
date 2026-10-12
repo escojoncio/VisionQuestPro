@@ -2041,6 +2041,7 @@ const klj_binding *const klj_binding_tables[] = {
     klj_bind_sdl,
     klj_bind_ue4,
     klj_bind_electra,
+    klj_bind_hostvideo,
     klj_bind_fmod,
     klj_bind_jkxr,
     NULL,

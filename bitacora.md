@@ -13,6 +13,36 @@
 - Fallo resuelto en la 2.ª build: `KL_TARGET_DEFAULT_NAME` no existe sin el proyecto de Klepton → `kl_app.c` define
   `KL_TARGET_DEFAULT "(ninguno)"`.
 
+## Batman log 21 (2026-10-12): juego corre; fuentes en cuadrados, vídeos saltados, altura fija
+- Fuentes/letras de mandos = cuadrados: VkComponentMapping ignorado (R8 con a=R). VPEngine `vulkan/src/entry.cpp`
+  `vkCreateImageView` traduce el mapeo → `Platform::ViewInfo::swizzle` → `metal2` `ViewDesc::swizzle`,
+  `Impl::view` usa `newTextureViewWithPixelFormat:...swizzle:` (si devuelve nil, vista sin swizzle + `gpu.err
+  what=swizzle_view_fallback`); `textureDescriptor` añade PixelFormatView a sampled de 1–2 B. Log
+  `gpu.diag swizzle fmt=N map=…`. Attachments siguen con `image->id` (sin swizzle). MoltenVK:
+  `MVK_CONFIG_FULL_IMAGE_VIEW_SWIZZLE=1` en `VQLaunch.applyToEnvironment`.
+- Vídeos: el juego usa `com.oculus.videoplayer.NativeVideoPlayer` (ExoPlayer) sobre Surface de OVROverlay; mp4 sueltos
+  en la carpeta OBB (DRM1…7, GothamToBlackgate): HEVC 8192x4096 60 fps, SBS estéreo, equirect 180°, sin audio (Wwise).
+  Nuevo `klepton/runtime/media/kl_hostvideo.c/.h` (petición C→Swift, estado Swift→C, gen), `runtime/jni/kl_jni_hostvideo.c`
+  (15 métodos estáticos, firmas sacadas del dex; tabla en `kl_jni.c`), `klovrp_GetLayerAndroidSurfaceObject` devuelve un
+  `android/view/Surface` falso fijado con layer+1. `KleptonCompositor.swift`: `HostVideoPlayer` (AVPlayer 32BGRA) y en
+  `encodeOverlays` la capa del Surface se pinta con el vídeo: Quad con rects por ojo o panorama inmersivo orientado por la
+  pose de la capa (SBS 2:1 = VR180, 180x180°/ojo). Shader equirect (`gfx/kl_reproject.c` KLEq) + `hspan/vspan/uv_rect`
+  (176 B, igual en Swift). Sin compositor/pipelines o fichero ausente → ENDED (se salta como antes). `host_present` solo con
+  overlays y pipelines. Log `[video] playVideo …`, `[cp] host video layer …`.
+- Altura (`kl_ovrp.c`): `g_eye_mm` calibrado; `klovrp_posture_feed` (en `kl_ovrp_set_head_pose`) re-latch si Y estable
+  ±3 cm 1,5 s y difiere ≥0,20 m (solo Postura=Automática); recentrado del juego re-mide; `g_recenter_count` →
+  `GetLocalTrackingSpaceRecenterCount`. Log `[ovrp] eye height recalibrated`. Ajuste «Postura» (`vq.posture`,
+  `KL_OVRP_POSTURE` auto|seated|standing; fijas = sin re-medida automática).
+- Versión OVRPlugin: `klovrp_version()` lee `libOVRPlugin.so` del juego (`kl_slink_libdir`), `KL_OVRP_VERSION` manda,
+  fallback 1.60.0. `ovrp_*` sin implementar → -1004 + log `[ovrp] unimplemented …` (antes abortaba).
+- Idioma: ajuste «Idioma del sistema si el juego lo incluye» (`vq.sysLang`, def. sí). `VQLanguage` (VQLaunch.swift) busca
+  el idioma en nombres de entradas del APK y ficheros (`VQGame.contentNames`) → `LANG` (Klepton Locale/AConfiguration); si
+  no, en_US.
+### Comprobar en el log 22
+- `gpu.diag swizzle fmt=9`, sin `swizzle_view_fallback`; texto legible. `[video] playVideo`, `[cp] host video layer`,
+  estados 2→3→4. `reporting OVRPlugin version 1.98`, líneas `unimplemented`. `Idioma: es_ES`. `eye height recalibrated`.
+- Riesgos: HEVC 8K60 en BGRA (rendimiento; alternativa 420 biplanar + YUV en shader); AC Nexus ahora recibe Surface.
+
 ## Batman log 20 (2026-10-12): capturas → el juego no dibuja la escena
 - Capturas: textura del ojo (RGBA8_sRGB 2383x1912, 2 capas) ~92 % negra con mosaico magenta disperso (G≈0); salida del
   compositor = entrada → fallo en el render del juego, no en el compositor. `[cp] stages draws=0`.

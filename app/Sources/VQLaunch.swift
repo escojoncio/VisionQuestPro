@@ -32,6 +32,7 @@ enum VQLaunch {
         setenv("KL_MVK_DIR", frameworks, 1)
         setenv("KL_ANGLE_DIR", frameworks, 1)
         VQSettings.shared.applyToEnvironment()
+        VQLanguage.apply(game, useSystem: VQSettings.shared.systemLanguage)
         VQLog.log("Arranque: \(game.id) (\(game.package)) tree=\(choice.prepared.tree.path) dylibs=\(choice.prepared.dylibs.path) "
                   + "files=\(files.path) obb=\(obbRel)")
         let rc = kl_app_configure_game(game.id, choice.prepared.tree.path, game.apk.path, choice.prepared.dylibs.path,
@@ -75,6 +76,10 @@ final class VQSettings: ObservableObject {
     @Published var diagCaptures: Bool { didSet { save() } }
     /// Vulkan driver: VPEngine's own (VPVulkan) or MoltenVK (to compare, or if VPEngine fails).
     @Published var useVPEngine: Bool { didSet { save() } }
+    /// Initial posture for the OVRPlugin eye height (KL_OVRP_POSTURE); auto re-measure always on.
+    @Published var posture: String { didSet { save() } }   // "auto" | "seated" | "standing"
+    /// Run the game in the system language when it ships it, else English (LANG for Klepton's Locale/AConfiguration).
+    @Published var systemLanguage: Bool { didSet { save() } }
 
     private init() {
         let d = UserDefaults.standard
@@ -97,6 +102,8 @@ final class VQSettings: ObservableObject {
         forceVulkan = d.object(forKey: "vq.forceVulkan") as? Bool ?? true
         diagCaptures = d.object(forKey: "vq.diagCaptures") as? Bool ?? true
         useVPEngine = d.object(forKey: "vq.vpengine") as? Bool ?? true
+        posture = d.string(forKey: "vq.posture") ?? "auto"
+        systemLanguage = d.object(forKey: "vq.sysLang") as? Bool ?? true
     }
 
     /// First Apple Vision Pro (M2) is RealityDevice14,x; a later one is taken as an M5
@@ -133,6 +140,8 @@ final class VQSettings: ObservableObject {
         d.set(forceVulkan, forKey: "vq.forceVulkan")
         d.set(diagCaptures, forKey: "vq.diagCaptures")
         d.set(useVPEngine, forKey: "vq.vpengine")
+        d.set(posture, forKey: "vq.posture")
+        d.set(systemLanguage, forKey: "vq.sysLang")
     }
 
     /// VPVulkan inside the app, if this build carries it.
@@ -172,6 +181,7 @@ final class VQSettings: ObservableObject {
         setenv("KL_AUTOBOOT", "1", 1)
         setenv("KL_IMMERSIVE", "1", 1)
         setenv("KL_VK_SPOOF_ADRENO", "1", 1)  // Quest titles check the GPU identity before choosing Vulkan
+        setenv("MVK_CONFIG_FULL_IMAGE_VIEW_SWIZZLE", "1", 1)  // MoltenVK: honour VkComponentMapping (R8 font atlases)
         // Unity player argument (the "unity" launch extra): use Vulkan even when Unity's own
         // device detection would fall back to GLES, which has no driver here.
         if forceVulkan { setenv("KL_UNITY_ARGS", "-force-vulkan", 1) } else { unsetenv("KL_UNITY_ARGS") }
@@ -198,6 +208,8 @@ final class VQSettings: ObservableObject {
         VQLog.log("Gráficos: capturas de diagnóstico \(diagCaptures)")
         // Eye texture size the game is told (Klepton's ovrp side) and headset identity:
         // 11 = ovrpSystemHeadset Meta_Quest_3; off: Klepton's per-game default (Quest 2 / Quest).
+        setenv("KL_OVRP_POSTURE", posture, 1)
+        VQLog.log("Gráficos: postura \(posture)")
         setenv("KL_OVRP_EYE_SCALE", String(format: "%.2f", renderScale), 1)
         setenv("KL_OVRP_EYE_BASE", avpResolution ? "display" : "original", 1)
         VQLog.log("Gráficos: resolución base \(avpResolution ? "Vision Pro" : "original (Quest 3)")")
@@ -226,5 +238,56 @@ final class VQSettings: ObservableObject {
         _ = vq_gfx_config_apply(&c)
         VQLog.log("Gráficos: foveado Quest siempre apagado; foveado propio \(foveation), VPKTAA \(vpktaa) \(Int(vpktaaPercent)) % nitidez \(vpktaaSharpness), escala \(renderScale), ASW apagado \(aswDisabled), perfil Quest 3 \(quest3Profile)")
         VQLog.log("Ajustes: sin red \(offline), log del juego \(guestLog), vigilante \(Int(watchdogSeconds)) s")
+    }
+}
+
+/// Game language: the system language if the game ships it (APK entries or data files name it),
+/// otherwise English. Klepton answers java.util.Locale and AConfiguration from LANG.
+enum VQLanguage {
+    static func apply(_ game: VQGame, useSystem: Bool) {
+        let sys = Locale.current
+        let code = (sys.language.languageCode?.identifier ?? "en").lowercased()
+        let region = sys.region?.identifier ?? ""
+        var lang = "en_US"
+        var reason = "por defecto"
+        if !useSystem {
+            reason = "opción desactivada"
+        } else if code == "en" {
+            lang = "en_" + (region.isEmpty ? "US" : region); reason = "sistema en inglés"
+        } else if let hit = match(code, game.contentNames) {
+            lang = code + "_" + (region.isEmpty ? code.uppercased() : region)
+            reason = "el juego lo incluye (\(hit))"
+        } else {
+            reason = "el juego no incluye '\(code)'"
+        }
+        setenv("LANG", lang + ".UTF-8", 1)
+        VQLog.log("Idioma: \(lang) (\(reason))")
+    }
+
+    /// First content name that names the language: the ISO code as a token (es, es-ES, es_419,
+    /// (es-es)), or its English / native name (spanish, español).
+    static func match(_ code: String, _ names: [String]) -> String? {
+        var words: [String] = []
+        if let en = Locale(identifier: "en").localizedString(forLanguageCode: code) { words.append(en.lowercased()) }
+        if let native = Locale(identifier: code).localizedString(forLanguageCode: code) {
+            let n = native.lowercased()
+            words.append(n)
+            words.append(n.folding(options: .diacriticInsensitive, locale: nil))
+        }
+        let esc = NSRegularExpression.escapedPattern(for: code)
+        // A bare 2-letter code is too common in file names (no.png, it/…): require a region
+        // (es-es, es_419) or a language context word before it (values-es, audio_es, lang/es).
+        let regional = try? NSRegularExpression(pattern: "(^|[^a-z])" + esc + "[-_]([a-z]{2}|[0-9]{3})([^a-z0-9]|$)")
+        let regions = Set(Locale.Region.isoRegions.map { $0.identifier.lowercased() })
+        let patterns = ["(lang|language|locale|locali[sz]ation|values|audio|voice|vo|text|strings|subtitles?)[-_/.]" + esc + "([^a-z]|$)"]
+        let res = patterns.compactMap { try? NSRegularExpression(pattern: $0) }
+        for n in names {
+            if words.contains(where: { $0.count > 2 && n.contains($0) }) { return n }
+            let r = NSRange(n.startIndex..., in: n)
+            if res.contains(where: { $0.firstMatch(in: n, range: r) != nil }) { return n }
+            if let regional, let m = regional.firstMatch(in: n, range: r), let rr = Range(m.range(at: 2), in: n),
+               regions.contains(String(n[rr])) || n[rr].allSatisfy(\.isNumber) { return n }
+        }
+        return nil
     }
 }

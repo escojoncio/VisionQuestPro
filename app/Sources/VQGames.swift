@@ -25,6 +25,7 @@ struct VQGame: Identifiable, Equatable {
     var obbs: [URL]
     var problems: [String]  // why it cannot run; empty when it can
     var manifestText: String
+    var contentNames: [String] = []  // lowercased APK entries + data file names (language detection)
 
     var compatible: Bool { problems.isEmpty }
 }
@@ -80,6 +81,8 @@ enum VQGames {
         for i in 0..<vq_zip_count(zip) {
             if let n = vq_zip_name(zip, i) { names.append(String(cString: n)) }
         }
+        game.contentNames = names.map { $0.lowercased() }
+            + all.map { $0.path.dropFirst(folder.path.count).lowercased() }
         let prefix = "lib/arm64-v8a/"
         game.libraries = names.filter { $0.hasPrefix(prefix) && $0.hasSuffix(".so") && !$0.dropFirst(prefix.count).contains("/") }
         let libNames = Set(game.libraries.map { String($0.dropFirst(prefix.count)) })

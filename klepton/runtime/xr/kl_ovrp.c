@@ -16,6 +16,7 @@
 #include "klepton.h"
 #include "kl_ovrp.h"
 #include "../guest/kl_driver.h"
+#include "../guest/kl_slink.h"
 // kl_glfb_note_eye_texture (the capture's eye-FBO seam) and
 // kl_glfb_last_render_stage (which stage the guest actually drew into — see
 // klovrp_EndFrame). Up here rather than beside SetupEyeTexture2 now that the
@@ -73,14 +74,16 @@ static uint64_t klovrp_called(const char *name) {
     // own thread, and the report said only which name it was — so "the viewer
     // crashes when a menu button highlights" and "the haptics SDK wants the PCM
     // API" had nothing joining them.
-    size_t off = 0;
-    const char *img = kl_addr_image(__builtin_return_address(0), &off);
-    fprintf(stderr, "\n[klepton] fatal: guest called unimplemented OVRPlugin entry "
-                    "point '%s', from %s+0x%zx\n",
-            name, img ? img : "?", off);
-    kl_ovrp_report(stderr);
-    kl_fatal_prepare();
-    abort();
+    // Not fatal: newer OVRPlugin entry points (a guest whose own plugin is
+    // newer than this shim) get ovrpFailure_Unsupported, which the C# wrappers
+    // treat as "feature absent". Logged once, with the caller.
+    if (s < 0 || g_ovrp[s].calls == 1) {
+        size_t off = 0;
+        const char *img = kl_addr_image(__builtin_return_address(0), &off);
+        fprintf(stderr, "  [ovrp] unimplemented %s -> UNSUPPORTED (from %s+0x%zx)\n",
+                name, img ? img : "?", off);
+    }
+    return (uint64_t)(int64_t)-1004;  // ovrpFailure_Unsupported
 }
 
 // ---------------------------------------------------------------------------
@@ -345,10 +348,22 @@ static uint64_t klovrp_GetDeviceId2(const char *name, const void **out) {
 // recenters elsewhere — the recenter-count getter above never increments, so
 // the guest sees "requested, nothing changed", which is also what a real Quest
 // answers when recentering is deferred. ieytd2 calls it during session setup.
+// The floor origin never moves (as on Quest); only the EyeLevel height is
+// re-latched to the current head Y and the recenter counter bumped.
+static void klovrp_recenter_now(const char *why);
 static uint64_t klovrp_RecenterTrackingOrigin2(int flags) {
     (void)flags;
     ovrp_hit("ovrp_RecenterTrackingOrigin2");
+    klovrp_recenter_now("ovrp_RecenterTrackingOrigin2");
     return OVRP_SUCCESS;
+}
+// Un-suffixed v1 form (bool return in the real plugin); the guest ignores it,
+// 0 kept as before.
+static uint64_t klovrp_RecenterTrackingOrigin(unsigned flags) {
+    (void)flags;
+    ovrp_hit("ovrp_RecenterTrackingOrigin");
+    klovrp_recenter_now("ovrp_RecenterTrackingOrigin");
+    return 0;
 }
 
 static uint64_t klovrp_GetAudioOutId2(const void **out)      { return klovrp_GetDeviceId2("ovrp_GetAudioOutId2", out); }
@@ -570,7 +585,79 @@ static uint64_t klovrp_SetAppChromaticCorrection(uint64_t on) {
 // (strings(1) reports 1.60.0; the package is ovrplugin-android-universal:28.0.0)
 // rather than picked: the guest's managed side was compiled against that plugin,
 // so any other number invites it down a path its own C# does not match.
-#define KLOVRP_VERSION "1.60.0"
+#define KLOVRP_VERSION_FALLBACK "1.60.0"
+// Report the version of the guest's OWN libOVRPlugin.so, so the C# side does
+// not take its "old OVRPlugin" path. Scanned from the file's strings: the
+// highest NUL-terminated "1.NN(N).N". KL_OVRP_VERSION overrides.
+static char g_klovrp_version[32] = KLOVRP_VERSION_FALLBACK;
+static pthread_once_t g_klovrp_version_once = PTHREAD_ONCE_INIT;
+static int klovrp_ver_parse(const char *s, size_t n, int v[3]) {
+    if (n < 5 || n > 12 || s[0] != '1' || s[1] != '.') return 0;
+    int part = 1, digits = 0; v[0] = 1; v[1] = v[2] = 0;
+    for (size_t i = 2; i < n; i++) {
+        if (s[i] == '.') {
+            if (!digits || part == 2) return 0;
+            if (part == 1 && (digits < 2 || digits > 3)) return 0;
+            part++; digits = 0;
+        } else if (s[i] >= '0' && s[i] <= '9') {
+            v[part] = v[part] * 10 + (s[i] - '0'); digits++;
+        } else return 0;
+    }
+    return part == 2 && digits > 0 && digits <= 3;
+}
+static void klovrp_version_init(void) {
+    const char *ov = getenv("KL_OVRP_VERSION");
+    if (ov && *ov && strlen(ov) < sizeof g_klovrp_version) {
+        strcpy(g_klovrp_version, ov);
+        fprintf(stderr, "  [ovrp] reporting OVRPlugin version %s (KL_OVRP_VERSION)\n", ov);
+        return;
+    }
+    const char *dir = kl_slink_libdir();
+    char path[1024];
+    FILE *f = NULL;
+    if (dir && *dir) {
+        snprintf(path, sizeof path, "%s/libOVRPlugin.so", dir);
+        f = fopen(path, "rb");
+    }
+    int best[3] = {0, 0, 0}, found = 0;
+    if (f) {
+        static unsigned char buf[1 << 16];
+        char run[16]; size_t rn = 0; int prev_nul = 1, start_ok = 0;
+        size_t got;
+        while ((got = fread(buf, 1, sizeof buf, f)) > 0) {
+            for (size_t i = 0; i < got; i++) {
+                unsigned char c = buf[i];
+                if (c == 0) {
+                    int v[3];
+                    if (start_ok && rn && klovrp_ver_parse(run, rn, v) &&
+                        (v[1] > best[1] || (v[1] == best[1] && v[2] > best[2]))) {
+                        memcpy(best, v, sizeof best); found = 1;
+                    }
+                    rn = 0; prev_nul = 1; start_ok = 1;
+                    continue;
+                }
+                if (rn == 0) start_ok = prev_nul;
+                prev_nul = 0;
+                if (rn < sizeof run) run[rn++] = (char)c; else start_ok = 0;
+            }
+        }
+        fclose(f);
+    }
+    if (found) {
+        snprintf(g_klovrp_version, sizeof g_klovrp_version, "%d.%d.%d",
+                 best[0], best[1], best[2]);
+        fprintf(stderr, "  [ovrp] reporting OVRPlugin version %s (from guest libOVRPlugin.so)\n",
+                g_klovrp_version);
+    } else {
+        fprintf(stderr, "  [ovrp] reporting OVRPlugin version %s (fallback; no version "
+                        "found in guest libOVRPlugin.so)\n", g_klovrp_version);
+    }
+}
+static const char *klovrp_version(void) {
+    pthread_once(&g_klovrp_version_once, klovrp_version_init);
+    return g_klovrp_version;
+}
+#define KLOVRP_VERSION klovrp_version()
 
 static const char *klovrp_GetVersion(void) {
     ovrp_hit("ovrp_GetVersion");
@@ -685,10 +772,11 @@ static uint64_t klovrp_GetSystemHeadsetType2(int *out) {
 // Real plugin is ovrpResult + int* out-param (0x172530), NOT a scalar return;
 // it NULL-checks x0 and writes the count. Nothing has ever been recentered on
 // this host, so the honest answer is 0.
+static int g_recenter_count;   // eye-height re-latches (atomic)
 static uint64_t klovrp_GetLocalTrackingSpaceRecenterCount(int *out) {
     ovrp_hit("ovrp_GetLocalTrackingSpaceRecenterCount");
     if (!out) return -1001;
-    *out = 0;
+    *out = __atomic_load_n(&g_recenter_count, __ATOMIC_ACQUIRE);
     return OVRP_SUCCESS;
 }
 
@@ -1673,23 +1761,82 @@ static int g_head_set;              // has a frontend ever written a head pose?
 
 // Quest's guardian measures the user's eye height above the floor; here Vision
 // Pro's own head tracking does (the immersive space origin is on the floor).
-// Latched once the first plausible head height arrives, like a calibration;
-// KL_OVRP_EYE_HEIGHT still overrides, 1.6 m until the headset has reported.
+// Calibrated from the head Y and RE-latched when the posture changes (sit <->
+// stand, head stable +-3 cm for 1.5 s and >= 0.20 m off) or the guest recenters.
+// Stored in mm in an int so guest-thread readers use plain atomics.
+// KL_OVRP_EYE_HEIGHT overrides; KL_OVRP_POSTURE=seated|standing picks the
+// default used before the headset has reported.
+static int g_eye_mm;                // 0 = not measured yet
+static uint64_t klovrp_mono_ns(void);
 static klovrp_pose klovrp_pose_read(const klovrp_pose *src);
-float klovrp_measured_eye_height(void) {
-    static float latched = -1.0f;
-    const char *ov = getenv("KL_OVRP_EYE_HEIGHT");
-    if (ov && *ov) { float h = (float)atof(ov); if (h > 0.3f && h < 2.5f) return h; }
-    if (latched > 0.0f) return latched;
-    if (__atomic_load_n(&g_head_set, __ATOMIC_ACQUIRE)) {
-        float y = klovrp_pose_read(&g_head_pose).py;
-        if (isfinite(y) && y > 0.3f && y < 2.5f) {
-            latched = y;
-            fprintf(stderr, "  [ovrp] eye height measured by the headset: %.3f m\n", (double)y);
-            return latched;
-        }
+static float klovrp_eye_override(void) {
+    static int init; static float h;
+    if (!__atomic_load_n(&init, __ATOMIC_ACQUIRE)) {
+        const char *ov = getenv("KL_OVRP_EYE_HEIGHT");
+        float v = (ov && *ov) ? (float)atof(ov) : 0.0f;
+        h = (v > 0.3f && v < 2.5f) ? v : 0.0f;
+        __atomic_store_n(&init, 1, __ATOMIC_RELEASE);
     }
-    return 1.6f;
+    return h;
+}
+static int klovrp_posture(void) {   // 0 auto, 1 seated, 2 standing
+    static int p = -1;
+    int v = __atomic_load_n(&p, __ATOMIC_ACQUIRE);
+    if (v < 0) {
+        const char *e = getenv("KL_OVRP_POSTURE");
+        v = (e && !strcmp(e, "seated")) ? 1 : (e && !strcmp(e, "standing")) ? 2 : 0;
+        __atomic_store_n(&p, v, __ATOMIC_RELEASE);
+    }
+    return v;
+}
+float klovrp_measured_eye_height(void) {
+    float ov = klovrp_eye_override();
+    if (ov > 0.0f) return ov;
+    int mm = __atomic_load_n(&g_eye_mm, __ATOMIC_ACQUIRE);
+    if (mm > 0) return (float)mm / 1000.0f;
+    return klovrp_posture() == 1 ? 1.2f : 1.6f;
+}
+static void klovrp_eye_latch(float y, const char *why) {
+    int old = __atomic_exchange_n(&g_eye_mm, (int)lrintf(y * 1000.0f), __ATOMIC_ACQ_REL);
+    if (old > 0) {
+        __atomic_add_fetch(&g_recenter_count, 1, __ATOMIC_ACQ_REL);
+        fprintf(stderr, "  [ovrp] eye height recalibrated: %.3f -> %.3f m (%s, %s)\n",
+                old / 1000.0, (double)y, y < 1.35f ? "seated" : "standing", why);
+    } else {
+        fprintf(stderr, "  [ovrp] eye height measured by the headset: %.3f m (%s)\n",
+                (double)y, y < 1.35f ? "seated" : "standing");
+    }
+}
+static void klovrp_recenter_now(const char *why) {
+    if (!__atomic_load_n(&g_head_set, __ATOMIC_ACQUIRE)) return;
+    float y = klovrp_pose_read(&g_head_pose).py;
+    if (!isfinite(y) || y <= 0.3f || y >= 2.5f) return;
+    if (__atomic_load_n(&g_eye_mm, __ATOMIC_ACQUIRE) > 0) {
+        klovrp_eye_latch(y, why);
+    } else {
+        klovrp_eye_latch(y, why);
+        __atomic_add_fetch(&g_recenter_count, 1, __ATOMIC_ACQ_REL);
+    }
+}
+// Posture tracker; called on the single publishing thread with each head Y.
+static void klovrp_posture_feed(float y) {
+    static float lp, anchor;
+    static uint64_t t0;
+    static int have;
+    if (!isfinite(y) || y <= 0.3f || y >= 2.5f) return;
+    uint64_t now = klovrp_mono_ns();
+    if (!have) { lp = anchor = y; t0 = now; have = 1; }
+    lp += 0.1f * (y - lp);
+    if (fabsf(y - anchor) > 0.03f) { anchor = y; t0 = now; return; }
+    int mm = __atomic_load_n(&g_eye_mm, __ATOMIC_ACQUIRE);
+    if (mm <= 0) { klovrp_eye_latch(lp, "first sample"); return; }
+    // Seated/Standing (app setting) = fixed: keep the measured height, only a
+    // guest recenter re-measures. Auto follows sit<->stand changes.
+    if (klovrp_posture() != 0) return;
+    if (now - t0 >= 1500000000ull && fabsf(lp - mm / 1000.0f) >= 0.20f) {
+        klovrp_eye_latch(lp, "posture change");
+        t0 = now;
+    }
 }
 // The two hands, published by the same frontend in the same breath. Declared
 // here beside the head because the per-frame latch below promotes all three
@@ -1854,13 +2001,7 @@ static void klovrp_pose_write(klovrp_pose *dst, const klovrp_pose *v) {
 // hands) is a metre and a half below the frustum. Under EyeLevel the eye *is*
 // the origin, so the offset is zero and nothing moves.
 static float klovrp_eye_height(void) {
-    static int init;
-    static float h = 1.6f;
-    if (!init) {
-        init = 1;
-        h = kl_env_float("KL_OVRP_EYE_HEIGHT", 1.6f);
-    }
-    return g_tracking_origin == 0 ? 0.0f : h;
+    return g_tracking_origin == 0 ? 0.0f : klovrp_measured_eye_height();
 }
 
 float kl_ovrp_eye_height(void) { return klovrp_eye_height(); }
@@ -2131,6 +2272,7 @@ void kl_ovrp_set_head_pose(float px, float py, float pz,
     klovrp_derive_motion(&v, &g_head_hist, g_head_pose_time);
     klovrp_pose_write(&g_head_pose, &v);
     __atomic_store_n(&g_head_set, 1, __ATOMIC_RELEASE);
+    klovrp_posture_feed(py);
     // Pose trace, once a second: the pushed head Y + tracking-origin frame
     // (liminal's "floor drops" bug) and the head YAW (missioniss "can't look
     // around" bug — if yaw does not move as the user turns, the rotation we feed
@@ -6182,18 +6324,17 @@ static uint64_t klovrp_GetLayerTexturePtr(int layer_id, int stage, int eye,
 }
 
 // ovrp_GetLayerAndroidSurfaceObject(layerId, void** surfaceObject) - hands back
-// a Java Surface for an ANDROID SURFACE layer, which is how a title renders a
-// video straight onto an OVROverlay (AC Nexus's looping background). There is no
-// Android Surface / MediaPlayer surface path here, so it is refused - and the
-// out-param is ZEROED, not left alone: an unwritten jobject is the exact wild
-// pointer the kl_vulkan image-view guard now catches, one layer up. The caller
-// tests the result and, on failure, simply does not attach a video surface and
-// carries on; the background is dropped, the scene is not.
+// a Java Surface for an external-surface layer, which a title passes to a video
+// player (Meta's NativeVideoPlayer) to render a movie onto an OVROverlay. The
+// Surface is a pinned host jobject naming the layer (kl_jni_hostvideo.c); the
+// player's playVideo resolves it back to the layer id and the compositor draws
+// the host-decoded video as that layer. Out-param zeroed on failure.
+#include "kl_hostvideo.h"
 static uint64_t klovrp_GetLayerAndroidSurfaceObject(int layer_id, void **surface) {
     ovrp_hit("ovrp_GetLayerAndroidSurfaceObject");
-    (void)layer_id;
-    if (surface) *surface = NULL;
-    return OVRP_FAIL_UNSUPPORTED;
+    if (!surface) return (uint64_t)(int64_t)OVRP_FAIL_INVALID_PARAM;
+    *surface = kl_hostvideo_surface_object(layer_id);
+    return *surface ? OVRP_SUCCESS : OVRP_FAIL_UNSUPPORTED;
 }
 
 // ---------------------------------------------------------------------------
@@ -6677,6 +6818,7 @@ static const struct { const char *name; void *fn; } g_ovrp_impl[] = {
     {"ovrp_Initialize5",   (void *)klovrp_Initialize5},
     {"ovrp_Initialize6",   (void *)klovrp_Initialize6},
     {"ovrp_RecenterTrackingOrigin2", (void *)klovrp_RecenterTrackingOrigin2},
+    {"ovrp_RecenterTrackingOrigin", (void *)klovrp_RecenterTrackingOrigin},
     {"ovrp_GetAudioOutId2",       (void *)klovrp_GetAudioOutId2},
     {"ovrp_GetAudioInId2",        (void *)klovrp_GetAudioInId2},
     {"ovrp_GetDisplayAdapterId2", (void *)klovrp_GetDisplayAdapterId2},
@@ -6956,7 +7098,6 @@ static const char *const g_ovrp_result_ok[] = {
     // implementations above — they answer the same ovrpSuccess, but they are
     // where the timewarp bookkeeping is latched.
     "ovrp_EndEye2",
-    "ovrp_RecenterTrackingOrigin",
     // Thread-scheduling hints from PlayerSettings, set once at init; void
     // configuration like the setters above.
     "ovrp_AutoThreadScheduling", "ovrp_SetThreadPerformance",

@@ -22,6 +22,8 @@
 // Swift (KleptonAudio.swift). Three calls cross: the session's measured rate
 // going in, and the two ways the OS takes the stream away coming back.
 #import "kl_audio.h"
+// ...and one for host video (NativeVideoPlayer cutscenes): kl_hostvideo.
+#import "kl_hostvideo.h"
 // ...and by two for the flat guest's window. kl_present says WHAT SHAPE
 // of picture the guest is producing — one flat image wants a WindowGroup, an
 // eye pair wants the ImmersiveSpace — and kl_mono is what a window then talks
