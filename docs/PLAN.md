@@ -1,5 +1,14 @@
 # Plan técnico — VisionQuestPro
 
+## Base: Klepton (shinyquagsire23/Klepton, MIT)
+Klepton ya resuelve la parte de CPU/sistema: `klepton-ld` (`tools/klepton_ld.c`) convierte cada `.so` en dylib firmable
+con el código casi intacto, parchea x18 (slots TLS por librería), y aporta bionic, NDK, JNI sintético y `ovrp_*`
+reimplementado; probado con Beat Saber, BONELAB, RE4 VR, Red Matter 2… Lo que aporta VisionQuestPro encima:
+- Vulkan → **VPEngine** en lugar de MoltenVK (lector SPIR-V → VPIR + capa de API Vulkan).
+- VPKTAA, foveado propio, resolución, ASW desactivable, perfil Quest 3.
+- Launcher con `QUEST/Juegos` y conversión sin Mac (klepton-ld en el visor o en CI; firma propia de VPEngine).
+Las secciones de abajo describen el mecanismo; donde Klepton ya lo implementa, se usa el de Klepton.
+
 ## Idea central
 El código nativo de un juego de Quest ya es **ARM64**, la misma ISA del Vision Pro. No hay que traducir la CPU
 (nada de FEX ni AOT x86): basta con **cargar** las `.so` Android y darles el entorno que esperan.
