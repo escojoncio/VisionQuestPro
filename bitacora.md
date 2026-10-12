@@ -13,6 +13,20 @@
 - Fallo resuelto en la 2.ª build: `KL_TARGET_DEFAULT_NAME` no existe sin el proyecto de Klepton → `kl_app.c` define
   `KL_TARGET_DEFAULT "(ninguno)"`.
 
+## Arranque Batman log 9 (2026-10-12): StatFs + ELF TLS
+- Log 9: Vulkan aceptado, escenas y Wwise cargan; parada en JNI `android/os/StatFs.<init>(String)` sin implementar.
+  Arreglo: `klepton/runtime/jni/kl_jni_io.c` clase `StatFs` sobre `statfs()` del host (ruta desconocida → `$HOME`):
+  `<init>`, `restat`, `get{BlockSize,BlockCount,FreeBlocks,AvailableBlocks}Long`, `get{Total,Free,Available}Bytes`
+  y variantes `int` saturadas. Log `[jni] new StatFs(...) -> N MB free`.
+- `libMetaXRAudioWwise` (espacialización HRTF de Meta dentro de Wwise) no cargaba: reloc 1031 `R_AARCH64_TLSDESC`.
+  Arreglo `klepton/runtime/kl_image.c`: `tls_register` (desde `bind_dynamic`, antes de relocs) crea módulo TLS por
+  `PT_TLS` (pthread_key + bloque por hilo copiado de la plantilla); `kl_tls_get_addr`; resolver asm
+  `kl_tlsdesc_dynamic` (devuelve bloque+off − tpidrro_el0, preserva x1–x17/q0–q31); `DTPMOD64`/`DTPREL64`;
+  `__tls_get_addr` ligado a `kl_tls_get_addr`. Log `ELF TLS module N`. Sin soporte: `TLS_TPREL64` e imports TLS entre
+  módulos (error explícito). Riesgo conocido: si tpidrro_el0 llevase nº de CPU en bits bajos, migración entre lecturas.
+- Pendiente: verificar en log 10 que carga MetaXRAudioWwise y que pasa StatFs. Futuro: puente Wwise→PHASE para audio
+  espacial nativo de visionOS (ahora: binaural de Meta, salida estéreo directa).
+
 ## VPEngine como driver Vulkan + firma dentro de la app (2026-10-12)
 - `scripts/build-vpvulkan.sh` (CI, paso cacheado por hash de `vpengine/gpu/**`): CMake visionOS de VPEngine `gpu/`,
   objetivo `VPVulkan` → `build/VPVulkan.framework` (`install_name @rpath/VPVulkan.framework/VPVulkan`, Info.plist propio);
