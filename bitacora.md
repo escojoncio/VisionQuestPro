@@ -13,6 +13,11 @@
 - Fallo resuelto en la 2.ª build: `KL_TARGET_DEFAULT_NAME` no existe sin el proyecto de Klepton → `kl_app.c` define
   `KL_TARGET_DEFAULT "(ninguno)"`.
 
+## Batman log 11 (2026-10-12)
+- getDevices OK → OculusEndpointSink abre Oboe 1.7 → fatal `AAudio_getMMapPolicy`. Arreglo `klepton/runtime/media/kl_aaudio.c`:
+  `AAudio_getMMapPolicy` (=1 NEVER), `AAudio_setMMapPolicy` (no-op OK), `AAudioStream_getTimestamp` (frames leídos + monotonic).
+- Murió antes del 1.er frame: arreglo point_size de VPEngine aún sin verificar.
+
 ## Batman log 10 (2026-10-12): imagen corrupta, sin audio
 - StatFs y ELF TLS confirmados (`ELF TLS module 1`, MetaXRAudioWwise cargada). Juego en bucle de frames.
 - Gráficos: ~113 pipelines/frame fallaban (`Vertex shader writes point size but inputPrimitiveTopology is ...Triangle`).
