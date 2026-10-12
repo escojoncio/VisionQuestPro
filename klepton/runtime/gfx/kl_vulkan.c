@@ -78,6 +78,15 @@ void *kl_vulkan_layer_mtl_texture(int k, int s, int e, int *w, int *h) {
 }
 void  kl_vulkan_layer_rekey(int old_key, int new_key) { (void)old_key; (void)new_key; }
 int   kl_vulkan_layer_written(int key) { (void)key; return 0; }
+unsigned long long kl_vulkan_spacewarp_image(int s, int e, int k, unsigned w, unsigned h,
+                                             int f, int l) {
+    (void)s; (void)e; (void)k; (void)w; (void)h; (void)f; (void)l; return 0;
+}
+void *kl_vulkan_spacewarp_mtl(int e, int s, int k, int *w, int *h, int *sl) {
+    (void)e; (void)s; (void)k;
+    if (w) *w = 0; if (h) *h = 0; if (sl) *sl = 0; return NULL;
+}
+unsigned kl_vulkan_spacewarp_writes(int s, int k) { (void)s; (void)k; return 0; }
 void  kl_vulkan_capture_eyes(unsigned f, int s) { (void)f; (void)s; }
 void  kl_vulkan_frame_done(int s) { (void)s; }
 unsigned long long kl_vulkan_frame_serial(void) { return 0; }
@@ -1856,6 +1865,145 @@ void *kl_vulkan_layer_mtl_texture(int layer_key, int stage, int eye,
     return eye_mtl_texture(g_devs[0], slot->img);
 }
 
+// ---------------------------------------------------------------------------
+// Application SpaceWarp storage — VPKTAA phase 1 (see kl_vulkan.h).
+//
+// ovrp_GetLayerTextureSpaceWarp is GetLayerTexture2's sibling for the two extra
+// per-stage targets a SpaceWarp title renders: the motion-vector colour target
+// and the depth it was rendered against. They are allocated exactly as the eye
+// images are (klvk_image_alloc, one image per stage with a layer per eye under
+// multiview) and kept in their own table, so nothing that walks the eye or
+// layer tables (captures, kl_glfb's eye publication, the overlay compositor)
+// ever sees them. Nobody frees them: same rule as the eye images, a compositor
+// may be sampling one on another thread.
+// ---------------------------------------------------------------------------
+static klvk_img_slot g_asw[KLVK_EYE_STAGES][2 /*eye*/][2 /*kind*/];
+static unsigned g_asw_writes[KLVK_EYE_STAGES][2 /*kind*/];
+static int g_asw_any;    // set once the first SpaceWarp image exists: the write
+                         // hooks below cost one load until then
+static pthread_mutex_t g_asw_mu = PTHREAD_MUTEX_INITIALIZER;
+
+static int klvk_asw_find(VkImage img, int *stage, int *kind) {
+    if (!img || !__atomic_load_n(&g_asw_any, __ATOMIC_ACQUIRE)) return 0;
+    for (int st = 0; st < KLVK_EYE_STAGES; st++)
+        for (int e = 0; e < 2; e++)
+            for (int k = 0; k < 2; k++)
+                if (g_asw[st][e][k].img == img) {
+                    if (stage) *stage = st;
+                    if (kind) *kind = k;
+                    return 1;
+                }
+    return 0;
+}
+
+static void klvk_asw_note_write(VkImage img, const char *how) {
+    int st = 0, k = 0;
+    if (!klvk_asw_find(img, &st, &k)) return;
+    unsigned n = __atomic_add_fetch(&g_asw_writes[st][k], 1, __ATOMIC_RELAXED);
+    // The first two writes per (stage, kind), then a heartbeat: the evidence
+    // that the guest really renders its motion vectors, and through which door.
+    if (n <= 2 || n % 600 == 0)
+        VKI("[asw] %s image stage %d %#llx written by the guest (%s), write #%u\n",
+            k == KLVK_ASW_MOTION ? "motion-vector" : "depth", st,
+            (unsigned long long)(uintptr_t)img, how, n);
+}
+
+unsigned long long kl_vulkan_spacewarp_image(int stage, int eye, int kind,
+                                             unsigned w, unsigned h,
+                                             int vk_format, int layers) {
+    if (!kl_vulkan_guest_active()) return 0;
+    if (stage < 0 || stage >= KLVK_EYE_STAGES || eye < 0 || eye > 1) return 0;
+    if (kind != KLVK_ASW_MOTION && kind != KLVK_ASW_DEPTH) return 0;
+    if (!w || !h || vk_format <= 0) return 0;
+    if (layers < 1) layers = 1;
+    if (layers > 2) layers = 2;
+    if (layers > 1) eye = 0;                 // one image serves both eyes (slices)
+    klvk_device *d = g_devs[0];
+    VkFormat fmt = (VkFormat)vk_format;
+
+    pthread_mutex_lock(&g_asw_mu);
+    klvk_img_slot *slot = &g_asw[stage][eye][kind];
+    if (slot->img && (slot->w != w || slot->h != h ||
+                      slot->layers != (uint32_t)layers || slot->fmt != fmt)) {
+        VKI("[asw] %s stage %d eye %d: was %ux%u fmt %d (%u layer(s)), now %ux%u fmt %d "
+            "(%d) — allocating fresh; the old image is kept, not freed\n",
+            kind == KLVK_ASW_MOTION ? "motion-vector" : "depth", stage, eye,
+            slot->w, slot->h, (int)slot->fmt, slot->layers, w, h, (int)fmt, layers);
+        slot->img = VK_NULL_HANDLE;
+        slot->mem = VK_NULL_HANDLE;
+    }
+    if (slot->img) {
+        VkImage have = slot->img;
+        pthread_mutex_unlock(&g_asw_mu);
+        return (uint64_t)(uintptr_t)have;
+    }
+    VkImageUsageFlags usage = VK_IMAGE_USAGE_SAMPLED_BIT |
+                              VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT |
+                              VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
+                              VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+    usage |= kind == KLVK_ASW_MOTION ? VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT
+                                     : VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
+    VkDeviceMemory mem = VK_NULL_HANDLE;
+    // The colour one is cleared to opaque black by klvk_image_alloc, i.e. zero
+    // motion — the right "nothing written yet" value for a motion vector.
+    VkImage img = klvk_image_alloc(d, fmt, w, h, (uint32_t)layers, 1, usage, &mem);
+    if (img == VK_NULL_HANDLE) {
+        pthread_mutex_unlock(&g_asw_mu);
+        VKI("[asw] %s stage %d: vkCreateImage/memory failed for %ux%u fmt %d — "
+            "SpaceWarp storage refused\n",
+            kind == KLVK_ASW_MOTION ? "motion-vector" : "depth", stage, w, h, (int)fmt);
+        return 0;
+    }
+    slot->img = img;
+    slot->mem = mem;
+    slot->w = w;
+    slot->h = h;
+    slot->layers = (uint32_t)layers;
+    slot->fmt = fmt;
+    __atomic_store_n(&g_asw_any, 1, __ATOMIC_RELEASE);
+    pthread_mutex_unlock(&g_asw_mu);
+    void *mtl = eye_mtl_texture(d, img);
+    VKI("[asw] %s image stage %d %s = VkImage %p (%ux%u VkFormat %d, %d layer(s)) "
+        "MTLTexture %p\n",
+        kind == KLVK_ASW_MOTION ? "motion-vector" : "depth", stage,
+        layers > 1 ? "both eyes" : (eye ? "eye 1" : "eye 0"),
+        (void *)img, w, h, (int)fmt, layers, mtl);
+    return (uint64_t)(uintptr_t)img;
+}
+
+void *kl_vulkan_spacewarp_mtl(int eye, int stage, int kind,
+                              int *w, int *h, int *slice) {
+    if (w) *w = 0;
+    if (h) *h = 0;
+    if (slice) *slice = 0;
+    if (!kl_vulkan_guest_active() || !__atomic_load_n(&g_asw_any, __ATOMIC_ACQUIRE))
+        return NULL;
+    if (stage < 0 || stage >= KLVK_EYE_STAGES || eye < 0 || eye > 1) return NULL;
+    if (kind != KLVK_ASW_MOTION && kind != KLVK_ASW_DEPTH) return NULL;
+    pthread_mutex_lock(&g_asw_mu);
+    klvk_img_slot s = g_asw[stage][eye][kind];
+    int sl = 0;
+    // Array layout: only slot (stage, 0) holds the two-layer image and the eye
+    // is its slice.
+    if (!s.img && eye == 1) {
+        s = g_asw[stage][0][kind];
+        if (s.layers > 1) sl = 1;
+    }
+    pthread_mutex_unlock(&g_asw_mu);
+    if (!s.img) return NULL;
+    void *t = eye_mtl_texture(g_devs[0], s.img);
+    if (!t) return NULL;
+    if (w) *w = (int)s.w;
+    if (h) *h = (int)s.h;
+    if (slice) *slice = sl;
+    return t;
+}
+
+unsigned kl_vulkan_spacewarp_writes(int stage, int kind) {
+    if (stage < 0 || stage >= KLVK_EYE_STAGES || (kind != 0 && kind != 1)) return 0;
+    return __atomic_load_n(&g_asw_writes[stage][kind], __ATOMIC_RELAXED);
+}
+
 // Diagnostic/bridge: the MTLTexture behind the wild-handle scratch — the single
 // image AC Nexus actually composites its frame into (its real render target
 // allocation fails, so it falls back to a wild pointer we substitute with this
@@ -2633,6 +2781,7 @@ static void VKAPI_CALL klvk_CmdCopyImage(VkCommandBuffer cb, VkImage src,
     static PFN_vkCmdCopyImage real;
     if (!real) real = (PFN_vkCmdCopyImage)mvk_sym("vkCmdCopyImage");
     if (dst) klvk_layer_mark_written_how(dst, "vkCmdCopyImage", src);
+    if (dst) klvk_asw_note_write(dst, "vkCmdCopyImage");
     if (klvk_trace() && klvk_trace_once((unsigned long long)(uintptr_t)src,(unsigned long long)(uintptr_t)dst)) {
         int sk=klvk_layer_image_key(src), dk=klvk_layer_image_key(dst);
         klvk_trace_log("[copy] src %#llx(%s k=%d) -> dst %#llx(%s k=%d) n=%u\n",
@@ -2765,6 +2914,7 @@ static void VKAPI_CALL klvk_CmdBlitImage(VkCommandBuffer cb, VkImage src,
     static PFN_vkCmdBlitImage real;
     if (!real) real = (PFN_vkCmdBlitImage)mvk_sym("vkCmdBlitImage");
     if (dst) klvk_layer_mark_written_how(dst, "vkCmdBlitImage", src);
+    if (dst) klvk_asw_note_write(dst, "vkCmdBlitImage");
     if (KLVK_IMG_BAD(src) || KLVK_IMG_BAD(dst)) {
         if (!kl_env_on("KL_VK_WILD_REDIRECT", 0)) return;   // drop, as the copy above
         g_wild_blit_redir++;
@@ -3154,6 +3304,23 @@ static VkResult VKAPI_CALL klvk_CreateImageView(VkDevice dev,
                 r->baseArrayLayer, r->layerCount, ci->flags);
         }
     }
+    // SpaceWarp images: how the guest views its motion vectors / depth is the
+    // check that the format we allocated is the one it expected (a mismatch
+    // here is the first thing to look at if the SpaceWarp pass misbehaves).
+    { int ast = 0, akind = 0;
+      if (ci && klvk_asw_find(ci->image, &ast, &akind)) {
+          static int said;
+          klvk_img_slot s = g_asw[ast][0][akind].img == ci->image ? g_asw[ast][0][akind]
+                                                                 : g_asw[ast][1][akind];
+          if (said++ < 24 || ((int)ci->format != (int)s.fmt && said < 200))
+              VKI("[asw] guest view on %s image stage %d: viewType %d format %d "
+                  "(image format %d)%s aspect %#x layers %u+%u\n",
+                  akind == KLVK_ASW_MOTION ? "motion-vector" : "depth", ast,
+                  (int)ci->viewType, (int)ci->format, (int)s.fmt,
+                  (int)ci->format != (int)s.fmt ? " FORMAT DIFFERS" : "",
+                  ci->subresourceRange.aspectMask, ci->subresourceRange.baseArrayLayer,
+                  ci->subresourceRange.layerCount);
+      } }
     if (ci && ci->image && !klvk_img_reg_ok(ci->image)) {
         VkImage scratch = klvk_wild_scratch();
         if (scratch && real) {
@@ -3345,6 +3512,62 @@ static VkImage klvk_fb_image0(VkFramebuffer fb) {
     pthread_mutex_unlock(&g_fb_map_lock);
     return img;
 }
+// SpaceWarp write tracking (kl_vulkan_spacewarp_writes): framebuffers that have
+// a SpaceWarp image among their attachments, so a vkCmdBeginRenderPass on one
+// counts as "the guest records a pass into its motion vectors / depth". A ring,
+// newest-first lookup (a destroyed framebuffer's handle can be reused, and the
+// newest entry is the live one). Empty — and never consulted past one load —
+// for a guest that never asked for SpaceWarp storage.
+#define KLVK_ASW_FB_MAX 256
+static struct { VkFramebuffer fb; VkImage img[4]; } g_asw_fb[KLVK_ASW_FB_MAX];
+static unsigned g_asw_fb_n;   // total ever added; slot = n % MAX
+static pthread_mutex_t g_asw_fb_lock = PTHREAD_MUTEX_INITIALIZER;
+static void klvk_asw_fb_add(VkFramebuffer fb, const VkFramebufferCreateInfo *ci) {
+    if (!fb || !ci || !ci->pAttachments || !__atomic_load_n(&g_asw_any, __ATOMIC_ACQUIRE))
+        return;
+    VkImage hit[4] = { 0 };
+    int n = 0;
+    for (uint32_t k = 0; k < ci->attachmentCount && n < 4; k++) {
+        VkImage im = klvk_view_image(ci->pAttachments[k]);
+        if (klvk_asw_find(im, NULL, NULL)) hit[n++] = im;
+    }
+    if (!n) return;
+    pthread_mutex_lock(&g_asw_fb_lock);
+    unsigned slot = g_asw_fb_n++ % KLVK_ASW_FB_MAX;
+    g_asw_fb[slot].fb = fb;
+    memcpy(g_asw_fb[slot].img, hit, sizeof hit);
+    pthread_mutex_unlock(&g_asw_fb_lock);
+    static unsigned said;
+    if (said++ < 8)
+        VKI("[asw] framebuffer %#llx (%ux%u, %u layer(s), %u attachment(s)) binds %d "
+            "SpaceWarp image(s): %#llx %#llx\n",
+            (unsigned long long)(uintptr_t)fb, ci->width, ci->height, ci->layers,
+            ci->attachmentCount, n, (unsigned long long)(uintptr_t)hit[0],
+            (unsigned long long)(uintptr_t)hit[1]);
+}
+static void klvk_asw_note_pass(const VkRenderPassBeginInfo *bi, const char *how) {
+    if (!bi || !__atomic_load_n(&g_asw_any, __ATOMIC_ACQUIRE)) return;
+    // Imageless framebuffer: the attachments arrive with the begin, not the fb.
+    for (const VkBaseInStructure *p = bi->pNext; p; p = p->pNext) {
+        if (p->sType != VK_STRUCTURE_TYPE_RENDER_PASS_ATTACHMENT_BEGIN_INFO) continue;
+        const VkRenderPassAttachmentBeginInfo *ab = (const VkRenderPassAttachmentBeginInfo *)p;
+        for (uint32_t k = 0; ab->pAttachments && k < ab->attachmentCount; k++)
+            klvk_asw_note_write(klvk_view_image(ab->pAttachments[k]), how);
+    }
+    VkImage hit[4] = { 0 };
+    int found = 0;
+    pthread_mutex_lock(&g_asw_fb_lock);
+    unsigned n = g_asw_fb_n < KLVK_ASW_FB_MAX ? g_asw_fb_n : KLVK_ASW_FB_MAX;
+    for (unsigned i = 0; i < n && !found; i++) {
+        unsigned slot = (g_asw_fb_n - 1 - i) % KLVK_ASW_FB_MAX;
+        if (g_asw_fb[slot].fb == bi->framebuffer) {
+            memcpy(hit, g_asw_fb[slot].img, sizeof hit);
+            found = 1;
+        }
+    }
+    pthread_mutex_unlock(&g_asw_fb_lock);
+    for (int k = 0; found && k < 4; k++) if (hit[k]) klvk_asw_note_write(hit[k], how);
+}
 static VkResult VKAPI_CALL klvk_CreateFramebuffer(VkDevice dev,
         const VkFramebufferCreateInfo *ci, const VkAllocationCallbacks *a,
         VkFramebuffer *out) {
@@ -3357,6 +3580,7 @@ static VkResult VKAPI_CALL klvk_CreateFramebuffer(VkDevice dev,
         // A layer image bound as a colour attachment is one the guest renders into.
         for (uint32_t k = 0; ci->pAttachments && k < ci->attachmentCount && k < 8; k++)
             klvk_layer_mark_written(k == 0 ? img0 : klvk_view_image(ci->pAttachments[k]));
+        klvk_asw_fb_add(*out, ci);
         pthread_mutex_lock(&g_fb_map_lock);
         if (g_fb_map_n < KLVK_FB_MAP_MAX) {
             g_fb_map[g_fb_map_n].fb = *out; g_fb_map[g_fb_map_n].img0 = img0;
@@ -3464,6 +3688,7 @@ static void VKAPI_CALL klvk_CmdBeginRenderPass(VkCommandBuffer cb,
             (unsigned long long)(uintptr_t)im, klvk_img_tag(im), klvk_layer_image_key(im),
             bi->renderArea.extent.width, bi->renderArea.extent.height);
     }
+    klvk_asw_note_pass(bi, "render pass");
     VkRenderPassBeginInfo tmp; VkClearValue *inj = klvk_probe_inject_clears(bi, &tmp);
     if (real) real(cb, inj ? &tmp : bi, c);
     free(inj);
@@ -3480,6 +3705,7 @@ static void VKAPI_CALL klvk_CmdBeginRenderPass2(VkCommandBuffer cb,
             (unsigned long long)(uintptr_t)im, klvk_img_tag(im), klvk_layer_image_key(im),
             bi->renderArea.extent.width, bi->renderArea.extent.height);
     }
+    klvk_asw_note_pass(bi, "render pass 2");
     VkRenderPassBeginInfo tmp; VkClearValue *inj = klvk_probe_inject_clears(bi, &tmp);
     if (real) real(cb, inj ? &tmp : bi, sbi);
     free(inj);
@@ -3638,6 +3864,14 @@ static void VKAPI_CALL klvk_CmdBeginRendering(VkCommandBuffer cb,
                 i, (unsigned long long)(uintptr_t)v,
                 (unsigned long long)(uintptr_t)im, klvk_img_tag(im), klvk_layer_image_key(im));
         }
+    }
+    if (ri && __atomic_load_n(&g_asw_any, __ATOMIC_ACQUIRE)) {
+        for (uint32_t i = 0; i < ri->colorAttachmentCount && ri->pColorAttachments; i++)
+            klvk_asw_note_write(klvk_view_image(ri->pColorAttachments[i].imageView),
+                                "dynamic rendering");
+        if (ri->pDepthAttachment && ri->pDepthAttachment->imageView)
+            klvk_asw_note_write(klvk_view_image(ri->pDepthAttachment->imageView),
+                                "dynamic rendering");
     }
     if (real) real(cb, ri);
 }

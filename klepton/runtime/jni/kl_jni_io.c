@@ -168,13 +168,27 @@ static int klj_zip_data_off(const klj_zip *z, const klj_zent *e, uint64_t *out) 
 static klj_val klj_ZipFile_init(void *env, void *clazz, const klj_val *a, int n) {
     (void)env; (void)clazz;
     const char *path = n > 0 ? klj_str(a[0].l) : NULL;
-    if (!path) return (klj_val){.l = NULL};
+    if (!path) {
+        klj_throw_new("java/lang/NullPointerException", "name");
+        return (klj_val){.l = NULL};
+    }
     klj_zip *z = calloc(1, sizeof *z);
     if (!z) return (klj_val){.l = NULL};
     if (klj_zip_open(z, path) != 0) {
+        int missing = z->f == NULL;
         if (z->f) fclose(z->f);
         free(z->e); free(z);
-        return (klj_val){.l = NULL};      // guest catches IOException
+        // As Java does: FileNotFoundException for a file that is not there,
+        // ZipException for one that is not a readable zip. Unity's OBB check
+        // catches the former to skip an absent patch OBB.
+        if (missing) {
+            char msg[1300];
+            snprintf(msg, sizeof msg, "%s (No such file or directory)", path);
+            klj_throw_new("java/io/FileNotFoundException", msg);
+        } else {
+            klj_throw_new("java/util/zip/ZipException", "zip file is empty or corrupt");
+        }
+        return (klj_val){.l = NULL};
     }
     void *obj = kl_jni_new_object("java/util/zip/ZipFile");
     klj_as_object(obj)->data = z;
@@ -354,6 +368,41 @@ static klj_val klj_InputStream_close(void *env, void *self, const klj_val *a, in
     klj_stream *st = o ? o->data : NULL;
     klj_stream_close(st);
     return (klj_val){.l = NULL};
+}
+
+// ---- java.lang.Throwable, for the exceptions klj_throw_new raises ----
+static klj_val klj_Throwable_getMessage(void *env, void *self, const klj_val *a, int n) {
+    (void)env; (void)a; (void)n;
+    const char *m = klj_throwable_message(self);
+    return (klj_val){.l = m ? kl_jni_new_string(m) : NULL};
+}
+static klj_val klj_Throwable_toString(void *env, void *self, const klj_val *a, int n) {
+    (void)env; (void)a; (void)n;
+    klj_object *o = klj_as_object(self);
+    const char *m = klj_throwable_message(self);
+    char buf[1600], cls[256];
+    snprintf(cls, sizeof cls, "%s", o && o->cls ? o->cls : "java/lang/Throwable");
+    for (char *c = cls; *c; c++) if (*c == '/') *c = '.';
+    if (m) snprintf(buf, sizeof buf, "%s: %s", cls, m);
+    else   snprintf(buf, sizeof buf, "%s", cls);
+    return (klj_val){.l = kl_jni_new_string(buf)};
+}
+static klj_val klj_Throwable_printStackTrace(void *env, void *self, const klj_val *a, int n) {
+    (void)env; (void)a; (void)n;
+    klj_object *o = klj_as_object(self);
+    const char *m = klj_throwable_message(self);
+    KLJ_LOG("printStackTrace: %s: %s", o && o->cls ? o->cls : "?", m ? m : "");
+    return (klj_val){.l = NULL};
+}
+
+static klj_val klj_Throwable_getCause(void *env, void *self, const klj_val *a, int n) {
+    (void)env; (void)self; (void)a; (void)n;
+    return (klj_val){.l = NULL};             // none of ours wraps another
+}
+// An empty trace: there is no Java frame behind a host-raised exception.
+static klj_val klj_Throwable_getStackTrace(void *env, void *self, const klj_val *a, int n) {
+    (void)env; (void)self; (void)a; (void)n;
+    return (klj_val){.l = klj_new_array('L', "java/lang/StackTraceElement", 0)};
 }
 
 // ---- AVPro Video's Java crypto helpers ----
@@ -611,5 +660,14 @@ const klj_binding klj_bind_io[] = {
     {"java/io/InputStream", "skip",      "(J)J",    klj_InputStream_skip},
     {"java/io/InputStream", "available", "()I",     klj_InputStream_available},
     {"java/io/InputStream", "close",     "()V",     klj_InputStream_close},
+    // The throwables kl_jni.c raises (klj_throw_new), for a guest that logs or
+    // inspects what it caught.
+    {"java/lang/Throwable", "getMessage",          "()Ljava/lang/String;", klj_Throwable_getMessage},
+    {"java/lang/Throwable", "getLocalizedMessage", "()Ljava/lang/String;", klj_Throwable_getMessage},
+    {"java/lang/Throwable", "toString",            "()Ljava/lang/String;", klj_Throwable_toString},
+    {"java/lang/Throwable", "printStackTrace",     "()V",                  klj_Throwable_printStackTrace},
+    {"java/lang/Throwable", "getCause",            "()Ljava/lang/Throwable;", klj_Throwable_getCause},
+    {"java/lang/Throwable", "getStackTrace",       "()[Ljava/lang/StackTraceElement;",
+     klj_Throwable_getStackTrace},
     {0}
 };

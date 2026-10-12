@@ -59,6 +59,7 @@ void *kl_jni_new_object(const char *class_name);
 // Pin a host-made object against local-frame retirement (the C NewGlobalRef).
 // Use for objects the host caches and hands back more than once.
 void kl_jni_pin_object(void *obj);
+void kl_jni_unpin_object(void *obj);
 
 // The rest of UnityPlayer's constructor, for a driver that has just run initJni.
 //

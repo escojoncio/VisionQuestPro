@@ -453,7 +453,27 @@ static void kl_AAsset_close(kl_asset *a) {
 // The 32-bit spelling. Both exist in the NDK and the newer SDL3 in the VR build
 // imports this one; truncating is what Android does too, and no asset here is
 // anywhere near 2 GB.
-static int kl_AAsset_getLength(kl_asset *a) { return a ? (int)a->len : -1; }
+static int64_t kl_AAsset_getLength(kl_asset *a) { return a ? (int64_t)a->len : -1; }  // off_t
+
+// The rest of the NDK's AAsset surface (CRI ADX2 imports AAsset_seek and
+// AAsset_openFileDescriptor64). off_t and off64_t are both 64-bit on arm64
+// bionic, so the plain spellings ARE the 64-bit ones.
+static int64_t kl_AAsset_seek(kl_asset *a, int64_t off, int whence) {
+    return kl_AAsset_seek64(a, off, whence);
+}
+static int kl_AAsset_openFileDescriptor64(kl_asset *a, int64_t *out_start, int64_t *out_len) {
+    return kl_AAsset_openFileDescriptor(a, out_start, out_len);
+}
+static int64_t kl_AAsset_getRemainingLength64(kl_asset *a) {
+    if (!a || !a->f) return -1;
+    int64_t at = (int64_t)ftello(a->f);
+    return at < 0 ? -1 : (a->len > at ? a->len - at : 0);
+}
+
+// "Is the buffer a heap copy rather than a mapping of the APK": ours always is
+// once getBuffer has run (Android answers per-asset; nothing branches on it
+// beyond choosing whether to cache).
+static int kl_AAsset_isAllocated(kl_asset *a) { return a && a->buf ? 1 : 0; }
 
 // Directory enumeration. Android returns FILE names only — no subdirectories,
 // no "." or ".." — and returns NULL to end iteration, which is also how the
@@ -484,6 +504,10 @@ static const char *kl_AAssetDir_getNextFileName(kl_assetdir *ad) {
         return ad->name;
     }
     return NULL;
+}
+
+static void kl_AAssetDir_rewind(kl_assetdir *ad) {
+    if (ad && ad->d) rewinddir(ad->d);
 }
 
 static void kl_AAssetDir_close(kl_assetdir *ad) {
@@ -712,6 +736,12 @@ static const struct { const char *name; void *fn; } g_ndk[] = {
     N("AAsset_getLength",       kl_AAsset_getLength),
     N("AAsset_getBuffer",       kl_AAsset_getBuffer),
     N("AAsset_openFileDescriptor", kl_AAsset_openFileDescriptor),
+    N("AAsset_openFileDescriptor64", kl_AAsset_openFileDescriptor64),
+    N("AAsset_seek",            kl_AAsset_seek),
+    N("AAsset_getRemainingLength",   kl_AAsset_getRemainingLength64),  // off_t: 64-bit on arm64
+    N("AAsset_getRemainingLength64", kl_AAsset_getRemainingLength64),
+    N("AAsset_isAllocated",     kl_AAsset_isAllocated),
+    N("AAssetDir_rewind",       kl_AAssetDir_rewind),
     N("AAssetManager_openDir",  kl_AAssetManager_openDir),
     N("AAssetDir_getNextFileName", kl_AAssetDir_getNextFileName),
     N("AAssetDir_close",        kl_AAssetDir_close),

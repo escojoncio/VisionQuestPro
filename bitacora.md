@@ -2,6 +2,35 @@
 
 Historial completo de sesiones anteriores: `git log -p bitacora.md` (compactada el 2026-10-12 tras el log 25).
 
+## Logs 33–35 (2026-10-13): AoT crash, AC carga infinita, VPKTAA → build siguiente
+- Batman (35): compositor 100 Hz sin fallos (TAA asíncrono OK), 1 sola gpu.hold (108 ms). VPKTAA ciego (sin MV/depth):
+  rejected 10–30 %, borroso; juego GPU 14 ms (~50 fps). Usuario prefiere MSAA del juego.
+  App: `gameMSAA` (`vq.gameMSAA`, defecto ON, `force_single_sample = gameMSAA ? 0 : 1`), VPKTAA defecto OFF
+  (`vq.vpktaa4`), textos «experimental».
+- SpaceWarp fase 1 (solo `KL_VPKTAA=1`, `KL_VPKTAA_ASW=0` lo apaga): Batman pide `flags=0x1000`
+  (SpaceWarpDataAllocation), `mv=2/7` (RGBA16F / D24_S8), `depth=10` (None) pero nunca llamaba
+  `GetLayerTextureSpaceWarp`: el descriptor iba con MotionVectorTextureSize 0. `kl_ovrp.c`: `klovrp_fill_eye_desc`
+  rellena mv size = ojo / `KL_VPKTAA_MV_DIV` (2); `klovrp_GetLayerTextureSpaceWarp` (Vulkan) entrega MV + depth por
+  fase (2 capas multiview); `klovrp_asw_frame` (EndFrame4) vuelca flags y +0xa8..+0x130 del submit del ojo.
+  `kl_ovrp_render_pose.asw/asw_submit_flags`. `kl_vulkan.c`: tabla ASW, `kl_vulkan_spacewarp_mtl`,
+  `kl_vulkan_spacewarp_writes`. Capturas `aswmv*`. Numeración formatos depth hipótesis (D16=6 … None=10).
+  Fase 2 pendiente: offsets de escala/offset MV, delta pose, near/far del volcado; TAA con reproyección por píxel
+  (MV dilatado 3x3 por profundidad más cercana), desoclusión por profundidad, fallback rotación.
+  No cubierto: OpenXR `XR_FB_space_warp` (Unreal) ni GLES.
+- AC Nexus (34): `FileNotFoundException …/Android/obb/com.Ubisoft.ACNexusVR/start0` ×4317 (obb dir = raíz del juego).
+  `VQLaunch.swift`: obb dir = `<juego>/<paquete>` si existe; `kl_jni_android.c` `klj_obb_descend_package` +
+  `klj_obb_list`; `kl_libc.c` índice genérico de la carpeta del juego (`kl_gd_find`: fallo en
+  `<ext>/Android/obb/<pkg>/…` → busca por sufijo de ruta, nombre suelto permitido; en `Android/data/<pkg>/…` sin
+  nombre suelto; caché 256), logs `[path] game folder …` y `obb MISS`. Destellos morados: compositor pintaba el ojo
+  viejo mientras el vídeo de carga no tenía frame → ahora negro + overlays (`loadingVideo != nil`).
+- AoT (33): SIGSEGV 0x0 en libcri_ware_unity+0xbeed8 tras `GetInterface: unsupported` (SL_IID_VOLUME).
+  `kl_opensl.c` SLVolumeItf completo (ganancia en feeder), `*out=NULL`, más IIDs; `kl_ndk.c` AAsset_seek,
+  openFileDescriptor64, getRemainingLength(64) (off_t 64 bits), isAllocated, AAssetDir_rewind. JNI: excepciones
+  reales por hilo (`klj_exc_set` pin/unpin, `KL_JNI_EXCEPTIONS=0`), ZipFile.<init> lanza FileNotFound/Zip/NPE.
+  `kl_sample_snapshot` al primer DestroyDistortionWindow (`KL_OVRP_TEARDOWN_SNAP=0`).
+### Comprobar en el próximo log
+- `grep "\[asw\]"` (Batman con VPKTAA); `[path] game folder` / `obb MISS` (AC); `[sl]` volume y `[snap]` (AoT).
+
 ## Log 32 (2026-10-13): VPKTAA lento / a saltos → build siguiente
 - Log 32: vpktaa=1 force_1x=1, base «compositor» (eye 3072x2465 vs 2290x2400 del juego), gpu.time media 19 ms
   (895/1252 > 14 ms → juego ~50 fps), cadencia compositor 12–17 ms con 9–16 frames fuera de plazo por medio segundo:

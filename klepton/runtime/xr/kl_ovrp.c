@@ -18,6 +18,7 @@
 #include "../guest/kl_driver.h"
 #include "../guest/kl_slink.h"
 #include "../guest/kl_il2cpp.h"   // kl_il2cpp_method_at, for ovrp_log_chain
+#include "../diag/kl_sample.h"     // kl_sample_snapshot, at the display teardown
 // kl_glfb_note_eye_texture (the capture's eye-FBO seam) and
 // kl_glfb_last_render_stage (which stage the guest actually drew into — see
 // klovrp_EndFrame). Up here rather than beside SetupEyeTexture2 now that the
@@ -321,6 +322,12 @@ static uint64_t klovrp_ok(const char *name) {
     if (strncmp(name, "ovrp_DestroyDistortionWindow", 28) == 0) {
         static unsigned n;
         if (n++ < 8) ovrp_log_chain(name, 0);
+        // The graphics thread only EXECUTES the teardown; whoever asked for it
+        // (managed XRDisplaySubsystem.Stop / an XR loader deinit / Unity's own
+        // lifecycle) is on another thread. Snapshot every guest thread once —
+        // a main thread waiting on this teardown is still inside the request.
+        if (n == 1 && kl_env_on("KL_OVRP_TEARDOWN_SNAP", 1))
+            kl_sample_snapshot(stderr, name);
     }
     return OVRP_SUCCESS;
 }
@@ -2722,6 +2729,9 @@ static uint64_t klovrp_begin_frame_impl(int guest_frame_index) {
     for (int e = 0; e < 2; e++)
         memcpy(r->tangents[e], klovrp_eye_tan(e), sizeof r->tangents[e]);
     klovrp_jit_frame_begin(r);
+    // Per-frame statements too (klovrp_asw_frame fills them at EndFrame4).
+    r->asw = 0;
+    r->asw_submit_flags = 0;
     // Cleared, not carried: the render viewport is a per-frame statement the
     // guest makes at EndFrame4, and a rect left over from the previous frame
     // would keep cropping after the guest stopped asking for it. Zero reads as
@@ -2795,6 +2805,10 @@ static int klovrp_submit_stage(const void *layer_submits, int count);
 // ...and the census of the whole list, for the same forward-declaration reason.
 static void klovrp_census_submits(const void *layer_submits, int count);
 static void klovrp_passthrough_scan(const void *layer_submits, int count);
+// ...and the SpaceWarp side of the eye submit (VPKTAA phase 1): files
+// kl_ovrp_render_pose.asw / asw_submit_flags into the pending record and logs
+// the submit's SpaceWarp-relevant bytes. Defined beside klovrp_census_submits.
+static void klovrp_asw_frame(const void *layer_submits, int count, int named_stage);
 // ...and the overlay list a compositor draws on top of the eye picture.
 static void klovrp_record_overlays(const void *layer_submits, int count);
 
@@ -3085,6 +3099,7 @@ static uint64_t klovrp_EndFrame4(int guest_frame_index, const void *layer_submit
     // different thing from stage 0 and has to stay distinguishable — the frame
     // record's fallback ladder tests it (klovrp_end_frame_impl).
     int named = klovrp_submit_stage(layer_submits, layer_submit_count);
+    klovrp_asw_frame(layer_submits, layer_submit_count, named);
     uint64_t r = klovrp_end_frame_impl(guest_frame_index, have ? vp : NULL,
                                        have ? of : NULL, named);
 
@@ -5072,6 +5087,104 @@ static uint32_t klovrp_gl_format(int ovrp_fmt, const char **name) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Application SpaceWarp — VPKTAA phase 1.
+//
+// What Batman: Arkham Shadow (Unity, Vulkan multiview, OculusXR provider) asks
+// for, measured in log 35:
+//
+//   CalculateEyeLayerDesc: layout=3 ... fmt=0 depth=10 mv=2/7 flags=0x1000
+//
+// and ovrp_GetLayerTextureSpaceWarp resolved but NEVER called.
+//
+// flags 0x1000 is ovrpLayerFlag_SpaceWarpDataAllocation (1 << 12; 1 << 13 is
+// SpaceWarpDedicatedDepth): the provider wants SpaceWarp storage on the eye
+// layer. The three format arguments only read coherently with OVR_Plugin_Types.h's
+// numbering of ovrpTextureFormat, where the depth formats sit right after the
+// six colour ones — D16 = 6, D24_S8 = 7, D32_FP = 8, D32_FP_S8 = 9, None = 10,
+// R5G6B5 = 11 (OVRPlugin.cs's C# mirror carries R5G6B5 = 11 too):
+//   depth = 10  None   — no eye depth from us (Unity makes its own D24S8, which
+//                         is exactly what log 35 shows: format-129 2-layer views)
+//   mv    = 2   R16G16B16A16_FP — the AppSW motion-vector target
+//   mvdepth = 7 D24_S8 — the AppSW depth target
+// which is the Quest AppSW pair (RGBA16F motion + D24S8 depth). It is also why
+// the ...2/un-suffixed forms fill the "missing" format slots with 10: None.
+// (The older note at klovrp_gl_format reading 10 as D24_S8 cannot be right —
+// it would make the motion-vector depth R16G16_FP. Only colour format 0 is ever
+// allocated through that table, so it was never exercised.)
+//
+// The likely reason the provider never asked: our desc leaves
+// MotionVectorTextureSize (+0x74) at 0x0 — the real plugin fills it with the
+// runtime's recommended motion-vector size, and a provider sizing its Unity
+// render textures from it has nothing to make. So, with KL_VPKTAA=1 only, the
+// desc now carries a size, and GetLayerTextureSpaceWarp serves real storage.
+// With KL_VPKTAA off every answer here is byte-identical to before.
+// ---------------------------------------------------------------------------
+#define KLOVRP_LAYERFLAG_SPACEWARP_ALLOC (1 << 12)
+#define KLOVRP_LAYERFLAG_SPACEWARP_DEPTH (1 << 13)
+#define KLOVRP_FMT_NONE 10
+
+static int klovrp_asw_on(void) {
+    static int on = -1;
+    if (on < 0) on = kl_env_on("KL_VPKTAA", 0) && kl_env_on("KL_VPKTAA_ASW", 1);
+    return on;
+}
+
+static const char *klovrp_fmt_name(int f) {
+    static const char *const N[] = {
+        "R8G8B8A8_sRGB", "R8G8B8A8", "R16G16B16A16_FP", "R11G11B10_FP",
+        "B8G8R8A8_sRGB", "B8G8R8A8", "D16", "D24_S8", "D32_FP", "D32_FP_S8",
+        "None", "R5G6B5" };
+    return (unsigned)f < sizeof N / sizeof *N ? N[f] : "?";
+}
+
+// VkFormat numbers (vulkan_core.h), spelled out so this file stays Vulkan-free.
+#define KLOVRP_VK_R16G16_SFLOAT        83
+#define KLOVRP_VK_R16G16B16A16_SFLOAT  97
+#define KLOVRP_VK_D16_UNORM            124
+#define KLOVRP_VK_D32_SFLOAT           126
+#define KLOVRP_VK_D24_UNORM_S8_UINT    129
+#define KLOVRP_VK_D32_SFLOAT_S8_UINT   130
+
+// The motion-vector target. RGBA16F is what AppSW renders (3D motion in RGB);
+// anything that is not a float colour format is answered with RGBA16F and
+// said so — a motion vector squeezed into 8 bits is useless to the TAA.
+static int klovrp_asw_mv_vkformat(int f) {
+    if (f == 2) return KLOVRP_VK_R16G16B16A16_SFLOAT;
+    if (f == 12) return KLOVRP_VK_R16G16_SFLOAT;   // R16G16_FP if numbered after R5G6B5
+    return KLOVRP_VK_R16G16B16A16_SFLOAT;
+}
+// The depth target, or 0 for None. D24S8 is what Unity already uses for its
+// own eye depth here (VkFormat 129), so the driver demonstrably serves it.
+static int klovrp_asw_depth_vkformat(int f) {
+    switch (f) {
+    case 6:  return KLOVRP_VK_D16_UNORM;
+    case 7:  return KLOVRP_VK_D24_UNORM_S8_UINT;
+    case 8:  return KLOVRP_VK_D32_SFLOAT;
+    case 9:  return KLOVRP_VK_D32_SFLOAT_S8_UINT;
+    case KLOVRP_FMT_NONE: return 0;
+    default: return KLOVRP_VK_D24_UNORM_S8_UINT;
+    }
+}
+
+// The motion-vector size we advertise for an eye of w x h. Quest runtimes
+// recommend roughly a quarter of the eye per axis (Meta's sample: 368x400 for a
+// ~1440x1584 eye) because there the runtime only extrapolates from it. Here it
+// feeds a per-pixel TAA reprojection, so the default is HALF per axis — 4x the
+// Quest density at a quarter of the eye's pixels. KL_VPKTAA_MV_DIV = 1..8.
+static void klovrp_asw_mv_size(int w, int h, int *mw, int *mh) {
+    static int div;
+    if (!div) {
+        div = kl_env_int("KL_VPKTAA_MV_DIV", 2);
+        if (div < 1) div = 1;
+        if (div > 8) div = 8;
+    }
+    *mw = (w + div - 1) / div;
+    *mh = (h + div - 1) / div;
+    if (*mw < 1) *mw = 1;
+    if (*mh < 1) *mh = 1;
+}
+
     // ovrpShape_EyeFov, and ovrpLayout's {Stereo, Mono, DoubleWide, Array}. The
     // provider derives its layout argument from Unity's texture-layout choice and
 // passes only 0 (separate 2D textures per eye) or 3 (one 2D array, two slices);
@@ -5472,6 +5585,100 @@ static void klovrp_census_submits(const void *layer_submits, int count) {
     }
 }
 
+// SpaceWarp, per frame (VPKTAA phase 1; forward-declared beside
+// klovrp_end_frame_impl). Two jobs, both for the EYE layer only:
+//
+// 1. Evidence for phase 2. A SpaceWarp frame carries its per-frame data in the
+//    eye submit: LayerSubmitFlags (+0x44) and, past the common header, the
+//    EyeFov arm of ovrpLayerSubmitUnion (sizeof 0x130, see the note above
+//    klovrp_quad_size) — where the motion-vector scale/offset, the app-space
+//    delta pose and near/far Z of XR_FB_space_warp's
+//    XrCompositionLayerSpaceWarpInfoFB would live. Their offsets are not known,
+//    so the bytes from +0xa8 to +0x130 are dumped as words (hex + float) for
+//    the first frames and whenever the flags change. Read through
+//    vm_read_overwrite: a provider that hands a plain ovrpLayerSubmit (0xbc)
+//    rather than the union must not fault us at the end of a page.
+// 2. The frame record: whether the guest wrote this stage's motion vectors /
+//    depth this frame (kl_vulkan_spacewarp_writes moved since this stage was
+//    last filed), into kl_ovrp_render_pose.asw.
+//
+// A guest whose eye layer did not ask for SpaceWarp storage, with VPKTAA off,
+// returns at the first test — no log, no record change.
+static void klovrp_asw_frame(const void *layer_submits, int count, int named_stage) {
+    if (!klovrp_asw_on()) return;     // VPKTAA off: exactly the old path
+    const ovrp_layer_submit *const *list = layer_submits;
+    const ovrp_layer_submit *eye = NULL;
+    struct klovrp_layer *el = NULL;
+    for (int i = 0; list && i < count; i++) {
+        const ovrp_layer_submit *s = list[i];
+        if (!s) continue;
+        struct klovrp_layer *l = klovrp_layer(s->layer_id);
+        if (l && l->is_eye) { eye = s; el = l; break; }
+    }
+    if (!eye || !el) return;
+    int wants = (el->desc.layer_flags & KLOVRP_LAYERFLAG_SPACEWARP_ALLOC) != 0;
+    if (!wants && !klovrp_asw_on()) return;
+
+    static unsigned frames;
+    static int last_flags = -1, dumps;
+    unsigned f = frames++;
+    if (wants && (f < 4 || (eye->submit_flags != last_flags && dumps < 24))) {
+        dumps++;
+        uint32_t wd[0x130 / 4];
+        memset(wd, 0, sizeof wd);
+        vm_size_t got = 0;
+        if (vm_read_overwrite(mach_task_self(), (vm_address_t)eye, sizeof wd,
+                              (vm_address_t)wd, &got) != KERN_SUCCESS)
+            got = 0;
+        if (got < 0xbc) { memcpy(wd, eye, sizeof *eye); got = sizeof *eye; }
+        fprintf(stderr, "  [asw] eye submit frame %u: layer %d stage %d flags=%#x "
+                        "pose q=(%.3f %.3f %.3f %.3f) p=(%.3f %.3f %.3f), %u bytes readable\n",
+                f, eye->layer_id, eye->texture_stage, (unsigned)eye->submit_flags,
+                eye->pose[0], eye->pose[1], eye->pose[2], eye->pose[3],
+                eye->pose[4], eye->pose[5], eye->pose[6], (unsigned)got);
+        for (unsigned off = 0xa8; off + 16 <= (unsigned)got && off < 0x130; off += 16) {
+            const uint32_t *q = &wd[off / 4];
+            float fl[4];
+            memcpy(fl, q, sizeof fl);
+            fprintf(stderr, "  [asw]   +0x%03x: %08x %08x %08x %08x  (%g %g %g %g)\n",
+                    off, q[0], q[1], q[2], q[3],
+                    (double)fl[0], (double)fl[1], (double)fl[2], (double)fl[3]);
+        }
+    }
+    last_flags = eye->submit_flags;
+
+    int bits = 0;
+    if (klovrp_asw_on() && kl_vulkan_guest_active() && named_stage >= 0 &&
+        named_stage < KLOVRP_MAX_STAGES) {
+        int w = 0, h = 0, sl = 0;
+        if (kl_vulkan_spacewarp_mtl(0, named_stage, KLVK_ASW_MOTION, &w, &h, &sl))
+            bits |= KL_OVRP_ASW_STORAGE;
+        static unsigned last[KLOVRP_MAX_STAGES][2];
+        unsigned m = kl_vulkan_spacewarp_writes(named_stage, KLVK_ASW_MOTION);
+        unsigned d = kl_vulkan_spacewarp_writes(named_stage, KLVK_ASW_DEPTH);
+        if (m != last[named_stage][0]) bits |= KL_OVRP_ASW_MV;
+        if (d != last[named_stage][1]) bits |= KL_OVRP_ASW_DEPTH;
+        last[named_stage][0] = m;
+        last[named_stage][1] = d;
+        // A heartbeat that says, in one line, whether phase 2 has anything to
+        // work with: frames with storage, and how many of them the guest
+        // actually filled.
+        static unsigned n_store, n_mv, n_dp;
+        if (bits & KL_OVRP_ASW_STORAGE) n_store++;
+        if (bits & KL_OVRP_ASW_MV) n_mv++;
+        if (bits & KL_OVRP_ASW_DEPTH) n_dp++;
+        if (f < 3 || f % 600 == 0)
+            fprintf(stderr, "  [asw] frame %u stage %d: bits=%#x (storage/mv/depth) — so far "
+                            "%u frame(s) with storage, %u with motion vectors written, %u with "
+                            "depth written; motion %dx%d\n",
+                    f, named_stage, (unsigned)bits, n_store, n_mv, n_dp, w, h);
+    }
+    pthread_mutex_lock(&g_frames.mu);
+    g_frames.pending.asw = bits;
+    g_frames.pending.asw_submit_flags = eye->submit_flags;
+    pthread_mutex_unlock(&g_frames.mu);
+}
+
         // The non-eye layers of the current frame — see kl_ovrp.h.
         //
 // Replaced whole under g_frames.mu at each ovrp_EndFrame4, so a compositor
@@ -5850,6 +6057,13 @@ static void klovrp_fill_eye_desc(ovrp_layer_desc_eyefov *d, int layout,
     d->depth_format    = depth_format;
     d->mv_format       = mv_format;
     d->mv_depth_format = mv_depth_format;
+    // VPKTAA phase 1: a SpaceWarp request gets a motion-vector size, which is
+    // what lets the provider build its motion-vector render textures and ask
+    // ovrp_GetLayerTextureSpaceWarp for their storage (see the block above
+    // klovrp_asw_on). Off: left 0x0, exactly as before.
+    if (klovrp_asw_on() && (layer_flags & KLOVRP_LAYERFLAG_SPACEWARP_ALLOC) &&
+        mv_format != KLOVRP_FMT_NONE)
+        klovrp_asw_mv_size(w, h, &d->mv_texture_size.w, &d->mv_texture_size.h);
 }
 
     // ovrp_CalculateEyeLayerDesc3(layout, mipLevels, sampleCount, format,
@@ -5888,6 +6102,23 @@ static uint64_t klovrp_CalculateEyeLayerDesc3(int layout, int mip_levels,
             sample_count, format, fname ? fname : "UNMAPPED", gl,
             depth_format, mv_format, mv_depth_format, (unsigned)layer_flags,
             (double)texture_scale, (double)scale2);
+    if ((layer_flags & (KLOVRP_LAYERFLAG_SPACEWARP_ALLOC | KLOVRP_LAYERFLAG_SPACEWARP_DEPTH)) ||
+        mv_format != KLOVRP_FMT_NONE) {
+        static int said;
+        if (said++ < 4)
+            fprintf(stderr, "  [asw] eye desc decoded: flags %#x%s%s, eye depth %d (%s), "
+                            "motion %d (%s), motion depth %d (%s), MotionVectorTextureSize "
+                            "%dx%d%s\n",
+                    (unsigned)layer_flags,
+                    (layer_flags & KLOVRP_LAYERFLAG_SPACEWARP_ALLOC) ? " = SpaceWarpDataAllocation" : "",
+                    (layer_flags & KLOVRP_LAYERFLAG_SPACEWARP_DEPTH) ? " + SpaceWarpDedicatedDepth" : "",
+                    depth_format, klovrp_fmt_name(depth_format),
+                    mv_format, klovrp_fmt_name(mv_format),
+                    mv_depth_format, klovrp_fmt_name(mv_depth_format),
+                    out->mv_texture_size.w, out->mv_texture_size.h,
+                    klovrp_asw_on() ? " (VPKTAA on: SpaceWarp storage will be served)"
+                                    : " (VPKTAA off: left 0x0, SpaceWarp refused as before)");
+    }
     return OVRP_SUCCESS;
 }
 
@@ -6094,6 +6325,17 @@ static uint64_t klovrp_SetupLayer(void *device, const ovrp_layer_desc_eyefov *de
             desc->texture_size.w, desc->texture_size.h, desc->layout,
             desc->format, desc->sample_count,
             reused ? " (reusing the previous layer's textures)" : "");
+    if (is_eye && ((desc->layer_flags & KLOVRP_LAYERFLAG_SPACEWARP_ALLOC) ||
+                   desc->mv_texture_size.w > 0)) {
+        static int said;
+        if (said++ < 8)
+            fprintf(stderr, "  [asw] SetupLayer: eye layer %d as the provider passed it back: "
+                            "flags %#x depth %d motion %d motion-depth %d "
+                            "MotionVectorTextureSize %dx%d\n",
+                    l->id, (unsigned)desc->layer_flags, desc->depth_format,
+                    desc->mv_format, desc->mv_depth_format,
+                    desc->mv_texture_size.w, desc->mv_texture_size.h);
+    }
     kl_loadvid_recount();
     return OVRP_SUCCESS;
 }
@@ -6599,14 +6841,78 @@ static uint64_t klovrp_GetLayerTextureFoveation(int layer_id, int stage, int eye
 // SpaceWarp and carries on; SUCCESS with zero handles would be the damaging
 // answer, flagging the descriptor as space-warped against texture id 0. Same
 // story we already tell for foveation and ovrp_GetTiledMultiResSupported.
+//
+// **VPKTAA phase 1 changes the answer, and only under KL_VPKTAA=1.** Then the
+// motion vectors DO have a consumer — VPKTAA's history reprojection — so the
+// Vulkan path hands out real storage: per stage, a motion-vector colour image
+// and a depth image, allocated like the eye images (kl_vulkan_spacewarp_image;
+// one two-layer image per stage under the Array/multiview layout, both eyes get
+// the same handle, the eye is the slice), 64-bit VkImage handles exactly as
+// GetLayerTexture2 returns the colour one. Sizes and formats come from the
+// layer's desc (MotionVectorTextureSize, MotionVectorFormat,
+// MotionVectorDepthFormat — see the block above klovrp_asw_on), falling back
+// to half the eye size / RGBA16F / D24S8. Swift reaches both through
+// kl_vulkan_spacewarp_mtl.
+//
+// The GLES path keeps refusing: the guest's GL names would have to be backed by
+// MTLTextures through kl_glfb like the eye ones, and no GLES Quest title uses
+// AppSW (it is Vulkan-only on Quest).
 static uint64_t klovrp_GetLayerTextureSpaceWarp(int layer_id, int stage, int eye,
                                                 uint64_t *motion, uint64_t *depth) {
     ovrp_hit("ovrp_GetLayerTextureSpaceWarp");
-    (void)layer_id; (void)stage; (void)eye;
+    static int calls;
+    int n = ++calls;
+    if (n <= 16)
+        fprintf(stderr, "  [asw] GetLayerTextureSpaceWarp #%d(layer %d, stage %d, eye %d, "
+                        "motion=%p, depth=%p) vpktaa=%d vulkan=%d\n",
+                n, layer_id, stage, eye, (void *)motion, (void *)depth,
+                klovrp_asw_on(), kl_vulkan_guest_active());
     if (!motion || !depth) return OVRP_FAIL_INVALID_PARAM;
     *motion = 0;
     *depth = 0;
-    return OVRP_FAIL_UNSUPPORTED;
+    if (!klovrp_asw_on() || !kl_vulkan_guest_active())
+        return OVRP_FAIL_UNSUPPORTED;
+
+    struct klovrp_layer *l = klovrp_layer(layer_id);
+    if (!l || !l->is_eye || (unsigned)stage >= KLOVRP_MAX_STAGES || (unsigned)eye > 1) {
+        if (n <= 16)
+            fprintf(stderr, "  [asw] GetLayerTextureSpaceWarp: layer %d is not the eye layer "
+                            "(or stage/eye out of range) — refused\n", layer_id);
+        return l ? OVRP_FAIL_UNSUPPORTED : OVRP_FAIL_INVALID_PARAM;
+    }
+    const ovrp_layer_desc_eyefov *d = &l->desc;
+    int layers = (d->layout == KLOVRP_LAYOUT_ARRAY) ? 2 : 1;
+    int w = d->mv_texture_size.w, h = d->mv_texture_size.h;
+    const char *size_from = "desc MotionVectorTextureSize";
+    if (w <= 0 || h <= 0 || w > d->texture_size.w * 2 || h > d->texture_size.h * 2) {
+        klovrp_asw_mv_size(d->texture_size.w, d->texture_size.h, &w, &h);
+        size_from = "eye size / KL_VPKTAA_MV_DIV (desc carried none)";
+    }
+    int mv_vk = klovrp_asw_mv_vkformat(d->mv_format);
+    // SpaceWarpDedicatedDepth (1<<13) or not, a None motion-depth format is
+    // taken at its word: no depth image, handle 0.
+    int dp_vk = klovrp_asw_depth_vkformat(d->mv_depth_format);
+    unsigned long long mv = kl_vulkan_spacewarp_image(stage, eye, KLVK_ASW_MOTION,
+                                                      (unsigned)w, (unsigned)h, mv_vk, layers);
+    unsigned long long dp = dp_vk ? kl_vulkan_spacewarp_image(stage, eye, KLVK_ASW_DEPTH,
+                                                              (unsigned)w, (unsigned)h,
+                                                              dp_vk, layers) : 0;
+    if (!mv || (dp_vk && !dp)) {
+        fprintf(stderr, "  [asw] GetLayerTextureSpaceWarp(layer %d stage %d eye %d): "
+                        "storage could not be allocated (motion %#llx depth %#llx) — "
+                        "refusing, SpaceWarp stays off\n", layer_id, stage, eye, mv, dp);
+        return OVRP_FAIL_UNSUPPORTED;
+    }
+    *motion = mv;
+    *depth = dp;
+    if (n <= 16)
+        fprintf(stderr, "  [asw] GetLayerTextureSpaceWarp: eye layer %d stage %d eye %d -> "
+                        "motion VkImage %#llx (%dx%d ovrp fmt %d %s -> VkFormat %d), depth "
+                        "VkImage %#llx (ovrp fmt %d %s -> VkFormat %d), %d layer(s); size from %s\n",
+                layer_id, stage, eye, mv, w, h, d->mv_format, klovrp_fmt_name(d->mv_format),
+                mv_vk, dp, d->mv_depth_format, klovrp_fmt_name(d->mv_depth_format), dp_vk,
+                layers, size_from);
+    return OVRP_SUCCESS;
 }
 
 // ovrp_GetLayerTexturePtr(layerId, stage, eye, uint64_t* texturePtr) - the

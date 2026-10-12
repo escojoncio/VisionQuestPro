@@ -1432,6 +1432,127 @@ static void kl_casefix(char *path, size_t prefix) {
     memcpy(path, out, n + 1);
 }
 
+// ---------------------------------------------------------------------------
+// Game-folder lookup: a file the guest names under its external storage
+// (<ext>/Android/obb/<pkg>/..., <ext>/Android/data/<pkg>/...) that is NOT where
+// that mapping puts it is searched for inside the folder the game was copied
+// into (the APK's folder), wherever it sits there: "<game>/start0",
+// "<game>/<pkg>/start0", "<game>/Android/obb/<pkg>/start0", "<game>/obb/...".
+// Every game copy is laid out differently (VRP, adb pulls, store backups), so
+// one generic rule instead of a per-game path. Read-side only: it fires only
+// when the mapped path does not exist, so the guest's own writes (saves,
+// caches) keep landing in its external storage.
+//
+// The folder is indexed once (relative paths, depth <= 8, <= 40000 entries) and
+// a request matches an indexed file whose relative path ENDS with the request's
+// tail at a component boundary, case-insensitively; the longest tail wins (most
+// specific), then the shallowest file.
+typedef struct { char *rel; } kl_gd_ent;
+static kl_gd_ent *g_gd;
+static int g_gd_n, g_gd_cap;
+static char g_gd_root[1024];
+static pthread_mutex_t g_gd_mu = PTHREAD_MUTEX_INITIALIZER;
+static int g_gd_built;
+
+static void kl_gd_walk(const char *abs, const char *rel, int depth) {
+    if (depth > 8 || g_gd_n >= 40000) return;
+    DIR *d = opendir(abs);
+    if (!d) return;
+    struct dirent *e;
+    while ((e = readdir(d)) && g_gd_n < 40000) {
+        if (e->d_name[0] == '.') continue;
+        char a2[1024], r2[1024];
+        snprintf(a2, sizeof a2, "%s/%s", abs, e->d_name);
+        snprintf(r2, sizeof r2, "%s/%s", rel, e->d_name);
+        struct stat st;
+        if (stat(a2, &st) != 0) continue;
+        if (S_ISDIR(st.st_mode)) { kl_gd_walk(a2, r2, depth + 1); continue; }
+        if (g_gd_n == g_gd_cap) {
+            int nc = g_gd_cap ? g_gd_cap * 2 : 1024;
+            kl_gd_ent *ng = realloc(g_gd, (size_t)nc * sizeof *ng);
+            if (!ng) break;
+            g_gd = ng; g_gd_cap = nc;
+        }
+        g_gd[g_gd_n++].rel = strdup(r2);
+    }
+    closedir(d);
+}
+
+// Built on the first lookup that has an APK path (never before: an empty path
+// early in boot must not consume the one build).
+static void kl_gd_build(void) {
+    extern const char *kl_jni_apk_path(void);
+    const char *apk = kl_jni_apk_path();
+    if (!apk || apk[0] != '/') return;
+    g_gd_built = 1;
+    snprintf(g_gd_root, sizeof g_gd_root, "%s", apk);
+    char *sl = strrchr(g_gd_root, '/');
+    if (!sl || sl == g_gd_root) { g_gd_root[0] = 0; return; }
+    *sl = 0;
+    kl_gd_walk(g_gd_root, "", 0);
+    fprintf(stderr, "  [path] game folder index: %d file(s) under %s\n", g_gd_n, g_gd_root);
+}
+
+// `tail` is the guest's path past "<ext>/Android/<obb|data>/<pkg>" (starts with
+// '/'), e.g. "/start0" or "/files/Data/x.bundle". Fills `out` on a hit.
+// basename_ok: allow the bare file name as the last resort (obb data); off for
+// Android/data, where generic names (config.json, values) would match wrongly —
+// there only the tail and the tail past its first component ("/files") count.
+static int kl_gd_find(const char *tail, char *out, size_t cap, int basename_ok) {
+    if (!tail || tail[0] != '/' || !tail[1]) return 0;
+    pthread_mutex_lock(&g_gd_mu);
+    if (!g_gd_built) kl_gd_build();
+    pthread_mutex_unlock(&g_gd_mu);
+    if (!g_gd_root[0] || !g_gd_n) return 0;
+    // Small per-tail cache (hits and misses): Unity titles poll every frame.
+    static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
+    static struct { char tail[160]; int idx; int bo; } cache[256];
+    static int ncache, next;
+    pthread_mutex_lock(&mu);
+    for (int i = 0; i < ncache; i++) {
+        if (cache[i].bo == basename_ok && strcmp(cache[i].tail, tail) == 0) {
+            int idx = cache[i].idx;
+            pthread_mutex_unlock(&mu);
+            if (idx < 0) return 0;
+            snprintf(out, cap, "%s%s", g_gd_root, g_gd[idx].rel);
+            return 1;
+        }
+    }
+    pthread_mutex_unlock(&mu);
+    // Try the whole tail, then drop leading components ("/files/Data/x" ->
+    // "/Data/x" -> "/x"): the longest tail that matches anything wins.
+    int best = -1;
+    size_t bestDepth = (size_t)-1;
+    int step = 0;
+    for (const char *t = tail; t && *t; t = strchr(t + 1, '/'), step++) {
+        if (!basename_ok && (step >= 2 || (step >= 1 && !strchr(t + 1, '/')))) break;
+        size_t tl = strlen(t);
+        for (int i = 0; i < g_gd_n; i++) {
+            const char *r = g_gd[i].rel;
+            size_t rl = strlen(r);
+            if (rl < tl || strcasecmp(r + rl - tl, t) != 0) continue;
+            size_t depth = 0;
+            for (const char *c = r; *c; c++) if (*c == '/') depth++;
+            if (depth < bestDepth) { best = i; bestDepth = depth; }
+        }
+        if (best >= 0) break;
+    }
+    pthread_mutex_lock(&mu);
+    int slot = ncache < 256 ? ncache++ : (next++ % 256);
+    snprintf(cache[slot].tail, sizeof cache[slot].tail, "%s", tail);
+    cache[slot].idx = best;
+    cache[slot].bo = basename_ok;
+    pthread_mutex_unlock(&mu);
+    if (best < 0) return 0;
+    snprintf(out, cap, "%s%s", g_gd_root, g_gd[best].rel);
+    static int said;
+    if (said < 16) {
+        said++;
+        fprintf(stderr, "  [path] game folder: %s -> %s\n", tail, out);
+    }
+    return 1;
+}
+
 static const char *kl_guest_path_inner(const char *path, char *buf, size_t cap) {
     if (!path) return path;
     // Windows-heritage guests (reVC / GTA Vice City) build paths with '\'
@@ -1514,12 +1635,47 @@ static const char *kl_guest_path_inner(const char *path, char *buf, size_t cap) 
                             fprintf(stderr, "  [path] %s -> obb dir %s\n", path, buf); }
                         return buf;
                     }
+                    // A named file the obb dir does not hold: say so, once per
+                    // name (max 8). Unity titles poll for their loose asset files
+                    // every frame and the guest's own exception repeats forever
+                    // without naming the host directory it looked in.
+                    char extp[1024];
+                    snprintf(extp, sizeof extp, "%s%s", g_ext_target, path + n);
+                    kl_casefix(extp, strlen(g_ext_target));
+                    if (rest && rest[1] && stat(extp, &st) != 0 && kl_gd_find(rest, buf, cap, 1))
+                        return buf;
+                    if (rest && rest[1] && stat(extp, &st) != 0) {
+                        static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
+                        static char missed[8][128];
+                        static int nmissed;
+                        pthread_mutex_lock(&mu);
+                        int seen = 0;
+                        for (int i = 0; i < nmissed; i++)
+                            if (strncmp(missed[i], rest, sizeof missed[i] - 1) == 0) { seen = 1; break; }
+                        if (!seen && nmissed < 8) {
+                            snprintf(missed[nmissed++], sizeof missed[0], "%s", rest);
+                            fprintf(stderr, "  [path] obb MISS: %s is not in the obb dir %s "
+                                    "(copy the game's Android/obb/<package>/ files there)\n",
+                                    path, od);
+                        }
+                        pthread_mutex_unlock(&mu);
+                    }
                 }
             }
             snprintf(buf, cap, "%s%s", g_ext_target, path + n);
             // iOS is case-sensitive; the guest mixes case (DATA vs data). Rewrite
             // the suffix to the on-disk spelling, past the known-good target prefix.
             kl_casefix(buf, strlen(g_ext_target));
+            // <ext>/Android/data/<pkg>/... missing from external storage: look in
+            // the game's own folder (pre-seeded data shipped with the copy).
+            if (strncmp(path + n, "/Android/data/", 14) == 0) {
+                struct stat st;
+                const char *rest = strchr(path + n + 14, '/');
+                char alt[1024];
+                if (rest && rest[1] && stat(buf, &st) != 0 && kl_gd_find(rest, alt, sizeof alt, 0)) {
+                    snprintf(buf, cap, "%s", alt);
+                }
+            }
             return buf;
         }
     }

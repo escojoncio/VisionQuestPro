@@ -71,6 +71,41 @@ IID(SL_IID_ANDROIDCONFIGURATION,   0x1004)
 IID(SL_IID_RECORD,                 0x1005)
 IID(SL_IID_BUFFERQUEUE,            0x1006)
 IID(SL_IID_VOLUME,                 0x1007)
+// Named but not served: exported so a guest that imports them binds a real id
+// (a missing one would bind a code stub whose BYTES the guest then reads as an
+// SLInterfaceID) and the GetInterface refusal below can say WHICH it was.
+IID(SL_IID_EFFECTSEND,             0x1008)
+IID(SL_IID_PLAYBACKRATE,           0x1009)
+IID(SL_IID_PREFETCHSTATUS,         0x100a)
+IID(SL_IID_SEEK,                   0x100b)
+IID(SL_IID_MUTESOLO,               0x100c)
+IID(SL_IID_METADATAEXTRACTION,     0x100d)
+IID(SL_IID_ANDROIDEFFECT,          0x100e)
+IID(SL_IID_ANDROIDEFFECTSEND,      0x100f)
+IID(SL_IID_ENGINECAPABILITIES,     0x1010)
+IID(SL_IID_OUTPUTMIX,              0x1011)
+IID(SL_IID_ANDROIDBUFFERQUEUESOURCE, 0x1012)
+IID(SL_IID_NULL,                   0x1013)
+
+// A readable name for an interface id we issued, for the log only. Anything
+// else is not dereferenced: it may be a stub's code bytes (see above).
+static const char *sl_iid_name(const SLInterfaceID iid) {
+    static const struct { const struct SLInterfaceID_ *const *id; const char *nm; } t[] = {
+        {&SL_IID_ENGINE, "ENGINE"}, {&SL_IID_PLAY, "PLAY"},
+        {&SL_IID_ANDROIDSIMPLEBUFFERQUEUE, "ANDROIDSIMPLEBUFFERQUEUE"},
+        {&SL_IID_ANDROIDCONFIGURATION, "ANDROIDCONFIGURATION"}, {&SL_IID_RECORD, "RECORD"},
+        {&SL_IID_BUFFERQUEUE, "BUFFERQUEUE"}, {&SL_IID_VOLUME, "VOLUME"},
+        {&SL_IID_EFFECTSEND, "EFFECTSEND"}, {&SL_IID_PLAYBACKRATE, "PLAYBACKRATE"},
+        {&SL_IID_PREFETCHSTATUS, "PREFETCHSTATUS"}, {&SL_IID_SEEK, "SEEK"},
+        {&SL_IID_MUTESOLO, "MUTESOLO"}, {&SL_IID_METADATAEXTRACTION, "METADATAEXTRACTION"},
+        {&SL_IID_ANDROIDEFFECT, "ANDROIDEFFECT"}, {&SL_IID_ANDROIDEFFECTSEND, "ANDROIDEFFECTSEND"},
+        {&SL_IID_ENGINECAPABILITIES, "ENGINECAPABILITIES"}, {&SL_IID_OUTPUTMIX, "OUTPUTMIX"},
+        {&SL_IID_ANDROIDBUFFERQUEUESOURCE, "ANDROIDBUFFERQUEUESOURCE"}, {&SL_IID_NULL, "NULL"},
+    };
+    for (size_t i = 0; i < sizeof t / sizeof t[0]; i++)
+        if (*t[i].id == iid) return t[i].nm;
+    return NULL;
+}
 
 // ---- vtable layouts, in spec order ----
 struct SLObjectItf_;
@@ -166,6 +201,21 @@ struct SLBufferQueueItf_ {
     SLresult (*RegisterCallback)(SLBufferQueueItf, void (*)(SLBufferQueueItf, void *), void *);
 };
 
+// SLVolumeItf, in spec order. SLmillibel and SLpermille are int16.
+struct SLVolumeItf_;
+typedef const struct SLVolumeItf_ *const *SLVolumeItf;
+struct SLVolumeItf_ {
+    SLresult (*SetVolumeLevel)(SLVolumeItf, int16_t);
+    SLresult (*GetVolumeLevel)(SLVolumeItf, int16_t *);
+    SLresult (*GetMaxVolumeLevel)(SLVolumeItf, int16_t *);
+    SLresult (*SetMute)(SLVolumeItf, SLboolean);
+    SLresult (*GetMute)(SLVolumeItf, SLboolean *);
+    SLresult (*EnableStereoPosition)(SLVolumeItf, SLboolean);
+    SLresult (*IsEnabledStereoPosition)(SLVolumeItf, SLboolean *);
+    SLresult (*SetStereoPosition)(SLVolumeItf, int16_t);
+    SLresult (*GetStereoPosition)(SLVolumeItf, int16_t *);
+};
+
 struct SLConfigItf_;
 typedef const struct SLConfigItf_ *const *SLConfigItf;
 struct SLConfigItf_ {
@@ -201,6 +251,7 @@ typedef struct kl_sl_player {
     const struct SLPlayItf_   *play_vt;
     const struct SLBufferQueueItf_ *bq_vt;
     const struct SLConfigItf_ *cfg_vt;
+    const struct SLVolumeItf_ *vol_vt;
 
     pthread_mutex_t lock;
     pthread_cond_t  wake;
@@ -222,6 +273,14 @@ typedef struct kl_sl_player {
     int16_t *conv; size_t conv_cap;         // float -> int16 staging, feeder thread only
     int      mixes;                          // 1: feed kl_audio; 0: usleep-pace only
     unsigned long consumed;
+    // SLVolumeItf state. gain is derived (linear, 1.0 = unity) and read by the
+    // feeder without the lock: a torn read of one float is one buffer at the old
+    // or the new level, never a crash.
+    int16_t  vol_mb;                         // millibels, <= 0
+    SLboolean muted;
+    int16_t  stereo_pos;
+    SLboolean stereo_on;
+    float    gain;
 } kl_sl_player;
 
 typedef struct { const struct SLObjectItf_ *obj_vt; } kl_sl_mix;
@@ -295,6 +354,7 @@ static kl_sl_player *obj_as_player(const void *self) {
 #define KL_SL_PLAY_P(self) ((kl_sl_player *)((char *)(self) - offsetof(kl_sl_player, play_vt)))
 #define KL_SL_BQ_P(self)   ((kl_sl_player *)((char *)(self) - offsetof(kl_sl_player, bq_vt)))
 #define KL_SL_CFG_P(self)  ((kl_sl_player *)((char *)(self) - offsetof(kl_sl_player, cfg_vt)))
+#define KL_SL_VOL_P(self)  ((kl_sl_player *)((char *)(self) - offsetof(kl_sl_player, vol_vt)))
 
 // The recorder's own container-of macros. Its bq/cfg vtable pointers sit at
 // different offsets than the player's, so they need their own recovery — a
@@ -375,6 +435,22 @@ static void *feeder(void *arg) {
                 }
                 buf = p->conv; size = (SLuint32)(n * sizeof(int16_t));
             } else { buf = NULL; size /= 2; }   // allocation failed: pace silently
+        }
+        // SLVolumeItf: attenuate (or mute) 16-bit PCM on its way to the device.
+        // Unity gain stays a straight pass of the guest's buffer.
+        float gain = p->gain;
+        if (buf && p->bits == 16 && gain != 1.0f) {
+            size_t n = size / sizeof(int16_t);
+            if (buf != p->conv && n > p->conv_cap) {
+                int16_t *c = realloc(p->conv, n * sizeof(int16_t));
+                if (c) { p->conv = c; p->conv_cap = n; }
+            }
+            if (n <= p->conv_cap) {
+                const int16_t *in = buf;
+                for (size_t i = 0; i < n; i++)
+                    p->conv[i] = (int16_t)lrintf((float)in[i] * gain);
+                buf = p->conv;
+            }
         }
         size_t played = (buf && p->mixes) ? kl_audio_write_src(p, buf, size) : 0;
         if (played < size) {
@@ -613,13 +689,95 @@ static SLresult cfg_Get(SLConfigItf s, const char *k, SLuint32 *n, void *v) {
 }
 static const struct SLConfigItf_ g_cfg_vt = { cfg_Set, cfg_Get };
 
+// ---- SLVolumeItf ----
+// Android's answers: the maximum level is 0 mB (unity — OpenSL here can only
+// attenuate), the minimum SL_MILLIBEL_MIN. CRI ADX2 fetches this interface and
+// calls through it without checking GetInterface's result, so refusing it was a
+// NULL vtable call on CRI's audio thread (Attack on Titan VR).
+#define SL_MILLIBEL_MIN ((int16_t)-32768)
+static void vol_update(kl_sl_player *p) {
+    if (p->muted || p->vol_mb <= SL_MILLIBEL_MIN) { p->gain = 0.0f; return; }
+    p->gain = p->vol_mb >= 0 ? 1.0f : powf(10.0f, (float)p->vol_mb / 2000.0f);
+}
+static SLresult vol_SetVolumeLevel(SLVolumeItf s, int16_t mb) {
+    kl_sl_player *p = KL_SL_VOL_P(s);
+    if (mb > 0) return 2; /* SL_RESULT_PARAMETER_INVALID: above GetMaxVolumeLevel */
+    p->vol_mb = mb; vol_update(p);
+    static int said;
+    if (said++ < 4) fprintf(stderr, "  [sl] volume level %d mB (gain %.3f)\n", mb, p->gain);
+    return SL_RESULT_SUCCESS;
+}
+static SLresult vol_GetVolumeLevel(SLVolumeItf s, int16_t *mb) {
+    if (!mb) return 2; *mb = KL_SL_VOL_P(s)->vol_mb; return SL_RESULT_SUCCESS;
+}
+static SLresult vol_GetMaxVolumeLevel(SLVolumeItf s, int16_t *mb) {
+    (void)s; if (!mb) return 2; *mb = 0; return SL_RESULT_SUCCESS;
+}
+static SLresult vol_SetMute(SLVolumeItf s, SLboolean m) {
+    kl_sl_player *p = KL_SL_VOL_P(s); p->muted = m ? 1 : 0; vol_update(p); return SL_RESULT_SUCCESS;
+}
+static SLresult vol_GetMute(SLVolumeItf s, SLboolean *m) {
+    if (!m) return 2; *m = KL_SL_VOL_P(s)->muted; return SL_RESULT_SUCCESS;
+}
+// Stereo position is recorded, not applied: the guest's own mix already places
+// its sources, and a player-wide pan is something no measured guest sets.
+static SLresult vol_EnableStereoPosition(SLVolumeItf s, SLboolean e) {
+    KL_SL_VOL_P(s)->stereo_on = e ? 1 : 0; return SL_RESULT_SUCCESS;
+}
+static SLresult vol_IsEnabledStereoPosition(SLVolumeItf s, SLboolean *e) {
+    if (!e) return 2; *e = KL_SL_VOL_P(s)->stereo_on; return SL_RESULT_SUCCESS;
+}
+static SLresult vol_SetStereoPosition(SLVolumeItf s, int16_t pm) {
+    if (pm < -1000 || pm > 1000) return 2;
+    KL_SL_VOL_P(s)->stereo_pos = pm; return SL_RESULT_SUCCESS;
+}
+static SLresult vol_GetStereoPosition(SLVolumeItf s, int16_t *pm) {
+    if (!pm) return 2; *pm = KL_SL_VOL_P(s)->stereo_pos; return SL_RESULT_SUCCESS;
+}
+static const struct SLVolumeItf_ g_vol_vt = {
+    vol_SetVolumeLevel, vol_GetVolumeLevel, vol_GetMaxVolumeLevel, vol_SetMute, vol_GetMute,
+    vol_EnableStereoPosition, vol_IsEnabledStereoPosition, vol_SetStereoPosition,
+    vol_GetStereoPosition,
+};
+
 // ---- SLEngineItf ----
+static void sl_log_requested(const char *what, SLuint32 n, const SLInterfaceID *ids,
+                             const SLboolean *req);
 static SLresult eng_CreateOutputMix(SLEngineItf self, SLObjectItf *out, SLuint32 n,
                                     const SLInterfaceID *ids, const SLboolean *req) {
-    (void)self; (void)n; (void)ids; (void)req;
+    (void)self;
+    sl_log_requested("CreateOutputMix", n, ids, req);
     g_mix.obj_vt = &g_obj_vt;
     if (out) *out = (SLObjectItf)&g_mix;
     return SL_RESULT_SUCCESS;
+}
+
+// Which interfaces the guest asked an object to carry, named, and whether we
+// serve each. Logged per distinct (what, id) so a guest that builds many players
+// says it once. Not used to refuse creation: nothing measured depends on that,
+// and the refusal that matters (GetInterface) is named where it happens.
+static void sl_log_requested(const char *what, SLuint32 n, const SLInterfaceID *ids,
+                             const SLboolean *req) {
+    static struct { const char *what; const void *id; } seen[48];
+    static unsigned nseen;
+    static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
+    if (!ids) return;
+    for (SLuint32 i = 0; i < n && i < 16; i++) {
+        const void *id = (const void *)ids[i];
+        pthread_mutex_lock(&mu);
+        unsigned k = 0;
+        for (; k < nseen; k++) if (seen[k].what == what && seen[k].id == id) break;
+        int fresh = k == nseen && nseen < sizeof seen / sizeof seen[0];
+        if (fresh) { seen[nseen].what = what; seen[nseen].id = id; nseen++; }
+        pthread_mutex_unlock(&mu);
+        if (!fresh) continue;
+        const char *nm = sl_iid_name(ids[i]);
+        int served = ids[i] == SL_IID_PLAY || ids[i] == SL_IID_ANDROIDSIMPLEBUFFERQUEUE ||
+                     ids[i] == SL_IID_BUFFERQUEUE || ids[i] == SL_IID_ANDROIDCONFIGURATION ||
+                     ids[i] == SL_IID_VOLUME || ids[i] == SL_IID_RECORD;
+        fprintf(stderr, "  [sl] %s asks for SL_IID_%s%s%s\n", what, nm ? nm : "?",
+                req && req[i] ? " (required)" : "", served ? "" : " — NOT served");
+    }
 }
 
 // Stop and join the feeder, if one is running. Must happen before the player is
@@ -664,7 +822,8 @@ static void player_wait_cb(kl_sl_player *p) {
 static SLresult eng_CreateAudioPlayer(SLEngineItf self, SLObjectItf *out,
                                       void *src, void *snk, SLuint32 n,
                                       const SLInterfaceID *ids, const SLboolean *req) {
-    (void)self; (void)snk; (void)n; (void)ids; (void)req;
+    (void)self; (void)snk;
+    sl_log_requested("CreateAudioPlayer", n, ids, req);
     // A FREE slot, so a second output (vampire: UE4 alongside FMOD) does not stop
     // and memset a live player out from under its feeder. Only when all slots are
     // in use do we fall back to reclaiming slot 0.
@@ -683,6 +842,8 @@ static SLresult eng_CreateAudioPlayer(SLEngineItf self, SLObjectItf *out,
     p->play_vt = &g_play_vt;
     p->bq_vt = &g_bq_vt;
     p->cfg_vt = &g_cfg_vt;
+    p->vol_vt = &g_vol_vt;
+    p->gain = 1.0f;
     p->state = SL_PLAYSTATE_STOPPED;
     p->rate = 48000; p->channels = 2; p->bits = 16;
     pthread_mutex_init(&p->lock, NULL);
@@ -1010,7 +1171,10 @@ static const struct SLEngineItf_ g_engine_vt = {
 // GetInterface hands back a pointer to the right vtable *slot inside the object*,
 // because every method takes that pointer back as self.
 static SLresult obj_GetInterface(SLObjectItf self, const SLInterfaceID iid, void *out) {
-    if (!out) return SL_RESULT_FEATURE_UNSUPPORTED;
+    if (!out) return 2; /* SL_RESULT_PARAMETER_INVALID */
+    // Android clears the out-parameter before anything else, so a caller that
+    // ignores the result reads NULL rather than its own stale stack.
+    *(void **)out = NULL;
     void *o = (void *)self;
     if (o == (void *)&g_engine && iid == SL_IID_ENGINE) {
         g_engine.engine_vt = &g_engine_vt;
@@ -1026,6 +1190,7 @@ static SLresult obj_GetInterface(SLObjectItf self, const SLInterfaceID iid, void
         if (iid == SL_IID_ANDROIDCONFIGURATION) {
             *(void **)out = &p->cfg_vt; return SL_RESULT_SUCCESS;
         }
+        if (iid == SL_IID_VOLUME) { *(void **)out = &p->vol_vt; return SL_RESULT_SUCCESS; }
     }
     kl_sl_recorder *r = obj_as_recorder(o);
     if (r) {
@@ -1037,8 +1202,11 @@ static SLresult obj_GetInterface(SLObjectItf self, const SLInterfaceID iid, void
             *(void **)out = &r->cfg_vt; return SL_RESULT_SUCCESS;
         }
     }
-    fprintf(stderr, "  [sl] GetInterface: unsupported interface %p on %p\n",
-            (const void *)iid, o);
+    const char *nm = sl_iid_name(iid);
+    fprintf(stderr, "  [sl] GetInterface: unsupported interface SL_IID_%s (%p) on %s %p\n",
+            nm ? nm : "?", (const void *)iid,
+            p ? "player" : r ? "recorder" : o == (void *)&g_engine ? "engine" :
+            o == (void *)&g_mix ? "output mix" : "object", o);
     return SL_RESULT_FEATURE_UNSUPPORTED;
 }
 
@@ -1107,6 +1275,18 @@ static const struct { const char *name; void *addr; } g_sl_syms[] = {
     {"SL_IID_RECORD",                   &SL_IID_RECORD},
     {"SL_IID_BUFFERQUEUE",              &SL_IID_BUFFERQUEUE},
     {"SL_IID_VOLUME",                   &SL_IID_VOLUME},
+    {"SL_IID_EFFECTSEND",               &SL_IID_EFFECTSEND},
+    {"SL_IID_PLAYBACKRATE",             &SL_IID_PLAYBACKRATE},
+    {"SL_IID_PREFETCHSTATUS",           &SL_IID_PREFETCHSTATUS},
+    {"SL_IID_SEEK",                     &SL_IID_SEEK},
+    {"SL_IID_MUTESOLO",                 &SL_IID_MUTESOLO},
+    {"SL_IID_METADATAEXTRACTION",       &SL_IID_METADATAEXTRACTION},
+    {"SL_IID_ANDROIDEFFECT",            &SL_IID_ANDROIDEFFECT},
+    {"SL_IID_ANDROIDEFFECTSEND",        &SL_IID_ANDROIDEFFECTSEND},
+    {"SL_IID_ENGINECAPABILITIES",       &SL_IID_ENGINECAPABILITIES},
+    {"SL_IID_OUTPUTMIX",                &SL_IID_OUTPUTMIX},
+    {"SL_IID_ANDROIDBUFFERQUEUESOURCE", &SL_IID_ANDROIDBUFFERQUEUESOURCE},
+    {"SL_IID_NULL",                     &SL_IID_NULL},
 };
 
 void *kl_opensl_sym(const char *name) {

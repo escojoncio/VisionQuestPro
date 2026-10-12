@@ -580,3 +580,75 @@ void kl_sample_stop_report(FILE *out) {
     kl_sample_report(out);
     g_started = 0;
 }
+
+// One-shot picture of every thread that is in guest code right now, for an
+// event whose CAUSE runs on another thread than the one that reports it — the
+// XR display teardown (ovrp_DestroyDistortionWindow2) runs on Unity's graphics
+// thread, but whatever asked for it (a managed XRDisplaySubsystem.Stop, an XR
+// loader deinit) is on the main/managed thread. Works with or without the
+// periodic sampler; threads are not suspended (a torn read costs one frame).
+void kl_sample_snapshot(FILE *out, const char *why) {
+    thread_act_array_t list;
+    mach_msg_type_number_t nlist = 0;
+    if (task_threads(mach_task_self(), &list, &nlist) != KERN_SUCCESS) return;
+    mach_port_t self = mach_thread_self();
+    fprintf(out, "  [snap] guest threads at %s:\n", why ? why : "?");
+    unsigned shown_threads = 0;
+    for (mach_msg_type_number_t i = 0; i < nlist; i++) {
+        thread_act_t act = list[i];
+        arm_thread_state64_t ts;
+        mach_msg_type_number_t cnt = ARM_THREAD_STATE64_COUNT;
+        void *frames[24];
+        unsigned nf = 0;
+        if (act == self) {
+            // Our own chain, from here.
+            uint64_t fp = (uint64_t)__builtin_frame_address(0);
+            frames[nf++] = __builtin_return_address(0);
+            while (fp && nf < 24) {
+                if (fp & 7) break;
+                uint64_t pair[2]; vm_size_t got = 0;
+                if (vm_read_overwrite(mach_task_self(), fp, sizeof pair, (vm_address_t)pair,
+                                      &got) != KERN_SUCCESS || got != sizeof pair) break;
+                if (!pair[1] || pair[0] <= fp) break;
+                frames[nf++] = (void *)(pair[1] & 0x0000ffffffffffffULL);
+                fp = pair[0];
+            }
+        } else {
+            if (thread_get_state(act, ARM_THREAD_STATE64, (thread_state_t)&ts, &cnt)
+                != KERN_SUCCESS) continue;
+            frames[nf++] = (void *)((uint64_t)ts.__pc & 0x0000ffffffffffffULL);
+            uint64_t fp = (uint64_t)ts.__fp;
+            while (fp && nf < 24) {
+                if (fp & 7) break;
+                uint64_t pair[2]; vm_size_t got = 0;
+                if (vm_read_overwrite(mach_task_self(), fp, sizeof pair, (vm_address_t)pair,
+                                      &got) != KERN_SUCCESS || got != sizeof pair) break;
+                if (!pair[1] || pair[0] <= fp) break;
+                frames[nf++] = (void *)(pair[1] & 0x0000ffffffffffffULL);
+                fp = pair[0];
+            }
+        }
+        int guest = 0;
+        for (unsigned f = 0; f < nf; f++) if (kl_addr_image(frames[f], NULL)) { guest = 1; break; }
+        if (!guest) continue;
+        char nm[64] = {0};
+        pthread_t pt = pthread_from_mach_thread_np(act);
+        if (pt) pthread_getname_np(pt, nm, sizeof nm);
+        fprintf(out, "    thread %#x%s%s%s%s\n", act, nm[0] ? " \"" : "", nm, nm[0] ? "\"" : "",
+                act == self ? " (this one)" : act == g_main_act ? " (pump)" : "");
+        for (unsigned f = 0; f < nf; f++) {
+            char b[160];
+            size_t off = 0;
+            const char *img = kl_addr_image(frames[f], &off);
+            const char *m = kl_il2cpp_method_at(frames[f]);
+            if (m && img) fprintf(out, "      #%-2u %s+0x%zx [%s]\n", f, img, off, m);
+            else          fprintf(out, "      #%-2u %s\n", f, label_pc(frames[f], b, sizeof b));
+        }
+        if (++shown_threads >= 24) break;
+    }
+    for (mach_msg_type_number_t i = 0; i < nlist; i++)
+        mach_port_deallocate(mach_task_self(), list[i]);
+    vm_deallocate(mach_task_self(), (vm_address_t)list, nlist * sizeof list[0]);
+    mach_port_deallocate(mach_task_self(), self);
+    fflush(out);
+}
