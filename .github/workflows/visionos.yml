@@ -77,7 +77,8 @@ jobs:
             -sdk xros -configuration Release -destination 'generic/platform=visionOS' \
             -derivedDataPath build/dd \
             CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
-            build 2>&1 | tee app.log | grep -E 'error:|warning: .*VQ|BUILD (SUCCEEDED|FAILED)' || true
+            build > app.log 2>&1 || true
+          grep -E 'error:|BUILD (SUCCEEDED|FAILED)' app.log | head -60 || true
           grep -q 'BUILD SUCCEEDED' app.log
           APP=$(find build/dd/Build/Products -name 'VisionQuestPro.app' -maxdepth 3 | head -n 1)
           ls -la "$APP" "$APP/Frameworks" | tee -a app.log
@@ -86,22 +87,9 @@ jobs:
           (cd build/ipa && zip -qry ../VisionQuestPro.ipa Payload)
           ls -la build/VisionQuestPro.ipa
 
-      - name: Logs (on failure)
-        if: failure()
-        run: |
-          for f in runtime.log app.log; do
-            [ -f "$f" ] || continue
-            echo "=== $f (errors)"; grep -nE 'error|Error' "$f" | head -80
-            echo "=== $f (tail)"; tail -60 "$f"
-          done
-      - uses: actions/upload-artifact@v4
+      - name: Publish the logs (branch ci-logs, visionos.txt)
         if: always()
-        with:
-          name: logs
-          path: |
-            runtime.log
-            app.log
-          if-no-files-found: ignore
+        run: bash scripts/ci-publish-log.sh visionos runtime.log app.log
 
       - name: Publish the app as a release
         if: success() && github.ref == 'refs/heads/main'
