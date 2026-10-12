@@ -87,9 +87,32 @@ enum VQPrepare {
         } else {
             try convert(game, tree: tree, dylibs: dylibs, work: work, stampURL: stampURL, want: want, progress: progress)
         }
+        writeVersionFile(game, tree: tree)
         let signed = try sign(game, from: dylibs, conversion: want, identity: identity, progress: progress)
         progress(1, VQL("Listo", "Done"))
         return Prepared(tree: tree, dylibs: signed)
+    }
+
+    /// Klepton names the game's OBB (main.<versionCode>.<package>.obb) from tree/apktool.yml; without
+    /// it, it falls back to a fixed number and the game data is never found. Written on every launch
+    /// from the APK's own manifest, so trees prepared before this existed are fixed too.
+    private static func writeVersionFile(_ game: VQGame, tree: URL) {
+        let m = game.manifestText
+        guard let code = VQGames.attribute(m, element: "manifest", name: "android:versionCode"),
+              Int(code) != nil else {
+            VQLog.log("Preparar: \(game.id): el manifiesto no trae versionCode; Klepton usará su valor por defecto")
+            return
+        }
+        let name = VQGames.attribute(m, element: "manifest", name: "android:versionName") ?? "0"
+        let text = "versionInfo:\n  versionCode: '\(code)'\n  versionName: \(name)\n"
+        let url = tree.appendingPathComponent("apktool.yml")
+        if (try? String(contentsOf: url, encoding: .utf8)) == text { return }
+        do {
+            try text.write(to: url, atomically: true, encoding: .utf8)
+            VQLog.log("Preparar: \(game.id): versionCode \(code) / \(name) -> apktool.yml")
+        } catch {
+            VQLog.log("Preparar: \(game.id): no se pudo escribir apktool.yml (\(error.localizedDescription))")
+        }
     }
 
     private static func convert(_ game: VQGame, tree: URL, dylibs: URL, work: URL, stampURL: URL, want: String,

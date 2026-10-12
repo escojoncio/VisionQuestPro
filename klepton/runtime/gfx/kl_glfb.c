@@ -255,6 +255,10 @@ static void klfb_debug_cb(uint32_t source, uint32_t type, uint32_t id,
 
 int kl_glfb_init(void) {
     if (!kl_glfb_enabled() || g_ready) return g_ready;
+    // A failed ANGLE load is final for the process: retrying on every GL lookup
+    // only repeats the same dlopen error hundreds of times in the log.
+    static int g_load_failed;
+    if (g_load_failed) return 0;
 
     // Applied here rather than only in kl_glfb_set_size, which this path never
     // calls — the eye size stays at its 1832x1920 default unless OVRPlugin says
@@ -276,7 +280,8 @@ int kl_glfb_init(void) {
                         "patches the checkout too.\n"
                         "         (KL_ANGLE_DIR overrides, but a stock ANGLE is not "
                         "equivalent: see angle-patches/.)\n"
-                        "         staying on the null driver\n", dir, dlerror());
+                        "         staying on the null driver (reported once)\n", dir, dlerror());
+        g_load_failed = 1;
         return 0;
     }
 

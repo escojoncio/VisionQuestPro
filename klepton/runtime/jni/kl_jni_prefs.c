@@ -331,6 +331,26 @@ static int klj_mod_renderer_override(const char *file, const char *key, long lon
     return 0;
 }
 
+// Unity keeps a few booleans in the activity's own prefs file
+// (Activity.getPreferences -> "com.unity3d.player.UnityPlayerActivity"). One of
+// them records that a previous launch died while initialising the graphics
+// device; when it reads true, Unity skips Vulkan and starts on GLES, which this
+// build has no driver for. Every early run of a new port dies there at least
+// once, so the flag sticks and Vulkan is never tried again. Log every boolean
+// read from that file and answer false for a stored true, so each launch gets
+// Vulkan again. KL_KEEP_UNITY_GFX_FALLBACK=1 restores the stored value.
+static int klj_unity_activity_bool(klj_prefs *p, const char *key, long long stored,
+                                   long long *out) {
+    if (!p || !key || strcmp(p->name, "com.unity3d.player.UnityPlayerActivity") != 0) return 0;
+    if (stored && !kl_env_on("KL_KEEP_UNITY_GFX_FALLBACK", 0)) {
+        KLJ_LOG("prefs[UnityPlayerActivity] getBoolean(\"%s\") stored true -> false "
+                "(Unity's graphics fallback flag; KL_KEEP_UNITY_GFX_FALLBACK=1 keeps it)", key);
+        *out = 0; return 1;
+    }
+    KLJ_LOG("prefs[UnityPlayerActivity] getBoolean(\"%s\") -> %lld", key, stored);
+    return 0;
+}
+
 // Diagnostic + override for the launcher's "mod" prefs (see above). Logs each
 // absent read's key+default once (one-shot, cheap) so new keys stay discoverable.
 #define KLJ_SP_GET(Sfx, kind, Field, Slot, DefLL)                                  \
@@ -351,6 +371,12 @@ static int klj_mod_renderer_override(const char *file, const char *key, long lon
                 KLJ_LOG("prefs[mod] get" #Sfx "(\"%s\") absent -> guest default %lld", \
                         k_ ? k_ : "?", (long long)(DefLL));                       \
             return (klj_val){.Slot = n > 1 ? a[1].Slot : 0};                      \
+        }                                                                         \
+        if (kind == 'Z') {                                                        \
+            long long bo_;                                                        \
+            if (klj_unity_activity_bool(klj_prefs_of(self),                       \
+                    n > 0 ? klj_str(a[0].l) : NULL, (long long)e->ival, &bo_))     \
+                return (klj_val){.j = (uint64_t)bo_};                             \
         }                                                                         \
         return (klj_val){.Slot = e->Field};                                       \
     }
