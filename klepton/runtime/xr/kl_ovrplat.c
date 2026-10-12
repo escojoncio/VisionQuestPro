@@ -140,10 +140,24 @@ static int plat_is_iap_owned_query(const char *name) {
            strcmp(name, "ovr_IAP_GetViewerPurchasesDeltaAsync") == 0;
 }
 
+// "What is the status of this asset file?" — the asset-file twin of the owned
+// IAP query above. With no platform service the truthful answer is "the request
+// could not be made" (request id 0): no status message arrives, so the guest
+// learns of no installed or owned content it did not already have, and nothing
+// is delivered. Batman: Arkham Shadow asks ovr_AssetFile_StatusByName during
+// boot. The DELIVERY calls (ovr_AssetFile_Download*, DownloadById) stay in
+// plat_is_drm and keep aborting.
+static int plat_is_asset_status_query(const char *name) {
+    return strcmp(name, "ovr_AssetFile_Status") == 0 ||
+           strcmp(name, "ovr_AssetFile_StatusById") == 0 ||
+           strcmp(name, "ovr_AssetFile_StatusByName") == 0;
+}
+
 static int plat_is_drm(const char *name) {
     if (plat_is_absent_ok(name)) return 0;
     if (plat_is_iap_catalog(name)) return 0;
     if (plat_is_iap_owned_query(name)) return 0;
+    if (plat_is_asset_status_query(name)) return 0;
     for (size_t i = 0; i < sizeof g_drm_markers / sizeof g_drm_markers[0]; i++)
         if (strstr(name, g_drm_markers[i])) return 1;
     return 0;
@@ -744,6 +758,8 @@ static const char *const g_plat_request[] = {
     "ovr_IAP_GetProductsBySKU", "ovr_IAP_GetNextProductArrayPage",
     // Owned-inventory query: honest failure, grants nothing (see plat_is_iap_owned_query).
     "ovr_IAP_GetViewerPurchases", "ovr_IAP_GetViewerPurchasesDeltaAsync",
+    // Asset-file status query: honest failure, grants nothing (see plat_is_asset_status_query).
+    "ovr_AssetFile_Status", "ovr_AssetFile_StatusById", "ovr_AssetFile_StatusByName",
     "ovr_RichPresence_Clear", "ovr_RichPresence_Set",
     "ovr_RichPresence_SetDestination", "ovr_RichPresence_SetIsJoinable",
     // Asking who is logged in is not an ownership question; with no platform
