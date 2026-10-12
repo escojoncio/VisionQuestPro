@@ -38,7 +38,8 @@
 #include "kl_target.h"
 
 #ifndef KL_TARGET_DEFAULT
-#define KL_TARGET_DEFAULT KL_TARGET_DEFAULT_NAME
+// VisionQuestPro: no compiled-in game; the launcher picks one (kl_app_configure_game).
+#define KL_TARGET_DEFAULT "(ninguno)"
 #endif
 
 static const kl_target *g_target;
