@@ -2818,7 +2818,14 @@ final class KleptonCompositor {
                 // image we handed out — so that handle, resolved to its MTLTexture,
                 // is where the panel pixels actually are. Falls back to the layer
                 // image (RE4's path) then kl_glfb when texL carries nothing.
-                let t = kl_vulkan_mtl_for_handle(ov.tex)
+                // ...unless the guest has written the layer's OWN image (a view or a
+                // copy into it, kl_vulkan_layer_written): then that image is the
+                // picture, as on a Quest, and texL is only its source texture
+                // (Batman's loading icon: a 2048x128 sprite strip whose frame is
+                // picked by the submit's texture-rect matrix).
+                let ownFirst = kl_vulkan_layer_written(ov.layer_id) != 0
+                let t = (ownFirst ? kl_vulkan_layer_mtl_texture(ov.layer_id, ov.stage, Int32(vi), &w, &h) : nil)
+                    ?? kl_vulkan_mtl_for_handle(ov.tex)
                     ?? kl_vulkan_layer_mtl_texture(ov.layer_id, ov.stage, Int32(vi), &w, &h)
                     ?? kl_glfb_layer_mtl_texture(ov.layer_id, ov.stage, &w, &h)
                 if texture == nil, let t { texture = Unmanaged<MTLTexture>
@@ -2941,7 +2948,10 @@ final class KleptonCompositor {
         // texL first — AC Nexus renders its backdrop into its OWN texture and
         // submits that handle, exactly as its menu quads do; the layer swapchain
         // image is the empty fallback. Same ladder, same reason, as the quad path.
-        let t = kl_vulkan_mtl_for_handle(ov.tex)
+        let ownFirst = kl_vulkan_layer_written(ov.layer_id) != 0
+        let t = (ownFirst ? kl_vulkan_layer_mtl_texture(ov.layer_id, ov.stage,
+                                                        Int32(viewIndices.first ?? 0), &w, &h) : nil)
+            ?? kl_vulkan_mtl_for_handle(ov.tex)
             ?? kl_vulkan_layer_mtl_texture(ov.layer_id, ov.stage,
                                             Int32(viewIndices.first ?? 0), &w, &h)
             ?? kl_glfb_layer_mtl_texture(ov.layer_id, ov.stage, &w, &h)

@@ -152,6 +152,11 @@ typedef struct {
     // having a hard jagged edge.
     float         chroma_min, chroma_max;
     float         chroma_key[3];
+    // The guest's global colour fade (ovrp_SetColorScaleAndOffset): rgb = rgb *
+    // scale + offset when fade_on. Scalars for the same layout reason as above.
+    uint32_t      fade_on;
+    float         fade_scale[4];
+    float         fade_offset[4];
 } kl_reproject_uniforms;
 
 // The blit's uniforms — buffer(0) of its FRAGMENT stage. It carried a bare
@@ -208,7 +213,23 @@ typedef struct {
     // already happening and is at least honest.
     uint32_t      visible;
     uint32_t      opaque;    // KL_OVERLAY_OPAQUE: force sampled alpha to 1
+    // Texture-rect matrix (kl_ovrp_overlay.rect_on): the quad's uv (bottom-left
+    // origin) maps to tex_uv = uv * sb.xy + sb.zw and samples only inside `rect`.
+    // Zero = off, so a caller that never fills these draws as before.
+    uint32_t      rect_on;
+    float         rect[4];
+    float         scale_bias[4];
+    // Colour: c = c * color_scale + color_offset (per-layer, or the global fade
+    // when the guest applied it to all layers). Zero = off.
+    uint32_t      color_on;
+    float         color_scale[4];
+    float         color_offset[4];
 } kl_overlay_uniforms;
+
+// The guest's global colour fade (ovrp_SetColorScaleAndOffset). The eye pass
+// always takes it; overlays take it when `all_layers` and they carry no colour of
+// their own.
+void kl_reproject_set_fade(int on, const float scale[4], const float offset[4], int all_layers);
 
 // The overlay shader — `kl_ov_v` / `kl_ov_f`, a 4-vertex triangle strip with no
 // vertex buffer, buffer(0) an array indexed by [[amplification_id]] exactly as

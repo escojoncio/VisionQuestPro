@@ -6061,10 +6061,57 @@ static void klovrp_enq_flush(void) {
     if (g_enq_n) kl_ovrp_overlays_external(g_enq, g_enq_n);
     g_enq_n = 0;
 }
+// ovrp_SetColorScaleAndOffset(ovrpVector4f scale, ovrpVector4f offset, ovrpBool
+// applyToAllLayers): the guest's global fade (OVRManager / OVRScreenFade). Both
+// vectors are 4-float HFAs, so they arrive in s0..s3 and s4..s7 and the bool in
+// w0 - the same on the guest's AAPCS64 and on Darwin. Batman calls it every frame
+// and fades the eye buffer to black while a level loads; ignoring it showed the
+// half-streamed map instead of the black loading screen with its spinner.
+typedef struct { float x, y, z, w; } klovrp_vec4;
+void kl_reproject_set_fade(int on, const float scale[4], const float offset[4], int all_layers);
+static uint64_t klovrp_SetColorScaleAndOffset(klovrp_vec4 scale, klovrp_vec4 offset, int all) {
+    ovrp_hit("ovrp_SetColorScaleAndOffset");
+    float sc[4] = {scale.x, scale.y, scale.z, scale.w};
+    float of[4] = {offset.x, offset.y, offset.z, offset.w};
+    for (int i = 0; i < 4; i++) {
+        if (!isfinite(sc[i])) sc[i] = 1.0f;
+        if (!isfinite(of[i])) of[i] = 0.0f;
+    }
+    int identity = sc[0] == 1.0f && sc[1] == 1.0f && sc[2] == 1.0f && sc[3] == 1.0f &&
+                   of[0] == 0.0f && of[1] == 0.0f && of[2] == 0.0f && of[3] == 0.0f;
+    if (kl_env_on("KL_OVRP_FADE", 1)) kl_reproject_set_fade(!identity, sc, of, all != 0);
+    // Log transitions only: identity <-> faded, plus the first few values.
+    static int last_identity = -1, said;
+    if (identity != last_identity || said < 4) {
+        if (said < 64) {
+            said++;
+            fprintf(stderr, "  [ovrp] colour fade scale=[%.3f %.3f %.3f %.3f] offset=[%.3f %.3f %.3f %.3f] all=%d%s\n",
+                    sc[0], sc[1], sc[2], sc[3], of[0], of[1], of[2], of[3], all,
+                    identity ? " (identity)" : "");
+        }
+        last_identity = identity;
+    }
+    return OVRP_SUCCESS;
+}
+
+// The tail after layerIndex (OVRPlugin >= 1.3x): overrideTextureRectMatrix,
+// &TextureRectMatrixf, overridePerLayerColorScaleAndOffset, &colorScale,
+// &colorOffset. They are the 9th..13th arguments, so they arrive on the STACK; the
+// guest (AAPCS64) gives each its own 8-byte slot and the Darwin packing of
+// (int, ptr, int, ptr, ptr) lands on exactly the same offsets, so they are plain
+// parameters here. Read defensively: a flag that is not 0/1 or a NULL pointer
+// means an older header without the tail, and the tail is then ignored.
+static int klovrp_plausible_unit_rect(const float *v) {
+    for (int i = 0; i < 4; i++) if (!(v[i] > -4.0f && v[i] < 4.0f)) return 0;
+    return 1;
+}
 static uint64_t klovrp_EnqueueSubmitLayer2(uint32_t flags, void *texL, void *texR,
                                            int layer_id, int frame_index,
                                            const float *pose, const float *scale,
-                                           int layer_index) {
+                                           int layer_index,
+                                           int override_rect, const float *rect_matrix,
+                                           int override_color, const float *color_scale,
+                                           const float *color_offset) {
     ovrp_hit("ovrp_EnqueueSubmitLayer2");
     // Log the SUBMITTED texture handles per layer (once each): if texL differs
     // from the VkImage we handed out via GetLayerTexture2 for this layer, the
@@ -6109,6 +6156,36 @@ static uint64_t klovrp_EnqueueSubmitLayer2(uint32_t flags, void *texL, void *tex
         o->head_locked = ((int)flags & KLOVRP_SUBMIT_HEAD_LOCKED) != 0;
         o->origin_top_left = kl_vulkan_guest_active();
         o->tex = (unsigned long long)(uintptr_t)texL;
+        if (override_rect == 1 && rect_matrix && ((uintptr_t)rect_matrix & 3) == 0 &&
+            klovrp_plausible_unit_rect(rect_matrix) && klovrp_plausible_unit_rect(rect_matrix + 4) &&
+            klovrp_plausible_unit_rect(rect_matrix + 8) && klovrp_plausible_unit_rect(rect_matrix + 12)) {
+            o->rect_on = 1;
+            memcpy(o->rect[0], rect_matrix + 0, 4 * sizeof(float));
+            memcpy(o->rect[1], rect_matrix + 4, 4 * sizeof(float));
+            memcpy(o->scale_bias[0], rect_matrix + 8, 4 * sizeof(float));
+            memcpy(o->scale_bias[1], rect_matrix + 12, 4 * sizeof(float));
+        }
+        if (override_color == 1 && color_scale && color_offset &&
+            ((uintptr_t)color_scale & 3) == 0 && ((uintptr_t)color_offset & 3) == 0) {
+            o->color_on = 1;
+            memcpy(o->color_scale, color_scale, 4 * sizeof(float));
+            memcpy(o->color_offset, color_offset, 4 * sizeof(float));
+        }
+        static int said_tail;
+        if (said_tail < 16 && (o->rect_on || o->color_on || said_tail == 0)) {
+            said_tail++;
+            fprintf(stderr, "  [ovrp] layer %d submit tail: rect=%d", layer_id, override_rect);
+            if (o->rect_on)
+                fprintf(stderr, " src=[%.4f %.4f %.4f %.4f] sb=[%.4f %.4f %.4f %.4f]",
+                        o->rect[0][0], o->rect[0][1], o->rect[0][2], o->rect[0][3],
+                        o->scale_bias[0][0], o->scale_bias[0][1], o->scale_bias[0][2], o->scale_bias[0][3]);
+            fprintf(stderr, " color=%d", override_color);
+            if (o->color_on)
+                fprintf(stderr, " scale=[%.3f %.3f %.3f %.3f] offset=[%.3f %.3f %.3f %.3f]",
+                        o->color_scale[0], o->color_scale[1], o->color_scale[2], o->color_scale[3],
+                        o->color_offset[0], o->color_offset[1], o->color_offset[2], o->color_offset[3]);
+            fprintf(stderr, "\n");
+        }
     }
     // Diagnostic: every ~600 submits, dump the layer images' lit counts so we
     // can see if the guest is drawing UI into them or submitting empties.
@@ -7107,6 +7184,7 @@ static const struct { const char *name; void *fn; } g_ovrp_impl[] = {
     {"ovrp_SetupLayer", (void *)klovrp_SetupLayer},
     {"ovrp_EnqueueSetupLayer2", (void *)klovrp_EnqueueSetupLayer2},
     {"ovrp_EnqueueSubmitLayer2", (void *)klovrp_EnqueueSubmitLayer2},
+    {"ovrp_SetColorScaleAndOffset", (void *)klovrp_SetColorScaleAndOffset},
     {"ovrp_SetOverlayQuad3", (void *)klovrp_SetOverlayQuad3},
     {"ovrp_DestroyLayer", (void *)klovrp_DestroyLayer},
     {"ovrp_EnqueueDestroyLayer", (void *)klovrp_EnqueueDestroyLayer},
@@ -7387,7 +7465,7 @@ static const char *const g_ovrp_result_ok[] = {
     // (full brightness) rather than ramping - cosmetic, and never a failure the
     // guest reads back. If a title turns out to REQUIRE the ramp, this graduates
     // to a real body that hands the scale/offset to kl_glfb.
-    "ovrp_SetColorScaleAndOffset",
+    // (ovrp_SetColorScaleAndOffset has a real body now: klovrp_SetColorScaleAndOffset.)
     // The OVERLAY submit path. AC Nexus drives its main eye layer through
     // BeginFrame4/EndFrame4 (implemented, and where the eye texture is captured)
     // but submits its Equirect background OVROverlay through the older enqueue

@@ -8,6 +8,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <pthread.h>
 #include "kl_reproject.h"
 #include "../xr/kl_passthrough.h"
 #include "kl_env.h"
@@ -119,6 +120,28 @@ void kl_reproject_set_srgb_decode(int on) {
             klr_srgb_forced(&forced) ? " (overridden by KL_SRGB_DECODE)" : "");
 }
 
+static volatile int s_fade_on, s_fade_all;
+static float s_fade_scale[4] = {1, 1, 1, 1}, s_fade_offset[4];
+static pthread_mutex_t s_fade_mu = PTHREAD_MUTEX_INITIALIZER;
+void kl_reproject_set_fade(int on, const float scale[4], const float offset[4], int all_layers) {
+    pthread_mutex_lock(&s_fade_mu);
+    for (int i = 0; i < 4; i++) {
+        s_fade_scale[i]  = scale ? scale[i] : 1.0f;
+        s_fade_offset[i] = offset ? offset[i] : 0.0f;
+    }
+    s_fade_all = all_layers;
+    s_fade_on  = on;
+    pthread_mutex_unlock(&s_fade_mu);
+}
+static int klr_fade(float scale[4], float offset[4], int *all) {
+    pthread_mutex_lock(&s_fade_mu);
+    int on = s_fade_on;
+    for (int i = 0; i < 4; i++) { scale[i] = s_fade_scale[i]; offset[i] = s_fade_offset[i]; }
+    if (all) *all = s_fade_all;
+    pthread_mutex_unlock(&s_fade_mu);
+    return on;
+}
+
 int kl_reproject_srgb_decode(void) {
     int forced;
     if (klr_srgb_forced(&forced)) return forced;
@@ -149,6 +172,9 @@ static const char kl_msl_reproject[] =
 "    float    chromaMin;\n"
 "    float    chromaMax;\n"
 "    packed_float3 chromaKey;  // packed: matches the C side's three floats\n"
+"    uint     fadeOn;     // ovrp_SetColorScaleAndOffset — kl_reproject.h\n"
+"    float    fadeScale[4];\n"
+"    float    fadeOffset[4];\n"
 "};\n"
 "\n"
 // The sRGB EOTF, piecewise as the spec has it rather than a 2.2 power. The
@@ -194,7 +220,8 @@ static const char kl_msl_reproject[] =
 // would otherwise read. Unlike the struct above these are varyings, not buffer
 // members, so a float3 here costs nothing and hides nothing.
 "              uint chromaOn [[flat]]; float3 chromaKey [[flat]];\n"
-"              float2 chromaRange [[flat]]; };\n"
+"              float2 chromaRange [[flat]];\n"
+"              uint fadeOn [[flat]]; float3 fadeS [[flat]]; float3 fadeO [[flat]]; };\n"
 "\n"
 // One place, so a rung of the probe ladder cannot disagree with the real pass
 // about which eye it is looking at — which is the failure this whole file keeps
@@ -326,6 +353,9 @@ static const char kl_msl_reproject[] =
 "    o.chromaOn = u.chromaOn;\n"
 "    o.chromaKey = float3(u.chromaKey);\n"
 "    o.chromaRange = float2(u.chromaMin, u.chromaMax);\n"
+"    o.fadeOn = u.fadeOn;\n"
+"    o.fadeS = float3(u.fadeScale[0], u.fadeScale[1], u.fadeScale[2]);\n"
+"    o.fadeO = float3(u.fadeOffset[0], u.fadeOffset[1], u.fadeOffset[2]);\n"
 "    // The amplification index IS the texture slot: the caller binds the views'\n"
 "    // textures in the order it amplified them. A single-view pass amplifies\n"
 "    // once, lands on 0, and binds one texture.\n"
@@ -365,7 +395,7 @@ static const char kl_msl_reproject[] =
 "                               texture2d_array<float> tex1 [[texture(1)]],\n"
 "                               sampler samp [[sampler(0)]])\n"
 "{\n"
-"    float4 c = kl_eye_sample2(tex, tex1, samp, in.uv, in.slice, in.srgb, in.src);\n"
+"    float4 c = kl_eye_sample2(tex, tex1, samp, in.uv, in.slice, in.srgb, in.src);\n""    if (in.fadeOn != 0u) c.rgb = c.rgb * in.fadeS + in.fadeO;\n"
 // The matte is applied HERE and in no probe below. A rung of the probe ladder
 // exists to answer "is the picture arriving", and one that could also be
 // keyed out would answer that question with the matte's opinion — which is the
@@ -477,7 +507,7 @@ static const char kl_msl_blit[] =
 static const char kl_msl_overlay[] =
 "#include <metal_stdlib>\n"
 "using namespace metal;\n"
-"struct VOut { float4 pos [[position]]; float2 uv; };\n"
+"struct VOut { float4 pos [[position]]; float2 uv; float2 q; };\n"
 // Matches kl_overlay_uniforms in kl_reproject.h.
 "struct KLOv {\n"
 "    float4x4 projection;\n"
@@ -489,13 +519,19 @@ static const char kl_msl_overlay[] =
 "    uint     srgb_decode;\n"
 "    uint     visible;\n"
 "    uint     opaque;\n"
+"    uint     rectOn;\n"
+"    float    rect[4];\n"
+"    float    scaleBias[4];\n"
+"    uint     colorOn;\n"
+"    float    colorScale[4];\n"
+"    float    colorOffset[4];\n"
 "};\n"
 "vertex VOut kl_ov_v(uint vid [[vertex_id]],\n"
 "                    constant KLOv *us [[buffer(0)]],\n"
 "                    ushort amp [[amplification_id]]) {\n"
 "    constant KLOv &u = us[amp];\n"
 "    VOut o;\n"
-"    if (u.visible == 0u) { o.pos = float4(2.0, 2.0, 2.0, 1.0); o.uv = float2(0); return o; }\n"
+"    if (u.visible == 0u) { o.pos = float4(2.0, 2.0, 2.0, 1.0); o.uv = float2(0); o.q = float2(0); return o; }\n"
 // A triangle strip in the quad's own plane, facing -Z, which is the convention
 // ovrpLayerSubmit's Pose states its orientation in.
 "    float2 c = float2((vid & 1) ? 1.0 : -1.0, (vid & 2) ? -1.0 : 1.0);\n"
@@ -507,6 +543,7 @@ static const char kl_msl_overlay[] =
 // passes read the same field off two records and a flag that means opposite
 // things in each is a wrong picture with nothing to catch it.
 "    float2 t = float2((c.x + 1.0) * 0.5, (c.y + 1.0) * 0.5);\n"
+"    o.q = t;\n"
 "    if (u.flip_y != 0u) t.y = 1.0 - t.y;\n"
 "    o.uv = u.uv_rect.xy + t * u.uv_rect.zw;\n"
 "    return o;\n"
@@ -517,12 +554,28 @@ static const char kl_msl_overlay[] =
 "                        constant KLOv *us [[buffer(0)]],\n"
 "                        ushort amp [[amplification_id]]) {\n"
 "    constant KLOv &u = us[amp];\n"
-"    float4 c = tex.sample(samp, in.uv);\n"
+"    float2 uv = in.uv;\n"
+// The submit's texture-rect matrix: quad uv -> texture uv, sampled only inside the
+// source rect (clamped half a texel in so a sprite cell does not bleed into its
+// neighbour), in Unity's bottom-left convention before the API flip.
+"    if (u.rectOn != 0u) {\n"
+"        float2 tq = in.q * float2(u.scaleBias[0], u.scaleBias[1]) + float2(u.scaleBias[2], u.scaleBias[3]);\n"
+"        float2 lo = float2(u.rect[0], u.rect[1]);\n"
+"        float2 hi = lo + float2(u.rect[2], u.rect[3]);\n"
+"        if (any(tq < lo - 1e-4) || any(tq > hi + 1e-4)) discard_fragment();\n"
+"        float2 ht = 0.5 / float2(max(tex.get_width(), 1u), max(tex.get_height(), 1u));\n"
+"        tq = clamp(tq, lo + ht, max(hi - ht, lo + ht));\n"
+"        if (u.flip_y != 0u) tq.y = 1.0 - tq.y;\n"
+"        uv = u.uv_rect.xy + tq * u.uv_rect.zw;\n"
+"    }\n"
+"    float4 c = tex.sample(samp, uv);\n"
 "    if (u.srgb_decode != 0u) {\n"
 "        float3 lo = c.rgb / 12.92;\n"
 "        float3 hi = pow((c.rgb + 0.055) / 1.055, float3(2.4));\n"
 "        c.rgb = select(hi, lo, c.rgb <= float3(0.04045));\n"
 "    }\n"
+"    if (u.colorOn != 0u) c = c * float4(u.colorScale[0], u.colorScale[1], u.colorScale[2], u.colorScale[3])\n"
+"                           + float4(u.colorOffset[0], u.colorOffset[1], u.colorOffset[2], u.colorOffset[3]);\n"
 "    if (u.opaque != 0u) c.a = 1.0;\n"
 "    return c;\n"
 "}\n";
@@ -796,6 +849,8 @@ kl_reproject_uniforms kl_reproject_build(const kl_ovrp_render_pose *rendered, in
     // exactly this call and no other.
     u.chroma_on = (uint32_t)kl_reproject_chroma(u.chroma_key, &u.chroma_min,
                                                 &u.chroma_max);
+    // The guest's fade (black while a level streams in, Batman), read per build.
+    u.fade_on = (uint32_t)klr_fade(u.fade_scale, u.fade_offset, NULL);
     // Passthrough (kl_passthrough): keep the guest's alpha so the room shows
     // through where it cleared to alpha 0. Bits documented at kl_chroma_apply.
     if (kl_passthrough_active())
@@ -951,6 +1006,29 @@ kl_overlay_uniforms kl_overlay_build(const kl_ovrp_overlay *ov, int eye,
     if (ov->eye_visibility == 2 && eye != 1) return u;
 
     u.half_size = simd_make_float2(ov->size[0] * 0.5f, ov->size[1] * 0.5f);
+
+    // Texture-rect matrix and colour (kl_ovrp_overlay.rect_on / color_on).
+    {
+        int e = (unsigned)eye > 1 ? 0 : eye;
+        if (ov->rect_on && ov->rect[e][2] > 0.0f && ov->rect[e][3] > 0.0f &&
+            ov->scale_bias[e][0] != 0.0f && ov->scale_bias[e][1] != 0.0f &&
+            kl_env_on("KL_OVERLAY_RECT", 1)) {
+            u.rect_on = 1;
+            memcpy(u.rect, ov->rect[e], sizeof u.rect);
+            memcpy(u.scale_bias, ov->scale_bias[e], sizeof u.scale_bias);
+        }
+        float fs[4], fo[4];
+        int all = 0;
+        if (ov->color_on) {
+            u.color_on = 1;
+            memcpy(u.color_scale, ov->color_scale, sizeof u.color_scale);
+            memcpy(u.color_offset, ov->color_offset, sizeof u.color_offset);
+        } else if (klr_fade(fs, fo, &all) && all) {
+            u.color_on = 1;
+            memcpy(u.color_scale, fs, sizeof u.color_scale);
+            memcpy(u.color_offset, fo, sizeof u.color_offset);
+        }
+    }
 
     // Which part of the layer texture this eye reads. The guest states it in
     // PIXELS of its own texture, so it is carried as a fraction for the reason

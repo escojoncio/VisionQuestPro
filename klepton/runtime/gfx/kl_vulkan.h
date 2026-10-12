@@ -120,6 +120,8 @@ unsigned long long kl_vulkan_layer_image(int layer_key, int stage, int eye,
 // per-eye ViewportRect selecting the part — answers eye 1 from it rather than
 // with nothing. NULL when the layer has no storage for that stage.
 void *kl_vulkan_mtl_for_handle(unsigned long long h);
+// 1 once the guest has rendered/copied into layer `layer_key`'s own image.
+int kl_vulkan_layer_written(int layer_key);
 void *kl_vulkan_layer_mtl_texture(int layer_key, int stage, int eye,
                                   int *w, int *h);
 

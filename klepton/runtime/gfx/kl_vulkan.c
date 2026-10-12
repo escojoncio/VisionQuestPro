@@ -77,6 +77,7 @@ void *kl_vulkan_layer_mtl_texture(int k, int s, int e, int *w, int *h) {
     (void)k; (void)s; (void)e; if (w) *w = 0; if (h) *h = 0; return NULL;
 }
 void  kl_vulkan_layer_rekey(int old_key, int new_key) { (void)old_key; (void)new_key; }
+int   kl_vulkan_layer_written(int key) { (void)key; return 0; }
 void  kl_vulkan_capture_eyes(unsigned f, int s) { (void)f; (void)s; }
 void  kl_vulkan_frame_done(int s) { (void)s; }
 unsigned long long kl_vulkan_frame_serial(void) { return 0; }
@@ -1160,6 +1161,7 @@ static struct {
     int           key;                       // the guest's layer id; 0 = free
     unsigned      seq;                        // claim order, for recycling oldest
     klvk_img_slot s[KLVK_EYE_STAGES][2];
+    volatile int  written;                    // the guest copied/rendered into it (see klvk_layer_mark_written)
 } g_layer_img[KLVK_MAX_LAYERS];
 static VkImage g_wild_scratch;   // wild-handle stand-in (see klvk_wild_scratch); defined lazily
 static VkImage g_content_rt; static uint32_t g_content_rt_w, g_content_rt_h, g_content_rt_area; // KL_RT_DEBUG: largest UI render target
@@ -1411,6 +1413,34 @@ static int klvk_layer_image_key(VkImage img) {
             if (g_layer_img[i].s[st][e].img==img) return g_layer_img[i].key; }
     return 0;
 }
+// Layer images the guest actually WRITES (a framebuffer attachment, or a
+// copy/blit landing in it — a plain view is not enough: Unity wraps the image as a
+// sampled external texture right after GetLayerTexturePtr). Since GetLayerTexturePtr hands Unity a proper VkImage*,
+// OVROverlay fills the layer's own image (as on a Quest), and that is what the
+// compositor should show; the submitted texL is the guest's SOURCE texture (Batman:
+// a 2048x128 ETC2 sprite strip) and is only the fallback for a guest that never
+// writes its layer image.
+static void klvk_layer_mark_written(VkImage img) {
+    if (!img) return;
+    for (int i = 0; i < KLVK_MAX_LAYERS; i++) {
+        if (!g_layer_img[i].key) continue;
+        for (int st = 0; st < KLVK_EYE_STAGES; st++) for (int e = 0; e < 2; e++)
+            if (g_layer_img[i].s[st][e].img == img) {
+                if (!g_layer_img[i].written) {
+                    g_layer_img[i].written = 1;
+                    VKI("layer %d image %#llx written by the guest — compositor samples it\n",
+                        g_layer_img[i].key, (unsigned long long)(uintptr_t)img);
+                }
+                return;
+            }
+    }
+}
+int kl_vulkan_layer_written(int key) {
+    if (!key) return 0;
+    for (int i = 0; i < KLVK_MAX_LAYERS; i++)
+        if (g_layer_img[i].key == key) return g_layer_img[i].written;
+    return 0;
+}
 // view -> image, so a framebuffer's attachment views resolve to their images.
 #define KLVK_VIEW_MAP_MAX 8192
 static struct { VkImageView view; VkImage img; } g_view_map[KLVK_VIEW_MAP_MAX];
@@ -1553,6 +1583,7 @@ static klvk_img_slot *layer_slots_for(int key) {
         if (!g_layer_img[i].key) {
             g_layer_img[i].key = key;
             g_layer_img[i].seq = ++g_layer_img_seq;
+            g_layer_img[i].written = 0;
             return &g_layer_img[i].s[0][0];
         }
     // Full: recycle the OLDEST-claimed slot rather than refusing. AC Nexus
@@ -1572,6 +1603,7 @@ static klvk_img_slot *layer_slots_for(int key) {
             g_layer_img[oldest].key, key, evicted);
     g_layer_img[oldest].key = key;
     g_layer_img[oldest].seq = ++g_layer_img_seq;
+    g_layer_img[oldest].written = 0;
     return &g_layer_img[oldest].s[0][0];
 }
 
@@ -2531,6 +2563,7 @@ static void VKAPI_CALL klvk_CmdCopyImage(VkCommandBuffer cb, VkImage src,
         const VkImageCopy *regions) {
     static PFN_vkCmdCopyImage real;
     if (!real) real = (PFN_vkCmdCopyImage)mvk_sym("vkCmdCopyImage");
+    if (dst) klvk_layer_mark_written(dst);
     if (klvk_trace() && klvk_trace_once((unsigned long long)(uintptr_t)src,(unsigned long long)(uintptr_t)dst)) {
         int sk=klvk_layer_image_key(src), dk=klvk_layer_image_key(dst);
         klvk_trace_log("[copy] src %#llx(%s k=%d) -> dst %#llx(%s k=%d) n=%u\n",
@@ -2662,6 +2695,7 @@ static void VKAPI_CALL klvk_CmdBlitImage(VkCommandBuffer cb, VkImage src,
         const VkImageBlit *r, VkFilter f) {
     static PFN_vkCmdBlitImage real;
     if (!real) real = (PFN_vkCmdBlitImage)mvk_sym("vkCmdBlitImage");
+    if (dst) klvk_layer_mark_written(dst);
     if (KLVK_IMG_BAD(src) || KLVK_IMG_BAD(dst)) {
         if (!kl_env_on("KL_VK_WILD_REDIRECT", 0)) return;   // drop, as the copy above
         g_wild_blit_redir++;
@@ -3251,6 +3285,9 @@ static VkResult VKAPI_CALL klvk_CreateFramebuffer(VkDevice dev,
     if (r == VK_SUCCESS && ci && out) {
         VkImage img0 = VK_NULL_HANDLE;
         if (ci->attachmentCount && ci->pAttachments) img0 = klvk_view_image(ci->pAttachments[0]);
+        // A layer image bound as a colour attachment is one the guest renders into.
+        for (uint32_t k = 0; ci->pAttachments && k < ci->attachmentCount && k < 8; k++)
+            klvk_layer_mark_written(k == 0 ? img0 : klvk_view_image(ci->pAttachments[k]));
         pthread_mutex_lock(&g_fb_map_lock);
         if (g_fb_map_n < KLVK_FB_MAP_MAX) {
             g_fb_map[g_fb_map_n].fb = *out; g_fb_map[g_fb_map_n].img0 = img0;

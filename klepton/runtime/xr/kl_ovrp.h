@@ -367,6 +367,18 @@ typedef struct {
     // here, not into the swapchain image we handed out via GetLayerTexture2 — so
     // the compositor resolves THIS to an MTLTexture, or every panel is empty.
     unsigned long long tex;
+    // The submit's texture-rect matrix (OVRPlugin TextureRectMatrixf), when the
+    // guest overrides it: per eye the SOURCE rect inside the texture and the
+    // scale/bias that maps the quad's own uv onto the texture, both in Unity's
+    // bottom-left uv convention. OVROverlay uses it to show one cell of a sprite
+    // strip (Batman's loading icon, 16 frames in 2048x128).
+    int   rect_on;
+    float rect[2][4];        // x, y, w, h
+    float scale_bias[2][4];  // sx, sy, bx, by: tex_uv = quad_uv * s + b
+    // Per-layer colour scale/offset (OVRPlugin overridePerLayerColorScaleAndOffset):
+    // out = c * scale + offset. 0 = none (the global fade may still apply).
+    int   color_on;
+    float color_scale[4], color_offset[4];
 } kl_ovrp_overlay;
 
 // How many non-eye layers the guest submitted with its most recent frame, and
