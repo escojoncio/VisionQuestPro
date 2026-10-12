@@ -1454,12 +1454,11 @@ static float klovrp_GetUserIPD(void) {
 // average standing eye height; the guest's own SetTrackingOriginType decides
 // whether it is applied (EyeLevel ignores it). Honours a KL_OVRP_EYE_HEIGHT
 // override for tuning.
+float klovrp_measured_eye_height(void);
 static uint64_t klovrp_GetUserEyeHeight2(float *out) {
     ovrp_hit("ovrp_GetUserEyeHeight2");
     if (!out) return OVRP_FAIL_INVALID_PARAM;
-    float h = kl_env_float("KL_OVRP_EYE_HEIGHT", 1.6f);
-    if (!(h > 0.0f && h < 3.0f)) h = 1.6f;
-    *out = h;
+    *out = klovrp_measured_eye_height();
     return OVRP_SUCCESS;
 }
 
@@ -1615,15 +1614,7 @@ static uint64_t klovrp_GetTrackingOriginType2(int *out) {
 // orientation (0,0,0,1), position (0,0,0). Liminal reaches this during Touch
 // controller/avatar setup once it recognises the Quest, and an unimplemented
 // entry point aborts.
-static uint64_t klovrp_GetTrackingTransformRelativePose(float *out, int origin) {
-    ovrp_hit("ovrp_GetTrackingTransformRelativePose");
-    if (!out) return -1001;
-    out[0] = 0.0f; out[1] = 0.0f; out[2] = 0.0f; out[3] = 1.0f;  // orientation
-    out[4] = 0.0f; out[5] = 0.0f; out[6] = 0.0f;                 // position
-    { static int n; if (n++ < 2)
-        fprintf(stderr, "  [ovrp] out GetTrackingTransformRelativePose origin=%d -> identity\n", origin); }
-    return OVRP_SUCCESS;
-}
+static uint64_t klovrp_GetTrackingTransformRelativePose(float *out, int origin);
 
 // The per-frame node loop's tracked/valid probes (0x9bbe78..0x9bbeb4): u32
 // out-param, which is why these cannot be shared handlers. Tracked and valid
@@ -1679,6 +1670,27 @@ static klovrp_pose g_head_pose = {
     0,   // motion_valid: nothing has been published, so there is nothing to know
 };
 static int g_head_set;              // has a frontend ever written a head pose?
+
+// Quest's guardian measures the user's eye height above the floor; here Vision
+// Pro's own head tracking does (the immersive space origin is on the floor).
+// Latched once the first plausible head height arrives, like a calibration;
+// KL_OVRP_EYE_HEIGHT still overrides, 1.6 m until the headset has reported.
+static klovrp_pose klovrp_pose_read(const klovrp_pose *src);
+float klovrp_measured_eye_height(void) {
+    static float latched = -1.0f;
+    const char *ov = getenv("KL_OVRP_EYE_HEIGHT");
+    if (ov && *ov) { float h = (float)atof(ov); if (h > 0.3f && h < 2.5f) return h; }
+    if (latched > 0.0f) return latched;
+    if (__atomic_load_n(&g_head_set, __ATOMIC_ACQUIRE)) {
+        float y = klovrp_pose_read(&g_head_pose).py;
+        if (isfinite(y) && y > 0.3f && y < 2.5f) {
+            latched = y;
+            fprintf(stderr, "  [ovrp] eye height measured by the headset: %.3f m\n", (double)y);
+            return latched;
+        }
+    }
+    return 1.6f;
+}
 // The two hands, published by the same frontend in the same breath. Declared
 // here beside the head because the per-frame latch below promotes all three
 // together — they are one sample of one instant and must stay so.
@@ -3497,6 +3509,37 @@ static void klovrp_hand_sweep(const klovrp_pose *head, klovrp_pose *hand) {
     hand->px = head->px; hand->py = head->py; hand->pz = head->pz;
 }
 
+static uint64_t klovrp_GetTrackingTransformRelativePose(float *out, int origin) {
+    ovrp_hit("ovrp_GetTrackingTransformRelativePose");
+    if (!out) return -1001;
+    out[0] = 0.0f; out[1] = 0.0f; out[2] = 0.0f; out[3] = 1.0f;  // orientation
+    out[4] = 0.0f; out[5] = 0.0f; out[6] = 0.0f;                 // position
+    // Identity is only right when the asked origin IS the current one. Under a
+    // floor/stage origin the EyeLevel origin (0) sits at eye height above the
+    // floor: the real plugin answers y = eye height. Answering 0 makes titles
+    // that derive "calibrated eye height" from this pose (Arkham Shadow:
+    // ComputeStableEyeHeight/SetCalibratedEyeHeightToMatchTrackingOrigin) divide
+    // by zero and NaN the whole PlayerController/TrackingOffset rig. Latched once
+    // (the real value only changes on recenter). View (4) is the head itself.
+    int cur = g_tracking_origin;
+    if (origin == 0 && cur != 0) {
+        // Latched inside klovrp_measured_eye_height only once the headset has
+        // reported a real height (1.6 m until then, never frozen at a default).
+        out[5] = klovrp_measured_eye_height();
+    } else if (origin == 4) {
+        klovrp_pose h = klovrp_step_head(-1);
+        out[0] = h.qx; out[1] = h.qy; out[2] = h.qz; out[3] = h.qw;
+        out[4] = h.px; out[5] = h.py; out[6] = h.pz;
+        for (int i = 0; i < 7; i++) if (!isfinite(out[i])) out[i] = (i == 3) ? 1.0f : 0.0f;
+    }
+    { static int n; if (n++ < 4)
+        fprintf(stderr, "  [ovrp] out GetTrackingTransformRelativePose origin=%d (cur=%d) -> q=(%.3f %.3f %.3f %.3f) p=(%.3f %.3f %.3f)\n",
+                origin, cur, (double)out[0], (double)out[1], (double)out[2], (double)out[3],
+                (double)out[4], (double)out[5], (double)out[6]); }
+    return OVRP_SUCCESS;
+}
+
+
     // out-struct via the sret register x8, NOT x2: the real function returns the
 // 88-byte ovrpPoseStatef by value (its own prologue does `mov x19, x8` and an
 // 0x58-byte memcpy back), so callers place the destination in x8 and the
@@ -4521,7 +4564,7 @@ int kl_ovrp_haptics_pull(int hand, float *amplitude, float *seconds) {
 // Safe to give an out-param because ONLY libil2cpp references this name;
 // libunity does not (checked against both binaries). ovrp_GetAppHasVrFocus is
 // referenced by both and really is a bare bool, so it stays where it is.
-static uint64_t klovrp_GetAppHasInputFocus(char *out) {
+static uint64_t klovrp_GetAppHasInputFocus(int32_t *out) {  /* ovrpBool is a 4-byte enum */
     ovrp_hit("ovrp_GetAppHasInputFocus");
     if (out) *out = 1;
     return OVRP_SUCCESS;
@@ -4530,7 +4573,7 @@ static uint64_t klovrp_GetAppHasInputFocus(char *out) {
 // ovrpResult with a bool OUT-PARAM (real plugin: ldrb/str w8 to [x0],
 // -1001 on NULL). We accepted ovrp_SetAppAsymmetricFov at init, so the
 // read-back says enabled — one device story, like the headset above.
-static uint64_t klovrp_GetAppAsymmetricFov(char *out) {
+static uint64_t klovrp_GetAppAsymmetricFov(int32_t *out) {  /* ovrpBool is a 4-byte enum */
     ovrp_hit("ovrp_GetAppAsymmetricFov");
     *out = 1;
     return OVRP_SUCCESS;

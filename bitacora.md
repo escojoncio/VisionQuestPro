@@ -13,6 +13,28 @@
 - Fallo resuelto en la 2.ª build: `KL_TARGET_DEFAULT_NAME` no existe sin el proyecto de Klepton → `kl_app.c` define
   `KL_TARGET_DEFAULT "(ninguno)"`.
 
+## Batman log 20 (2026-10-12): capturas → el juego no dibuja la escena
+- Capturas: textura del ojo (RGBA8_sRGB 2383x1912, 2 capas) ~92 % negra con mosaico magenta disperso (G≈0); salida del
+  compositor = entrada → fallo en el render del juego, no en el compositor. `[cp] stages draws=0`.
+- Juego (análisis del APK, nada copiado al repo): SRP propio «Manta» (derivado de HDRP, no URP); OculusSettings:
+  Multiview, **LateLatching=1**, SubsampledLayout=1, SpaceWarp=0. libOVRPlugin real 1.98.0 (shim dice 1.60.0).
+  Rig: `ComputeStableEyeHeight`/`SetCalibratedEyeHeightToMatchTrackingOrigin` usan
+  `ovrp_GetTrackingTransformRelativePose(origin=0 EyeLevel)`; el shim daba identidad (y=0) con origen Floor → división
+  por 0 → NaN en PlayerController/TrackingOffset (primer NaN justo tras esa llamada; 1169 llamadas = 1169 errores).
+- Arreglos (`kl_ovrp.c`): RelativePose origin=0 con origen ≠0 → y = altura de ojos medida; origin=4 (View) = cabeza.
+  `klovrp_measured_eye_height()`: altura de ojos medida por el Vision Pro (cabeza sobre el suelo del espacio inmersivo),
+  fijada al primer valor válido (log `eye height measured by the headset`), `KL_OVRP_EYE_HEIGHT` la anula; también en
+  `GetUserEyeHeight2`. Bool de `GetAppHasInputFocus`/`GetAppAsymmetricFov` escritos como int32.
+- `kl_jni_services.c` `klj_oculus_manifest_flag`: LateLatching forzado a false (el plugin real reescribe el UBO de
+  matrices en el submit; el nuestro no) — `KL_LATE_LATCHING=1` lo mantiene.
+- VPEngine metal2: volcado por pase (`VP_DUMP_FRAME`/`VP_DUMP_DIR`, la app pone 600 + QUEST/Registros) → PNG
+  `pass-<f>-<i>-<fmt>-<w>x<h>.png` + `gpu.dump`/`gpu.dump.stats` (NaN en verde).
+### Pendiente
+- Guardian: principio general = medir posición/altura con el Vision Pro para todos los juegos. Límite (Boundary*) sigue
+  «no configurado»; si algún juego lo exige, área virtual desde el Vision Pro.
+- `KLOVRP_VERSION` 1.60 → 1.98 (comprobar entradas nuevas que C# llamaría). VkComponentMapping ignorado en
+  `vkCreateImageView` (VPEngine `vulkan/src/entry.cpp`). Compute con imágenes 3D (`LutBuilder3D`).
+
 ## Batman log 18 (2026-10-12): sin mejora visual; ventana inmersiva OK
 - Ventana del launcher se cierra al abrir el inmersivo (verificado en log). NaN de cámara sigue (2029), sin NONFINITE.
   `gpu.diag viewport views=2 w=256 h=256` (primer draw multiview, pase pequeño).
