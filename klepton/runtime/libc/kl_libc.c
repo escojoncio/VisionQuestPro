@@ -1636,18 +1636,21 @@ const char *kl_guest_path(const char *path, char *buf, size_t cap) {
 static void kl_media_probe_log(const char *op, const char *path, const char *host, int failed) {
     if (!path) return;
     int saved = errno;   // the guest reads errno after we return
-    size_t n = strlen(path);
-    static const char *ext[] = {".mp4", ".m4v", ".mov", ".webm", ".mkv", ".MP4"};
+    // Case-insensitive, anywhere in the path (".MP4", "x.mp4.part", "DRM1.Mp4").
+    static const char *ext[] = {".mp4", ".m4v", ".mov", ".webm", ".mkv"};
     int hit = 0;
-    for (unsigned i = 0; i < sizeof ext / sizeof *ext; i++) {
-        size_t e = strlen(ext[i]);
-        if (n >= e && strcmp(path + n - e, ext[i]) == 0) { hit = 1; break; }
-    }
+    for (unsigned i = 0; i < sizeof ext / sizeof *ext && !hit; i++)
+        if (strcasestr(path, ext[i])) hit = 1;
     if (!hit) { errno = saved; return; }
+    static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
     static char seen[32][256]; static int nseen;
-    for (int i = 0; i < nseen; i++) if (strncmp(seen[i], path, 255) == 0) { errno = saved; return; }
-    if (nseen < 32) { strncpy(seen[nseen], path, 255); seen[nseen][255] = 0; nseen++; }
-    else { errno = saved; return; }   // bounded: log the first 32 distinct probes
+    pthread_mutex_lock(&mu);
+    int dup = 0;
+    for (int i = 0; i < nseen; i++) if (strncmp(seen[i], path, 255) == 0) { dup = 1; break; }
+    if (!dup && nseen < 32) { strncpy(seen[nseen], path, 255); seen[nseen][255] = 0; nseen++; }
+    else dup = 1;   // bounded: log the first 32 distinct probes
+    pthread_mutex_unlock(&mu);
+    if (dup) { errno = saved; return; }
     fprintf(stderr, "  [video] %s(\"%s\")%s%s -> %s\n", op, path,
             host && strcmp(host, path) ? " host " : "", host && strcmp(host, path) ? host : "",
             failed ? strerror(saved) : "exists");
@@ -1723,6 +1726,7 @@ FILE *klb_fopen(const char *path, const char *mode) {
     }
     KL_GUEST_PATH(path);
     FILE *f = fopen(_p, mode);
+    kl_media_probe_log("fopen", path, _p, f == NULL);
     // A sound engine that reads its banks through stdio (Wwise fopen(<files>/
     // Init.bnk)) will miss them: the banks live only inside the OBB, not on disk.
     // Serve them from the OBB by basename when the real open fails. Read-only.
@@ -3154,6 +3158,7 @@ int klb_madvise(void *a, size_t n, int advice) {
 // open() lives behind a variadic thunk in kl_va_handlers.c, so its trace call
 // comes back here rather than duplicating the mode lookup there.
 void kl_fs_trace_open(const char *path, int flags, int fd) {
+    kl_media_probe_log("open", path, NULL, fd < 0);
     (void)flags;
     kl_fs_trace("open", path, NULL, fd < 0);
     if (kl_file_watch && fd >= 0) kl_file_watch("open", path, fd, NULL, 0, 0, NULL);
