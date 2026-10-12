@@ -13,6 +13,17 @@
 - Fallo resuelto en la 2.ª build: `KL_TARGET_DEFAULT_NAME` no existe sin el proyecto de Klepton → `kl_app.c` define
   `KL_TARGET_DEFAULT "(ninguno)"`.
 
+## Batman log 10 (2026-10-12): imagen corrupta, sin audio
+- StatFs y ELF TLS confirmados (`ELF TLS module 1`, MetaXRAudioWwise cargada). Juego en bucle de frames.
+- Gráficos: ~113 pipelines/frame fallaban (`Vertex shader writes point size but inputPrimitiveTopology is ...Triangle`).
+  Arreglo en VPEngine: `gpu/shader/msl/src/msl.cpp` emite el PointSize de vértice como `[[VP_PSZ]]` (por defecto
+  `#define VP_PSZ point_size`); `gpu/metal2/src/metal_backend.mm` `function(..., noPointSize)` compila los vertex de
+  pipelines no-puntos con `VP_PSZ=user(vp_psz)` y clave de caché distinta.
+- Audio: OculusEndpointSink (salida Wwise de Meta) fallaba sin dispositivo por defecto. `kl_jni_net.c`
+  `AudioManager.getDevices` devuelve 1 salida (altavoz, 48 kHz, 2 ch) + getters `AudioDeviceInfo`; `String/CharSequence.toString`.
+- NaN en `TrackedHeadset/Camera`: `kl_ovrp.c` `klovrp_GetNodeFrustum2` no escribía zNear/zFar (0/0) → ahora 0.1/1000.
+- Pendiente log 11: pipelines restantes (`gpu.err what=pipeline`), audio audible, sin NaN.
+
 ## Arranque Batman log 9 (2026-10-12): StatFs + ELF TLS
 - Log 9: Vulkan aceptado, escenas y Wwise cargan; parada en JNI `android/os/StatFs.<init>(String)` sin implementar.
   Arreglo: `klepton/runtime/jni/kl_jni_io.c` clase `StatFs` sobre `statfs()` del host (ruta desconocida → `$HOME`):
