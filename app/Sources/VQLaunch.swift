@@ -401,7 +401,7 @@ final class VQPrewarm: ObservableObject {
     @Published var compiling = false  // first run: harvested SPIR-V being compiled ("Compilando shaders")
 
     /// Bump when the harvest or the SPIR-V -> MSL translator changes: the first-run precompile repeats.
-    static let firstRunVersion = 1
+    static let firstRunVersion = 2  // 2: VPEngine per-variable private slots (new MSL)
 
     static func run(gameFolder: URL, cache: URL) {
         guard VQSettings.shared.precompileShaders else {

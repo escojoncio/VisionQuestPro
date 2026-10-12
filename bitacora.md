@@ -1,400 +1,76 @@
 # Bitácora — VisionQuestPro
 
-## Estado (2026-10-12)
-- Log 16:27 (Batman: Arkham Shadow): abort por `glGetShaderPrecisionFormat` sin implementar (ANGLE no da entrada
-  para él). Arreglo: `klepton/runtime/gfx/kl_egl.c` `klgl_GetShaderPrecisionFormat` en `g_gl_impl` (float 127/127/23,
-  int 31/30/0, como un GPU de 32 bits en todos los niveles). Llegó hasta Unity creando contexto GLES 2 y consultando
-  límites; siguiente fallo pendiente de log.
-- Paso 1 (app genérica Klepton + lanzador + conversión en el visor, Vulkan con MoltenVK, sin ANGLE): **build verde**
-  (run 38219167270, commit «kl_app.c: sin objetivo por defecto compilado»). IPA 6,7 MB en release `visionos`
-  (`VisionQuestPro.ipa`, con `Frameworks/MoltenVK.framework` y `VPEngineCertificates/`). Nada probado aún en el visor.
-- Logs de CI: rama `ci-logs`, fichero `visionos.txt` (`scripts/ci-publish-log.sh`); los logs de Actions no se pueden
-  descargar desde la sesión.
-- Fallo resuelto en la 2.ª build: `KL_TARGET_DEFAULT_NAME` no existe sin el proyecto de Klepton → `kl_app.c` define
-  `KL_TARGET_DEFAULT "(ninguno)"`.
+Historial completo de sesiones anteriores: `git log -p bitacora.md` (compactada el 2026-10-12 tras el log 25).
 
-## Batman log 24 (2026-10-12) → build siguiente
-- Log 24: AssetFile solo pregunta por Audio_*.obb (no mp4); vídeo sigue sin arrancar; VPKTAA borroso (sin jitter, 95 %
-  historial); GPU por frame de juego ~39 ms (log 23 ~11 ms en la misma fase: sospechosos contención GPU con el TAA del
-  compositor y aniso x16 en todos los samplers).
-- Vídeo (descompilado con resolver IL2CPP propio, scratchpad): StereoVideoPlayer.Play @0x1da9d34 → path =
-  Path.Combine(getObbDir, VideoFileName) → si !File.Exists vuelve false (se salta). PlayEnumerator espera Wwise
-  AllSoundBanksLoaded (con timeout) → AndroidVideoPlayer.Play → OVROverlay Equirect (shape 5) isExternalSurface →
-  GetLayerAndroidSurfaceObject → NativeVideoPlayer. Diagnóstico nuevo `kl_libc.c` `kl_media_probe_log`: `[video] stat(...)`
-  para .mp4/.m4v/.mov/.webm/.mkv en stat/lstat/access.
-- VPKTAA rehecho (`KleptonTAA.swift`): salida en rejilla sin jitter (3x3 Blackman-Harris), historial Catmull-Rom, clip
-  varianza YCoCg, inverse-luma, RCAS aparte; peso 0.5–0.92; reproyección solo rotación (sin profundidad del juego:
-  `GetLayerTexture2` da depth=0). Jitter Halton(2,3)x8 en `klovrp_GetNodeFrustum2` (`klovrp_jit_frustum`) solo si el juego
-  relee el frustum cada frame y si el resolve corre (`kl_ovrp_set_taa_active` desde `prepareTAA`). Por defecto OFF
-  (`vq.vpktaa2`), nitidez 0.3 (`vq.vpktaaSharp2`).
-- Rendimiento: aniso por nivel (`vq.anisoLevel`, Off/2/4/8/16, def. 16) solo en samplers lineales con mips y Repeat/
-  Mirrored (`vkCreateSampler`); `VPVK_ANISO`. Diagnóstico `VP_PASS_TIMING` (ajuste «Diagnóstico de rendimiento») →
-  `gpu.passtime`. `vpvk::logConfig()` en vkCreateDevice → `vk.cfg effective …` (antes los vk.cfg salían antes de abrir el log).
-- Resolución base 3 opciones (`vq.resBase`: original/compositor/native; nativa = 3660x3200 ref. con aspecto del frustum).
-- MSAA del juego a 1x con VPKTAA (`vpvk_config_set_force_single_sample`, ajuste `dropGameAA`): imágenes 1x, resolve →
-  render directo / copia; `vk.msaa forced 1x`.
-- Shaders 1.ª vez: `app/Native/vq_harvest.c` (UnityFS v6–8 + LZ4 propio, ZIP, busca SPIR-V por magia, dedupe) →
-  `<cache>/spirv/*.spv`; VPEngine `precompile.cpp` `vpvk_precompile_spirv` (reflexión, MSL, compileShaderNow) +
-  `msl_index.bin`; runtime `gpu.shader.lib hit/miss`. En el APK de Batman: 49 módulos (falta medir shaders_assets_all.bundle
-  en el visor). Vertex con layout supuesto (puede fallar). VQPrewarm.firstRun con stamp `firstrun.vN`.
-- Passthrough automático: `kl_passthrough.c/.h`, OVRPlugin Insight y XR_FB_passthrough con estado; capa forma 6/7 o
-  blend ALPHA → `kl_passthrough_active`; compositor clear transparente + alfa; `KleptonChroma.immersionStyle` con
-  histéresis 0,5 s; ajuste «Passthrough» Auto/VR/Mixto (`KL_PASSTHROUGH`).
+## Batman log 25 (2026-10-12) → build siguiente
+- **Rendimiento**: meseta de 38–41 ms de GPU por frame de render (~22 fps de juego, ~95 en zonas ligeras) según hacia
+  dónde se mira; pases idénticos en frames rápidos y lentos. Causa en VPEngine: todos los locales SPIR-V en un único
+  arena `vp_private` → con un índice dinámico todo el shader va a la pila. Arreglo en VPEngine (slots por variable,
+  ver su bitácora 2026-10-12 «log 25»). `app/Sources/VQLaunch.swift` `firstRunVersion = 2` (re-precompila con el
+  MSL nuevo); VPEngine `kRecipeVersion = 2` (descarta recetas viejas: la 1.ª partida tras actualizar compila PSO).
+- **Cuadrado rosa al empezar partida** (no era un vídeo roto): capa Quad 2048x128 de OVROverlay; `klovrp_GetLayerTexturePtr`
+  daba el VkImage crudo y Unity (CreateExternalTexture en Vulkan espera `VkImage*`) lo desreferenciaba → handle
+  salvaje 0xe → pintaba en el scratch. `klepton/runtime/xr/kl_ovrp.c`: con guest Vulkan devuelve la dirección de una
+  celda estable por (capa, stage, ojo) (`klovrp_texcell`, 128 celdas, nunca se liberan); GLES sin cambios;
+  `KL_OVRP_TEXPTR_RAW=1` vuelve al valor crudo. Log: `GetLayerTexturePtr(...) wrote <ptr> (VkImage … via cell)`;
+  debe desaparecer `SUBSTITUTING scratch for wild handle`.
+- **Vídeos**: en el log 25 el juego no tocó ningún .mp4 (ni stat, ni JNI de vídeo, ni AMedia*, ni capa Equirect).
+  Sonda `kl_libc.c` `kl_media_probe_log` ampliada: `strcasestr` de .mp4/.m4v/.mov/.webm/.mkv en cualquier parte de la
+  ruta, mutex, y llamada también desde `kl_fs_trace_open` (open/openat/__open_2) y `klb_fopen`.
+- Ruido: `klovrp_Update3` dejaba `calls` de Update2 en 0 cada frame → 11k líneas `first-call ovrp_Update2`; ahora no
+  baja de 1.
+- Diagnóstico nuevo (VPEngine): `gpu.shader.mem … dyn_slots=` por shader y `gpu.time … enc_ms=` en frames lentos.
+### Comprobar en el log 26
+- `gpu.time` de la zona pesada (debería bajar de ~39 ms); si sigue alto: `enc_ms` (qué pase) y `gpu.shader.mem` con
+  `dyn_slots>0`.
+- Sin `wild handle 0xe`; el cuadrado del inicio muestra contenido (indicador de carga / texto).
+- `[video] …` si el juego busca algún vídeo; sin `first-call ovrp_Update2` repetido; sin `archive_save` fallido.
+- Pendiente si hace falta: perfilador automático de frames pesados (bisección por draws), tablas constantes en
+  `constant`, mprobe de escena/objetos de vídeo (`kl_mprobe.c`).
 
-## Batman log 22 (2026-10-12): letras OK; vídeo no arranca; tirones; PS sale al sistema
-- Letras: confirmado `gpu.diag swizzle fmt=9 map=0,0,0,r`.
-- Vídeo: el juego no llegó a NativeVideoPlayer. `OBBVideoWrapper` usa la ruta literal
-  `/storage/emulated/0/Android/obb/com.camouflaj.manta/<X>.mp4` (DRM1..7 = DreamSequence1..7). `kl_libc.c`
-  `kl_guest_path_inner`: `{/sdcard,/storage/emulated/0,/mnt/sdcard}/Android/obb/<pkg>/resto` → `kl_jni_obb_dir()`+resto
-  (con `kl_casefix`, solo si existe); log `[path] … -> obb dir …`. Cuadrado rosa = material del reproductor sin frame.
-  Si sigue sin llamar: siguiente sospechoso `ovr_AssetFile_StatusByName` (devuelve 0 siempre, `kl_ovrplat.c`).
-- Tirones: compilación de pipeline (250–650 ms) bloqueaba el submit vía `pipelineMutex` mientras se añadía al
-  MTLBinaryArchive. VPEngine `metal2/src/metal_backend.mm`: `archiveMutex` aparte; lookup con
-  `FailOnBinaryArchiveMiss` bajo `archiveMutex`; compilación sin lock y sin archive; `maybeSaveArchive` (32 pipelines o
-  30 s); `platform_metal.mm` `cacheRoot` = `VP_PIPELINE_CACHE_DIR` (app: Caches/VisionQuestPro/PipelineCache/<juego>) y
-  guardado al destruir; `entry.cpp` workers = clamp(cores,4,8)-2. Logs `gpu.pso.cache loaded=N` / `saved=N`.
-- Mandos (`KleptonControllers.swift`): `captureSystemButtons` pone `preferredSystemGestureState=.disabled` en home/menu/PS
-  (log `[input] PS buttons captured`, por mando `free|STILL SYSTEM`). PS izq = Start (☰); PS der corto = nada, ≥0,75 s =
-  `kl_ovrp_host_recenter()` (re-mide altura, contador, `GetAppShouldRecenter(2)` true una vez).
-  Touches: `klovrp_raw_touch/near` en `fill_controller_state` (antes los bits de botón iban crudos a Touches); host usa
-  toque capacitivo si existe (`GCTouchedStateInput`), si no pulsado/desviado.
-- Manos: `KleptonChroma.swift` `handMatting` por defecto false (clave `handMattingV2`) → `upperLimbVisibility` oculto.
-- Idioma: `VQLanguage` usa `Locale.preferredLanguages` (antes `Locale.current` = idioma de la app, en). Versión OVRPlugin:
-  `VQOVRPluginVersion` lee `lib/arm64-v8a/libOVRPlugin.so` del APK → `KL_OVRP_VERSION` (la búsqueda en C fallaba: no hay
-  .so en `kl_slink_libdir`).
-- VPKTAA: NO implementado aún en VPEngine (`config.cpp` solo guarda: `applied=no(pass_pending)`); el juego usa su MSAA.
-  Además `vq_gfx_config_forward` no se llamó en el log 22 (sin línea `vk.cfg`). Pendiente: pase VPKTAA + reenvío.
-- Pendiente aparte: aborto final `mutex lock failed: Invalid argument` (última línea del log 22).
+## Batman log 24 (2026-10-12)
+- Vídeo (descompilado con resolver IL2CPP propio): StereoVideoPlayer.Play @0x1da9d34 → path =
+  Path.Combine(getObbDir, VideoFileName) → si !File.Exists vuelve false. PlayEnumerator espera Wwise
+  AllSoundBanksLoaded → AndroidVideoPlayer.Play → OVROverlay Equirect (shape 5) isExternalSurface →
+  GetLayerAndroidSurfaceObject → NativeVideoPlayer. Vídeos sueltos en OBB (DRM1..7, GothamToBlackgate): HEVC 8192x4096
+  60 fps SBS equirect 180°; reproductor host `kl_hostvideo.c` + `kl_jni_hostvideo.c` + `HostVideoPlayer` (AVPlayer) en
+  `KleptonCompositor.swift`. `OBBVideoWrapper` usa `/storage/emulated/0/Android/obb/<pkg>/X.mp4` → remap en
+  `kl_libc.c` `kl_guest_path_inner`.
+- VPKTAA (`KleptonTAA.swift`): rejilla sin jitter Blackman-Harris, Catmull-Rom, clip YCoCg, RCAS; jitter Halton en
+  `klovrp_GetNodeFrustum2` si el resolve corre; por defecto OFF (`vq.vpktaa2`).
+- Ajustes: aniso por nivel (`vq.anisoLevel`, def. 16), `VP_PASS_TIMING` («Diagnóstico de rendimiento»), resolución base
+  original/compositor/nativa (`vq.resBase`), MSAA del juego a 1x con VPKTAA (`dropGameAA`).
+- Shaders 1.ª vez: `app/Native/vq_harvest.c` (UnityFS + LZ4, ZIP, SPIR-V por magia) → `<cache>/spirv/*.spv` →
+  VPEngine `vpvk_precompile_spirv` + `msl_index.bin`; stamp `firstrun.vN`.
+- Passthrough automático: `kl_passthrough.c/.h`, ajuste Auto/VR/Mixto (`KL_PASSTHROUGH`).
 
-## Batman log 21 (2026-10-12): juego corre; fuentes en cuadrados, vídeos saltados, altura fija
-- Fuentes/letras de mandos = cuadrados: VkComponentMapping ignorado (R8 con a=R). VPEngine `vulkan/src/entry.cpp`
-  `vkCreateImageView` traduce el mapeo → `Platform::ViewInfo::swizzle` → `metal2` `ViewDesc::swizzle`,
-  `Impl::view` usa `newTextureViewWithPixelFormat:...swizzle:` (si devuelve nil, vista sin swizzle + `gpu.err
-  what=swizzle_view_fallback`); `textureDescriptor` añade PixelFormatView a sampled de 1–2 B. Log
-  `gpu.diag swizzle fmt=N map=…`. Attachments siguen con `image->id` (sin swizzle). MoltenVK:
-  `MVK_CONFIG_FULL_IMAGE_VIEW_SWIZZLE=1` en `VQLaunch.applyToEnvironment`.
-- Vídeos: el juego usa `com.oculus.videoplayer.NativeVideoPlayer` (ExoPlayer) sobre Surface de OVROverlay; mp4 sueltos
-  en la carpeta OBB (DRM1…7, GothamToBlackgate): HEVC 8192x4096 60 fps, SBS estéreo, equirect 180°, sin audio (Wwise).
-  Nuevo `klepton/runtime/media/kl_hostvideo.c/.h` (petición C→Swift, estado Swift→C, gen), `runtime/jni/kl_jni_hostvideo.c`
-  (15 métodos estáticos, firmas sacadas del dex; tabla en `kl_jni.c`), `klovrp_GetLayerAndroidSurfaceObject` devuelve un
-  `android/view/Surface` falso fijado con layer+1. `KleptonCompositor.swift`: `HostVideoPlayer` (AVPlayer 32BGRA) y en
-  `encodeOverlays` la capa del Surface se pinta con el vídeo: Quad con rects por ojo o panorama inmersivo orientado por la
-  pose de la capa (SBS 2:1 = VR180, 180x180°/ojo). Shader equirect (`gfx/kl_reproject.c` KLEq) + `hspan/vspan/uv_rect`
-  (176 B, igual en Swift). Sin compositor/pipelines o fichero ausente → ENDED (se salta como antes). `host_present` solo con
-  overlays y pipelines. Log `[video] playVideo …`, `[cp] host video layer …`.
-- Altura (`kl_ovrp.c`): `g_eye_mm` calibrado; `klovrp_posture_feed` (en `kl_ovrp_set_head_pose`) re-latch si Y estable
-  ±3 cm 1,5 s y difiere ≥0,20 m (solo Postura=Automática); recentrado del juego re-mide; `g_recenter_count` →
-  `GetLocalTrackingSpaceRecenterCount`. Log `[ovrp] eye height recalibrated`. Ajuste «Postura» (`vq.posture`,
-  `KL_OVRP_POSTURE` auto|seated|standing; fijas = sin re-medida automática).
-- Versión OVRPlugin: `klovrp_version()` lee `libOVRPlugin.so` del juego (`kl_slink_libdir`), `KL_OVRP_VERSION` manda,
-  fallback 1.60.0. `ovrp_*` sin implementar → -1004 + log `[ovrp] unimplemented …` (antes abortaba).
-- Idioma: ajuste «Idioma del sistema si el juego lo incluye» (`vq.sysLang`, def. sí). `VQLanguage` (VQLaunch.swift) busca
-  el idioma en nombres de entradas del APK y ficheros (`VQGame.contentNames`) → `LANG` (Klepton Locale/AConfiguration); si
-  no, en_US.
-### Comprobar en el log 22
-- `gpu.diag swizzle fmt=9`, sin `swizzle_view_fallback`; texto legible. `[video] playVideo`, `[cp] host video layer`,
-  estados 2→3→4. `reporting OVRPlugin version 1.98`, líneas `unimplemented`. `Idioma: es_ES`. `eye height recalibrated`.
-- Riesgos: HEVC 8K60 en BGRA (rendimiento; alternativa 420 biplanar + YUV en shader); AC Nexus ahora recibe Surface.
+## Resuelto en logs 8–22 (referencia breve; detalle en git)
+- Vulkan en Batman: spoof Adreno 740 / driverVersion bit 31, `ovrp_GetDisplayAdapterId2` → NULL (log 7–8),
+  `-force-vulkan` vía extra `unity` del Intent, AssetFile StatusByName como petición fallida.
+- Sistema: StatFs, ELF TLS (TLSDESC), liblog completo, libdl namespaces, AAudio MMap, OpenSL PCM_EX float y
+  GetConfiguration, AudioManager.getDevices/AudioDeviceInfo → audio OK desde log 17.
+- Gráficos VPEngine: point_size, SubpassData como Texture y D2Array con multiview, VkComponentMapping → swizzle
+  (fuentes OK log 22), pipelines fuera del mutex + MTLBinaryArchive persistente.
+- XR: zNear/zFar, Time de poses, RelativePose EyeLevel con altura medida por el Vision Pro, LateLatching off,
+  postura auto/sentado/de pie, recentrado con PS derecho largo, PS izq = Start, toques capacitivos, manos ocultas,
+  idioma del sistema (`Locale.preferredLanguages`), versión OVRPlugin leída del APK.
+- Foveado Quest siempre apagado (ovrp, OpenXR FB/META, extensiones Vulkan FDM/VRS ocultas).
+- Pendiente antiguo aún abierto: aborto final `mutex lock failed: Invalid argument` (log 22); Boundary «no configurado».
 
-## Batman log 20 (2026-10-12): capturas → el juego no dibuja la escena
-- Capturas: textura del ojo (RGBA8_sRGB 2383x1912, 2 capas) ~92 % negra con mosaico magenta disperso (G≈0); salida del
-  compositor = entrada → fallo en el render del juego, no en el compositor. `[cp] stages draws=0`.
-- Juego (análisis del APK, nada copiado al repo): SRP propio «Manta» (derivado de HDRP, no URP); OculusSettings:
-  Multiview, **LateLatching=1**, SubsampledLayout=1, SpaceWarp=0. libOVRPlugin real 1.98.0 (shim dice 1.60.0).
-  Rig: `ComputeStableEyeHeight`/`SetCalibratedEyeHeightToMatchTrackingOrigin` usan
-  `ovrp_GetTrackingTransformRelativePose(origin=0 EyeLevel)`; el shim daba identidad (y=0) con origen Floor → división
-  por 0 → NaN en PlayerController/TrackingOffset (primer NaN justo tras esa llamada; 1169 llamadas = 1169 errores).
-- Arreglos (`kl_ovrp.c`): RelativePose origin=0 con origen ≠0 → y = altura de ojos medida; origin=4 (View) = cabeza.
-  `klovrp_measured_eye_height()`: altura de ojos medida por el Vision Pro (cabeza sobre el suelo del espacio inmersivo),
-  fijada al primer valor válido (log `eye height measured by the headset`), `KL_OVRP_EYE_HEIGHT` la anula; también en
-  `GetUserEyeHeight2`. Bool de `GetAppHasInputFocus`/`GetAppAsymmetricFov` escritos como int32.
-- `kl_jni_services.c` `klj_oculus_manifest_flag`: LateLatching forzado a false (el plugin real reescribe el UBO de
-  matrices en el submit; el nuestro no) — `KL_LATE_LATCHING=1` lo mantiene.
-- VPEngine metal2: volcado por pase (`VP_DUMP_FRAME`/`VP_DUMP_DIR`, la app pone 600 + QUEST/Registros) → PNG
-  `pass-<f>-<i>-<fmt>-<w>x<h>.png` + `gpu.dump`/`gpu.dump.stats` (NaN en verde).
-### Pendiente
-- Guardian: principio general = medir posición/altura con el Vision Pro para todos los juegos. Límite (Boundary*) sigue
-  «no configurado»; si algún juego lo exige, área virtual desde el Vision Pro.
-- `KLOVRP_VERSION` 1.60 → 1.98 (comprobar entradas nuevas que C# llamaría). VkComponentMapping ignorado en
-  `vkCreateImageView` (VPEngine `vulkan/src/entry.cpp`). Compute con imágenes 3D (`LutBuilder3D`).
+## Arquitectura (referencia)
+- Base Klepton (MIT, copia `ce74582` en `klepton/`, ver `THIRD-PARTY-NOTICES.md`): cada `.so` ARM64 se envuelve en un
+  dylib firmado (`tools/klepton_ld.c` en proceso, `klepton_ld_run`) y se carga con `dlopen`; relocs ELF propias;
+  bionic/JNI/OVRPlugin/OpenXR propios. Sin traducción de CPU.
+- Gráficos: VPEngine VPVulkan.framework (`scripts/build-vpvulkan.sh`, cacheado por hash de `vpengine/gpu/**`) en lugar de
+  MoltenVK (`VQSettings.useVPEngine`, `KL_MVK_DYLIB`). VisionQuestPro usa `gpu/metal2`.
+- Firma: conversión sin firmar en `QUEST/Cache/<j>/dylibs`; copias firmadas en
+  `Library/Application Support/VisionQuestPro/Signed/<j>/` (`VQPrepare`, `VQSigner`, variantes req4k/req16k/plain).
+- App (`app/Sources/`): `VQLog`, `VQFolder` (QUEST: Juegos/Cache/Partidas), `VQGames`, `VQPrepare`, `VQLaunch`
+  (+ `VQSettings`, todos los ajustes en la app), `VQLauncher`; `app/Native/vq_apk.c` (ZIP + AXML), `vq_config.c`
+  (reenvío `vpvk_config_set_*`).
+- CI `.github/workflows/visionos.yml`: solo `[build]` o manual; release `visionos` (`VisionQuestPro.ipa`, bundle
+  `com.kdt.livecontainer`); logs de CI en rama `ci-logs` (`visionos.txt`).
 
-## Batman log 18 (2026-10-12): sin mejora visual; ventana inmersiva OK
-- Ventana del launcher se cierra al abrir el inmersivo (verificado en log). NaN de cámara sigue (2029), sin NONFINITE.
-  `gpu.diag viewport views=2 w=256 h=256` (primer draw multiview, pase pequeño).
-- Diagnóstico nuevo: `FrameCapture` (KleptonCompositor.swift, `KL_CAPTURE=1`, ajuste «Capturas de diagnóstico»):
-  PNG de ambas capas del ojo + salida del compositor en frames 120/600/1200 → `Documents/Registros/capture-*.png`
-  (compartibles; también en `QUEST/Registros` vía `KL_CAPTURE_DIR`). `kl_ovrp.c`: línea `first-call <fn> <- imagen+off` por función; `NONUNIT-QUAT` normaliza;
-  `out GetNodePoseState node=…`.
-- Resolución base (ajuste «Resolución base» Original/Vision Pro, `vq.resAVP`, por defecto Original):
-  `KL_OVRP_EYE_BASE=original` → área Quest 3 (2064×2208) con el aspecto del frustum del visor; luego escala y tope.
-
-## Batman log 17 (2026-10-12): audio OK (`[sl] play state -> PLAYING`), juego corre, imagen totalmente corrupta
-- Sin `gpu.err` de draws; `missing_pipelines` solo f13–f19. 3119 errores NaN de cámara, sin `NONFINITE` en poses.
-- VPEngine `spirv/src/lower.cpp`: SubpassData con multiview (`o_.viewCount>1`) → `D2Array` y fetch en capa = ViewIndex
-  (MSL `read(c.xy, c.z)`). `vulkan/src/pipelines.cpp`: diag única `gpu.diag viewport views=… x y w h` (+ viewport h<0).
-- `kl_ovrp.c`: `ovrpPoseStatef.Time` (double +0x50) ya no es 0 (tiempo de display previsto) — hipótesis del NaN
-  (Δpose/Δt). Saneo+log `[ovrp] NONFINITE <fn>` en GetNodeFrustum2 (y línea por nodo), GetPredictedDisplayTime,
-  GetSystemDisplayFrequency(2), GetUserIPD2.
-- UI (`KleptonApp.swift`, `KleptonCompositor.swift`, `app/Sources/VQLauncher.swift`): ventana `main` se cierra al abrir
-  el espacio inmersivo (`spaceOpened`); background con inmersivo abierto no sale; `Lifecycle.immersiveEnded()` reabre
-  launcher → `VQEndedView`. Arranque con `VQLoadingView` (nombre, estado, «Ver registro»); log intacto en fichero.
-### Siguiente si sigue corrupta
-- subpassLoad lee como textura el adjunto del mismo pase (indefinido en Metal) → usar framebuffer fetch `[[color(n)]]`
-  (metal2 ya tiene `fetch.textureSlot`). Comprobar `gpu.diag viewport` (h negativo → invertir en metal2).
-- Si no hay `NONFINITE` y siguen los NaN: cámara 1832x1920 no-XR (JNI Display).
-
-## Batman log 15 (2026-10-12): audio abre; fatal `__android_log_is_loggable`
-- OpenSL OK: `GetConfiguration("androidPerformanceMode") -> 1`, Oboe sigue, CoreAudio arranca. Muere en el frame 3 por
-  import sin resolver `__android_log_is_loggable` (Oboe, dentro del sink de Meta). Sin `gpu.err`, sin NONFINITE (pero
-  0 draws aún: arreglo SubpassData sin ejercitar).
-- `libc/kl_shim.c`: liblog `__android_log_is_loggable(_len)` (INFO+), `_buf_write`, `_buf_print`, `_assert` (aborta
-  con mensaje), `_set/get_minimum_priority`, `_write_log_message`; libdl `android_get_exported_namespace`,
-  `android_create_namespace` (NULL, log `[dl]`), `android_link_namespaces` (0). Varargs: `kl_va_thunks.S`
-  `klv_android_log_buf_print` (4), `klv_android_log_assert` (3); handlers en `kl_va_handlers.c`.
-- `setBufferSizeInFrames ErrorUnimplemented`: interno de Oboe con OpenSL+callback, inocuo.
-### Pendiente
-- Multiview + subpassLoad: shader declara texture2d (SubpassData Arrayed=0) y metal2 liga vista 2DArray de 2 capas →
-  desajuste/ojo derecho con capa 0. Arreglo: `texDim` D2Array si el módulo usa multiview + capa=ViewIndex en el fetch.
-- Candidatos de imports aún sin shim (auditoría): `android_dlopen_ext`, `clock_nanosleep`, `sched_setscheduler`,
-  `sched_getcpu`, `__sched_cpualloc/free`, `AChoreographer_*`.
-
-## Batman log 14 (2026-10-12): imagen corrupta + sin audio
-- Gráficos (confirmado): 20 draws/frame saltadas `unbound_kind5_slot4/2`. SPIR-V `Dim::SubpassData` lleva siempre
-  `Sampled=2` → `lower.cpp` lo declaraba StorageTexture (kind 5) mientras el layout Vulkan liga INPUT_ATTACHMENT como
-  Texture (kind 3). Arreglo VPEngine `gpu/shader/spirv/src/lower.cpp`: `storage` excluye SubpassData. Pendiente si
-  aparece: multiview + subpassLoad debería leer capa = ViewIndex (hoy D2, xy).
-- Audio (confirmado por secuencia del log): `GetConfiguration(PERFORMANCE_MODE)` devolvía 12 → Oboe 1.7 (SDK 29) aborta
-  open() → `OculusEndpointSink ... Unsupported format` y reintentos abortados; nunca hubo `[sl] play state`. Arreglo
-  `kl_opensl.c` `cfg_slot/cfg_Set/cfg_Get`: guarda y devuelve performanceMode/streamType (consulta de tamaño con v=NULL).
-- NaN cámara: no sale de las poses del shim (revisado). `kl_ovrp.c` `klovrp_GetNodePoseState_impl` sanea y registra
-  `NONFINITE`/`ZERO-QUAT`. Pista: el error es de una cámara con rect 1832x1920 (pantalla Android, no ojo XR).
-### Comprobar log 15
-- `[sl] GetConfiguration(...) -> N`, `[sl] play state -> PLAYING`, sin `eps client`. `gpu.err ... skipped_draws=0`.
-
-## Batman log 13 (2026-10-12)
-- point_size arreglado: 0 fallos de pipeline; `missing_pipelines` baja a 0 (compilación asíncrona). Quedan 20 draws/frame
-  saltadas `unbound_kind5_slot4` (StorageTexture slot 4) → diagnóstico en VPEngine `metal2/src/metal_backend.mm`
-  (`what=unbound ... shader_wants=[...] draw_binds=[...]`, una vez por stage/kind/slot).
-- Audio: Oboe va por OpenSL; pedía float (`SLAndroidDataFormat_PCM_EX`, tipo 4) y el shim solo leía PCM → 16 bit →
-  `OculusEndpointSink ... Unsupported format`. `klepton/runtime/media/kl_opensl.c`: PCM_EX float32 aceptado, el feeder
-  convierte a int16 (`is_float`, `conv`).
-- NaN en `TrackedHeadset/Camera/MainAudioListener` sigue tras zNear/zFar: causa abierta.
-
-## Batman log 12 (2026-10-12)
-- MMap OK; Oboe cae a OpenSL (correcto). Sink de Meta pide `AudioDeviceInfo.TYPE_BLUETOOTH_A2DP` → campo ausente.
-  Arreglo `klepton/runtime/kl_jni.c` g_fields: todas las `AudioDeviceInfo.TYPE_*` y `AudioManager.GET_DEVICES_INPUTS/ALL`.
-
-## Batman log 11 (2026-10-12)
-- getDevices OK → OculusEndpointSink abre Oboe 1.7 → fatal `AAudio_getMMapPolicy`. Arreglo `klepton/runtime/media/kl_aaudio.c`:
-  `AAudio_getMMapPolicy` (=1 NEVER), `AAudio_setMMapPolicy` (no-op OK), `AAudioStream_getTimestamp` (frames leídos + monotonic).
-- Murió antes del 1.er frame: arreglo point_size de VPEngine aún sin verificar.
-
-## Batman log 10 (2026-10-12): imagen corrupta, sin audio
-- StatFs y ELF TLS confirmados (`ELF TLS module 1`, MetaXRAudioWwise cargada). Juego en bucle de frames.
-- Gráficos: ~113 pipelines/frame fallaban (`Vertex shader writes point size but inputPrimitiveTopology is ...Triangle`).
-  Arreglo en VPEngine: `gpu/shader/msl/src/msl.cpp` emite el PointSize de vértice como `[[VP_PSZ]]` (por defecto
-  `#define VP_PSZ point_size`); `gpu/metal2/src/metal_backend.mm` `function(..., noPointSize)` compila los vertex de
-  pipelines no-puntos con `VP_PSZ=user(vp_psz)` y clave de caché distinta.
-- Audio: OculusEndpointSink (salida Wwise de Meta) fallaba sin dispositivo por defecto. `kl_jni_net.c`
-  `AudioManager.getDevices` devuelve 1 salida (altavoz, 48 kHz, 2 ch) + getters `AudioDeviceInfo`; `String/CharSequence.toString`.
-- NaN en `TrackedHeadset/Camera`: `kl_ovrp.c` `klovrp_GetNodeFrustum2` no escribía zNear/zFar (0/0) → ahora 0.1/1000.
-- Pendiente log 11: pipelines restantes (`gpu.err what=pipeline`), audio audible, sin NaN.
-
-## Arranque Batman log 9 (2026-10-12): StatFs + ELF TLS
-- Log 9: Vulkan aceptado, escenas y Wwise cargan; parada en JNI `android/os/StatFs.<init>(String)` sin implementar.
-  Arreglo: `klepton/runtime/jni/kl_jni_io.c` clase `StatFs` sobre `statfs()` del host (ruta desconocida → `$HOME`):
-  `<init>`, `restat`, `get{BlockSize,BlockCount,FreeBlocks,AvailableBlocks}Long`, `get{Total,Free,Available}Bytes`
-  y variantes `int` saturadas. Log `[jni] new StatFs(...) -> N MB free`.
-- `libMetaXRAudioWwise` (espacialización HRTF de Meta dentro de Wwise) no cargaba: reloc 1031 `R_AARCH64_TLSDESC`.
-  Arreglo `klepton/runtime/kl_image.c`: `tls_register` (desde `bind_dynamic`, antes de relocs) crea módulo TLS por
-  `PT_TLS` (pthread_key + bloque por hilo copiado de la plantilla); `kl_tls_get_addr`; resolver asm
-  `kl_tlsdesc_dynamic` (devuelve bloque+off − tpidrro_el0, preserva x1–x17/q0–q31); `DTPMOD64`/`DTPREL64`;
-  `__tls_get_addr` ligado a `kl_tls_get_addr`. Log `ELF TLS module N`. Sin soporte: `TLS_TPREL64` e imports TLS entre
-  módulos (error explícito). Riesgo conocido: si tpidrro_el0 llevase nº de CPU en bits bajos, migración entre lecturas.
-- Pendiente: verificar en log 10 que carga MetaXRAudioWwise y que pasa StatFs. Futuro: puente Wwise→PHASE para audio
-  espacial nativo de visionOS (ahora: binaural de Meta, salida estéreo directa).
-
-## VPEngine como driver Vulkan + firma dentro de la app (2026-10-12)
-- `scripts/build-vpvulkan.sh` (CI, paso cacheado por hash de `vpengine/gpu/**`): CMake visionOS de VPEngine `gpu/`,
-  objetivo `VPVulkan` → `build/VPVulkan.framework` (`install_name @rpath/VPVulkan.framework/VPVulkan`, Info.plist propio);
-  `project.yml` lo embebe (codeSign). Checkout de VPEngine con `runtime` + `gpu`.
-- `VQSettings.useVPEngine` (UserDefaults `vq.vpengine`, por defecto sí; interruptor en «Gráficos»). `selectDriver()`
-  (desde `applyToEnvironment`): `dlopen(Frameworks/VPVulkan.framework/VPVulkan, RTLD_GLOBAL)` antes del juego y
-  `KL_MVK_DYLIB` = esa ruta (Klepton `kl_vulkan.c` `mvk_open` la usa); si falla o se apaga → MoltenVK. Log `Gráficos:`.
-- Firma (lección de VPEngine: solo se aceptaron copias firmadas dentro del contenedor de la app, con id y requisitos de
-  la app): `VQPrepare` separa conversión y firma. Conversión sin firmar en `QUEST/Cache/<j>/dylibs` (stamp `kld-2`,
-  sin certificado); copias firmadas en `Library/Application Support/VisionQuestPro/Signed/<j>/` con `sign.txt`
-  (stamp conversión|huella certificado + variante). `KL_DYLIB_DIR` apunta a las firmadas. Variante elegida con dlopen
-  de la 1.ª librería, como antes.
-
-## Foveado Quest apagado + ajustes gráficos en la app (2026-10-12)
-- Foveado del juego **siempre apagado** (log `vq.fov`):
-  - `klepton/runtime/xr/kl_ovrp.c` `ovrp_hit`: 1.ª llamada a cualquier `*Foveation*`/`*TiledMultiRes*` → línea
-    `vq.fov ovrp <nombre> -> off`. Comportamiento previo de Klepton conservado: `GetTiledMultiResSupported` = no,
-    `GetTiledMultiResLevel` = 0, `GetFoveationEyeTrackedSupported` = 0, `GetLayerTextureFoveation` = UNSUPPORTED,
-    setters (`SetTiledMultiResLevel/Dynamic`, `SetFoveationEyeTracked`) = éxito sin efecto.
-  - `kl_openxr.c`: `klxr_is_foveation_ext` (XR_FB_foveation, _configuration, _vulkan, XR_META_foveation_eye_tracked,
-    XR_META_vulkan_swapchain_create_info, XR_FB_swapchain_update_state(_vulkan)): no se anuncian; si el juego las
-    habilita igualmente, `xrCreateInstance` las acepta e ignora. Nuevos `xrCreateFoveationProfileFB` (perfil ficticio),
-    `xrDestroyFoveationProfileFB`, `xrUpdateSwapchainFB` = éxito sin efecto (filas añadidas a `KL_XR_ENTRY_POINTS`).
-    `xrCreateSwapchain` registra e ignora `XrSwapchainCreateInfoFoveationFB` (tipo 1000114000).
-  - `gfx/kl_vulkan.c`: `vkEnumerateDeviceExtensionProperties` oculta `VK_EXT_fragment_density_map*`,
-    `VK_KHR_fragment_shading_rate`, `VK_QCOM_fragment_density_map_offset`; `klvk_CreateDevice` los descarta si se piden.
-- Ajustes en la app (`VQSettings` en `app/Sources/VQLaunch.swift`, UserDefaults `vq.fov*`, `vq.vpktaa*`,
-  `vq.renderScale`, `vq.aswOff`, `vq.quest3`; sección «Gráficos» en `VQLauncher.swift`): foveado apagado/M2/M5/
-  personalizado (zona nítida, periferia, altura; M5 solo si `VQSettings.isM5`, misma regla que PTVisionPro), VPKTAA
-  (activado, %, nitidez), resolución de render (→ `KL_OVRP_EYE_SCALE`), ASW desactivado (Klepton ya nunca da texturas
-  SpaceWarp), perfil Quest 3 (→ `KL_OVRP_HEADSET=11`; apagado por defecto: JNI/Build.MODEL de Klepton dicen Quest 2).
-- `app/Native/vq_config.c/.h` (+ bridging header): `vq_gfx_config_apply` guarda, registra y reenvía por `dlsym` a
-  `vpvk_config_set_*` de VPVulkan (VPEngine `gpu/vulkan/include/vpvk/config.h`); con MoltenVK solo registra.
-- Build verde: run 38222233549 (commit 8c33463). Verificado antes: sintaxis de los .c con clang en Linux (sin errores en las zonas tocadas), `vq_config.c` con gcc -Wall.
-  Swift sin compilar en local (CI).
-
-### Pendiente (foveado/VPKTAA)
-- Cargar libVPVulkan en lugar de MoltenVK (`KL_MVK_DYLIB`) y llamar `vq_gfx_config_forward()` tras el dlopen.
-- VPEngine: rate map en pases multiview de ojo y pase VPKTAA final (ver VPEngine `docs/VULKAN.md` «Foveado y VPKTAA»).
-- Comprobar en el visor que `KL_OVRP_HEADSET=11` no rompe el mapeo de mandos (si falla, dejar perfil Quest 3 apagado).
-
-## Paso 1 — app VisionQuestPro (2026-10-12)
-- `klepton/`: copia de Klepton `ce74582` (MIT, `klepton/LICENSE`; detalle en `THIRD-PARTY-NOTICES.md`).
-  - `tools/klepton_ld.c`: `-DKLEPTON_LD_INPROC` → `klepton_ld_run(in,out,err,len)` (die → longjmp, libera mmap/img/pool/out,
-    borra `out`); emite `LC_CODE_SIGNATURE` vacío (dataoff = fin de strtab alineado a 16, datasize 0) como último LC.
-  - `visionos/Sources/kl_app.c/.h`: `kl_app_configure_game(name,tree,apk,dylibs,files,obb_rel,container)` (objetivo Unity
-    sintetizado, entry libmain); `configure_rest()` = cola común con `kl_app_configure`; `have_translations` acepta `<lib>.dylib`.
-  - `KleptonApp.swift`: ventana raíz `VQRootView`; `boot()` llama a `VQLaunch.configure()`.
-  - Bridging header: + `vq_apk.h`, `vp_codesign.h`, `vp_pkcs12.h`, `dlfcn.h`. Info.plist: sin icono, + `LSSupportsOpeningDocumentsInPlace`.
-- `app/Native/vq_apk.c/.h`: lector ZIP (central dir, stored/deflate, ZIP64, CRC) + AXML→XML texto. **Verificado en Linux**
-  (gcc + ASan/UBSan) con APK sintético: lista entradas, extrae stored, decodifica manifest (package, versionName,
-  uses-feature vulkan, meta-data supportedDevices).
-- `app/Sources/`: `VQLog` (Documents/Registros/app.txt, compartible), `VQFolder` (QUEST: bookmark ajustes+llavero;
-  Juegos/Cache/Partidas), `VQGames` (detección y tarjeta), `VQSigner` (p12 en llavero, variantes req4k/req16k/plain4k/plain16k,
-  vp_codesign), `VQPrepare` (Cache/<juego>/{tree,dylibs,stamp.txt}; extrae assets/ y manifest texto; .so → klepton_ld_run →
-  firma; la 1.ª librería elige variante con dlopen), `VQLaunch` (+ `VQSettings`: sin red, log a fichero, vigilante),
-  `VQLauncher` (UI).
-- Rutas en el arranque: tree=`QUEST/Cache/<j>/tree`, KL_DYLIB_DIR=`QUEST/Cache/<j>/dylibs`, files=`QUEST/Partidas/<j>`,
-  OBB = carpeta del .obb (o la del juego) relativa a files; KL_MVK_DIR = Frameworks de la app.
-- CI `.github/workflows/visionos.yml` + `project.yml` (xcodegen): VPEngine sparse (runtime/), MoltenVK v1.4.2 cacheado,
-  `libklepton.a` cacheado por hash de `klepton/runtime/**`, IPA sin firmar `com.kdt.livecontainer`, release `visionos`.
-
-### Riesgos abiertos (paso 1)
-- dlopen de dylibs firmados que viven en QUEST (carpeta externa, File Provider) puede ser rechazado; alternativa:
-  copiar `dylibs/` a Library/Application Support de la app antes de arrancar (como VPGamePack).
-- assets/ extraído al tree (duplica espacio); Unity lee el APK montado vía `kl_guest_path_map`.
-- No probado: `kl_app_configure_game` con un juego real; OBB relativo con `..`.
-- `libklepton.a` se enlaza con `-lklepton` + `-dead_strip`: si falta algún símbolo que el invitado pide por nombre
-  (tabla libc/JNI resuelta en runtime), pasar a `-Wl,-force_load`.
-- El juego sigue en `KL_IMMERSIVE=1`/`KL_AUTOBOOT=1` forzados por `VQSettings.applyToEnvironment()`; BootView muestra
-  aún los paneles de Klepton (Controller alignment, Matting).
-- Decisión de arquitectura: el código de Quest es ARM64 → sin traducción de CPU. Cada `.so` se envuelve sin cambios
-  en un dylib firmado (firma propia de VPEngine, `runtime/vp_codesign.c`) y se carga con `dlopen`; un cargador propio
-  aplica relocaciones ELF y resuelve imports contra capas bionic/JNI/OpenXR/Vulkan propias.
-
-- Base de CPU/sistema: Klepton (MIT). Ya parchea x18, carga sin JIT, bionic/NDK/JNI/ovrp. Gráficos: VPEngine sustituye
-  a MoltenVK.
-
-## Klepton: puntos de integración (leído en shinyquagsire23/Klepton, commit de 2026-09-03)
-- Hoy: un juego por app, convertido en Mac (`visionos/mkguest.sh` → `build/klepton-ld`) y metido en `Frameworks/<target>/`.
-- `tools/klepton_ld.c` (776 líneas, C puro, escribe Mach-O sin linker; parchea x18 y TLS; sección `__TEXT,__klelf`) →
-  compilable dentro de la app para convertir en el visor.
-- `runtime/kl_image.c` `kl_load_auto`: busca traducciones en `KL_DYLIB_DIR` (`<lib>.dylib` o `<lib>.framework/<lib>`).
-- `runtime/kl_target.c` `synthesize()`: objetivo genérico Unity (entry `libmain`) para árboles fuera de la tabla.
-- ANGLE se carga con `dlopen` (`gfx/kl_glfb.c`) → opcional; se omite (GLES fuera de la v1).
-- `gfx/kl_vulkan.c` (6070 líneas): `libvulkan.so` del invitado → `dlopen` de MoltenVK + `VK_EXT_metal_objects` para dar el
-  `MTLTexture` del ojo al compositor. **Punto de entrada de VPEngine**: un driver Vulkan propio (dylib con
-  `vkGetInstanceProcAddr`) cargado en lugar de MoltenVK, que también expone `VK_EXT_metal_objects`.
-
-## Pendiente (siguiente sesión)
-0. Resultado de la primera build del paso 1; luego prueba en el visor con un juego Unity+Vulkan.
-1. Fase 1: `tools/vqanalyze` (APK/OBB, motor, Vulkan/GLES, variante Quest 3, alineación de segmentos, uso de x18,
-   imports por librería). Necesita el juego de prueba elegido por el usuario.
-2. Comprobar en el visor: TPIDR_EL0 por hilo y x18 (riesgos 1–2 de `docs/PLAN.md`).
-
-## Análisis de Batman: Arkham Shadow (com.camouflaj.manta, solo para estudio)
-- Unity IL2CPP, Vulkan, `com.oculus.supportedDevices=quest3+`, FDM (`xr-vulkan-extension-fragment-density-map-enabled=1`),
-  OculusXRPlugin → libOVRPlugin → libopenxr_loader. Audio Wwise (OpenSL ES). Datos: bundles Addressables sueltos + OBB.
-- 20 `.so` arm64. Relocaciones solo `RELATIVE` (538k), `ABS64`, `GLOB_DAT`, `JUMP_SLOT`. Sin TEXTREL, sin TLSDESC.
-- Ninguna lee `tpidr_el0` → riesgo TLS descartado para este juego.
-- Páginas: todo alineado a 4 KB; texto y datos comparten páginas de 16 KB → el envoltorio debe desplazar datos a frontera
-  de 16 KB y parchear ADRP/ADR/LDR-literal que apunten a ellos (en conversión, firmado; sin JIT).
-- **x18 usado como registro normal** (XNU lo pone a 0 en cambios de contexto): libunity 387 funciones, libOni 32,
-  libc++_shared 8, libOculusXRPlugin 4, libil2cpp 1 (solo guardado/restaurado de contexto, inocuo). Solo 4 funciones
-  tienen un registro x9–x17 libre en toda la función → hace falta renombrado por vivacidad (x18 nunca vive a través de
-  llamadas en AAPCS64, así que basta un temporal libre en cada rango vivo de x18). Script: análisis por FDE de `.eh_frame`.
-
-## 2026-10-12 — Batman caía a GLES
-- Log: VPVulkan carga, Unity crea instancia y enumera GPU pero nunca llama vkCreateDevice; crea contexto GLES2 y aborta (sin ANGLE).
-- Causa: comprobación de hardware del juego. El nombre "Adreno (TM) 740 (VPVulkan)" y deviceID 0x43050a01 no coinciden; el spoof de Klepton solo se activaba con target "batman".
-- Arreglo: VPVulkan informa "Adreno (TM) 740" / 0x43051401 y un LUID válido; la app fija KL_VK_SPOOF_ADRENO=1 siempre.
-- Identidad Quest 3 genérica: `KL_QUEST3=1` hace que Android Build (Quest 3/eureka), cabeza OVRPlugin (11), nombre OpenXR ("Meta Quest 3") y GPU (Adreno 740) se presenten como Quest 3 en todos los juegos, no por target. Ajuste "Perfil Quest 3" activado por defecto (clave nueva vq.quest3v2).
-
-## 2026-10-12 — Unity seguía en GLES tras el spoof de GPU
-- Log (klepton-boot 12:25): spoof Adreno activo, 2 instancias Vulkan, sin vkCreateDevice; justo antes de EGL, `Activity.getPreferences(0).getBoolean` sobre `com.unity3d.player.UnityPlayerActivity.xml` (1 entrada guardada). (Hipótesis descartada en el log siguiente: ver entrada «gles-api-check».) ANGLE no va en la IPA → null driver → aborto en `glGetShaderPrecisionFormat`.
-- `klepton/runtime/jni/kl_jni_prefs.c`: `klj_unity_activity_bool` (en `KLJ_SP_GET`, solo kind 'Z' y fichero UnityPlayerActivity): registra cada lectura (`prefs[UnityPlayerActivity] getBoolean(...)`) y un `true` guardado se devuelve `false`; `KL_KEEP_UNITY_GFX_FALLBACK=1` lo desactiva.
-- `klepton/runtime/gfx/kl_glfb.c`: fallo de carga de ANGLE se recuerda (`g_load_failed`), un solo aviso.
-- `app/Sources/VQPrepare.swift` `writeVersionFile`: en cada arranque escribe `tree/apktool.yml` (versionCode/versionName del manifiesto) → nombre de OBB correcto (antes 545 vs `main.350961`).
-- No añadido stub GL de `glGetShaderPrecisionFormat`: GLES no es la ruta objetivo.
-### Comprobar en el siguiente log
-- Línea `prefs[UnityPlayerActivity] getBoolean("<clave>")`: confirma la clave. Debe aparecer `vkCreateDevice` y no `[egl] context`.
-- `guest version 350961 / ...` en vez de `no apktool.yml`.
-- Si sigue en GLES: falta otra comprobación (driverVersion/driverID de Adreno, extensiones) → registrar `vkGetPhysicalDeviceFeatures2`/extensiones pedidas.
-
-## 2026-10-12 — `gles-api-check` = casilla del aviso de hardware; -force-vulkan
-- Log klepton-boot 3: OBB correcto (`guest version 350961`, main.350961 presente). La clave leída es `gles-api-check`: casilla «no volver a avisar» del diálogo de Unity «Your device does not match the hardware requirements»; Klepton pulsa Continue y Unity sigue por GLES. La detección Vulkan de Unity se repite en cada arranque; la casilla solo oculta el aviso (la anulación de `kl_jni_prefs.c` se mantiene, inocua).
-- Datos del APK (`assets/bin/Data/data.unity3d` → globalgamemanagers): **sin lista de filtrado de dispositivos Vulkan**. libunity 2022.3.45 tiene el argumento `force-vulkan` y lee extras del Intent (getExtras/containsKey).
-- `klepton/runtime/jni/kl_jni_android.c` `klj_Intent_getExtras`: kv[6]; nuevo extra `unity` = `KL_UNITY_ARGS`.
-- `kl_jni_services.c` `klj_Bundle_containsKey`: registra clave y resultado.
-- App: `VQSettings.forceVulkan` (UserDefaults `vq.forceVulkan`, por defecto sí; interruptor «Forzar Vulkan en juegos Unity» en Gráficos) → `KL_UNITY_ARGS=-force-vulkan`; log `Gráficos: forzar Vulkan en Unity`.
-### Comprobar en el siguiente log
-- `Bundle.containsKey("unity") -> true` y línea `CommandLine:` de Unity; luego `vkCreateDevice`.
-- Si Unity no lee `unity`: la detección rechaza algo de la GPU. Siguiente paso: registrar todas las consultas vkGetPhysicalDevice* de la instancia de Unity (apiVersion 1.1 de MoltenVK vs 1.3 de Adreno; driverVersion con vendor Qualcomm).
-
-## 2026-10-12 — Causa real del rechazo Vulkan: driverVersion (desensamblado de libunity)
-- Log 4: `-force-vulkan` llega (`Bundle.containsKey("unity") -> true`, `getString`), Unity reintenta Vulkan pero vuelve a rechazar. `force-vulkan` no salta la detección.
-- libunity 2022.3.45 (Batman), función de detección en 0xdaa154 (log «Vulkan detection: %d», resultado 0 sin Vulkan / 1 rechazado / 2 válido). Lee VkPhysicalDeviceProperties y conmuta por vendorID:
-  - Qualcomm 0x5143: nombre «Adreno (TM) 4xx» → rechazado (0xdcc858). Si no, 0xdcc8e8 (Qualcomm y global <0) → exige `driverVersion >= 0x80000000`; si no, apiVersion >= 1.0.49.
-  - ARM 0x13b5 (Mali-T…), NVIDIA, Intel, ImgTec: mínimos propios. Otro vendor (Apple): válido solo si API Android > 29.
-- MoltenVK da un driverVersion pequeño → rechazo. Arreglo: `kl_vulkan.c` `klvk_spoof_props` pone `driverVersion = VK_MAKE_VERSION(512,744,0)` (= 0x802e8000, como un driver Adreno 512.x real); se registra en la línea del spoof.
-- Para otros juegos Unity 2022 la misma regla aplica: con vendor Qualcomm hace falta bit 31 en driverVersion.
-
-## 2026-10-12 — Log 5: driverVersion no bastó; registro de quién consulta la GPU
-- driverVersion 0x802e8000 aplicado (línea del spoof), aviso de hardware sigue. La salida `printf_console` de Unity (p. ej. «Vulkan detection: %d», «[Vulkan init] …») no aparece en el log: build release, no se puede leer el resultado directamente.
-- libunity: la selección de API (0x89eb.. → 0x89ece4 muestra el aviso `gles-api-check`) recorre la lista de APIs; 0x89e4b0 es la comprobación GLES/EGL. Selección de GPU Vulkan en 0xdb11cc: si el plugin XR da un `xrDevice` que no está en la lista enumerada → NULL → Vulkan descartado. Ninguna llamada a Properties2 con ID/LUID en el log.
-- `kl_vulkan.c`: `klvk_who`/`KLVK_WHO` registra cada sitio de llamada distinto (`who: <vk fn> <- lib+off`, máx. 128) en EnumeratePhysicalDevices, Get*Properties(2), Features(2), QueueFamilyProperties, MemoryProperties, EnumerateDeviceExtensionProperties. Include `klepton.h` para `kl_addr_image`.
-### Siguiente
-- Con las líneas `who:` de libunity, situar cada llamada en el desensamblado (detección 0xdaa154, selección 0xdb11cc) y ver qué rama descarta Vulkan.
-
-## 2026-10-12 — Log 6: causa real, el id de adaptador XR
-- `who:` muestra: detección 0xdaa154 completa (Properties en 0xdaa2e0) y pasa con el spoof. El rechazo está en la creación del GfxDevice Vulkan (0xdaa54c): `dab8d4` guarda `XRManager->GetGraphicsAdapterId(Vulkan=21)` (OculusXRPlugin → `ovrp_GetDisplayAdapterId2`) y `0xdb11cc` lo compara **como handle VkPhysicalDevice** con los enumerados; un LUID ≠ 0 no coincide → NULL → `cf68b8` (0x889ddc) falla → GLES (0x89ea70, que solo mira GLES2/3 y muestra el aviso `gles-api-check` al no haber ninguno). Con 0 elige por deviceType (como en Quest, donde no hay LUID).
-- `kl_vulkan.c` `cache_display_luid`: guarda LUID en cero por defecto (`KL_ADAPTER_LUID_REAL=1` lo desactiva); la lectura de deviceLUID en Properties2 se fuerza al mismo cero, así la ruta por LUID de Unity antigua (AC Nexus) sigue coincidiendo (sin verificar en log). Comentario de `kl_ovrp.c` `klovrp_GetDisplayAdapterId2` actualizado.
-### Comprobar
-- Línea `display adapter id reported as zero`; `who: vkGetPhysicalDeviceQueueFamilyProperties <- libunity.so+0xdaa774` y `vkCreateDevice`; sin aviso de hardware.
-
-## 2026-10-12 — Log 7: el LUID a cero no bastaba; el id es un PUNTERO
-- Con LUID cero sigue el aviso de hardware y no hay `who: vkGetPhysicalDeviceQueueFamilyProperties` → selección NULL igual.
-- OculusXRPlugin `OculusSystem::GetGraphicsAdapterId` (+0x292d8): llama a `ovrp_GetDisplayAdapterId2(&p)` y entrega **el valor del puntero `p`** como id (no su contenido). Klepton daba la dirección de su buffer `id[32]` → nunca coincide con un handle.
-- libOVRPlugin real de Batman (`ovrp_GetDisplayAdapterId2` +0x1c7ef0 → +0x206110): en Android hace `*out = NULL; return 0`.
-- Arreglo: `klepton/runtime/xr/kl_ovrp.c` `klovrp_GetDisplayAdapterId2` → `*out = NULL` (log `display adapter id -> NULL`); `KL_OVRP_ADAPTER_LUID=1` restaura el buffer LUID. Revertido el LUID a cero de `kl_vulkan.c` (entrada anterior), innecesario.
-### Comprobar
-- `who: vkGetPhysicalDeviceQueueFamilyProperties <- libunity.so+0xdaa774`, `vkCreateDevice`, sin aviso de hardware ni `[egl] context`.
-
-## 2026-10-12 — Log 8: **Vulkan funcionando** en Batman; parada en ovr_AssetFile_StatusByName
-- Con `ovrp_GetDisplayAdapterId2` → NULL: sin aviso de hardware; Unity selecciona GPU, consulta colas/extensiones/Properties2/Features2 y `vkCreateDevice ok — 8 extension(s), queue family 0`. Llega a `frame pump` (~1,3 GB), carga plugins, audio, haptics. El contexto `[egl] GLES 3` posterior es auxiliar.
-- Fin: `kl_ovrplat.c` abortaba en `ovr_AssetFile_StatusByName` (familia AssetFile = marcador DRM).
-- Arreglo: `plat_is_asset_status_query` (`ovr_AssetFile_Status`, `StatusById`, `StatusByName`) sale de `plat_is_drm` y entra en `g_plat_request` → request id 0 («no se pudo hacer la petición», sin mensaje de estado; no concede nada). `ovr_AssetFile_Download*` sigue abortando.
-- Ruido: decenas de `guest dlopen("libOVRPlugin.so")`/`libovrplatformloader.so` repetidos (pendiente: registrar solo el primero).
-### Comprobar
-- Qué hace Batman con el fallo de la petición (sigue o sale) y siguiente parada.
-
-## 2026-10-12 — Capturas de diagnóstico (log 18: imagen corrupta en el visor)
-- `KleptonCompositor.swift` `FrameCapture` (`KL_CAPTURE=1`): en los frames de imagen del guest 120/600/1200 (`capGuestFrames`, solo frames con capa de ojo viva) copia por blit, antes de `encodePresent`, todas las capas de la(s) textura(s) de ojo (`eyeSource`) y del `colorTextures[0]` del drawable a MTLBuffer compartido; en `addCompletedHandler` → PNG ≤1024 de ancho en `Documents/Registros/capture-<frame>-eye<N>.png` / `-output<N>.png`. Logs `[cap] <tex>: fmt/type/usage/storage/fbOnly…` y `[cap] saved …`. Solo RGBA8/BGRA8 (sRGB o no); otros formatos, MSAA o framebufferOnly se saltan con log.
-- Ajuste «Capturas de diagnóstico» (`VQSettings.diagCaptures`, `vq.diagCaptures`, por defecto ON) → `KL_CAPTURE`. `VQLog.shareable` incluye `captures`; `VQLog.start()` borra las PNG de la sesión anterior.
-- Sin volcado por pase en VPEngine metal2 (pendiente si hace falta).
-### Comprobar
-- PNG de ojo bien y output mal → fallo en el compositor; ojo ya corrupto → render del juego/traductor.
-
-## 2026-10-12 — VPKTAA en compositor + anisotrópico x16 (sin build aún)
-- `klepton/visionos/Sources/KleptonTAA.swift` (nuevo): compute por ojo y frame del juego (serial), historial ping-pong rgba16f + salida con nitidez RCAS; reproyección solo rotación (delta de pose de render, tangentes de cada frame, recorte viewport), clipping de varianza YCoCg, peso = pct/100·0.95. Reset: 1.er frame, tamaño, tangentes, giro >8°. Log `[taa] VPKTAA on:` + `[taa] stats` cada 30 s. Sin jitter (pendiente) y MSAA del juego intacto.
-- `KleptonCompositor.swift`: `taa`/`taaOut`, `prepareTAA()` al inicio de `encodeComposite`, sustitución de `alloc` en `encodeViews`. Solo si no hay lista de capas proyección (`projLayerCount == 0`).
-- `VQLaunch.swift`: env `KL_VPKTAA`, `KL_VPKTAA_PCT`, `KL_VPKTAA_SHARP`; ajuste `aniso16` (`vq.aniso16`, defecto sí) → `vq_gfx_config.anisotropy`; `vq_gfx_config_forward()` repetido tras `kl_app_configure_game` (antes el envío ocurría antes de que stderr llegara al log → faltaba `vk.cfg`). `VQLauncher.swift`: toggle "Filtrado anisotrópico x16".
-- `vq_config.c/.h`: campo `anisotropy`, dlsym `vpvk_config_set_anisotropy`.
-- Pendiente: verificar en log `vk.cfg anisotropy=16`, `[taa] VPKTAA on`, `Gráficos: ajustes enviados a VPVulkan sí`; jitter Halton en `klovrp_eye_tan` solo si el juego relee el frustum cada frame.
+## Batman: Arkham Shadow (com.camouflaj.manta, solo estudio)
+- Unity 2022.3.45 IL2CPP, Vulkan multiview, SRP propio «Manta» (derivado de HDRP), OculusXRPlugin → libOVRPlugin
+  1.98; Wwise (OpenSL); `supportedDevices=quest3+`. x18 usado como registro normal (Klepton lo parchea).

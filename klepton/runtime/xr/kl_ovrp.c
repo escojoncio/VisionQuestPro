@@ -2432,7 +2432,9 @@ static uint64_t klovrp_Update3(int step, int frame_index, double prediction) {
     // klovrp_Update2 records itself as ovrp_Update2; correct the attribution so
     // the work list says which numbered form the guest actually called.
     int s2 = ovrp_slot("ovrp_Update2");
-    if (s2 >= 0 && g_ovrp[s2].calls) g_ovrp[s2].calls--;
+    // Never back to 0: ovrp_hit logs "first-call" whenever calls becomes 1, and
+    // going 0->1->0 every frame printed it ~11k times per session.
+    if (s2 >= 0 && g_ovrp[s2].calls > 1) g_ovrp[s2].calls--;
     ovrp_hit("ovrp_Update3");
     return r;
 }
@@ -6459,20 +6461,61 @@ static uint64_t klovrp_GetLayerTextureSpaceWarp(int layer_id, int stage, int eye
 // layers by layer_id (not the shared eye storage), so this allocates the layer's
 // own image and cannot disturb the eyes. The handle it hands back is the same
 // 64-bit value - a GL name on the GLES path, a VkImage on Vulkan.
+//
+// On Vulkan the value is NOT the VkImage itself: OVROverlay passes it straight to
+// Texture2D.CreateExternalTexture, and Unity's Vulkan backend takes that as a
+// `VkImage*` (the same shape GetNativeTexturePtr returns) and dereferences it.
+// Handing the raw handle made Unity read the first word of our image object
+// (0xe in Batman's log) and render the overlay into a wild handle - the pink
+// quad over the loading map. So Vulkan gets the address of a stable cell that
+// holds the VkImage; GLES keeps the plain GL name.
+#define KLOVRP_TEXCELLS 128
+static struct { int used, layer, stage, eye; uint64_t image; } g_texcell[KLOVRP_TEXCELLS];
+static pthread_mutex_t g_texcell_mu = PTHREAD_MUTEX_INITIALIZER;
+
+static uint64_t *klovrp_texcell(int layer_id, int stage, int eye, uint64_t image) {
+    uint64_t *cell = NULL;
+    pthread_mutex_lock(&g_texcell_mu);
+    int free_slot = -1;
+    for (int i = 0; i < KLOVRP_TEXCELLS; i++) {
+        if (g_texcell[i].used && g_texcell[i].layer == layer_id &&
+            g_texcell[i].stage == stage && g_texcell[i].eye == eye) {
+            cell = &g_texcell[i].image;
+            break;
+        }
+        if (!g_texcell[i].used && free_slot < 0) free_slot = i;
+    }
+    if (!cell) {
+        // Full table: recycle by layer id hash. Cells are never freed (Unity may keep the
+        // pointer for the texture's lifetime), only re-pointed.
+        int i = free_slot >= 0 ? free_slot
+                               : (int)(((unsigned)layer_id * 7u + (unsigned)stage * 3u + (unsigned)eye) % KLOVRP_TEXCELLS);
+        g_texcell[i].used = 1, g_texcell[i].layer = layer_id;
+        g_texcell[i].stage = stage, g_texcell[i].eye = eye;
+        cell = &g_texcell[i].image;
+    }
+    *cell = image;
+    pthread_mutex_unlock(&g_texcell_mu);
+    return cell;
+}
+
 static uint64_t klovrp_GetLayerTexturePtr(int layer_id, int stage, int eye,
                                           uint64_t *texture_ptr) {
     ovrp_hit("ovrp_GetLayerTexturePtr");
     uint64_t color = 0, depth = 0;
     uint64_t r = klovrp_GetLayerTexture2(layer_id, stage, eye, &color, &depth);
-    if (texture_ptr) *texture_ptr = color;
+    uint64_t out = color;
+    if (color && kl_vulkan_guest_active() && !getenv("KL_OVRP_TEXPTR_RAW"))
+        out = (uint64_t)(uintptr_t)klovrp_texcell(layer_id, stage, eye, color);
+    if (texture_ptr) *texture_ptr = out;
     // TEMP diagnostic: the guest was seen creating an image view on a wild
     // pointer right after this call - if these args do not read as a plausible
     // (layer, stage, eye, ptr) then the signature is wrong and the real texture
     // out-param is being left uninitialised.
     fprintf(stderr, "  [ovrp] GetLayerTexturePtr(layer=%d stage=%d eye=%d ptr=%p) "
-                    "wrote color=%#llx depth=%#llx result=%llu\n",
-            layer_id, stage, eye, (void *)texture_ptr,
-            (unsigned long long)color, (unsigned long long)depth,
+                    "wrote %#llx (VkImage %#llx%s) depth=%#llx result=%llu\n",
+            layer_id, stage, eye, (void *)texture_ptr, (unsigned long long)out,
+            (unsigned long long)color, out != color ? " via cell" : "", (unsigned long long)depth,
             (unsigned long long)r);
     return r;
 }
