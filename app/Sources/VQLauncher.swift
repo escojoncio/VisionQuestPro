@@ -254,6 +254,13 @@ struct VQSettingsView: View {
                         Stepper(VQL("Nitidez: \(Int(settings.vpktaaSharpness * 100)) %", "Sharpness: \(Int(settings.vpktaaSharpness * 100)) %"),
                                 value: $settings.vpktaaSharpness, in: 0...1, step: 0.1)
                     }
+                    Toggle(VQL("Idioma del sistema si el juego lo incluye (si no, inglés)", "System language if the game ships it (else English)"), isOn: $settings.systemLanguage)
+                    Picker(VQL("Postura", "Posture"), selection: $settings.posture) {
+                        Text(VQL("Automática", "Automatic")).tag("auto")
+                        Text(VQL("Sentado", "Seated")).tag("seated")
+                        Text(VQL("De pie", "Standing")).tag("standing")
+                    }
+                    .pickerStyle(.segmented)
                     Picker(VQL("Resolución base", "Base resolution"), selection: $settings.avpResolution) {
                         Text(VQL("Original", "Original")).tag(false)
                         Text("Vision Pro").tag(true)

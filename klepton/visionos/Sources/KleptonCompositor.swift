@@ -899,6 +899,9 @@ final class KleptonCompositor {
                 qdesc.maxVertexAmplificationCount = amplification
                 equirectPipeline = try? device.makeRenderPipelineState(descriptor: qdesc)
             }
+            // Host video consumer is live: NativeVideoPlayer requests get played.
+            kl_hostvideo_set_host_present(
+                (overlaysEnabled && overlayPipeline != nil && equirectPipeline != nil) ? 1 : 0)
             if equirectPipeline == nil {
                 NSLog("[cp] the equirect pipeline failed to build — 360 background "
                       + "overlays (AC Nexus loading skybox) will not be composited")
@@ -2691,12 +2694,30 @@ final class KleptonCompositor {
         // buffer is where the panel actually is.
         if writeDepth, let depthState { enc.setDepthStencilState(depthState) }
         let n = Int(kl_ovrp_overlay_count())
-        if n == 0 { return 0 }
+        // Host video (NativeVideoPlayer): its frame replaces the guest texture
+        // of the layer whose Surface it was given; drawn even with no layers.
+        let hv = hostVideoFrame()
+        var hvDrawn = false
+        if n == 0 {
+            if let hv { drawHostVideoUnbound(enc, hv: hv, viewIndices: viewIndices,
+                                             drawable: drawable, originFromHead: originFromHead)
+                if writeDepth, let depthState { enc.setDepthStencilState(depthState) }
+                return 1 }
+            return 0
+        }
         var drawn = 0
         var drewEquirect = false
         for i in 0..<n {
             var ov = kl_ovrp_overlay()
             guard kl_ovrp_overlay_get(Int32(i), &ov) != 0 else { continue }
+            if let hv, ov.layer_id == hv.layer {
+                if encodeHostVideo(enc, ov: &ov, hv: hv, viewIndices: viewIndices,
+                                   drawable: drawable, originFromHead: originFromHead,
+                                   writeDepth: writeDepth) {
+                    hvDrawn = true; drawn += 1
+                }
+                continue
+            }
             // Equirect layers are the loading/menu backdrop, which the host
             // draws itself from the real mp4 (drawLoadingSkybox). The guest's
             // own equirect layers here are 2x2 placeholders or the wild video
@@ -2806,10 +2827,19 @@ final class KleptonCompositor {
                       + (ov.head_locked != 0 ? ", HEAD-LOCKED" : ""))
             }
         }
+        if let hv, !hvDrawn {
+            // Its layer was not submitted this frame (or unknown): show it anyway
+            // as an immersive panorama facing tracking-space forward.
+            drawHostVideoUnbound(enc, hv: hv, viewIndices: viewIndices,
+                                 drawable: drawable, originFromHead: originFromHead)
+            if writeDepth, let depthState { enc.setDepthStencilState(depthState) }
+            drawn += 1
+        }
         return drawn
     }
     /// Matches `struct KLEq` in kl_msl_equirect (kl_reproject.c) byte for byte:
-    /// two float4x4 then four uint, 144 bytes, 16-aligned. One per amplified
+    /// two float4x4, five uint, hscale/hspan/vspan, float4 uv_rect: 176 bytes,
+    /// 16-aligned (uvRect lands at offset 160 in both). One per amplified
     /// view, indexed by [[amplification_id]].
     private struct KLEqUniform {
         var invProj: simd_float4x4 = matrix_identity_float4x4
@@ -2820,6 +2850,9 @@ final class KleptonCompositor {
         var visible: UInt32 = 0
         var test: UInt32 = 0
         var hscale: Float = 1
+        var hspan: Float = 0      // >0: angular mode, radians across uvRect
+        var vspan: Float = 0
+        var uvRect: SIMD4<Float> = .zero   // z == 0: whole texture (legacy)
     }
 
     /// The 3x3 rotation of a rigid transform, re-homed as a 4x4 with no
@@ -2917,6 +2950,187 @@ final class KleptonCompositor {
             NSLog("[cp] compositing EQUIRECT panorama layer \(ov.layer_id): "
                   + "\(w)x\(h) tex, flipY=\(Self.eqFlipY) srgb=\(Self.eqSrgbDecode)")
         }
+        return true
+    }
+
+    // MARK: Host video (com.oculus.videoplayer.NativeVideoPlayer)
+    //
+    // kl_hostvideo carries the guest's playVideo/stop/pause/seek; this side plays
+    // the file with AVPlayer, publishes state back, and draws each frame in place
+    // of the overlay layer whose Surface the guest handed the player.
+    private var hostVideo: HostVideoPlayer?
+    private var hostVideoLogged = Set<String>()
+
+    fileprivate struct HostVideoFrame {
+        let layer: Int32
+        let texture: MTLTexture
+        let width: Int, height: Int
+        let stereo: Int32          // KL_HV_* layout guessed from the frame
+    }
+
+    /// Sync the player with the guest's request and return the current frame,
+    /// or nil when nothing is playing (or no frame is decoded yet).
+    private func hostVideoFrame() -> HostVideoFrame? {
+        var req = kl_hostvideo_request()
+        let gen = kl_hostvideo_get_request(&req)
+        let path = withUnsafeBytes(of: req.path) { raw -> String in
+            String(cString: raw.bindMemory(to: CChar.self).baseAddress!)
+        }
+        if req.active == 0 || path.isEmpty {
+            if hostVideo != nil { hostVideo?.stop(); hostVideo = nil }
+            return nil
+        }
+        if hostVideo?.gen != gen {
+            hostVideo?.stop()
+            hostVideo = HostVideoPlayer(device: device, path: path, gen: gen)
+            if hostVideo == nil {
+                NSLog("[cp] host video: cannot create a player for \(path)")
+                kl_hostvideo_publish(gen, Int32(KL_HV_ENDED), 0, 0, 0, 0, 0, 0)
+                return nil
+            }
+        }
+        guard let hv = hostVideo else { return nil }
+        hv.sync(req)
+        guard let tex = hv.latestTexture() else { return nil }
+        return HostVideoFrame(layer: Int32(req.layer_id), texture: tex,
+                              width: tex.width, height: tex.height,
+                              stereo: HostVideoPlayer.layout(w: tex.width, h: tex.height))
+    }
+
+    /// Per-eye source rect (fractions) and the angular span each covers.
+    private static func hostVideoRects(_ f: HostVideoFrame, ov: kl_ovrp_overlay?)
+        -> (rects: [SIMD4<Float>], hspan: Float, vspan: Float, src: String) {
+        var rects: [SIMD4<Float>]
+        var src = "aspect"
+        if let ov, ov.tex_w > 0, ov.tex_h > 0 {
+            let l = ov.viewport.0, r = ov.viewport.1
+            let tw = Float(ov.tex_w), th = Float(ov.tex_h)
+            if l.2 > 0, l.3 > 0, r.2 > 0, r.3 > 0,
+               (l.0 != r.0 || l.1 != r.1 || l.2 != r.2 || l.3 != r.3) {
+                rects = [SIMD4(Float(l.0) / tw, Float(l.1) / th, Float(l.2) / tw, Float(l.3) / th),
+                         SIMD4(Float(r.0) / tw, Float(r.1) / th, Float(r.2) / tw, Float(r.3) / th)]
+                src = "layer"
+                let a = rects[0].z * Float(f.width) / max(rects[0].w * Float(f.height), 1)
+                return (rects, a > 1.5 ? 2 * Float.pi : Float.pi, Float.pi, src)
+            }
+        }
+        let a = Float(f.width) / Float(max(f.height, 1))
+        switch f.stereo {
+        case Int32(KL_HV_LEFT_RIGHT):
+            rects = [SIMD4(0, 0, 0.5, 1), SIMD4(0.5, 0, 0.5, 1)]
+            let ea = a * 0.5
+            return (rects, ea > 1.5 ? 2 * Float.pi : Float.pi, Float.pi, src)
+        case Int32(KL_HV_TOP_BOTTOM):
+            rects = [SIMD4(0, 0, 1, 0.5), SIMD4(0, 0.5, 1, 0.5)]
+            return (rects, 2 * Float.pi, Float.pi, src)
+        default:
+            rects = [SIMD4(0, 0, 1, 1), SIMD4(0, 0, 1, 1)]
+            if abs(a - 2) < 0.1 { return (rects, 2 * Float.pi, Float.pi, src) }
+            // Flat video on a panorama: 90 deg wide, height from the aspect.
+            let h: Float = Float.pi / 2
+            return (rects, h, 2 * atan(tan(h / 2) / max(a, 0.1)), src)
+        }
+    }
+
+    /// Draw the video as the guest's layer `ov`: an equirect/cylinder/other
+    /// layer becomes an immersive panorama oriented by the layer pose; a quad
+    /// keeps its placement and size with the video's per-eye rects.
+    private func encodeHostVideo(_ enc: MTLRenderCommandEncoder, ov: inout kl_ovrp_overlay,
+                                 hv: HostVideoFrame, viewIndices: [Int],
+                                 drawable: LayerRenderer.Drawable,
+                                 originFromHead: simd_float4x4, writeDepth: Bool) -> Bool {
+        let (rects, hspan, vspan, src) = Self.hostVideoRects(hv, ov: ov)
+        let key = "\(ov.layer_id)/\(ov.shape)/\(hv.width)x\(hv.height)"
+        if !hostVideoLogged.contains(key) {
+            hostVideoLogged.insert(key)
+            NSLog("[cp] host video layer \(ov.layer_id) shape \(ov.shape) stereo \(hv.stereo) "
+                  + "\(hv.width)x\(hv.height) drawn (rects from \(src), span "
+                  + "\(Int(hspan * 180 / Float.pi))x\(Int(vspan * 180 / Float.pi)) deg)")
+        }
+        if ov.shape == 0, let pipe = overlayPipeline {
+            // Quad: route the video rects through kl_overlay_build's uv_rect.
+            ov.tex_w = Int32(hv.width); ov.tex_h = Int32(hv.height)
+            let px: (SIMD4<Float>) -> (Int32, Int32, Int32, Int32) = { r in
+                (Int32(r.x * Float(hv.width)), Int32(r.y * Float(hv.height)),
+                 Int32(r.z * Float(hv.width)), Int32(r.w * Float(hv.height))) }
+            ov.viewport.0 = px(rects[0]); ov.viewport.1 = px(rects[1])
+            ov.origin_top_left = 1
+            var uniforms: [kl_overlay_uniforms] = []
+            for vi in viewIndices {
+                uniforms.append(kl_overlay_build(&ov, Int32(vi), originFromHead,
+                    Self.headFromView(drawable.views[vi].transform, midpoint: eyeMidpointInDevice),
+                    drawable.computeProjection(viewIndex: vi)))
+            }
+            if writeDepth, let depthState { enc.setDepthStencilState(depthState) }
+            enc.setRenderPipelineState(pipe)
+            enc.setFragmentTexture(hv.texture, index: 0)
+            enc.setFragmentSamplerState(sampler, index: 0)
+            uniforms.withUnsafeBytes { buf in
+                enc.setVertexBytes(buf.baseAddress!, length: buf.count, index: 0)
+                enc.setFragmentBytes(buf.baseAddress!, length: buf.count, index: 0)
+            }
+            enc.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
+            return true
+        }
+        let q = simd_quatf(ix: ov.pose.0, iy: ov.pose.1, iz: ov.pose.2, r: ov.pose.3)
+        let layerRot = simd_length(q.vector) > 0.5 ? simd_float4x4(simd_normalize(q))
+                                                   : matrix_identity_float4x4
+        let ok = encodeHostVideoPanorama(enc, texture: hv.texture, rects: rects,
+                                         hspan: hspan, vspan: vspan, layerRot: layerRot,
+                                         viewIndices: viewIndices, drawable: drawable,
+                                         originFromHead: originFromHead)
+        if writeDepth, let depthState { enc.setDepthStencilState(depthState) }
+        return ok
+    }
+
+    /// No submitted layer to bind to: panorama facing tracking-space forward.
+    private func drawHostVideoUnbound(_ enc: MTLRenderCommandEncoder, hv: HostVideoFrame,
+                                      viewIndices: [Int], drawable: LayerRenderer.Drawable,
+                                      originFromHead: simd_float4x4) {
+        let (rects, hspan, vspan, _) = Self.hostVideoRects(hv, ov: nil)
+        let key = "unbound/\(hv.layer)/\(hv.width)x\(hv.height)"
+        if !hostVideoLogged.contains(key) {
+            hostVideoLogged.insert(key)
+            NSLog("[cp] host video layer \(hv.layer) shape - stereo \(hv.stereo) "
+                  + "\(hv.width)x\(hv.height) drawn (layer not submitted: forward panorama)")
+        }
+        _ = encodeHostVideoPanorama(enc, texture: hv.texture, rects: rects, hspan: hspan,
+                                    vspan: vspan, layerRot: matrix_identity_float4x4,
+                                    viewIndices: viewIndices, drawable: drawable,
+                                    originFromHead: originFromHead)
+    }
+
+    private func encodeHostVideoPanorama(_ enc: MTLRenderCommandEncoder, texture: MTLTexture,
+                                         rects: [SIMD4<Float>], hspan: Float, vspan: Float,
+                                         layerRot: simd_float4x4, viewIndices: [Int],
+                                         drawable: LayerRenderer.Drawable,
+                                         originFromHead: simd_float4x4) -> Bool {
+        guard let pipe = equirectPipeline else { return false }
+        // View ray -> tracking space -> the layer's own frame.
+        let layerFromOrigin = layerRot.transpose
+        var uniforms: [KLEqUniform] = []
+        for vi in viewIndices {
+            let proj = drawable.computeProjection(viewIndex: vi)
+            let originFromView = originFromHead
+                * Self.headFromView(drawable.views[vi].transform, midpoint: eyeMidpointInDevice)
+            var u = KLEqUniform()
+            u.invProj = proj.inverse
+            u.worldRot = layerFromOrigin * Self.rotationOnly(originFromView)
+            u.visible = 1
+            u.hspan = hspan
+            u.vspan = vspan
+            u.uvRect = rects[vi == 0 ? 0 : 1]
+            uniforms.append(u)
+        }
+        enc.setRenderPipelineState(pipe)
+        if let equirectDepthState { enc.setDepthStencilState(equirectDepthState) }
+        enc.setFragmentTexture(texture, index: 0)
+        enc.setFragmentSamplerState(sampler, index: 0)
+        uniforms.withUnsafeBytes { buf in
+            enc.setVertexBytes(buf.baseAddress!, length: buf.count, index: 0)
+            enc.setFragmentBytes(buf.baseAddress!, length: buf.count, index: 0)
+        }
+        enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
         return true
     }
 
@@ -3866,6 +4080,155 @@ final class KleptonCompositor {
     }
 }
 
+
+/// The host half of NativeVideoPlayer: one AVPlayer item per guest playVideo,
+/// driven by the kl_hostvideo request every frame and publishing ExoPlayer-style
+/// state back. Frames come out as BGRA MTLTextures (AVPlayerItemVideoOutput).
+/// Audio plays if the file has a track (Quest cutscenes usually carry none).
+final class HostVideoPlayer {
+    let gen: UInt32
+    private let path: String
+    private let player: AVPlayer
+    private let item: AVPlayerItem
+    private let output: AVPlayerItemVideoOutput
+    private var cache: CVMetalTextureCache?
+    private var retained: CVMetalTexture?
+    private var current: MTLTexture?
+    private var endObserver: NSObjectProtocol?
+    private let lock = NSLock()
+    private var reachedEnd = false
+    private var looping = false
+    private var seekGen: UInt32
+    private var lastPaused = -1
+    private var lastSpeed: Float = 1
+    private var lastState: Int32 = 0
+    private var failedLogged = false
+
+    init?(device: MTLDevice, path: String, gen: UInt32) {
+        guard FileManager.default.fileExists(atPath: path) else {
+            NSLog("[cp] host video: file missing \(path)")
+            return nil
+        }
+        var c: CVMetalTextureCache?
+        guard CVMetalTextureCacheCreate(kCFAllocatorDefault, nil, device, nil, &c)
+                == kCVReturnSuccess, let c else { return nil }
+        cache = c
+        self.gen = gen
+        self.path = path
+        var req = kl_hostvideo_request()
+        _ = kl_hostvideo_get_request(&req)
+        seekGen = req.seek_gen       // a seek filed before playVideo is not ours
+        item = AVPlayerItem(url: URL(fileURLWithPath: path))
+        // No preferredMaximumResolution: decode at full size (8K HEVC on M2).
+        output = AVPlayerItemVideoOutput(outputSettings: [
+            kCVPixelBufferMetalCompatibilityKey as String: true,
+            kCVPixelBufferPixelFormatTypeKey as String: Int(kCVPixelFormatType_32BGRA),
+        ])
+        item.add(output)
+        player = AVPlayer(playerItem: item)
+        player.actionAtItemEnd = .pause
+        player.automaticallyWaitsToMinimizeStalling = false
+        endObserver = NotificationCenter.default.addObserver(
+            forName: .AVPlayerItemDidPlayToEndTime, object: item, queue: nil) { [weak self] _ in
+            guard let self else { return }
+            self.lock.lock(); let loop = self.looping; if !loop { self.reachedEnd = true }
+            self.lock.unlock()
+            if loop { self.player.seek(to: .zero); self.player.play() }
+        }
+        NSLog("[cp] host video: playing \(path)")
+        player.play()
+    }
+
+    deinit { stop() }
+
+    /// Aspect -> layout: 2:1 or 4:1 = left/right (VR180 / 360 SBS), 1:1 =
+    /// top/bottom 360, anything else mono.
+    static func layout(w: Int, h: Int) -> Int32 {
+        guard h > 0 else { return Int32(KL_HV_MONO) }
+        let a = Double(w) / Double(h)
+        if abs(a - 2) < 0.1 || abs(a - 4) < 0.2 { return Int32(KL_HV_LEFT_RIGHT) }
+        if abs(a - 1) < 0.05 { return Int32(KL_HV_TOP_BOTTOM) }
+        return Int32(KL_HV_MONO)
+    }
+
+    func sync(_ req: kl_hostvideo_request) {
+        lock.lock(); looping = req.looping != 0; var ended = reachedEnd; lock.unlock()
+        if req.seek_gen != seekGen {
+            seekGen = req.seek_gen
+            lock.lock(); reachedEnd = false; lock.unlock(); ended = false
+            player.seek(to: CMTime(value: CMTimeValue(req.seek_ms), timescale: 1000),
+                        toleranceBefore: .zero, toleranceAfter: .zero)
+        }
+        let speed = req.speed > 0 ? req.speed : 1
+        let paused = Int(req.paused)
+        if paused != lastPaused || speed != lastSpeed {
+            lastPaused = paused; lastSpeed = speed
+            if paused != 0 { player.pause() } else if !ended { player.rate = speed }
+        }
+        // Looping turned on after the end: restart.
+        if ended && looping && paused == 0 {
+            lock.lock(); reachedEnd = false; lock.unlock(); ended = false
+            player.seek(to: .zero); player.rate = speed
+        }
+        var state: Int32
+        switch item.status {
+        case .failed:
+            if !failedLogged {
+                failedLogged = true
+                NSLog("[cp] host video: item failed: \(item.error?.localizedDescription ?? "?")")
+            }
+            state = Int32(KL_HV_ENDED)
+        case .readyToPlay:
+            state = ended ? Int32(KL_HV_ENDED)
+                : (item.isPlaybackLikelyToKeepUp || paused != 0 || current != nil
+                   ? Int32(KL_HV_READY) : Int32(KL_HV_BUFFERING))
+        default:
+            state = Int32(KL_HV_BUFFERING)
+        }
+        if state != lastState {
+            lastState = state
+            NSLog("[cp] host video: state \(state)")
+        }
+        let ds = item.duration.seconds
+        let dur = (item.duration.isNumeric && ds.isFinite) ? Int64(ds * 1000) : 0
+        let cs = item.currentTime().seconds
+        let pos = ended ? dur : (cs.isFinite ? max(0, Int64(cs * 1000)) : 0)
+        let size = item.presentationSize
+        let w = Int32(size.width), h = Int32(size.height)
+        let playing: Int32 = (paused == 0 && !ended && state != Int32(KL_HV_ENDED)) ? 1 : 0
+        kl_hostvideo_publish(gen, state, dur, pos, w, h,
+                             HostVideoPlayer.layout(w: Int(w), h: Int(h)), playing)
+    }
+
+    /// The newest decoded frame, or the last one if none is ready this vsync.
+    func latestTexture() -> MTLTexture? {
+        guard let cache else { return current }
+        let t = output.itemTime(forHostTime: CACurrentMediaTime())
+        guard t.isValid, output.hasNewPixelBuffer(forItemTime: t),
+              let pb = output.copyPixelBuffer(forItemTime: t, itemTimeForDisplay: nil) else {
+            return current
+        }
+        let w = CVPixelBufferGetWidth(pb), h = CVPixelBufferGetHeight(pb)
+        var cvtex: CVMetalTexture?
+        if CVMetalTextureCacheCreateTextureFromImage(kCFAllocatorDefault, cache, pb, nil,
+                                                     .bgra8Unorm, w, h, 0, &cvtex) == kCVReturnSuccess,
+           let cvtex, let mtl = CVMetalTextureGetTexture(cvtex) {
+            retained = cvtex
+            current = mtl
+        }
+        return current
+    }
+
+    func stop() {
+        player.pause()
+        player.replaceCurrentItem(with: nil)
+        if let endObserver { NotificationCenter.default.removeObserver(endObserver) }
+        endObserver = nil
+        current = nil
+        retained = nil
+        if let cache { CVMetalTextureCacheFlush(cache, 0) }
+    }
+}
 
 /// Plays one of AC Nexus's loading mp4s (HEVC) and hands the compositor the
 /// current frame as an MTLTexture. This is the visionOS stand-in for the Android

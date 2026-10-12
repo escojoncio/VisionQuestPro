@@ -42,7 +42,8 @@ RUNTIME_JNI := runtime/kl_jni.c \
            runtime/jni/kl_jni_net.c runtime/jni/kl_jni_softinput.c \
            runtime/jni/kl_jni_services.c runtime/jni/kl_jni_io.c \
            runtime/jni/kl_jni_prefs.c runtime/jni/kl_jni_sdl.c \
-           runtime/jni/kl_jni_ue4.c runtime/jni/kl_jni_electra.c runtime/jni/kl_jni_fmod.c runtime/jni/kl_jni_jkxr.c
+           runtime/jni/kl_jni_ue4.c runtime/jni/kl_jni_electra.c runtime/jni/kl_jni_fmod.c runtime/jni/kl_jni_jkxr.c \
+           runtime/jni/kl_jni_hostvideo.c
 
 RUNTIME_SHIP := runtime/kl_env.c runtime/kl_image.c runtime/kl_stub_cells.S runtime/libc/kl_shim.c runtime/libc/kl_va.c \
            runtime/libc/kl_va_handlers.c runtime/libc/kl_va_thunks.S \
@@ -56,7 +57,7 @@ RUNTIME_SHIP := runtime/kl_env.c runtime/kl_image.c runtime/kl_stub_cells.S runt
            runtime/guest/kl_nativeactivity.c runtime/guest/kl_slink.c runtime/guest/kl_ue4.c runtime/guest/kl_obbmap.c \
            runtime/guest/kl_jkxr.c runtime/guest/kl_native.c runtime/guest/kl_sdl2.c \
            runtime/guest/kl_gles3jni.c runtime/guest/kl_driver.c \
-           runtime/media/kl_aaudio.c runtime/media/kl_mediaplayer.c \
+           runtime/media/kl_aaudio.c runtime/media/kl_mediaplayer.c runtime/media/kl_hostvideo.c \
            runtime/gfx/kl_glfb.c runtime/gfx/kl_cvmtl.m runtime/gfx/kl_gl_trace.S runtime/gfx/kl_gl_lock.S \
            runtime/guest/kl_mono.c \
            runtime/guest/kl_il2cpp.c runtime/kl_fault.c runtime/guest/kl_guestpatch.c \
