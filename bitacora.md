@@ -161,3 +161,9 @@
 - `kl_vulkan.c`: `klvk_who`/`KLVK_WHO` registra cada sitio de llamada distinto (`who: <vk fn> <- lib+off`, máx. 128) en EnumeratePhysicalDevices, Get*Properties(2), Features(2), QueueFamilyProperties, MemoryProperties, EnumerateDeviceExtensionProperties. Include `klepton.h` para `kl_addr_image`.
 ### Siguiente
 - Con las líneas `who:` de libunity, situar cada llamada en el desensamblado (detección 0xdaa154, selección 0xdb11cc) y ver qué rama descarta Vulkan.
+
+## 2026-10-12 — Log 6: causa real, el id de adaptador XR
+- `who:` muestra: detección 0xdaa154 completa (Properties en 0xdaa2e0) y pasa con el spoof. El rechazo está en la creación del GfxDevice Vulkan (0xdaa54c): `dab8d4` guarda `XRManager->GetGraphicsAdapterId(Vulkan=21)` (OculusXRPlugin → `ovrp_GetDisplayAdapterId2`) y `0xdb11cc` lo compara **como handle VkPhysicalDevice** con los enumerados; un LUID ≠ 0 no coincide → NULL → `cf68b8` (0x889ddc) falla → GLES (0x89ea70, que solo mira GLES2/3 y muestra el aviso `gles-api-check` al no haber ninguno). Con 0 elige por deviceType (como en Quest, donde no hay LUID).
+- `kl_vulkan.c` `cache_display_luid`: guarda LUID en cero por defecto (`KL_ADAPTER_LUID_REAL=1` lo desactiva); la lectura de deviceLUID en Properties2 se fuerza al mismo cero, así la ruta por LUID de Unity antigua (AC Nexus) sigue coincidiendo (sin verificar en log). Comentario de `kl_ovrp.c` `klovrp_GetDisplayAdapterId2` actualizado.
+### Comprobar
+- Línea `display adapter id reported as zero`; `who: vkGetPhysicalDeviceQueueFamilyProperties <- libunity.so+0xdaa774` y `vkCreateDevice`; sin aviso de hardware.
