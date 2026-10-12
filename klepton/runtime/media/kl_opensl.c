@@ -183,6 +183,15 @@ typedef struct { void *pLocator; void *pFormat; } SLDataSource;
 typedef struct { void *pLocator; void *pFormat; } SLDataSink;   // same shape
 
 #define SL_DATAFORMAT_PCM 2
+// SLAndroidDataFormat_PCM_EX: SLDataFormat_PCM plus `representation`. Oboe uses
+// it for float output (and Meta's OculusEndpointSink insists on float — given
+// 16-bit it fails with "Unsupported format" and the game is silent).
+#define SL_ANDROID_DATAFORMAT_PCM_EX 4
+#define SL_ANDROID_PCM_REPRESENTATION_FLOAT 3
+typedef struct {
+    SLuint32 formatType, numChannels, sampleRate, bitsPerSample,
+             containerSize, channelMask, endianness, representation;
+} SLAndroidDataFormat_PCM_EX;
 
 // ---- objects ----
 #define KL_SL_QUEUE 16
@@ -208,7 +217,9 @@ typedef struct kl_sl_player {
     unsigned head, tail, count;
     unsigned generation;                    // bumped on every re-creation
 
-    unsigned rate, channels, bits;          // from the PCM format
+    unsigned rate, channels, bits;          // from the PCM format (device side: 16)
+    int      is_float;                      // guest buffers are 32-bit float (PCM_EX)
+    int16_t *conv; size_t conv_cap;         // float -> int16 staging, feeder thread only
     int      mixes;                          // 1: feed kl_audio; 0: usleep-pace only
     unsigned long consumed;
 } kl_sl_player;
@@ -349,6 +360,22 @@ static void *feeder(void *arg) {
         // draining) leaves the remainder to be paced the old way. That keeps one
         // code path for both cases: with no audio, `played` is 0 and this is
         // byte-for-byte the usleep loop it replaced.
+        if (p->is_float && buf) {
+            size_t n = size / sizeof(float);
+            if (n > p->conv_cap) {
+                int16_t *c = realloc(p->conv, n * sizeof(int16_t));
+                if (c) { p->conv = c; p->conv_cap = n; }
+            }
+            if (n <= p->conv_cap) {
+                const float *in = buf;
+                for (size_t i = 0; i < n; i++) {
+                    float v = in[i];
+                    v = v > 1.0f ? 1.0f : (v < -1.0f ? -1.0f : v);
+                    p->conv[i] = (int16_t)lrintf(v * 32767.0f);
+                }
+                buf = p->conv; size = (SLuint32)(n * sizeof(int16_t));
+            } else { buf = NULL; size /= 2; }   // allocation failed: pace silently
+        }
         size_t played = (buf && p->mixes) ? kl_audio_write_src(p, buf, size) : 0;
         if (played < size) {
             uint64_t rem = ((uint64_t)size - played) / frame;
@@ -632,6 +659,7 @@ static SLresult eng_CreateAudioPlayer(SLEngineItf self, SLObjectItf *out,
     pthread_mutex_unlock(&g_players_lock);
     player_stop(p);                 // no-op for a free slot (!started)
     unsigned gen = p->generation;
+    free(p->conv);                  // feeder joined by player_stop above
     memset(p, 0, sizeof *p);
     p->generation = gen;
     p->obj_vt = &g_obj_vt;
@@ -653,10 +681,20 @@ static SLresult eng_CreateAudioPlayer(SLEngineItf self, SLObjectItf *out,
             p->rate = f->samplesPerSec / 1000;
             p->channels = f->numChannels;
             p->bits = f->bitsPerSample;
+        } else if (f->formatType == SL_ANDROID_DATAFORMAT_PCM_EX) {
+            const SLAndroidDataFormat_PCM_EX *x = s->pFormat;
+            p->rate = x->sampleRate / 1000;
+            p->channels = x->numChannels;
+            if (x->representation == SL_ANDROID_PCM_REPRESENTATION_FLOAT && x->bitsPerSample == 32) {
+                p->is_float = 1;
+                p->bits = 16;               // the device is int16; the feeder converts
+            } else {
+                p->bits = x->bitsPerSample;
+            }
         }
     }
-    fprintf(stderr, "  [sl] audio player: %u Hz, %u ch, %u bit\n",
-            p->rate, p->channels, p->bits);
+    fprintf(stderr, "  [sl] audio player: %u Hz, %u ch, %s\n", p->rate, p->channels,
+            p->is_float ? "32 bit float (converted to 16 bit)" : (p->bits == 16 ? "16 bit" : "non-16 bit"));
     if (out) *out = (SLObjectItf)p;
     return SL_RESULT_SUCCESS;
 }

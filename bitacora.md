@@ -13,6 +13,15 @@
 - Fallo resuelto en la 2.ª build: `KL_TARGET_DEFAULT_NAME` no existe sin el proyecto de Klepton → `kl_app.c` define
   `KL_TARGET_DEFAULT "(ninguno)"`.
 
+## Batman log 13 (2026-10-12)
+- point_size arreglado: 0 fallos de pipeline; `missing_pipelines` baja a 0 (compilación asíncrona). Quedan 20 draws/frame
+  saltadas `unbound_kind5_slot4` (StorageTexture slot 4) → diagnóstico en VPEngine `metal2/src/metal_backend.mm`
+  (`what=unbound ... shader_wants=[...] draw_binds=[...]`, una vez por stage/kind/slot).
+- Audio: Oboe va por OpenSL; pedía float (`SLAndroidDataFormat_PCM_EX`, tipo 4) y el shim solo leía PCM → 16 bit →
+  `OculusEndpointSink ... Unsupported format`. `klepton/runtime/media/kl_opensl.c`: PCM_EX float32 aceptado, el feeder
+  convierte a int16 (`is_float`, `conv`).
+- NaN en `TrackedHeadset/Camera/MainAudioListener` sigue tras zNear/zFar: causa abierta.
+
 ## Batman log 12 (2026-10-12)
 - MMap OK; Oboe cae a OpenSL (correcto). Sink de Meta pide `AudioDeviceInfo.TYPE_BLUETOOTH_A2DP` → campo ausente.
   Arreglo `klepton/runtime/kl_jni.c` g_fields: todas las `AudioDeviceInfo.TYPE_*` y `AudioManager.GET_DEVICES_INPUTS/ALL`.
