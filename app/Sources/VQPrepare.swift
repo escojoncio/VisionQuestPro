@@ -3,19 +3,28 @@
 //   QUEST/Cache/<juego>/tree/AndroidManifest.xml   the manifest as text (what Klepton reads)
 //   QUEST/Cache/<juego>/tree/assets/...            the APK's assets/ (Unity reads them as files)
 //   QUEST/Cache/<juego>/dylibs/<lib>.dylib          each lib/arm64-v8a/*.so through klepton-ld
-//                                                  (in process), signed with the player's
-//                                                  certificate (VPEngine's signature)
+//                                                  (in process), unsigned: survives reinstalls
 //   QUEST/Cache/<juego>/stamp.txt                   what it was made from: APK size + date,
-//                                                  certificate, converter version, variant
+//                                                  converter version
+//   Library/Application Support/VisionQuestPro/Signed/<juego>/<lib>.dylib
+//                                                  the signed copies the game loads, with
+//                                                  sign.txt (conversion stamp, certificate, variant)
 //
-// Nothing is made again while the stamp matches. The OBB and the data folder are not copied:
+// Why the signed copies live inside the app: VPEngine's packs are only accepted by the system when
+// signed as a copy in the app's own container (Application Support), with the app's identifier
+// and requirement set and the certificate the app was signed with; libraries mapped from a folder
+// outside the container are not something the system has ever been seen to accept. Signing is
+// cheap next to the conversion (page hashes), so the copies are redone whenever the certificate
+// changes or the app is reinstalled, while the conversion in QUEST is kept.
+//
+// Nothing is made again while the stamps match. The OBB and the data folder are not copied:
 // the game reads them where they are.
 
 import Foundation
 
 enum VQPrepare {
     /// Bumped when the conversion changes (a new klepton-ld, a new layout): every cache is redone.
-    static let converterVersion = "kld-1"
+    static let converterVersion = "kld-2"
 
     struct Prepared {
         let tree: URL
@@ -41,42 +50,52 @@ enum VQPrepare {
         return stem.replacingOccurrences(of: "+", with: "x") + ".dylib"
     }
 
-    private static func stamp(_ game: VQGame, _ identity: VQSigner.Identity) -> String {
-        stamp(game, fingerprint: VQSigner.fingerprint(identity))
-    }
-
-    private static func stamp(_ game: VQGame, fingerprint: String) -> String {
+    private static func stamp(_ game: VQGame) -> String {
         let attrs = (try? FileManager.default.attributesOfItem(atPath: game.apk.path)) ?? [:]
         let size = (attrs[.size] as? NSNumber)?.int64Value ?? 0
         let date = (attrs[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0
-        return "\(converterVersion)|\(game.apk.lastPathComponent)|\(size)|\(Int64(date))|\(fingerprint)"
+        return "\(converterVersion)|\(game.apk.lastPathComponent)|\(size)|\(Int64(date))"
     }
 
-    /// Whether the cache is up to date (no work to do).
+    /// The app-internal folder with the signed copies of a game's libraries.
+    static func signedFolder(for gameID: String) -> URL {
+        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("VisionQuestPro/Signed", isDirectory: true)
+            .appendingPathComponent(gameID, isDirectory: true)
+    }
+
+    /// Whether the conversion is up to date (signing may still be needed, which is quick).
     static func isPrepared(_ game: VQGame) -> Bool {
         guard let cache = VQFolder.shared.cache(for: game.id),
-              let fingerprint = VQSigner.storedFingerprint,
               let text = try? String(contentsOf: cache.appendingPathComponent("stamp.txt"), encoding: .utf8) else { return false }
-        return text.components(separatedBy: "\n").first == stamp(game, fingerprint: fingerprint)
+        return text.components(separatedBy: "\n").first == stamp(game)
     }
 
     /// Prepares `game` if needed. Slow the first time: call off the main thread. `progress` gets
     /// a fraction (0...1) and a line of text.
     static func prepare(_ game: VQGame, progress: @escaping (Double, String) -> Void) throws -> Prepared {
         guard let cache = VQFolder.shared.cache(for: game.id) else { throw Problem.noFolder }
-        let fm = FileManager.default
         let tree = cache.appendingPathComponent("tree", isDirectory: true)
         let dylibs = cache.appendingPathComponent("dylibs", isDirectory: true)
         let work = cache.appendingPathComponent("work", isDirectory: true)
         let stampURL = cache.appendingPathComponent("stamp.txt")
         let identity: VQSigner.Identity
         do { identity = try VQSigner.storedIdentity() } catch { throw Problem.failed(error.localizedDescription) }
-        let want = stamp(game, identity)
+        let want = stamp(game)
         if let text = try? String(contentsOf: stampURL, encoding: .utf8), text.components(separatedBy: "\n").first == want {
-            VQLog.log("Preparar: \(game.id) ya preparado (\(want))")
-            return Prepared(tree: tree, dylibs: dylibs)
+            VQLog.log("Preparar: \(game.id) ya convertido (\(want))")
+        } else {
+            try convert(game, tree: tree, dylibs: dylibs, work: work, stampURL: stampURL, want: want, progress: progress)
         }
-        VQLog.log("Preparar: \(game.id): empieza (\(want))")
+        let signed = try sign(game, from: dylibs, conversion: want, identity: identity, progress: progress)
+        progress(1, VQL("Listo", "Done"))
+        return Prepared(tree: tree, dylibs: signed)
+    }
+
+    private static func convert(_ game: VQGame, tree: URL, dylibs: URL, work: URL, stampURL: URL, want: String,
+                                progress: @escaping (Double, String) -> Void) throws {
+        let fm = FileManager.default
+        VQLog.log("Preparar: \(game.id): convierte (\(want))")
         let started = Date()
         try? fm.removeItem(at: stampURL)
         for d in [tree, dylibs, work] { try? fm.removeItem(at: d) }
@@ -110,59 +129,94 @@ enum VQPrepare {
             }
             done += vq_zip_size(zip, i)
             if k % 25 == 0 || k == assetEntries.count - 1 {
-                progress(0.4 * Double(done) / Double(max(assetBytes, 1)), VQL("Extrayendo assets", "Extracting assets") + " \(k + 1)/\(assetEntries.count)")
+                progress(0.3 * Double(done) / Double(max(assetBytes, 1)), VQL("Extrayendo assets", "Extracting assets") + " \(k + 1)/\(assetEntries.count)")
             }
         }
 
-        // 2. Each library: extract, klepton-ld, sign. The first one also chooses the signature
-        //    variant the system accepts (tried with dlopen: a klepton-ld image runs no code on load).
-        var variants = VQSigner.variants()
-        var chosen: VQSigner.Variant?
+        // 2. Each library through klepton-ld (unsigned output, kept in QUEST).
         for (k, entry) in game.libraries.enumerated() {
             let so = (entry as NSString).lastPathComponent
-            let base = 0.4 + 0.6 * Double(k) / Double(max(game.libraries.count, 1))
-            progress(base, VQL("Convirtiendo", "Converting") + " \(so) (\(k + 1)/\(game.libraries.count))")
+            progress(0.3 + 0.5 * Double(k) / Double(max(game.libraries.count, 1)),
+                     VQL("Convirtiendo", "Converting") + " \(so) (\(k + 1)/\(game.libraries.count))")
             let elf = work.appendingPathComponent(so)
             let i = vq_zip_find(zip, entry)
             if i < 0 || vq_zip_extract(zip, i, elf.path, &err, err.count) != 0 {
                 throw Problem.failed(VQL("No se pudo extraer ", "Could not extract ") + "\(so): " + String(cString: err))
             }
             let out = dylibs.appendingPathComponent(dylibName(for: so))
+            let t0 = Date()
+            if klepton_ld_run(elf.path, out.path, &err, err.count) != 0 {
+                throw Problem.failed("klepton-ld \(so): " + String(cString: err))
+            }
+            let mb = ((try? fm.attributesOfItem(atPath: out.path)[.size] as? NSNumber)?.int64Value ?? 0) >> 20
+            VQLog.log("Preparar: \(so) -> \(out.lastPathComponent) (\(mb) MB, \(String(format: "%.1f", Date().timeIntervalSince(t0))) s)")
+            try? fm.removeItem(at: elf)
+        }
+        try? fm.removeItem(at: work)
+        try (want + "\n").write(to: stampURL, atomically: true, encoding: .utf8)
+        VQLog.log("Preparar: \(game.id) convertido en \(Int(Date().timeIntervalSince(started))) s")
+    }
+
+    /// Copies the converted libraries into the app and signs the copies (VPEngine's way: the app's
+    /// identifier and requirement set, the variant the system accepts, tried with dlopen on the
+    /// first library — a klepton-ld image runs no code when loaded).
+    private static func sign(_ game: VQGame, from dylibs: URL, conversion: String, identity: VQSigner.Identity,
+                             progress: @escaping (Double, String) -> Void) throws -> URL {
+        let fm = FileManager.default
+        let folder = signedFolder(for: game.id)
+        let stampURL = folder.appendingPathComponent("sign.txt")
+        let fingerprint = VQSigner.fingerprint(identity)
+        let libs = ((try? fm.contentsOfDirectory(at: dylibs, includingPropertiesForKeys: nil)) ?? [])
+            .filter { $0.pathExtension == "dylib" }
+            .sorted { $0.lastPathComponent < $1.lastPathComponent }
+        if libs.isEmpty { throw Problem.failed(VQL("La conversión no dejó librerías.", "The conversion left no libraries.")) }
+        if let text = try? String(contentsOf: stampURL, encoding: .utf8) {
+            let lines = text.components(separatedBy: "\n")
+            if lines.count >= 2, lines[0] == conversion + "|" + fingerprint,
+               libs.allSatisfy({ fm.fileExists(atPath: folder.appendingPathComponent($0.lastPathComponent).path) }) {
+                VQLog.log("Preparar: firmas al día (\(lines[1]))")
+                return folder
+            }
+        }
+        try? fm.removeItem(at: folder)
+        try fm.createDirectory(at: folder, withIntermediateDirectories: true)
+        var variants = VQSigner.variants()
+        var chosen: VQSigner.Variant?
+        for (k, lib) in libs.enumerated() {
+            progress(0.8 + 0.2 * Double(k) / Double(libs.count), VQL("Firmando", "Signing") + " \(lib.lastPathComponent)")
+            let out = folder.appendingPathComponent(lib.lastPathComponent)
             while true {
-                let t0 = Date()
-                if klepton_ld_run(elf.path, out.path, &err, err.count) != 0 {
-                    throw Problem.failed("klepton-ld \(so): " + String(cString: err))
-                }
+                let partial = out.appendingPathExtension("partial")
+                try? fm.removeItem(at: partial)
+                try fm.copyItem(at: lib, to: partial)
                 let variant = chosen ?? variants[0]
                 do {
-                    try VQSigner.sign(path: out.path, variant: variant, identity: identity)
+                    try VQSigner.sign(path: partial.path, variant: variant, identity: identity)
                 } catch {
-                    throw Problem.failed("\(so): \(error.localizedDescription)")
+                    try? fm.removeItem(at: partial)
+                    throw Problem.failed("\(lib.lastPathComponent): \(error.localizedDescription)")
                 }
-                let mb = ((try? fm.attributesOfItem(atPath: out.path)[.size] as? NSNumber)?.int64Value ?? 0) >> 20
-                VQLog.log("Preparar: \(so) -> \(out.lastPathComponent) (\(mb) MB, firma \(variant.name), \(String(format: "%.1f", Date().timeIntervalSince(t0))) s)")
+                try? fm.removeItem(at: out)
+                try fm.moveItem(at: partial, to: out)
                 if chosen != nil { break }
-                // Is this signature one the system accepts?
                 if let h = dlopen(out.path, RTLD_NOW | RTLD_LOCAL) {
-                    _ = h // left open: the runtime dlopens the same path later
+                    _ = h  // left open: the runtime dlopens the same path later
                     chosen = variant
                     VQSigner.remember(variant)
-                    VQLog.log("Preparar: el sistema acepta la firma \(variant.name)")
+                    VQLog.log("Preparar: el sistema acepta la firma \(variant.name) (\(out.path))")
                     break
                 }
                 let reason = dlerror().map { String(cString: $0) } ?? "?"
                 VQLog.log("Preparar: dlopen rechazó la firma \(variant.name): \(reason)")
                 variants.removeFirst()
                 if variants.isEmpty || !reason.contains("signature") {
+                    try? fm.removeItem(at: out)
                     throw Problem.failed(VQL("El sistema no acepta la librería firmada: ", "The system refuses the signed library: ") + reason)
                 }
             }
-            try? fm.removeItem(at: elf)
         }
-        try? fm.removeItem(at: work)
-        try (want + "\nvariante=\(chosen?.name ?? "?")\n").write(to: stampURL, atomically: true, encoding: .utf8)
-        VQLog.log("Preparar: \(game.id) listo en \(Int(Date().timeIntervalSince(started))) s")
-        progress(1, VQL("Listo", "Done"))
-        return Prepared(tree: tree, dylibs: dylibs)
+        try (conversion + "|" + fingerprint + "\nvariante=\(chosen?.name ?? "?")\n").write(to: stampURL, atomically: true, encoding: .utf8)
+        VQLog.log("Preparar: \(libs.count) librerías firmadas en la app (\(folder.path))")
+        return folder
     }
 }

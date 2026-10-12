@@ -69,6 +69,8 @@ final class VQSettings: ObservableObject {
     @Published var renderScale: Double { didSet { save() } }    // 0.5...1.5
     @Published var aswDisabled: Bool { didSet { save() } }
     @Published var quest3Profile: Bool { didSet { save() } }
+    /// Vulkan driver: VPEngine's own (VPVulkan) or MoltenVK (to compare, or if VPEngine fails).
+    @Published var useVPEngine: Bool { didSet { save() } }
 
     private init() {
         let d = UserDefaults.standard
@@ -87,6 +89,7 @@ final class VQSettings: ObservableObject {
         renderScale = d.object(forKey: "vq.renderScale") as? Double ?? 1
         aswDisabled = d.object(forKey: "vq.aswOff") as? Bool ?? true
         quest3Profile = d.object(forKey: "vq.quest3") as? Bool ?? false  // Klepton presents Quest 2 (JNI agrees)
+        useVPEngine = d.object(forKey: "vq.vpengine") as? Bool ?? true
     }
 
     /// First Apple Vision Pro (M2) is RealityDevice14,x; a later one is taken as an M5
@@ -119,10 +122,39 @@ final class VQSettings: ObservableObject {
         d.set(renderScale, forKey: "vq.renderScale")
         d.set(aswDisabled, forKey: "vq.aswOff")
         d.set(quest3Profile, forKey: "vq.quest3")
+        d.set(useVPEngine, forKey: "vq.vpengine")
+    }
+
+    /// VPVulkan inside the app, if this build carries it.
+    static var vpvulkanPath: String? {
+        let frameworks = Bundle.main.privateFrameworksPath ?? (Bundle.main.bundlePath + "/Frameworks")
+        let path = frameworks + "/VPVulkan.framework/VPVulkan"
+        return FileManager.default.fileExists(atPath: path) ? path : nil
+    }
+
+    /// Chooses the Vulkan driver Klepton loads (KL_MVK_DYLIB). VPVulkan is opened here first, with
+    /// RTLD_GLOBAL, so the settings reach it (vpvk_config_set_*) before the game creates its device;
+    /// Klepton's own dlopen of the same path then returns this handle.
+    func selectDriver() {
+        if useVPEngine, let path = VQSettings.vpvulkanPath {
+            if dlopen(path, RTLD_NOW | RTLD_GLOBAL) != nil {
+                setenv("KL_MVK_DYLIB", path, 1)
+                VQLog.log("Gráficos: VPEngine (VPVulkan) \(path)")
+                return
+            }
+            let reason = dlerror().map { String(cString: $0) } ?? "?"
+            VQLog.log("Gráficos: VPVulkan no carga (\(reason)); se usa MoltenVK")
+        } else if useVPEngine {
+            VQLog.log("Gráficos: esta build no trae VPVulkan; se usa MoltenVK")
+        } else {
+            VQLog.log("Gráficos: MoltenVK (elegido en ajustes)")
+        }
+        unsetenv("KL_MVK_DYLIB")
     }
 
     /// Klepton's knobs for these settings.
     func applyToEnvironment() {
+        selectDriver()
         setenv("KL_NET_OFFLINE", offline ? "1" : "0", 1)
         setenv("KL_LOG_FILE", guestLog ? "1" : "0", 1)
         setenv("KL_ALARM", String(Int(watchdogSeconds)), 1)
