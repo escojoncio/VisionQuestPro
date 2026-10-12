@@ -351,13 +351,25 @@ static uint64_t klovrp_GetAudioInId2(const void **out)       { return klovrp_Get
 // answer and hands the MATCH to vkGetPhysicalDeviceQueueFamilyProperties. The
 // old zeroed answer (via GetDeviceId2) matched nothing once MoltenVK 1.4.2 began
 // reporting a real, non-zero LUID, so Unity selected a NULL VkPhysicalDevice and
-// crashed in MVKPhysicalDevice::getQueueFamilies. The id answered is the cached
-// one from kl_vulkan, which is now ZERO by default (Quest-like; Unity 2022 compares
-// it to VkPhysicalDevice handles) and forced into deviceLUID too, so both paths
-// agree. KL_ADAPTER_LUID_REAL=1 restores the driver's LUID. A GLES guest has no Vulkan
-// instance; kl_vulkan_display_luid leaves the id empty, the prior behaviour.
+// crashed in MVKPhysicalDevice::getQueueFamilies.
+//
+// But the REAL libOVRPlugin (Batman's, +0x1c7ef0 -> +0x206110) answers
+// `*out = NULL; return 0` on Android: there is no adapter id on a Quest. And
+// OculusXRPlugin's GetGraphicsAdapterId passes the POINTER itself to Unity as the
+// adapter id; Unity 2022 (libunity 0xdb11cc) compares that value with the
+// VkPhysicalDevice handles it enumerated, so any non-NULL pointer matches nothing,
+// GfxDevice Vulkan creation fails and Unity falls back to GLES. NULL makes it
+// pick the device by type, as on a Quest. KL_OVRP_ADAPTER_LUID=1 restores the
+// LUID buffer answer (the AC Nexus-era behaviour).
 static uint64_t klovrp_GetDisplayAdapterId2(const void **out) {
     ovrp_hit("ovrp_GetDisplayAdapterId2");
+    if (!kl_env_on("KL_OVRP_ADAPTER_LUID", 0)) {
+        static int said;
+        if (!said) { said = 1;
+            fprintf(stderr, "  [ovrp] display adapter id -> NULL (as the real OVRPlugin on a Quest)\n"); }
+        if (out) *out = NULL;
+        return OVRP_SUCCESS;
+    }
     static uint8_t id[32];
     memset(id, 0, sizeof id);
     if (kl_vulkan_display_luid(id))

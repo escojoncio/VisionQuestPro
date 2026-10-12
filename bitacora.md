@@ -167,3 +167,11 @@
 - `kl_vulkan.c` `cache_display_luid`: guarda LUID en cero por defecto (`KL_ADAPTER_LUID_REAL=1` lo desactiva); la lectura de deviceLUID en Properties2 se fuerza al mismo cero, así la ruta por LUID de Unity antigua (AC Nexus) sigue coincidiendo (sin verificar en log). Comentario de `kl_ovrp.c` `klovrp_GetDisplayAdapterId2` actualizado.
 ### Comprobar
 - Línea `display adapter id reported as zero`; `who: vkGetPhysicalDeviceQueueFamilyProperties <- libunity.so+0xdaa774` y `vkCreateDevice`; sin aviso de hardware.
+
+## 2026-10-12 — Log 7: el LUID a cero no bastaba; el id es un PUNTERO
+- Con LUID cero sigue el aviso de hardware y no hay `who: vkGetPhysicalDeviceQueueFamilyProperties` → selección NULL igual.
+- OculusXRPlugin `OculusSystem::GetGraphicsAdapterId` (+0x292d8): llama a `ovrp_GetDisplayAdapterId2(&p)` y entrega **el valor del puntero `p`** como id (no su contenido). Klepton daba la dirección de su buffer `id[32]` → nunca coincide con un handle.
+- libOVRPlugin real de Batman (`ovrp_GetDisplayAdapterId2` +0x1c7ef0 → +0x206110): en Android hace `*out = NULL; return 0`.
+- Arreglo: `klepton/runtime/xr/kl_ovrp.c` `klovrp_GetDisplayAdapterId2` → `*out = NULL` (log `display adapter id -> NULL`); `KL_OVRP_ADAPTER_LUID=1` restaura el buffer LUID. Revertido el LUID a cero de `kl_vulkan.c` (entrada anterior), innecesario.
+### Comprobar
+- `who: vkGetPhysicalDeviceQueueFamilyProperties <- libunity.so+0xdaa774`, `vkCreateDevice`, sin aviso de hardware ni `[egl] context`.
