@@ -121,3 +121,14 @@
 - Causa: comprobación de hardware del juego. El nombre "Adreno (TM) 740 (VPVulkan)" y deviceID 0x43050a01 no coinciden; el spoof de Klepton solo se activaba con target "batman".
 - Arreglo: VPVulkan informa "Adreno (TM) 740" / 0x43051401 y un LUID válido; la app fija KL_VK_SPOOF_ADRENO=1 siempre.
 - Identidad Quest 3 genérica: `KL_QUEST3=1` hace que Android Build (Quest 3/eureka), cabeza OVRPlugin (11), nombre OpenXR ("Meta Quest 3") y GPU (Adreno 740) se presenten como Quest 3 en todos los juegos, no por target. Ajuste "Perfil Quest 3" activado por defecto (clave nueva vq.quest3v2).
+
+## 2026-10-12 — Unity seguía en GLES tras el spoof de GPU
+- Log (klepton-boot 12:25): spoof Adreno activo, 2 instancias Vulkan, sin vkCreateDevice; justo antes de EGL, `Activity.getPreferences(0).getBoolean` sobre `com.unity3d.player.UnityPlayerActivity.xml` (1 entrada guardada). Hipótesis: bandera de Unity «la init gráfica murió la vez anterior → GLES», pegada desde un arranque fallido previo. ANGLE no va en la IPA → null driver → aborto en `glGetShaderPrecisionFormat`.
+- `klepton/runtime/jni/kl_jni_prefs.c`: `klj_unity_activity_bool` (en `KLJ_SP_GET`, solo kind 'Z' y fichero UnityPlayerActivity): registra cada lectura (`prefs[UnityPlayerActivity] getBoolean(...)`) y un `true` guardado se devuelve `false`; `KL_KEEP_UNITY_GFX_FALLBACK=1` lo desactiva.
+- `klepton/runtime/gfx/kl_glfb.c`: fallo de carga de ANGLE se recuerda (`g_load_failed`), un solo aviso.
+- `app/Sources/VQPrepare.swift` `writeVersionFile`: en cada arranque escribe `tree/apktool.yml` (versionCode/versionName del manifiesto) → nombre de OBB correcto (antes 545 vs `main.350961`).
+- No añadido stub GL de `glGetShaderPrecisionFormat`: GLES no es la ruta objetivo.
+### Comprobar en el siguiente log
+- Línea `prefs[UnityPlayerActivity] getBoolean("<clave>")`: confirma la clave. Debe aparecer `vkCreateDevice` y no `[egl] context`.
+- `guest version 350961 / ...` en vez de `no apktool.yml`.
+- Si sigue en GLES: falta otra comprobación (driverVersion/driverID de Adreno, extensiones) → registrar `vkGetPhysicalDeviceFeatures2`/extensiones pedidas.
