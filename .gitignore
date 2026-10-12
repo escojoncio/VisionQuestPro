@@ -1,0 +1,12 @@
+# Built or fetched in CI, never committed.
+/build/
+/vpengine/
+/klepton/build/
+/klepton/vendor-moltenvk/
+*.xcodeproj/
+.DS_Store
+# Game data never goes in the repository.
+*.apk
+*.obb
+*.so
+*.ipa

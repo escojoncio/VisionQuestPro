@@ -1,0 +1,85 @@
+# VisionQuestPro for Apple Vision Pro, as an XcodeGen project: `xcodegen generate` writes
+# VisionQuestPro.xcodeproj. Built by .github/workflows/visionos.yml, which first makes
+# klepton/build/xros/libklepton.a (Klepton's runtime), MoltenVK and the VPEngine checkout (vpengine/).
+name: VisionQuestPro
+options:
+  deploymentTarget:
+    visionOS: "26.0"
+  createIntermediateGroups: true
+  xcodeVersion: "26.0"
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    MARKETING_VERSION: "0.1.0"
+    CURRENT_PROJECT_VERSION: "1"
+    DEVELOPMENT_TEAM: ""
+targets:
+  VisionQuestPro:
+    type: application
+    platform: visionOS
+    scheme: {}
+    sources:
+      - path: app/Sources
+      - path: app/Native
+      - path: klepton/visionos/Sources
+        excludes:
+          - "*.h"
+      - path: klepton/tools/klepton_ld.c
+        compilerFlags: ["-DKLEPTON_LD_INPROC", "-Wno-unused-function"]
+      - path: vpengine/runtime/vp_codesign.c
+      - path: vpengine/runtime/vp_pkcs12.c
+      - path: build/VPEngineCertificates
+        type: folder
+        buildPhase: resources
+    dependencies:
+      - framework: klepton/vendor-moltenvk/out/xros/MoltenVK.framework
+        embed: true
+        link: false
+        codeSign: true
+    settings:
+      base:
+        PRODUCT_NAME: VisionQuestPro
+        PRODUCT_BUNDLE_IDENTIFIER: com.kdt.livecontainer
+        INFOPLIST_FILE: klepton/visionos/Info.plist
+        GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_KEY_CFBundleDisplayName: VisionQuestPro
+        INFOPLIST_KEY_GCSupportsControllerUserInteraction: YES
+        CODE_SIGN_ENTITLEMENTS: app/VisionQuestPro.entitlements
+        CODE_SIGN_STYLE: Automatic
+        SWIFT_OBJC_BRIDGING_HEADER: klepton/visionos/Sources/Klepton-Bridging-Header.h
+        HEADER_SEARCH_PATHS:
+          - $(SRCROOT)/klepton/runtime
+          - $(SRCROOT)/klepton/runtime/jni
+          - $(SRCROOT)/klepton/runtime/libc
+          - $(SRCROOT)/klepton/runtime/gfx
+          - $(SRCROOT)/klepton/runtime/xr
+          - $(SRCROOT)/klepton/runtime/media
+          - $(SRCROOT)/klepton/runtime/guest
+          - $(SRCROOT)/klepton/runtime/diag
+          - $(SRCROOT)/klepton/visionos/Sources
+          - $(SRCROOT)/klepton/vendor-moltenvk/out/include
+          - $(SRCROOT)/app/Native
+          - $(SRCROOT)/vpengine/runtime
+          - $(inherited)
+        LIBRARY_SEARCH_PATHS:
+          - $(SRCROOT)/klepton/build/xros
+        OTHER_LDFLAGS:
+          - -lklepton
+          - -framework Metal
+          - -lz
+          - -framework AudioToolbox
+          - -framework VideoToolbox
+          - -framework CoreMedia
+          - -framework CoreVideo
+          - -framework IOSurface
+          - -framework AVFoundation
+          - -framework Security
+          - -framework CoreFoundation
+          - -framework Foundation
+        LD_RUNPATH_SEARCH_PATHS:
+          - $(inherited)
+          - "@executable_path/Frameworks"
+        GCC_WARN_INHIBIT_ALL_WARNINGS: NO
+        ENABLE_BITCODE: NO
+        SUPPORTED_PLATFORMS: "xros"
+        TARGETED_DEVICE_FAMILY: "7"
