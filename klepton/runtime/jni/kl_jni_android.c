@@ -352,13 +352,16 @@ static klj_val klj_Intent_getExtras(void *env, void *self, const klj_val *a, int
     static int   built;
     if (!built) {
         built = 1;
-        static klj_kv kv[5];
+        static klj_kv kv[6];
         int k = 0;
         const struct { const char *env, *key; } want[] = {
             {"KL_SLINK_SARGS",         "sArgs"},
             {"KL_SLINK_START_INFO",    "sStartInfo"},
             {"KL_SLINK_ORIG_PACKAGE",  "sOriginalPackage"},
             {"KL_SLINK_ORIG_ACTIVITY", "sOriginalActivity"},
+            // Unity's own command line: libunity reads the "unity" extra and
+            // parses it as player arguments (e.g. -force-vulkan).
+            {"KL_UNITY_ARGS",          "unity"},
         };
         for (size_t i = 0; i < sizeof want / sizeof want[0]; i++) {
             const char *v = getenv(want[i].env);

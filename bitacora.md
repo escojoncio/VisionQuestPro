@@ -123,7 +123,7 @@
 - Identidad Quest 3 genérica: `KL_QUEST3=1` hace que Android Build (Quest 3/eureka), cabeza OVRPlugin (11), nombre OpenXR ("Meta Quest 3") y GPU (Adreno 740) se presenten como Quest 3 en todos los juegos, no por target. Ajuste "Perfil Quest 3" activado por defecto (clave nueva vq.quest3v2).
 
 ## 2026-10-12 — Unity seguía en GLES tras el spoof de GPU
-- Log (klepton-boot 12:25): spoof Adreno activo, 2 instancias Vulkan, sin vkCreateDevice; justo antes de EGL, `Activity.getPreferences(0).getBoolean` sobre `com.unity3d.player.UnityPlayerActivity.xml` (1 entrada guardada). Hipótesis: bandera de Unity «la init gráfica murió la vez anterior → GLES», pegada desde un arranque fallido previo. ANGLE no va en la IPA → null driver → aborto en `glGetShaderPrecisionFormat`.
+- Log (klepton-boot 12:25): spoof Adreno activo, 2 instancias Vulkan, sin vkCreateDevice; justo antes de EGL, `Activity.getPreferences(0).getBoolean` sobre `com.unity3d.player.UnityPlayerActivity.xml` (1 entrada guardada). (Hipótesis descartada en el log siguiente: ver entrada «gles-api-check».) ANGLE no va en la IPA → null driver → aborto en `glGetShaderPrecisionFormat`.
 - `klepton/runtime/jni/kl_jni_prefs.c`: `klj_unity_activity_bool` (en `KLJ_SP_GET`, solo kind 'Z' y fichero UnityPlayerActivity): registra cada lectura (`prefs[UnityPlayerActivity] getBoolean(...)`) y un `true` guardado se devuelve `false`; `KL_KEEP_UNITY_GFX_FALLBACK=1` lo desactiva.
 - `klepton/runtime/gfx/kl_glfb.c`: fallo de carga de ANGLE se recuerda (`g_load_failed`), un solo aviso.
 - `app/Sources/VQPrepare.swift` `writeVersionFile`: en cada arranque escribe `tree/apktool.yml` (versionCode/versionName del manifiesto) → nombre de OBB correcto (antes 545 vs `main.350961`).
@@ -132,3 +132,13 @@
 - Línea `prefs[UnityPlayerActivity] getBoolean("<clave>")`: confirma la clave. Debe aparecer `vkCreateDevice` y no `[egl] context`.
 - `guest version 350961 / ...` en vez de `no apktool.yml`.
 - Si sigue en GLES: falta otra comprobación (driverVersion/driverID de Adreno, extensiones) → registrar `vkGetPhysicalDeviceFeatures2`/extensiones pedidas.
+
+## 2026-10-12 — `gles-api-check` = casilla del aviso de hardware; -force-vulkan
+- Log klepton-boot 3: OBB correcto (`guest version 350961`, main.350961 presente). La clave leída es `gles-api-check`: casilla «no volver a avisar» del diálogo de Unity «Your device does not match the hardware requirements»; Klepton pulsa Continue y Unity sigue por GLES. La detección Vulkan de Unity se repite en cada arranque; la casilla solo oculta el aviso (la anulación de `kl_jni_prefs.c` se mantiene, inocua).
+- Datos del APK (`assets/bin/Data/data.unity3d` → globalgamemanagers): **sin lista de filtrado de dispositivos Vulkan**. libunity 2022.3.45 tiene el argumento `force-vulkan` y lee extras del Intent (getExtras/containsKey).
+- `klepton/runtime/jni/kl_jni_android.c` `klj_Intent_getExtras`: kv[6]; nuevo extra `unity` = `KL_UNITY_ARGS`.
+- `kl_jni_services.c` `klj_Bundle_containsKey`: registra clave y resultado.
+- App: `VQSettings.forceVulkan` (UserDefaults `vq.forceVulkan`, por defecto sí; interruptor «Forzar Vulkan en juegos Unity» en Gráficos) → `KL_UNITY_ARGS=-force-vulkan`; log `Gráficos: forzar Vulkan en Unity`.
+### Comprobar en el siguiente log
+- `Bundle.containsKey("unity") -> true` y línea `CommandLine:` de Unity; luego `vkCreateDevice`.
+- Si Unity no lee `unity`: la detección rechaza algo de la GPU. Siguiente paso: registrar todas las consultas vkGetPhysicalDevice* de la instancia de Unity (apiVersion 1.1 de MoltenVK vs 1.3 de Adreno; driverVersion con vendor Qualcomm).

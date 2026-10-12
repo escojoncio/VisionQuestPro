@@ -1001,7 +1001,10 @@ static klj_val klj_Bundle_getInt(void *env, void *self, const klj_val *a, int n)
 }
 static klj_val klj_Bundle_containsKey(void *env, void *self, const klj_val *a, int n) {
     (void)env;
-    return (klj_val){.j = klj_bundle_get(self, n > 0 ? klj_str(a[0].l) : NULL) != NULL};
+    const char *key = n > 0 ? klj_str(a[0].l) : NULL;
+    int has = klj_bundle_get(self, key) != NULL;
+    KLJ_LOG("Bundle.containsKey(\"%s\") -> %s", key ? key : "(null)", has ? "true" : "false");
+    return (klj_val){.j = has};
 }
 
 // ---------- the guest's version, which NAMES A FILE ----------
