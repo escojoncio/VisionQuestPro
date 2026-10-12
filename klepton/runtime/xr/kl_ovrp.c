@@ -3530,6 +3530,19 @@ uint64_t klovrp_GetNodePoseState_impl(int step, int node, void *out) {
     // estimate off a 90 Hz pose stream is noise wearing a physical name.
     f[7]  = p->vx;  f[8]  = p->vy;  f[9]  = p->vz;
     f[13] = p->avx; f[14] = p->avy; f[15] = p->avz;
+    // Never hand the guest a non-finite or degenerate pose: Unity turns it into
+    // NaN camera/collider matrices. Logged so the next log says whether it happens.
+    for (int i = 0; i < 16; i++) if (!isfinite(f[i])) {
+        static int nf; if (nf++ < 16)
+            fprintf(stderr, "  [ovrp] NONFINITE pose node=%d step=%d field=%d\n", node, step, i);
+        f[i] = (i == 3) ? 1.0f : 0.0f;
+    }
+    float qn = f[0]*f[0] + f[1]*f[1] + f[2]*f[2] + f[3]*f[3];
+    if (!(qn > 1e-6f)) {
+        static int nq; if (nq++ < 16)
+            fprintf(stderr, "  [ovrp] ZERO-QUAT pose node=%d step=%d\n", node, step);
+        f[0] = f[1] = f[2] = 0.0f; f[3] = 1.0f;
+    }
     return OVRP_SUCCESS;
 }
 

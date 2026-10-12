@@ -585,14 +585,31 @@ static const struct SLBufferQueueItf_ g_bq_vt = {
 };
 
 // ---- SLAndroidConfigurationItf ----
+static SLuint32 g_cfg_perf = 1;   /* SL_ANDROID_PERFORMANCE_LATENCY */
+static SLuint32 g_cfg_stream = 3; /* SL_ANDROID_STREAM_MEDIA */
+static SLuint32 *cfg_slot(const char *k) {
+    if (!k) return NULL;
+    if (!strcmp(k, "androidPerformanceMode")) return &g_cfg_perf;
+    if (!strcmp(k, "androidPlaybackStreamType")) return &g_cfg_stream;
+    return NULL;
+}
 static SLresult cfg_Set(SLConfigItf s, const char *k, const void *v, SLuint32 n) {
-    (void)s; (void)v; (void)n;
-    fprintf(stderr, "  [sl] SetConfiguration(\"%s\") — recorded, not applied\n",
-            k ? k : "?");
+    (void)s;
+    SLuint32 *d = cfg_slot(k);
+    if (d && v && n >= sizeof(SLuint32)) *d = *(const SLuint32 *)v;
+    fprintf(stderr, "  [sl] SetConfiguration(\"%s\") -> %u\n", k ? k : "?", d ? *d : 0u);
     return SL_RESULT_SUCCESS;
 }
+// Oboe 1.7 (SDK > 27) treats a failing GetConfiguration as a fatal open() error.
 static SLresult cfg_Get(SLConfigItf s, const char *k, SLuint32 *n, void *v) {
-    (void)s; (void)k; (void)v; if (n) *n = 0; return SL_RESULT_FEATURE_UNSUPPORTED;
+    (void)s;
+    SLuint32 *src = cfg_slot(k);
+    if (!src || !n) { if (n) *n = 0; return SL_RESULT_FEATURE_UNSUPPORTED; }
+    if (!v) { *n = sizeof(SLuint32); return SL_RESULT_SUCCESS; }
+    if (*n < sizeof(SLuint32)) return 7; /* SL_RESULT_BUFFER_INSUFFICIENT */
+    *(SLuint32 *)v = *src; *n = sizeof(SLuint32);
+    fprintf(stderr, "  [sl] GetConfiguration(\"%s\") -> %u\n", k, *src);
+    return SL_RESULT_SUCCESS;
 }
 static const struct SLConfigItf_ g_cfg_vt = { cfg_Set, cfg_Get };
 
