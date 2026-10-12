@@ -178,6 +178,12 @@ final class VQSettings: ObservableObject {
         VQLog.log("Gráficos: forzar Vulkan en Unity \(forceVulkan)")
         // Frame captures (PNG in Documents/Registros) at compositor frames 120/600/1200.
         setenv("KL_CAPTURE", diagCaptures ? "1" : "0", 1)
+        if let quest = VQFolder.shared.url {
+            let dir = quest.appendingPathComponent("Registros", isDirectory: true)
+            try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            setenv("KL_CAPTURE_DIR", dir.path, 1)
+            VQLog.log("Capturas en \(dir.path)")
+        }
         VQLog.log("Gráficos: capturas de diagnóstico \(diagCaptures)")
         // Eye texture size the game is told (Klepton's ovrp side) and headset identity:
         // 11 = ovrpSystemHeadset Meta_Quest_3; off: Klepton's per-game default (Quest 2 / Quest).

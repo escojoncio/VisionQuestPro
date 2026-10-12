@@ -3959,10 +3959,15 @@ enum FrameCapture {
     static let maxWidth = 1024
     private static let queue = DispatchQueue(label: "klepton.capture", qos: .utility)
 
-    private static var directory: URL {
-        FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+    // KL_CAPTURE_DIR (QUEST/Registros, set by the launcher) is the folder the user can open in
+    // Files; without it, the app's own Documents/Registros.
+    private static let directory: URL = {
+        if let p = getenv("KL_CAPTURE_DIR").map({ String(cString: $0) }), !p.isEmpty {
+            return URL(fileURLWithPath: p, isDirectory: true)
+        }
+        return FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("Registros", isDirectory: true)
-    }
+    }()
 
     private struct Job { let name: String; let buf: MTLBuffer; let w: Int; let h: Int; let fmt: MTLPixelFormat }
 
