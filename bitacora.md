@@ -1,8 +1,13 @@
 # Bitácora — VisionQuestPro
 
 ## Estado (2026-10-12)
-- Paso 1 (app genérica Klepton + lanzador + conversión en el visor, Vulkan con MoltenVK, sin ANGLE) escrito;
-  primera build `[build]` lanzada (ver «Paso 1» abajo). Nada probado aún en el visor.
+- Paso 1 (app genérica Klepton + lanzador + conversión en el visor, Vulkan con MoltenVK, sin ANGLE): **build verde**
+  (run 38219167270, commit «kl_app.c: sin objetivo por defecto compilado»). IPA 6,7 MB en release `visionos`
+  (`VisionQuestPro.ipa`, con `Frameworks/MoltenVK.framework` y `VPEngineCertificates/`). Nada probado aún en el visor.
+- Logs de CI: rama `ci-logs`, fichero `visionos.txt` (`scripts/ci-publish-log.sh`); los logs de Actions no se pueden
+  descargar desde la sesión.
+- Fallo resuelto en la 2.ª build: `KL_TARGET_DEFAULT_NAME` no existe sin el proyecto de Klepton → `kl_app.c` define
+  `KL_TARGET_DEFAULT "(ninguno)"`.
 
 ## Paso 1 — app VisionQuestPro (2026-10-12)
 - `klepton/`: copia de Klepton `ce74582` (MIT, `klepton/LICENSE`; detalle en `THIRD-PARTY-NOTICES.md`).
@@ -30,6 +35,10 @@
   copiar `dylibs/` a Library/Application Support de la app antes de arrancar (como VPGamePack).
 - assets/ extraído al tree (duplica espacio); Unity lee el APK montado vía `kl_guest_path_map`.
 - No probado: `kl_app_configure_game` con un juego real; OBB relativo con `..`.
+- `libklepton.a` se enlaza con `-lklepton` + `-dead_strip`: si falta algún símbolo que el invitado pide por nombre
+  (tabla libc/JNI resuelta en runtime), pasar a `-Wl,-force_load`.
+- El juego sigue en `KL_IMMERSIVE=1`/`KL_AUTOBOOT=1` forzados por `VQSettings.applyToEnvironment()`; BootView muestra
+  aún los paneles de Klepton (Controller alignment, Matting).
 - Decisión de arquitectura: el código de Quest es ARM64 → sin traducción de CPU. Cada `.so` se envuelve sin cambios
   en un dylib firmado (firma propia de VPEngine, `runtime/vp_codesign.c`) y se carga con `dlopen`; un cargador propio
   aplica relocaciones ELF y resuelve imports contra capas bionic/JNI/OpenXR/Vulkan propias.
