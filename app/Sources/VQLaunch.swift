@@ -183,6 +183,17 @@ final class VQSettings: ObservableObject {
             try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
             setenv("KL_CAPTURE_DIR", dir.path, 1)
             VQLog.log("Capturas en \(dir.path)")
+            // VPEngine per-pass dump (PNG per render/compute pass + gpu.dump lines) at GPU frame 600.
+            if diagCaptures {
+                setenv("VP_DUMP_FRAME", "600", 1)
+                setenv("VP_DUMP_DIR", dir.path, 1)
+            } else {
+                unsetenv("VP_DUMP_FRAME")
+                unsetenv("VP_DUMP_DIR")
+            }
+        } else {
+            unsetenv("VP_DUMP_FRAME")
+            unsetenv("VP_DUMP_DIR")
         }
         VQLog.log("Gráficos: capturas de diagnóstico \(diagCaptures)")
         // Eye texture size the game is told (Klepton's ovrp side) and headset identity:

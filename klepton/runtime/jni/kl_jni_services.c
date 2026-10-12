@@ -1425,6 +1425,17 @@ static const char *klj_bundle_get(void *self, const char *key);
 static int klj_oculus_manifest_flag(const char *key) {
     const char *v = klj_bundle_get(klj_metaData_field().l, key);
     int on = v && (strcasecmp(v, "true") == 0 || strcmp(v, "1") == 0);
+    // Late latching: Unity leaves the camera matrices in a UBO that the real plugin
+    // rewrites at submit time with the freshest pose. Our ovrp never does that, so
+    // the game would render with stale/zero matrices. Always off unless
+    // KL_LATE_LATCHING=1 (also covers the generic getManifestSetting path).
+    if (on && strstr(key, "LateLatching")) {
+        const char *keep = getenv("KL_LATE_LATCHING");
+        if (!(keep && !strcmp(keep, "1"))) {
+            KLJ_LOG("OculusUnity: %s requested by the game -> forced false", key);
+            on = 0;
+        }
+    }
     KLJ_LOG("OculusUnity.getManifestSetting(\"%s\") -> %s%s", key,
             on ? "true" : "false", v ? "" : " (not declared)");
     return on;
