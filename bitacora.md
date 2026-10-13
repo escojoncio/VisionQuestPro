@@ -33,8 +33,8 @@ AA/sin AA) y jitter por frustum no emparejable (el juego lee `ovrp_GetNodeFrustu
   según revZ, texture(8)). `KleptonCompositor.swift` `prepareTAA`: en inline no llama a submit/acquire.
 ### Comprobar en el próximo log (Batman, VPKTAA on)
 - `[taa-inline] ON …`, `resolve hook registered`, `jitter ON: Halton … for WxH`; VPEngine `vk.taa jitter … jittered>0`
-  y `vk.native submit ok=1`. Si la GPU se cuelga justo tras `vk.native submit ok=1`: el par MTLEvent signal/wait del
-  mismo command buffer (`metal_backend.mm` `encodeNative`) → partir en dos command buffers.
+  y `vk.native submit ok=1`. `encodeNative` ya va en 3 command buffers ordenados con MTLEvent entre CBs; si aun así
+  se congela, buscar `gpu.err what=native_stuck … head= client= tail=` (dice qué parte no terminó).
 - `[taa] stats (30 s, inline)`: resolved ≈ frames, `gpu=` ms reales, `draws jittered` > 0 y skipped razonable,
   `mixed` ≈ 0, depthValid alto (si ≈0: depth descartada), `unresolved:` vacío. Comparar fps con VPKTAA off.
 - Con MSAA del juego on: `depth … (ms=N)` > 0 y sin `REFUSED: no 2D-array view`.
