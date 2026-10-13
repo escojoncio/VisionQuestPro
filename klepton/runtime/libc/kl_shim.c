@@ -2338,6 +2338,27 @@ void *(*kl_shim_override)(const char *name);
 static kl_image *g_guest_gl;
 void kl_shim_set_guest_gl(kl_image *img) { g_guest_gl = img; }
 
+// Static coverage, for the launcher's API scanner (no loading, no side effects): 1 when a guest
+// import named `name` binds to a shim (libc/libm/liblog/libandroid/NDK tables), 2 when it
+// belongs to a family Klepton serves as a whole layer (GL/EGL, Vulkan, OpenXR, OpenSL, AAudio,
+// media NDK, Oculus Platform), 0 when nothing would serve it.
+int kl_shim_known(const char *name) {
+    if (!name || !*name) return 0;
+    for (size_t i = 0; i < sizeof g_shim / sizeof g_shim[0]; i++)
+        if (strcmp(g_shim[i].name, name) == 0) return 1;
+    if (kl_ndk_lookup(name)) return 1;
+    if ((name[0] == 'g' && name[1] == 'l' && name[2] >= 'A' && name[2] <= 'Z') ||
+        (name[0] == 'e' && name[1] == 'g' && name[2] == 'l' && name[3] >= 'A' && name[3] <= 'Z') ||
+        (name[0] == 'v' && name[1] == 'k' && name[2] >= 'A' && name[2] <= 'Z') ||
+        (name[0] == 'x' && name[1] == 'r' && name[2] >= 'A' && name[2] <= 'Z') ||
+        !strncmp(name, "SL_IID_", 7) || !strcmp(name, "slCreateEngine") ||
+        !strncmp(name, "AAudio", 6) || !strncmp(name, "AMedia", 6) || !strncmp(name, "AImage", 6) ||
+        !strncmp(name, "AHardwareBuffer_", 16) || !strncmp(name, "ATrace_", 7) ||
+        !strncmp(name, "AMEDIAFORMAT_", 13) || !strncmp(name, "ovr_", 4) || !strncmp(name, "ovrID", 5))
+        return 2;
+    return 0;
+}
+
 void *kl_shim_lookup(const char *name) {
     if (kl_shim_override) { void *o = kl_shim_override(name); if (o) return o; }
     for (size_t i = 0; i < sizeof g_shim / sizeof g_shim[0]; i++)

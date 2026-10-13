@@ -8,6 +8,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <pthread.h>
 #include "kl_env.h"
 
 typedef struct kl_image kl_image;
@@ -99,9 +100,13 @@ const char *const *kl_weak_imports(kl_image *img, unsigned *count);
 // ---- shim ----
 // Resolve a bionic/NDK import by name. Returns NULL if unimplemented.
 void *kl_shim_lookup(const char *name);
+int   kl_shim_known(const char *name);   // static coverage: 1 shim, 2 served family, 0 none
 // Install the bionic stack-guard canary into Darwin TSD slot 5 for this thread.
 // Must be called on every thread that will execute guest code.
 void  kl_thread_init(void);
+// Starts fn(arg) on a new guest-ready thread (kl_thread_init done, registered like a guest
+// pthread_create) with `stack` bytes of stack (0 = bionic's 1 MB default). pthread errno.
+int   kl_guest_thread_create(pthread_t *out, size_t stack, void *(*fn)(void *), void *arg);
 // Restore default fatal-signal disposition and flush stdio. Call before abort()
 // in any diagnostic path: the guest installs handlers that expect a Linux
 // ucontext_t, and they swallow our abort and hang instead of dying.

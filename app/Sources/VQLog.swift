@@ -45,7 +45,8 @@ enum VQLog {
 
     /// The logs that exist, for the share button.
     static var shareable: [URL] {
-        [appLog, directory.appendingPathComponent("app-anterior.txt"), bootLog, crashLog]
+        [appLog, directory.appendingPathComponent("app-anterior.txt"), bootLog, crashLog,
+         directory.appendingPathComponent("conformidad-vulkan.txt")]
             .filter { FileManager.default.fileExists(atPath: $0.path) }
             + captures
     }

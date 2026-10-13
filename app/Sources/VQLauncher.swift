@@ -309,6 +309,7 @@ struct VQSettingsView: View {
                              "The game's own (Quest) foveation is always off. Foveation and VPKTAA are applied by VPKEngine (no effect yet with MoltenVK). M5 only appears on a Vision Pro M5. Applied when the game launches."))
                         .font(.caption)
                 }
+                VQConformanceSettings(settings: settings)
                 Section(VQL("Carpeta QUEST", "QUEST folder")) {
                     Text(model.folderPath ?? VQL("No elegida", "Not chosen")).font(.caption)
                     Button(VQL("Elegir otra…", "Choose another…")) { pickingFolder = true }

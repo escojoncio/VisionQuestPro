@@ -60,6 +60,10 @@ typedef enum {
     // handle threaded through onStart/onResume/onSurface*. Half-Life on Xash3D
     // (hl1, com.drbeef.lambda1vr) is here; kl_jkxr keeps JKXR's own data layout.
     KL_GUEST_GLES3JNI,
+    // A command-line program (PIE executable exporting main) — kl_exe's door. Mapped like a
+    // NativeActivity library, then main(argc, argv) runs on a big-stack guest thread once per
+    // command line. The Khronos conformance runners (deqp-vk) are here; no window, no frames.
+    KL_GUEST_EXE,
 } kl_guest_kind;
 
 typedef struct {

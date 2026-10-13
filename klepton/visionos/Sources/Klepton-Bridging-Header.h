@@ -46,6 +46,7 @@
 #import "vq_apk.h"
 #import "vq_config.h"
 #import "vq_harvest.h"
+#import "vq_scan.h"
 #import "vp_codesign.h"
 #import "vp_pkcs12.h"
 #include <dlfcn.h>

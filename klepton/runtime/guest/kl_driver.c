@@ -15,6 +15,7 @@
 #include "kl_guestpoke.h"
 #include "kl_jkxr.h"
 #include "kl_native.h"
+#include "kl_exe.h"
 #include "kl_sdl2.h"
 #include "kl_gles3jni.h"
 #include "kl_jni.h"
@@ -152,6 +153,7 @@ int kl_driver_owns_frame_loop(void) {
     case KL_GUEST_UE4:
     case KL_GUEST_JKXR:
     case KL_GUEST_NATIVE:
+    case KL_GUEST_EXE:
     case KL_GUEST_SDL2:
     case KL_GUEST_GLES3JNI: return 1;
     default:            return 0;
@@ -412,6 +414,7 @@ int kl_driver_boot(FILE *out) {
     case KL_GUEST_UE4:       rc = boot_ue4(out);       break;
     case KL_GUEST_JKXR:      rc = boot_jkxr(out);      break;
     case KL_GUEST_NATIVE:    rc = boot_native(out);    break;
+    case KL_GUEST_EXE:       rc = boot_native(out);    break;
     case KL_GUEST_SDL2:      rc = boot_sdl2(out);      break;
     case KL_GUEST_GLES3JNI:  rc = boot_gles3jni(out);  break;
     default:                 rc = boot_unity(out);     break;
@@ -602,6 +605,14 @@ static int begin_gles3jni(FILE *out) {
     return 0;
 }
 
+// The executable door: main() on its own guest thread; the pump waits for it.
+static int begin_exe(FILE *out) {
+    phase("main()");
+    if (kl_exe_begin(out) != 0) return fail(kl_exe_error());
+    phase("exe running");
+    return 0;
+}
+
 static int begin_native(FILE *out) {
     phase("ANativeActivity_onCreate");
     P(out, "\n=== ANativeActivity_onCreate ===\n");
@@ -624,6 +635,7 @@ int kl_driver_lifecycle_begin(FILE *out) {
     case KL_GUEST_UE4:       return begin_ue4(out);
     case KL_GUEST_JKXR:      return begin_jkxr(out);
     case KL_GUEST_NATIVE:    return begin_native(out);
+    case KL_GUEST_EXE:       return begin_exe(out);
     case KL_GUEST_SDL2:      return begin_sdl2(out);
     case KL_GUEST_GLES3JNI:  return begin_gles3jni(out);
     default:                 return begin_unity(out);
@@ -670,6 +682,7 @@ double kl_driver_pump(double seconds, const volatile int *quit) {
     case KL_GUEST_UE4:  return kl_ue4_pump(seconds, quit);
     case KL_GUEST_JKXR: return kl_jkxr_pump(seconds, quit);
     case KL_GUEST_NATIVE: return kl_native_pump(seconds, quit);
+    case KL_GUEST_EXE:    return kl_exe_pump(seconds, quit);
     case KL_GUEST_SDL2: return kl_sdl2_pump(seconds, quit);
     case KL_GUEST_GLES3JNI: return kl_gles3jni_pump(seconds, quit);
     default:            return 0.0;
@@ -687,6 +700,9 @@ double kl_driver_pump_default(void) {
                                   ? strtod(getenv("KL_UE4_WAIT"), NULL) : 5.0;
     case KL_GUEST_JKXR:      return kl_env_str("KL_JKXR_WAIT", NULL)
                                   ? strtod(getenv("KL_JKXR_WAIT"), NULL) : 5.0;
+    // Until main() returns (the runner's own budget, KL_EXE_BUDGET, decides when to stop).
+    case KL_GUEST_EXE:       return kl_env_str("KL_EXE_WAIT", NULL)
+                                  ? strtod(getenv("KL_EXE_WAIT"), NULL) : -1.0;
     case KL_GUEST_NATIVE:
     case KL_GUEST_SDL2:
     case KL_GUEST_GLES3JNI:  return kl_env_str("KL_NATIVE_WAIT", NULL)
@@ -711,6 +727,10 @@ void kl_driver_report(FILE *out) {
         fprintf(out, "\n=== the OpenJK run ===\n");
         kl_jkxr_report(out);
         fflush(out);
+        return;
+    case KL_GUEST_EXE:
+        fprintf(out, "\n=== the executable run ===\n");
+        kl_exe_report(out);
         return;
     case KL_GUEST_NATIVE:
         fprintf(out, "\n=== the NativeActivity run ===\n");
