@@ -129,7 +129,7 @@ struct VPKTAAParams {
     var flipY: UInt32
     var reset: UInt32
     var writeOut: UInt32
-    var pad: UInt32
+    var spatial: Float              // 0..1 spatial edge AA on the current frame (was `pad`)
 }
 
 final class VPKTAACore {
@@ -137,6 +137,9 @@ final class VPKTAACore {
     var historyPercent: Float = 80
     /// RCAS strength 0..1 (0 = no sharpening pass).
     var sharpness: Float = 0.3
+    /// 0..1: spatial edge AA (FXAA-style local edge blend) on the current frame before the
+    /// temporal blend: antialiases even when the guest's projection is NOT jittered.
+    var spatial: Float = 1
     /// Relative depth difference above which history counts as disoccluded.
     var disocclusion: Float = 0.1
 
@@ -373,7 +376,8 @@ final class VPKTAACore {
             w8: wts[8], historyWeight: hw, gamma: jitterOn ? 1.25 : 1.0,
             sharpness: min(max(sharpness, 0), 1), disocc: max(disocclusion, 0.01),
             slice: UInt32(input.slice), depthSlice: UInt32(depthSlice), mvSlice: UInt32(mvSlice),
-            flipY: input.flipY ? 1 : 0, reset: reset ? 1 : 0, writeOut: sharpOn ? 0 : 1, pad: 0)
+            flipY: input.flipY ? 1 : 0, reset: reset ? 1 : 0, writeOut: sharpOn ? 0 : 1,
+            spatial: min(max(spatial, 0), 1))
 
         let prevH = st.hist[st.cur], nextH = st.hist[st.cur ^ 1]
         let prevD = st.dist[st.cur], nextD = st.dist[st.cur ^ 1]
@@ -427,7 +431,7 @@ final class VPKTAACore {
         float2 crop; float2 cropOff;
         int2 shiftInt; float w8; float historyWeight; float gamma;
         float sharpness; float disocc; uint slice; uint depthSlice; uint mvSlice; uint flipY;
-        uint reset; uint writeOut; uint pad;
+        uint reset; uint writeOut; float spatial;
     };
     constant float kSky = 60000.0;          // distance stored for the far plane (r16f-safe)
     static float3 toYCoCg(float3 c) {
@@ -559,6 +563,34 @@ final class VPKTAACore {
             float3 c = float3(csum);
             float a = float(asum);
             if (any(kbad(c))) c = float3(0.0);
+            // Spatial edge AA (FXAA 3.11 edge test + local blend across the edge) on the tile:
+            // smooths stair-steps with no jitter at all; the temporal blend then stabilises it.
+            if (p.spatial > 0.0) {
+                uint tc = t0 + 19u;
+                float lC = luma(float3(tile[tc].rgb)), lN = luma(float3(tile[tc - 18u].rgb));
+                float lS = luma(float3(tile[tc + 18u].rgb)), lW = luma(float3(tile[tc - 1u].rgb));
+                float lE = luma(float3(tile[tc + 1u].rgb));
+                float lNW = luma(float3(tile[tc - 19u].rgb)), lNE = luma(float3(tile[tc - 17u].rgb));
+                float lSW = luma(float3(tile[tc + 17u].rgb)), lSE = luma(float3(tile[tc + 19u].rgb));
+                float lmn = min(lC, min(min(lN, lS), min(lW, lE)));
+                float lmx = max(lC, max(max(lN, lS), max(lW, lE)));
+                float range = lmx - lmn;
+                if (range > max(0.0312, 0.125 * lmx)) {
+                    float eV = abs(0.25 * lNW - 0.5 * lW + 0.25 * lSW) + abs(0.5 * lN - lC + 0.5 * lS)
+                             + abs(0.25 * lNE - 0.5 * lE + 0.25 * lSE);
+                    float eH = abs(0.25 * lNW - 0.5 * lN + 0.25 * lNE) + abs(0.5 * lW - lC + 0.5 * lE)
+                             + abs(0.25 * lSW - 0.5 * lS + 0.25 * lSE);
+                    bool horz = eH >= eV;               // horizontal edge: blend with N or S
+                    float l1 = horz ? lN : lW, l2 = horz ? lS : lE;
+                    bool second = abs(l2 - lC) >= abs(l1 - lC);
+                    uint ti = horz ? (second ? tc + 18u : tc - 18u) : (second ? tc + 1u : tc - 1u);
+                    float avg = (2.0 * (lN + lS + lW + lE) + lNW + lNE + lSW + lSE) / 12.0;
+                    float sub = smoothstep(0.0, 1.0, saturate(abs(avg - lC) / range));
+                    // Edge pixels get at least a quarter blend; isolated sub-pixel detail up to half.
+                    float bf = clamp(max(0.25, sub * sub * 0.75), 0.0, 0.5) * p.spatial;
+                    c = mix(c, float3(max(tile[ti].rgb, half3(0.0h))), bf);
+                }
+            }
             if (kbad1(a)) a = 1.0;
             m1 /= 9.0; m2 /= 9.0;
             float3 sigma = sqrt(max(m2 - m1 * m1, 0.0));

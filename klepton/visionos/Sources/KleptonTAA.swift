@@ -54,6 +54,9 @@ final class KleptonTAA {
     // un-shifted by the wrong sub-pixel amount: shimmer + blur. KL_VPKTAA_JITTER_LAG =
     // auto (default: starts 0, follows the shader's vote) | -1 | 0 | 1.
     private let jitterLagAuto: Bool
+    // Spatial edge AA: KL_VPKTAA_SPATIAL = auto (default: on until the jitter votes PROVE the
+    // guest renders with the paired jitter, i.e. "used" wins >= 50 %) | 0 | 1.
+    private let spatialMode = KleptonTAA.envS("KL_VPKTAA_SPATIAL") ?? "auto"
     private var jitterLag = 0
     private var jitterLagUnknown = 0          // records whose jitter is not a Halton(2,3) x8 entry
 
@@ -105,6 +108,7 @@ final class KleptonTAA {
         queue?.label = "VPKTAA"
         c.historyPercent = percent
         c.sharpness = sharp
+        c.spatial = spatialMode == "0" ? 0 : 1
         c.disocclusion = min(max(KleptonTAA.envF("KL_VPKTAA_DISOCC", 0.1), 0.02), 1)
         if sign == "-1" { mvSign = SIMD2<Float>(-1, -1) }
         if let l = Int(lag) { jitterLag = max(-2, min(2, l)) }
@@ -485,9 +489,24 @@ final class KleptonTAA {
         line += " | jitter votes (used,prev,next)=\(jv[0]),\(jv[1]),\(jv[2]) lag=\(jitterLag)"
             + (jitterLagAuto ? "(auto)" : "(forced)")
             + (jitterLagUnknown > 0 ? " non-halton=\(jitterLagUnknown)" : "")
+        if spatialMode == "auto" && jt >= 300 {
+            let proven = Double(jv[0]) / Double(jt) >= 0.5
+            let want: Float = proven ? 0 : 1
+            if want != core.spatial {
+                core.spatial = want
+                line += proven ? " -> jitter proven: spatial AA off" : " -> jitter NOT proven: spatial AA on"
+            }
+        }
+        line += " spatial=\(core.spatial > 0 ? "on" : "off")"
+        let rawNow = rawFrames
+        if rawNow > resolved {
+            line += " | WARN: TAA shown on only \(resolved * 100 / max(1, resolved + rawNow)) pct of guest frames "
+                + "(GPU saturated, resolve cannot keep up): game MSAA is the cheaper AA here"
+        }
         if jitterLagAuto && jt >= 300 {
             let alt = jv[1] >= jv[2] ? 1 : 2
-            if Double(jv[alt]) / Double(jt) >= 0.5 && jv[alt] >= 2 * jv[0] {
+            // Clear winner: alt is the top vote and leads "used" by 15 % -> paired one frame off.
+            if jv[alt] > jv[0] && Double(jv[alt]) >= 1.15 * Double(jv[0]) {
                 let nl = max(-2, min(2, jitterLag + (alt == 1 ? -1 : 1)))
                 if nl != jitterLag {
                     jitterLag = nl

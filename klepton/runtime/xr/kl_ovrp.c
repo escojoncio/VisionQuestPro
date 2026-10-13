@@ -3113,9 +3113,11 @@ static uint64_t klovrp_EndFrame(int guest_frame_index) {
 static unsigned g_vk_frame;
 
 static void kl_loadvid_tick(void);
+static void klovrp_enq_endframe(void);
 static uint64_t klovrp_EndFrame4(int guest_frame_index, const void *layer_submits,
                                  int layer_submit_count, void *sync) {
     ovrp_hit("ovrp_EndFrame4");
+    klovrp_enq_endframe();   // the Enqueue'd overlay set of this frame is complete
     kl_loadvid_tick();
     { static unsigned n; if (n < 48 || n % 300 == 0) {
         uint64_t tid=0; pthread_threadid_np(NULL,&tid);
@@ -6611,6 +6613,28 @@ static void klovrp_enq_flush(void) {
     if (g_enq_n) { klovrp_enq_census(); kl_ovrp_overlays_external(g_enq, g_enq_n); }
     g_enq_n = 0;
 }
+// The frame boundary of the Enqueue'd overlay set. The frameIndex argument is
+// NOT one: a layer whose content is static is submitted with frameIndex 0 while
+// the rest carry the live index (AC Nexus log 48: layer 2 always frame=0, layers
+// 3/4 frame=N). Splitting on it cut every frame into {2} and {3,4}, BOTH sets
+// were published in turn, and the compositor (own thread, 90 Hz) caught one or
+// the other at random: the head-locked cover quad 3 and layer 2 blinked on and
+// off — the <=1 s flashes after the intro video. Once the guest has shown it
+// ends its frames with ovrp_EndFrame4, that call (plus a repeated layer id, as
+// a safety net) is the only boundary, so the WHOLE set is published at once.
+// Guests that never call EndFrame4 keep the frameIndex heuristic.
+static pthread_mutex_t g_enq_mu = PTHREAD_MUTEX_INITIALIZER;
+static int g_enq_endframe_seen;
+static void klovrp_enq_endframe(void) {
+    pthread_mutex_lock(&g_enq_mu);
+    if (!g_enq_endframe_seen) {
+        g_enq_endframe_seen = 1;
+        fprintf(stderr, "  [ovrp] overlay set boundary = ovrp_EndFrame4 (frameIndex "
+                        "of Enqueue'd layers no longer splits the set)\n");
+    }
+    klovrp_enq_flush();
+    pthread_mutex_unlock(&g_enq_mu);
+}
 // ovrp_SetColorScaleAndOffset(ovrpVector4f scale, ovrpVector4f offset, ovrpBool
 // applyToAllLayers): the guest's global fade (OVRManager / OVRScreenFade). Both
 // vectors are 4-float HFAs, so they arrive in s0..s3 and s4..s7 and the bool in
@@ -6685,9 +6709,10 @@ static uint64_t klovrp_EnqueueSubmitLayer2(uint32_t flags, void *texL, void *tex
                 pose ? pose[4] : 0.f, pose ? pose[5] : 0.f, pose ? pose[6] : 0.f,
                 scale ? scale[0] : 0.f, scale ? scale[1] : 0.f, scale ? scale[2] : 0.f);
     }
+    pthread_mutex_lock(&g_enq_mu);
     int dup = 0;
     for (int i = 0; i < g_enq_n; i++) if (g_enq[i].layer_id == layer_id) { dup = 1; break; }
-    if (dup || frame_index != g_enq_frame) {
+    if (dup || (!g_enq_endframe_seen && frame_index != g_enq_frame)) {
         klovrp_enq_flush();
         g_enq_frame = frame_index;
     }
@@ -6739,6 +6764,7 @@ static uint64_t klovrp_EnqueueSubmitLayer2(uint32_t flags, void *texL, void *tex
             fprintf(stderr, "\n");
         }
     }
+    pthread_mutex_unlock(&g_enq_mu);
     // Diagnostic: every ~600 submits, dump the layer images' lit counts so we
     // can see if the guest is drawing UI into them or submitting empties.
     static unsigned cap;

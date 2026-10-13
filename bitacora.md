@@ -39,6 +39,72 @@ Historial completo de sesiones anteriores: `git log -p bitacora.md` (compactada 
 - Unity/UE4 en `.full`: no se ve la habitación; `[pt] immersion -> mixed` solo si el juego pide passthrough.
 - Juegos EyeLevel: quads del menú a la altura de los ojos; `GetTrackingTransformRelativePose origin=1 (cur=0)` y≈−altura.
 
+## Logs 47–49 (2026-10-13) → build siguiente
+### VPKTAA en Batman (log 49): «no suaviza» + framerate
+- Evidencia `[taa] stats` (30 s): resolves=1040, **raw-fallback=1472** (solo ~41 % de los frames del juego salen con
+  TAA; el resto es el frame crudo → alterna AA/sin AA), gpu=22,2 ms/resolve (máx 34), juego `gpu.time` ≈13,4 ms medio
+  a ~84 fps → GPU saturada: el resolve en su cola compite con el juego (Metal en visionOS no expone prioridad de cola).
+- Jitter: el juego (Unity, `libOculusXRPlugin.so`) relee `ovrp_GetNodeFrustum2` (x30627, ~5/frame) y el probe da
+  jitter ON, pero los votos (used,prev,next)=1,69M/2,03M/1,52M ≈ 34/40/26 % → jitter NO probado (con jitter bien
+  emparejado «used» domina). Sin jitter real el TAA solo difumina/titila. Frustum real near=0.100 (se usa 0.05 por
+  defecto; solo afecta paralaje de traslación).
+- MSAA 2x del juego forzado a 1x (`vk.msaa forced 1x (was 2x)`) para tener depth 1x → se perdió el AA nativo.
+- `VPKTAACore.swift`: `Params.pad` → `spatial` (float, mismo tamaño, 304 B); `VPKTAACore.spatial` (0..1). En
+  `vpktaa_resolve`, tras la reconstrucción: AA espacial tipo FXAA (test de borde FXAA 3.11 sobre el 3x3 del tile,
+  mezcla con el vecino a través del borde, 0,25–0,5), antes del blend temporal (que lo estabiliza). Sin lecturas
+  extra de memoria (usa el tile).
+- `KleptonTAA.swift`: `KL_VPKTAA_SPATIAL`=auto|0|1 (auto: ON hasta que «used» ≥50 % de votos; log `spatial=on/off`);
+  lag de jitter auto ahora cambia si alt es el máximo y ≥1,15× used (antes ≥2× y ≥50 %: nunca saltaba);
+  stats añade `WARN: TAA shown on only N pct…` cuando raw-fallback > resolves.
+### Pendiente / decisión
+- Estándar en móvil TBDR (Quest/Apple): MSAA en tile memory ≈ gratis. Para juegos con MSAA nativo y GPU saturada,
+  lo recomendable es NO forzar 1x y dejar VPKTAA apagado (o ajuste en la app «AA: MSAA del juego | VPKTAA»); requiere
+  tocar el forzado `VPVK_FORCE_1X`/kl_vulkan y Ajustes (no hecho aquí). Mismo patrón que AoT (lento con VPKTAA).
+- Comprobar en el próximo log: `jitter votes … -> AUTO jitter lag -1` y si después «used» supera 50 %
+  (`jitter proven`); `raw-fallback` vs `resolves`; comparar fps con VPKTAA OFF.
+
+### AC Nexus (log 48): crash ovr_User_GetImageUrl + flashes tras el vídeo (sin build)
+- **Crash** `fatal: unimplemented Oculus Platform entry point 'ovr_User_GetImageUrl'` (tras GetLoggedInUser, usuario offline Ubisoft).
+  - `klepton/runtime/xr/kl_ovrplat.c` `klplat_called`: ya NO aborta; respuesta neutra por nombre (`plat_name_is_string`: último segmento `Get…Url/Uri/String/Name/Path/Token/Text/Title/Description/Locale/Tag/Hash/Key/Metadata/ApiName/Json/Email/OculusID/SessionId/DisplayName/Deeplink(Message)/Presence/Label/Sku` → `""`; resto → 0 = request "no se pudo hacer" / ID 0 / false / NULL). Log `[plat] unimplemented X -> neutral …` una vez por nombre. `KL_PLAT_STRICT=1` recupera el abort. `plat_is_drm` sigue antes y sigue abortando.
+  - Getters User explícitos: `ovr_User_GetImageUrl/SmallImageUrl/Presence/PresenceDeeplinkMessage/PresenceDestinationApiName/PresenceLobbySessionId/PresenceMatchSessionId/InviteToken` → `""`, `GetPresenceStatus` → 0 (`klplat_User_str_empty`/`klplat_User_zero` en `g_plat_impl`).
+- **Flashes ≤1 s**: frontera de frame del set de overlays Enqueue. Capa 2 (Equirect estática) llega siempre con `frame=0`, capas 3/4 con `frame=N`; `klovrp_EnqueueSubmitLayer2` hacía flush al cambiar frameIndex → cada frame publicaba {2} y luego {3,4}; el compositor (90 Hz, otro hilo) pillaba uno u otro → quad head-locked 3 (cover a 0,5 m) y capa 2 parpadeaban. Evidencia: census alterna `overlay set (2): #3 #4` / `(1): #2` en cada frame (log 48 l.1875–2178). Descartados: gpu.err (1, blit 1x1 al arrancar), draws_skipped=0, skybox nunca OFF.
+  - `klepton/runtime/xr/kl_ovrp.c`: `klovrp_enq_endframe()` (al inicio de `klovrp_EndFrame4`) publica el set completo; tras ver EndFrame4 el frameIndex ya no parte el set (solo id repetido como red de seguridad). Mutex `g_enq_mu` en submit/flush. Guests sin EndFrame4: heurística antigua.
+- Mirar en log siguiente: `[ovrp] overlay set boundary = ovrp_EndFrame4`, census estable `overlay set (3 layer(s)): #2 … #3 … #4`, `[plat] unimplemented … -> neutral`, sin fatal de plataforma.
+- Observado: el juego deja de enviar frames hasta ~2 s en cargas (`207 stale in a row`); es el propio juego cargando.
+
+### AoT 47: carga infinita al entrar en partida (música sí, imagen congelada)
+- Evidencia: serial del compositor congelado en 10300 desde 10:50:08 (`5770 stale in a row`), `vk.submit` se para en
+  n=10312, sin más JNI/Unity. Últimas líneas del guest: `ovrp_EnqueueSetupLayer2 -> layer 2, Quad, 2048x512` (quad
+  de la pantalla de carga) y `first-call ovrp_GetLayerTexturePtr` desde libil2cpp (hilo de juego); NUNCA sale
+  `GetLayerTexture2: layer 2 …` → el hilo de juego quedó dentro de `kl_vulkan_layer_image` → `klvk_image_alloc` →
+  `klvk_image_clear_black` (QueueSubmit + WaitForFences en el hilo de juego) mientras el hilo de render de Unity hacía
+  su vkQueueSubmit. vkQueueSubmit exige sincronización externa por cola; nuestros submits internos no la tenían.
+- `klepton/runtime/gfx/kl_vulkan.c`: `g_qsub_mu` + `klvk_qsubmit()`; todos los `d->QueueSubmit` internos pasan por él
+  y `klvk_QueueSubmit` (el del guest) toma el mismo lock solo alrededor de `real()` (no del shadow pump ni de esperas).
+  Capas no-ojo (`kl_vulkan_layer_image` con key != ojo) ya no hacen el clear síncrono (`t_klvk_no_clear`; el
+  compositor ya salta capas no escritas). `KL_VK_LAYER_NOCLEAR=0` lo reactiva.
+- `klepton/visionos/Sources/kl_app.c` (heartbeat): vigilante de bloqueo. Si el serial OVRPlugin no avanza 8 s en
+  `frame pump` (tras >30 frames), `kl_sample_snapshot` de todos los hilos (`[snap] guest threads at guest frame stall`),
+  y otra a 40 s. `KL_STALL_SNAP=0` lo apaga. Sirve para cualquier juego OVRPlugin (no OpenXR).
+### Rendimiento (AoT 47; mismo patrón que Batman)
+- Menú: ~33 fps de guest (631 submits/20 s), `gpu_ms` p50 22 / p90 27 ms con solo ~204 draws; pase principal
+  RGBA8Srgb 2976x1912x2 = 11.6 ms. En partida 15–25 ms.
+- **Cuello principal común: VPKTAA** (`[taa] stats … async queue gpu=18.8–24.6 ms/frame (max 40)`): misma GPU que el
+  juego → ~40–45 ms de GPU por frame del guest. Pendiente (dueño de KleptonTAA/VPKTAACore): debería costar 1–3 ms;
+  perfilar sus pases, bajar a la resolución de salida o desactivarlo para A/B.
+- Compilación de shaders: `gpu.shader.lib hit=0 miss=1440` con índice de 658 entradas cargado → 0 % de aciertos
+  (1092 MSL compilados, 25 s, máx. 766 ms); primer run de build nueva puede invalidar → comprobar en un 2.º arranque
+  con la misma build. Al entrar en partida `gpu.pso ms=7178 max 886/2814`, `gpu.hold 1504 ms timeouts=1`,
+  `missing_pipelines=12` (tirón de carga, no fps sostenido).
+- `gpu.err archive_save pipelines-38.metalar entries=84 Failed_to_generate_machO: cannot pack` (VPEngine; los split
+  de 23/33 entradas sí se guardan) y 18× `vk.err shader compute "internal error: vector"` (emisor MSL de VPEngine;
+  `dispatch_skipped=6`/frame). Ambos en VPEngine, no en este repo.
+- Ojo 2976x1912: ovrp recomienda 2383x1912 (base original) y Unity aplica su escala ~1.25 en ancho.
+### Comprobar en el próximo log (AoT 47 / rendimiento)
+- AoT: tras `SetupLayer -> layer 2, Quad` debe salir `GetLayerTexture2: layer 2 …` y el serial sigue subiendo.
+- Si vuelve a congelarse: bloque `[snap] guest threads at guest frame stall` → hilo y función donde está parado.
+- `gpu.shader.lib hit=` > 0 en el segundo arranque con la misma build.
+
 ## VPKTAA: voto de jitter, RCAS fusionado, fallback sin TAA (2026-10-13, sin build)
 Log 46 (Batman): entradas OK (jitter ON, depth D24S8 live s0/s1 revZ=1, near 0.05 por defecto, sin MV), depthValid 53 %,
 disocc 0,5 %, rejected 6,5 %; pero resolves ≈30/s con juego ≈50 fps, gpu=21,6 ms/resolve (compartiendo GPU) → saltos.

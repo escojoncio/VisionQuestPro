@@ -213,20 +213,55 @@ static uint64_t klplat_drm(const char *name) {
     abort();
 }
 
-// Everything else: named, so the guest says which of the 1335 it wants.
+// Everything else: named, so the guest says which of the 1335 it wants — and
+// answered NEUTRALLY instead of aborting. The DRM classifier runs before this
+// (kl_ovrplat_sym), so nothing that reaches here is an ownership question; what
+// is left is decoration (avatars, presence, social, analytics). The type is read
+// off the C SDK's naming convention, which is regular across all 1335 exports:
+//   *_Get<..>Url / Uri / String / Name / Path / Token / Message / Text / Title /
+//   (DeeplinkMessage) / Description / Locale / Tag / Hash / Key / Metadata / ApiName / Id(string)
+//                                 -> ""   (const char *; NULL crashes Marshal)
+//   *Array_GetSize / GetNextUrl  -> 0 / ""  (empty list, no next page)
+//   everything else (ovrRequest, ovrID, bool, enum, int, handle) -> 0
+// An ovrRequest of 0 is the SDK's own "request could not be made" (the same
+// answer g_plat_request gives), ovrID 0 is "no such user", false/enum 0 are the
+// zero answers. Logged ONCE per name so the log still lists the surface.
+// KL_PLAT_STRICT=1 restores the old fail-closed abort for scouting.
+static const char g_plat_empty[] = "";
+
+static int plat_name_is_string(const char *name) {
+    const char *f = strrchr(name, '_');
+    f = f ? f + 1 : name;
+    if (strncmp(f, "Get", 3) != 0) return 0;
+    static const char *const suf[] = {
+        "Url", "Uri", "URL", "String", "Name", "Path", "Token", "DeeplinkMessage",
+        "Text", "Title", "Description", "Locale", "Tag", "Hash", "Key",
+        "Metadata", "ApiName", "Json", "Email", "OculusID",
+        "SessionId", "DisplayName", "Deeplink", "Presence", "Label", "Sku",
+    };
+    size_t fl = strlen(f);
+    for (size_t i = 0; i < sizeof suf / sizeof suf[0]; i++) {
+        size_t sl = strlen(suf[i]);
+        if (fl >= sl && strcmp(f + fl - sl, suf[i]) == 0) return 1;
+    }
+    return 0;
+}
+
 static uint64_t klplat_called(const char *name) {
     plat_hit(name);
-    if (kl_permissive()) {
-        int s = plat_slot(name);
-        if (s >= 0 && g_plat[s].calls == 1)
-            fprintf(stderr, "  [plat] call (permissive, returning 0): %s\n", name);
-        return 0;
+    if (kl_env_on("KL_PLAT_STRICT", 0) && !kl_permissive()) {
+        fprintf(stderr, "\n[klepton] fatal: guest called unimplemented Oculus Platform "
+                        "entry point '%s' (KL_PLAT_STRICT=1)\n", name);
+        kl_ovrplat_report(stderr);
+        kl_fatal_prepare();
+        abort();
     }
-    fprintf(stderr, "\n[klepton] fatal: guest called unimplemented Oculus Platform "
-                    "entry point '%s'\n", name);
-    kl_ovrplat_report(stderr);
-    kl_fatal_prepare();
-    abort();
+    int str = plat_name_is_string(name);
+    int s = plat_slot(name);
+    if (s < 0 || g_plat[s].calls == 1)
+        fprintf(stderr, "  [plat] unimplemented %s -> neutral %s (logged once)\n",
+                name, str ? "\"\"" : "0");
+    return str ? (uint64_t)(uintptr_t)g_plat_empty : 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -575,6 +610,15 @@ static uint64_t klplat_User_GetID(const void *h) {
 static const char *klplat_User_GetOculusID(const void *h) {
     plat_hit("ovr_User_GetOculusID"); (void)h;
     return "kleptonplayer";
+}
+// The remaining User fields the managed `Models.User` constructor reads. No
+// avatar, no presence, no invite: "" for the strings (the SDK marshals them
+// straight to System.String, NULL would throw), 0 (Unknown) for PresenceStatus.
+static const char *klplat_User_str_empty(const void *h) {
+    (void)h; plat_hit("ovr_User_Get*(string)"); return "";
+}
+static uint64_t klplat_User_zero(const void *h) {
+    (void)h; plat_hit("ovr_User_GetPresenceStatus"); return 0;
 }
 static const char *klplat_User_GetDisplayName(const void *h) {
     plat_hit("ovr_User_GetDisplayName"); (void)h;
@@ -1345,6 +1389,15 @@ static const struct { const char *name; void *fn; } g_plat_impl[] = {
     {"ovr_User_GetID",                         (void *)klplat_User_GetID},
     {"ovr_User_GetOculusID",                   (void *)klplat_User_GetOculusID},
     {"ovr_User_GetDisplayName",                (void *)klplat_User_GetDisplayName},
+    {"ovr_User_GetImageUrl", (void *)klplat_User_str_empty},
+    {"ovr_User_GetSmallImageUrl", (void *)klplat_User_str_empty},
+    {"ovr_User_GetPresence", (void *)klplat_User_str_empty},
+    {"ovr_User_GetPresenceDeeplinkMessage", (void *)klplat_User_str_empty},
+    {"ovr_User_GetPresenceDestinationApiName", (void *)klplat_User_str_empty},
+    {"ovr_User_GetPresenceLobbySessionId", (void *)klplat_User_str_empty},
+    {"ovr_User_GetPresenceMatchSessionId", (void *)klplat_User_str_empty},
+    {"ovr_User_GetInviteToken", (void *)klplat_User_str_empty},
+    {"ovr_User_GetPresenceStatus", (void *)klplat_User_zero},
     {"ovr_ApplicationVersion_GetCurrentCode",  (void *)klplat_AppVersion_code},
     {"ovr_ApplicationVersion_GetLatestCode",   (void *)klplat_AppVersion_code},
     {"ovr_ApplicationVersion_GetCurrentName",  (void *)klplat_AppVersion_name},

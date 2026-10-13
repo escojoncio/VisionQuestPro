@@ -23,6 +23,7 @@
 #include "kl_glfb.h"      // kl_glfb_release_current — the handoff hands the context on
 #include "kl_x18.h"       // claim the veneers' TSD slot before anything else can
 #include "kl_env.h"
+#include "kl_sample.h"    // kl_sample_snapshot — the frame-stall watchdog
 
 // --- Which guest ------------------------------------------------------------
 //
@@ -539,6 +540,37 @@ static void *heartbeat(void *arg) {
                     kl_phys_footprint() >> 20, kl_avail_memory() >> 20);
             fflush(stderr);
             last_phase = phase;
+        }
+        // Guest frame-stall watchdog. A game whose frame serial stops advancing while
+        // the process is alive (music playing, compositor re-showing the last frame)
+        // is parked somewhere — a lock, a join, a fence. Without a Mac the only way
+        // to see where is a stack snapshot of every guest thread, taken here once
+        // after 8 s without a new frame and once more at 40 s (KL_STALL_SNAP=0: off).
+        {
+            static uint64_t last_serial, advanced;
+            static int still_ticks, snaps;
+            static int on = -1;
+            if (on < 0) on = kl_env_on("KL_STALL_SNAP", 1);
+            int st = on ? kl_ovrp_last_complete_stage() : -1;
+            kl_ovrp_render_pose rp;
+            if (st >= 0 && kl_ovrp_stage_render_pose(st, &rp) && rp.serial) {
+                if (rp.serial != last_serial) {
+                    if (last_serial) advanced++;
+                    last_serial = rp.serial;
+                    if (still_ticks >= 32) snaps = 0;   // recovered: arm for the next stall
+                    still_ticks = 0;
+                } else if (advanced > 30 && g_phase && strcmp(g_phase, "frame pump") == 0) {
+                    still_ticks++;
+                    if ((still_ticks == 32 && snaps == 0) || (still_ticks == 160 && snaps == 1)) {
+                        char why[96];
+                        snprintf(why, sizeof why, "guest frame stall (serial %llu, %d s)",
+                                 (unsigned long long)last_serial, still_ticks / 4);
+                        kl_sample_snapshot(stderr, why);
+                        fflush(stderr);
+                        snaps++;
+                    }
+                }
+            }
         }
         ticks++;
         struct timespec iv = { 0, 250000000 };  // nanosleep: usleep is EINVAL at >= 1e6
