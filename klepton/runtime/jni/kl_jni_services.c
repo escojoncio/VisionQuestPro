@@ -1284,6 +1284,31 @@ static klj_val klj_LoadingScreen_stopUpdating(void *env, void *self,
 // plays the loading video on its own; so this only records what was asked
 // (which layer the Surface names, if it is one of ours) and returns. Without a
 // binding the static call aborted the run ("no host implementation").
+// The file the game asked for, handed to the compositor (kl_ovrp.h,
+// kl_loadingvideo_request_*). The Java screen plays it through a MediaPlayer,
+// i.e. WITH its sound — AC Nexus log 39 had no audio at all before its sound
+// engine started because the host played a fixed, muted file instead
+// ("Background-with-Initialisation-Loop.mp4" while the game asked for
+// "Ubisoft-Logo-With-Sound.mp4").
+static pthread_mutex_t g_loadvid_req_lock = PTHREAD_MUTEX_INITIALIZER;
+static char            g_loadvid_req[512];
+static unsigned        g_loadvid_req_gen;
+
+unsigned kl_loadingvideo_request_gen(void) {
+    pthread_mutex_lock(&g_loadvid_req_lock);
+    unsigned g = g_loadvid_req_gen;
+    pthread_mutex_unlock(&g_loadvid_req_lock);
+    return g;
+}
+unsigned kl_loadingvideo_request_name(char *buf, int cap) {
+    if (!buf || cap <= 0) return 0;
+    pthread_mutex_lock(&g_loadvid_req_lock);
+    snprintf(buf, (size_t)cap, "%s", g_loadvid_req);
+    unsigned g = g_loadvid_req_gen;
+    pthread_mutex_unlock(&g_loadvid_req_lock);
+    return g;
+}
+
 static klj_val klj_LoadingScreen_startUpdating(void *env, void *self,
                                                const klj_val *a, int n) {
     (void)env; (void)self;
@@ -1293,8 +1318,21 @@ static klj_val klj_LoadingScreen_startUpdating(void *env, void *self,
     int w            = n > 3 ? (int)a[3].j : 0;
     int h            = n > 4 ? (int)a[4].j : 0;
     KLJ_LOG("LoadingScreen.startUpdatingLoadingScreen path=\"%s\" surface=%p layer=%d %dx%d"
-            " (Java loading screen not run; host drives the loading video)",
+            " (Java loading screen not run; host plays this file, with sound)",
             path ? path : "(null)", surface, layer, w, h);
+    if (path && *path) {
+        // Relative to the APK's assets, which is where the Java screen opens it
+        // and where the compositor looks; an absolute path keeps its file name.
+        const char *base = path;
+        if (path[0] == '/') {
+            const char *s = strrchr(path, '/');
+            base = s ? s + 1 : path;
+        }
+        pthread_mutex_lock(&g_loadvid_req_lock);
+        snprintf(g_loadvid_req, sizeof g_loadvid_req, "%s", base);
+        g_loadvid_req_gen++;
+        pthread_mutex_unlock(&g_loadvid_req_lock);
+    }
     return (klj_val){.j = 0};
 }
 static klj_val klj_UbiJavaInterface_injectActivity(void *env, void *self,

@@ -266,6 +266,9 @@ typedef struct kl_sl_player {
 
     struct { const void *buf; SLuint32 size; } q[KL_SL_QUEUE];
     unsigned head, tail, count;
+    unsigned clears;                        // bumped by bq_Clear (feeder retires only if unchanged)
+    unsigned long polls;                    // bq_GetState calls (diagnostic: polling guest?)
+    unsigned enq_logged;                    // first Enqueue sizes logged
     unsigned generation;                    // bumped on every re-creation
 
     unsigned rate, channels, bits;          // from the PCM format (device side: 16)
@@ -401,10 +404,17 @@ static void *feeder(void *arg) {
             pthread_cond_timedwait(&p->wake, &p->lock, &ts);
             continue;
         }
+        // PEEK, do not pop: the buffer stays in the queue (GetState.count still
+        // includes it) until its PCM has been copied into the device ring below.
+        // Popping first told a guest that POLLS the queue state rather than
+        // waiting for the callback (CRI ADX2, AoT log 40) that the buffer was
+        // free while kl_audio_write_src had not yet copied it — and in mixing
+        // mode that copy waits for g_wlock behind the other players' writes —
+        // so the guest refilled it under us: torn, crackling audio. Android
+        // counts the playing buffer too. Retired after the write (see below).
         const void *buf = p->q[p->head].buf;
         SLuint32 size = p->q[p->head].size;
-        p->head = (p->head + 1) % KL_SL_QUEUE;
-        p->count--;
+        unsigned clears = p->clears;
         unsigned frame = (p->channels * p->bits) / 8;
         if (!frame) frame = 4;
         unsigned rate = p->rate ? p->rate : 48000;
@@ -473,6 +483,12 @@ static void *feeder(void *arg) {
         // Oculus spatializer rather than as our own race.
         pthread_mutex_lock(&p->lock);
         if (!p->running || generation != p->generation) break;
+        // Retire the buffer we peeked above — unless the guest Clear()ed the
+        // queue meanwhile (then head/count were reset and it is already gone).
+        if (clears == p->clears && p->count > 0) {
+            p->head = (p->head + 1) % KL_SL_QUEUE;
+            p->count--;
+        }
         if (p->state != SL_PLAYSTATE_PLAYING) continue;   // stopped or paused mid-buffer
         void (*cb)(SLBufferQueueItf, void *) = p->cb;
         void *cb_ctx = p->cb_ctx;
@@ -633,6 +649,16 @@ static SLresult bq_Enqueue(SLBufferQueueItf self, const void *buf, SLuint32 size
     p->q[p->tail].size = size;
     p->tail = (p->tail + 1) % KL_SL_QUEUE;
     p->count++;
+    // Diagnostic: the buffer shape each player really uses (frames per buffer
+    // decide the callback rate and the mix granularity).
+    if (p->enq_logged < 2) {
+        p->enq_logged++;
+        unsigned fb = (p->channels * p->bits) / 8;
+        fprintf(stderr, "  [sl] player #%d enqueue #%u: %u bytes (%u frames, %.1f ms) buf=%p, "
+                        "%u queued\n", (int)(p - g_players), p->enq_logged, (unsigned)size,
+                fb ? (unsigned)size / fb : 0,
+                fb && p->rate ? 1000.0 * (double)(size / fb) / p->rate : 0.0, buf, p->count);
+    }
     pthread_cond_signal(&p->wake);
     pthread_mutex_unlock(&p->lock);
     return SL_RESULT_SUCCESS;
@@ -641,12 +667,21 @@ static SLresult bq_Clear(SLBufferQueueItf self) {
     kl_sl_player *p = KL_SL_BQ_P(self);
     pthread_mutex_lock(&p->lock);
     p->head = p->tail = p->count = 0;
+    p->clears++;
     pthread_mutex_unlock(&p->lock);
     return SL_RESULT_SUCCESS;
 }
 static SLresult bq_GetState(SLBufferQueueItf self, SLBufferQueueState *st) {
     kl_sl_player *p = KL_SL_BQ_P(self);
+    // count includes the buffer the feeder is handing to the device (it is
+    // retired only after the copy) — Android's meaning, and what a polling
+    // guest needs to not refill a buffer still being read.
     if (st) { st->count = p->count; st->index = (SLuint32)p->consumed; }
+    unsigned long n = ++p->polls;
+    if (n == 200)
+        fprintf(stderr, "  [sl] player #%d: the guest POLLS GetState (200 calls, %lu buffers "
+                        "played) — buffers are retired only once copied to the device\n",
+                (int)(p - g_players), p->consumed);
     return SL_RESULT_SUCCESS;
 }
 static SLresult bq_RegisterCallback(SLBufferQueueItf self,

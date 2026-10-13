@@ -411,6 +411,15 @@ int kl_ovrp_overlay_get(int i, kl_ovrp_overlay *out);
 int kl_loadingvideo_active(void);
 // The guest's LoadingScreen.stopUpdatingLoadingScreen() hook - hide the skybox.
 void kl_loadingvideo_stop(void);
+// The video file the GAME last asked its Java loading screen to play
+// (LoadingScreen.startUpdatingLoadingScreen's path, e.g. AC Nexus's
+// "Ubisoft-Logo-With-Sound.mp4"), relative to the assets dir. The generation
+// counts requests (0 = none yet) so the compositor polls it cheaply each frame
+// and fetches the name only when it moved. Defined in jni/kl_jni_services.c.
+unsigned kl_loadingvideo_request_gen(void);
+// Copies the requested name (NUL-terminated, truncated to cap) and returns its
+// generation; buf[0] = 0 and 0 when nothing was requested.
+unsigned kl_loadingvideo_request_name(char *buf, int cap);
 
 // ...and the two calls that FILE those records for a guest that does not speak
 // OVRPlugin at all.

@@ -5119,9 +5119,22 @@ static uint32_t klovrp_gl_format(int ovrp_fmt, const char **name) {
 // render textures from it has nothing to make. So, with KL_VPKTAA=1 only, the
 // desc now carries a size, and GetLayerTextureSpaceWarp serves real storage.
 // With KL_VPKTAA off every answer here is byte-identical to before.
+//
+// **Correction (AoT log 40).** Attack on Titan (Unity 2021.3, OVRPlugin 1.89,
+// a title that really uses AppSW: it CALLS GetLayerTextureSpaceWarp for all
+// three stages) asks with flags=0x300, i.e. bits 8 and 9 — which is where
+// OVR_Plugin_Types.h puts ovrpLayerFlag_SpaceWarpDataAllocation (1 << 8) and
+// ovrpLayerFlag_SpaceWarpDedicatedDepth (1 << 9). Testing only 1 << 12 left
+// AoT's MotionVectorTextureSize at 0x0 while we still served 1488x956 storage:
+// Unity failed "RenderTexture.Create ... width & height must be larger than 0"
+// ~2x per frame (5149 times) and its XR texture set came out as {eye stage 0,
+// MOTION-VECTOR image stage 0, a wild pointer} — eye stages 1 and 2 were never
+// even viewed, so 2 of every 3 submitted frames showed a never-rendered eye
+// image: the flicker. Batman's 0x1000 is kept in the mask (it never calls
+// GetLayerTextureSpaceWarp, so whether 1 << 12 means SpaceWarp is unproven).
 // ---------------------------------------------------------------------------
-#define KLOVRP_LAYERFLAG_SPACEWARP_ALLOC (1 << 12)
-#define KLOVRP_LAYERFLAG_SPACEWARP_DEPTH (1 << 13)
+#define KLOVRP_LAYERFLAG_SPACEWARP_ALLOC ((1 << 8) | (1 << 12))
+#define KLOVRP_LAYERFLAG_SPACEWARP_DEPTH ((1 << 9) | (1 << 13))
 #define KLOVRP_FMT_NONE 10
 
 static int klovrp_asw_on(void) {
@@ -5720,6 +5733,34 @@ static struct {
 // wrong placement has no error surface at all.
 #define KLOVRP_SUBMIT_HEAD_LOCKED 0x2
 
+// ovrpLayerFlag_TextureOriginAtBottomLeft (1 << 3) of the layer DESC (+0x1c,
+// what ovrp_CalculateLayerDesc / SetupLayer carry), not of the submit. Unity's
+// OVROverlay sets it on every layer it creates: it fills the swapchain image
+// with Graphics.CopyTexture / vkCmdBlitImage from a Unity texture, whose rows
+// are stored bottom-up on every graphics API (Unity's GL convention), and tells
+// the runtime so instead of flipping the copy. Batman's loading bat (Quad
+// 2048x128, flags=0x8, log 38) and AC Nexus's Quad panel (1024x1024, flags=0x8)
+// both carry it; the eye layer (flags 0x1000) does not and stays top-left on
+// Vulkan. Ignoring it drew those quads UPSIDE DOWN (vertical only: the sprite
+// cells run along x, so the animation was right and only v was reversed).
+// KL_OVRP_LAYER_BL=0 restores the old "Vulkan = top-left for every layer".
+#define KLOVRP_LAYERFLAG_TEXTURE_ORIGIN_BOTTOM_LEFT (1 << 3)
+static int klovrp_overlay_origin_top_left(const struct klovrp_layer *l) {
+    if (!kl_vulkan_guest_active()) return 0;   // GLES: bottom-left either way
+    static int honour = -1;
+    if (honour < 0) honour = kl_env_on("KL_OVRP_LAYER_BL", 1);
+    if (!honour || !l || !(l->desc.layer_flags & KLOVRP_LAYERFLAG_TEXTURE_ORIGIN_BOTTOM_LEFT))
+        return 1;
+    static int said;   // called per overlay per frame: log the first few only
+    if (said < 4) {
+        said++;
+        fprintf(stderr, "  [ovrp] layer %d desc flags %#x: TextureOriginAtBottomLeft — "
+                        "sampled bottom-left (v not flipped; KL_OVRP_LAYER_BL=0 reverts)\n",
+                l->id, (unsigned)l->desc.layer_flags);
+    }
+    return 0;
+}
+
 static void klovrp_record_overlays(const void *layer_submits, int count) {
     const ovrp_layer_submit *const *list = layer_submits;
     kl_ovrp_overlay tmp[KLOVRP_MAX_LAYERS];
@@ -5800,8 +5841,9 @@ static void klovrp_record_overlays(const void *layer_submits, int count) {
         // is follows from the API it rendered with — the same question, and the
         // same answer, as the eye textures beside it. Only the Vulkan path
         // backs a non-eye layer with anything a compositor can sample today
-        // (kl_vulkan_layer_mtl_texture), and Vulkan's origin is the top left.
-        o->origin_top_left = kl_vulkan_guest_active();
+        // (kl_vulkan_layer_mtl_texture), and Vulkan's origin is the top left —
+        // unless the layer desc says TextureOriginAtBottomLeft (see the helper).
+        o->origin_top_left = klovrp_overlay_origin_top_left(l);
 // The quad's world size, out of the union's own arm — which starts at
         // +0xb0 or +0xbc depending on which OVRPlugin the guest was built
         // against. klovrp_quad_size tells them apart and latches; see it.
@@ -6493,7 +6535,8 @@ static uint64_t klovrp_EnqueueSubmitLayer2(uint32_t flags, void *texL, void *tex
         if (scale) { o->size[0] = scale[0]; o->size[1] = scale[1]; }
         o->flags       = (int)flags;
         o->head_locked = ((int)flags & KLOVRP_SUBMIT_HEAD_LOCKED) != 0;
-        o->origin_top_left = kl_vulkan_guest_active();
+        // Desc flag TextureOriginAtBottomLeft decides (klovrp_overlay_origin_top_left).
+        o->origin_top_left = klovrp_overlay_origin_top_left(l);
         o->tex = (unsigned long long)(uintptr_t)texL;
         if (override_rect == 1 && rect_matrix && ((uintptr_t)rect_matrix & 3) == 0 &&
             klovrp_plausible_unit_rect(rect_matrix) && klovrp_plausible_unit_rect(rect_matrix + 4) &&
@@ -6907,6 +6950,24 @@ static uint64_t klovrp_GetLayerTextureSpaceWarp(int layer_id, int stage, int eye
     int w = d->mv_texture_size.w, h = d->mv_texture_size.h;
     const char *size_from = "desc MotionVectorTextureSize";
     if (w <= 0 || h <= 0 || w > d->texture_size.w * 2 || h > d->texture_size.h * 2) {
+        // AoT log 40: serving storage the desc did not size makes the provider
+        // build its motion-vector render textures at 0x0 (Unity refuses them
+        // every frame) and its XR texture set comes out corrupted — the eye
+        // images of stages 1/2 are never rendered and the picture flickers.
+        // Refusing is the pre-phase-1 answer the provider handles (it turns
+        // SpaceWarp off and carries on). KL_VPKTAA_ASW_NOSIZE=1 serves anyway.
+        static int nosize = -1;
+        if (nosize < 0) nosize = kl_env_on("KL_VPKTAA_ASW_NOSIZE", 0);
+        if (!nosize) {
+            static int said;
+            if (said++ < 4)
+                fprintf(stderr, "  [asw] GetLayerTextureSpaceWarp(layer %d stage %d eye %d): "
+                                "the eye desc carries no MotionVectorTextureSize (flags %#x) — "
+                                "refused, the provider could only make 0x0 motion targets "
+                                "(KL_VPKTAA_ASW_NOSIZE=1 serves anyway)\n",
+                        layer_id, stage, eye, (unsigned)d->layer_flags);
+            return OVRP_FAIL_UNSUPPORTED;
+        }
         klovrp_asw_mv_size(d->texture_size.w, d->texture_size.h, &w, &h);
         size_from = "eye size / KL_VPKTAA_MV_DIV (desc carried none)";
     }

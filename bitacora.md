@@ -2,6 +2,25 @@
 
 Historial completo de sesiones anteriores: `git log -p bitacora.md` (compactada el 2026-10-12 tras el log 25).
 
+## Logs 39–41 (2026-10-13) → build siguiente
+- SpaceWarp: AC y AoT llevan `flags 0x300` = bit 8 SpaceWarpDataAllocation + bit 9 SpaceWarpDedicatedDepth y SÍ llaman
+  `GetLayerTextureSpaceWarp`; Batman (0x1000) no lo usa (SetSpaceWarp forzado sin efecto, inocuo). La fase 1 servía MV
+  con desc MV size 0x0 → `RenderTexture.Create failed`, Unity renderizaba 2 de cada 3 frames en la imagen MV/scratch
+  (parpadeo). `kl_ovrp.c`: `KLOVRP_LAYERFLAG_SPACEWARP_ALLOC=(1<<8)|(1<<12)`, `_DEPTH=(1<<9)|(1<<13)`; rechazo si el
+  desc no lleva MV size (`KL_VPKTAA_ASW_NOSIZE=1` sirve igual). `kl_vulkan.c` `klvk_eye_fb_note` (diag stages eye).
+- Overlays: bit 3 `TextureOriginAtBottomLeft` (0x8) → `origin_top_left=0` en Vulkan
+  (`klovrp_overlay_origin_top_left`, `KL_OVRP_LAYER_BL=0`). Murciélago de Batman y quad de AC al derecho.
+- AC (39): abort `GetObjectClass(NULL)` desde libubiservices (Activity del puente Java). `kl_jni.c`: soft null-class
+  por defecto (`KL_JNI_SOFT_NULLCLASS=0`), receptor NULL en método no-Object de Object → Activity real.
+  `kl_shim.c`: `__memchr_chk`, `__fread_chk`, `__assert`. Vídeo de carga: `kl_jni_services.c` guarda el vídeo pedido
+  (`kl_loadingvideo_request_gen/name`); compositor lo reproduce con sonido (bucle si el nombre contiene «Loop»),
+  retiene 4 texturas de frame; al cerrar el skybox se olvida la petición.
+- AoT (40): audio entrecortado: feeder OpenSL hacía pop antes de copiar. `kl_opensl.c`: peek → write → retire
+  (`clears`), `GetState.count` incluye el buffer en curso. Pendiente VPEngine: `internal error: vector` en un compute
+  (vk.comp14…347) y `gpu.err arg_overflow=16090 skipped_draws` en f=348.
+- Pendiente VPKTAA: fase 2 con MV reales (AC/AoT); vía universal por profundidad desde VPEngine (Batman); bajar el
+  coste GPU del TAA (12,7 ms/frame en cola compartida).
+
 ## Logs 36–38 (2026-10-13) → build siguiente
 - AoT (36) y AC (37) abortaban: tras `throw FileNotFoundException(patch obb)` Unity llama `Object.toString()` →
   «no host implementation». `kl_jni_android.c`: `klj_Object_toString` (String → sí mismo; throwable →

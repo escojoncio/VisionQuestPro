@@ -1788,6 +1788,27 @@ static char *kl_strchr_chk(char *s, int ch, size_t dl) {
     kl_strlen_chk(s, dl);                  // proves the object is dl bytes
     return strchr(s, ch);
 }
+// bionic: __memchr_chk(s, c, n, buf_size) — the search may not run past the
+// object the compiler knows about. AC Nexus's libubiservices imports it.
+static void *kl_memchr_chk(const void *s, int c, size_t n, size_t dl) {
+    if (n > dl) die("__memchr_chk overflow"); return memchr(s, c, n); }
+// bionic: __fread_chk(buf, size, count, stream, buf_size). The whole transfer
+// (size * count, overflow-checked first) is bounded by the object size; the
+// read itself is kl_fread's, so the guest FILE* is mapped the same way and
+// KL_TRACE_IO still counts it. Darwin has no __fread_chk to forward to.
+static size_t kl_fread_chk(void *p, size_t a, size_t b, void *f, size_t dl) {
+    if (a && b > (size_t)-1 / a) die("__fread_chk size overflow");
+    if (a * b > dl) die("__fread_chk overflow");
+    return kl_fread(p, a, b, f);
+}
+// bionic's older assert: __assert(file, line, failed_expression). Fatal, like
+// __assert2; named first so the log says which assertion it was.
+static void kl_assert1(const char *file, int line, const char *expr) {
+    fprintf(stderr, "  [klepton] guest assertion failed: %s:%d: %s\n",
+            file ? file : "?", line, expr ? expr : "?");
+    fflush(NULL);
+    die("__assert");
+}
 // bionic: __vsnprintf_chk(dest, supplied_size, flags, compiler_size, fmt, va).
 static int kl_vsnprintf_chk(char *d, size_t n, int flags, size_t dl,
                             const char *fmt, void *gva) {
@@ -2049,6 +2070,8 @@ static const kl_entry g_shim[] = {
     E("__strcpy_chk", kl_strcpy_chk), E("__stack_chk_fail", kl_stack_chk_fail),
     E("__FD_ISSET_chk", klb_FD_ISSET_chk), E("__FD_SET_chk", klb_FD_SET_chk),
     E("__strlen_chk", kl_strlen_chk), E("__strchr_chk", kl_strchr_chk),
+    E("__memchr_chk", kl_memchr_chk), E("__fread_chk", kl_fread_chk),
+    E("__assert", kl_assert1),
     E("__vsnprintf_chk", kl_vsnprintf_chk),
 
     // divergent layouts / Android-only
