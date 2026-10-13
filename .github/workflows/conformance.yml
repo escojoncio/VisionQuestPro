@@ -177,10 +177,11 @@ jobs:
       - name: Package OpenXRCTS.apk
         run: |
           set -euo pipefail
-          APK=$(find xrcts/src/conformance/build/outputs/apk/release -name '*.apk' | head -1)
+          find xrcts -name '*.apk' | tee package-xr.log
+          APK=$(find xrcts -name '*.apk' | grep -i release | head -1)
           test -n "$APK"
           cp "$APK" OpenXRCTS.apk
-          unzip -l OpenXRCTS.apk | grep -E "lib/arm64-v8a|AndroidManifest|assets/" | head -40 | tee package-xr.log
+          unzip -l OpenXRCTS.apk | grep -E "lib/|AndroidManifest" | head -40 | tee -a package-xr.log
           ls -la OpenXRCTS.apk | tee -a package-xr.log
       - name: Publish the logs (branch ci-logs, conformance-openxr.txt)
         if: always()
