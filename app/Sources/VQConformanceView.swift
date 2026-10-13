@@ -114,6 +114,7 @@ struct VQConformanceSettings: View {
     @ObservedObject var settings: VQSettings
     @ObservedObject private var model = VQModel.shared
     @State private var downloading = false
+    @State private var downloadingXR = false
     @State private var fraction = 0.0
     @State private var result: String?
 
@@ -137,6 +138,22 @@ struct VQConformanceSettings: View {
                     })
                 }
                 .disabled(model.folderPath == nil)
+            }
+            if downloadingXR {
+                ProgressView(value: fraction) { Text(VQL("Descargando…", "Downloading…")).font(.caption) }
+            } else {
+                Button(VQL("Descargar / actualizar OpenXR CTS (inmersivo)", "Download / update OpenXR CTS (immersive)")) {
+                    downloadingXR = true; fraction = 0; result = nil
+                    VQConformance.download(openXR: true, progress: { f in Task { @MainActor in fraction = f } },
+                                           done: { err in
+                        Task { @MainActor in
+                            downloadingXR = false
+                            result = err.map { VQL("Error: ", "Error: ") + $0 } ?? VQL("Listo: «OpenXR CTS» ya está en la lista de juegos. Se juega como un juego (inmersivo); su resultado sale en el registro.", "Done: “OpenXR CTS” is in the game list. It plays like a game (immersive); its result goes to the log.")
+                            model.refresh()
+                        }
+                    })
+                }
+                .disabled(model.folderPath == nil || downloading)
             }
             if let result { Text(result).font(.caption).foregroundStyle(.secondary) }
             Picker(VQL("Duración de cada sesión", "Length of each session"), selection: $settings.conformanceMinutes) {

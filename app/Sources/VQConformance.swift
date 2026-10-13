@@ -16,12 +16,22 @@
 import Foundation
 
 enum VQConformance {
-    /// The release of the repository this build came from (VQBuildInfo, written by CI).
-    static var downloadURL: URL? {
-        vqReleaseRepository.isEmpty ? nil
-            : URL(string: "https://github.com/\(vqReleaseRepository)/releases/download/conformance/VulkanCTS.apk")
-    }
     static let folderName = "Vulkan CTS (Khronos)"
+    static let openXRPackage = "org.khronos.openxr.cts"
+    static let openXRFolderName = "OpenXR CTS (Khronos)"
+
+    /// The OpenXR CTS runs as a native game (immersive, like any OpenXR title) with Khronos's own
+    /// launch extras: the Vulkan2 graphics plugin, non-interactive tests only, XML results.
+    /// Its console report (pass/fail per test and the totals) lands in the guest log.
+    static func prepareOpenXR() {
+        let extras = [
+            "graphicsPlugin=Vulkan2",
+            "args=~[interactive]",
+            "xmlFilename=openxr_cts.xml",
+        ]
+        setenv("KL_INTENT_EXTRAS", extras.joined(separator: "\n"), 1)
+        VQLog.log("Conformidad OpenXR: plugin Vulkan2, sin tests interactivos; resultado en el registro del juego y en openxr_cts.xml")
+    }
     static let profile = "rapida"
 
     struct Batch {
@@ -298,10 +308,15 @@ enum VQConformance {
     // MARK: - Download
 
     /// Downloads VulkanCTS.apk into QUEST/Juegos/Vulkan CTS (Khronos)/ (replacing an older copy).
-    static func download(progress: @escaping @Sendable (Double) -> Void,
+    static func download(openXR: Bool = false, progress: @escaping @Sendable (Double) -> Void,
                          done: @escaping @Sendable (String?) -> Void) {
         guard let games = VQFolder.shared.games else { done(VQL("Elige antes la carpeta QUEST.", "Choose the QUEST folder first.")); return }
-        guard let downloadURL else { done(VQL("Esta build no sabe de qué repositorio descargar.", "This build does not know which repository to download from.")); return }
+        guard !vqReleaseRepository.isEmpty,
+              let downloadURL = URL(string: "https://github.com/\(vqReleaseRepository)/releases/download/"
+                                    + (openXR ? "conformance-openxr/OpenXRCTS.apk" : "conformance/VulkanCTS.apk"))
+        else { done(VQL("Esta build no sabe de qué repositorio descargar.", "This build does not know which repository to download from.")); return }
+        let folderName = openXR ? Self.openXRFolderName : Self.folderName
+        let fileName = openXR ? "OpenXRCTS.apk" : "VulkanCTS.apk"
         let folder = games.appendingPathComponent(folderName, isDirectory: true)
         VQLog.log("Conformidad: descargando \(downloadURL.absoluteString)")
         let delegate = Downloader(progress: progress) { tmp, error in
@@ -309,7 +324,7 @@ enum VQConformance {
             guard let tmp else { done("?"); return }
             do {
                 try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-                let dest = folder.appendingPathComponent("VulkanCTS.apk")
+                let dest = folder.appendingPathComponent(fileName)
                 try? FileManager.default.removeItem(at: dest)
                 try FileManager.default.moveItem(at: tmp, to: dest)
                 // A new APK means new lists and a new binary: the old preparation must go.

@@ -11,11 +11,15 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      target:
+        description: "Qué compilar: all, vulkan u openxr"
+        default: all
 permissions:
   contents: write
 jobs:
   vulkan-cts:
-    if: github.event_name == 'workflow_dispatch' || contains(github.event.head_commit.message, '[conformance]')
+    if: (github.event_name == 'workflow_dispatch' && inputs.target != 'openxr') || contains(github.event.head_commit.message, '[conformance]')
     concurrency:
       group: conformance
       cancel-in-progress: true
@@ -129,3 +133,65 @@ jobs:
             --target "$GITHUB_SHA" --prerelease \
             --title "Tests oficiales de conformidad (Khronos)" \
             --notes "Vulkan CTS ${CTS_TAG#vulkan-cts-} (deqp-vk) para Android arm64, empaquetado como APK para VisionQuestPro. La app lo descarga desde Ajustes > Conformidad."
+
+  # The OpenXR CTS (Khronos), the Android build exactly as Khronos ships it (gradle, NDK 23.2):
+  # a NativeActivity APK (libconformance_test.so) that VisionQuestPro runs as a native game, with
+  # its arguments passed as launch extras. Published as the release "conformance-openxr".
+  openxr-cts:
+    if: (github.event_name == 'workflow_dispatch' && inputs.target != 'vulkan') || contains(github.event.head_commit.message, '[conformance]')
+    concurrency:
+      group: conformance-openxr
+      cancel-in-progress: true
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    env:
+      XR_TAG: openxr-cts-1.1.58.0
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - name: NDK 23.2 and CMake 3.22 (the versions the CTS's gradle build names)
+        run: |
+          SDKM="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          yes | "$SDKM" --licenses > /dev/null || true
+          "$SDKM" "ndk;23.2.8568313" "cmake;3.22.1" "build-tools;34.0.0" "platforms;android-34" > /dev/null
+      - name: OpenXR-CTS ${{ env.XR_TAG }}
+        run: git clone -q --depth 1 --branch "$XR_TAG" https://github.com/KhronosGroup/OpenXR-CTS xrcts
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: xrcts-gradle-${{ env.XR_TAG }}
+      - name: Build (assembleRelease, arm64)
+        run: |
+          set -o pipefail
+          cd xrcts/src/conformance
+          echo "sdk.dir=$ANDROID_HOME" > local.properties
+          ./gradlew --no-daemon -Pandroid.injected.build.abi=arm64-v8a assembleRelease 2>&1 \
+            | grep -v "^> Task\|^\s*$" | tail -300 | tee ../../../build-xr.log
+      - name: Package OpenXRCTS.apk
+        run: |
+          set -euo pipefail
+          APK=$(find xrcts/src/conformance/build/outputs/apk/release -name '*.apk' | head -1)
+          test -n "$APK"
+          cp "$APK" OpenXRCTS.apk
+          unzip -l OpenXRCTS.apk | grep -E "lib/arm64-v8a|AndroidManifest|assets/" | head -40 | tee package-xr.log
+          ls -la OpenXRCTS.apk | tee -a package-xr.log
+      - name: Publish the logs (branch ci-logs, conformance-openxr.txt)
+        if: always()
+        run: bash scripts/ci-publish-log.sh conformance-openxr build-xr.log package-xr.log
+      - name: Publish OpenXRCTS.apk as the release "conformance-openxr"
+        if: success() && github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete conformance-openxr --yes --cleanup-tag || true
+          gh release create conformance-openxr OpenXRCTS.apk \
+            --target "$GITHUB_SHA" --prerelease \
+            --title "Test oficial de OpenXR (Khronos)" \
+            --notes "OpenXR CTS ${XR_TAG#openxr-cts-} para Android arm64, tal como lo compila Khronos. La app lo descarga desde Ajustes > Conformidad."
