@@ -43,8 +43,14 @@ tarde está resumido abajo y detallado en git).
 - Escáner de APIs (`VQApiScan.swift` + `app/Native/vq_scan.c`; Klepton `kl_shim_known`, `kl_jni_knows_class`):
   cada lanzamiento, log «Escáner de APIs: …» con importaciones nativas sin implementar y clases Java del sistema
   sin binding.
-- Pendiente: verificar que la CI del CTS compila/empaqueta; build de app `[build]`; primera tanda en el visor;
-  OpenXR CTS (fase B: gradle en `src/conformance`, NDK 23.2, lib `conformance_test`, necesita sesión inmersiva).
+- CI OK: release `conformance` (VulkanCTS.apk 68 MB, API 30, `vq_exe_main` exportada; `main` NO sale en dynsym
+  aunque se pida) y release `conformance-openxr` (OpenXRCTS.apk 41 MB, gradle oficial, NDK 23.2). Build de app
+  `96abece` OK (guest exe busca `vq_exe_main`; args deqp: `--quiet`, NO `--deqp-quiet`).
+- OpenXR CTS en la app: paquete `org.khronos.openxr.cts` se trata como Vulkan; `KL_INTENT_EXTRAS`
+  graphicsPlugin=Vulkan2, args=~[interactive], xmlFilename=openxr_cts.xml (relativo a externalDataPath);
+  `Intent.getBooleanExtra` ahora lee los extras de lanzamiento (true/false/1/0). Inmersivo, resultado en el log.
+- Pendiente: primera sesión de Vulkan CTS en el visor (sin probar nada aún en dispositivo); analizar su resumen y
+  corregir por grupos; luego OpenXR CTS.
 
 ## Estado al cierre del 2026-10-13 tarde (logs 53–54, AC Nexus)
 Última build: `de2bf58` (VisionQuestPro) + `166f0b1` (VPKEngine). Usuario: **AC Nexus y AoT siguen igual** (rosa
