@@ -68,6 +68,22 @@ tarde está resumido abajo y detallado en git).
   con `#terminateTestCaseResult Crash`, reanuda con `<log>.r<k>.txt/.qpa`, máx. 50 (`KL_EXE_MAX_RECOVERIES`),
   respeta presupuesto/memoria, vigilante: sin progreso 240 s tras recuperar → `_exit(0)` (`KL_EXE_STALL_S`).
 - README: sección «Atribución obligatoria» (petición del usuario) + créditos.
+- Log 59 (4ª sesión, build 874984e): 31 tandas en ~2,5 min, sin crashes; se bloqueó en `048-draw-001`:
+  `gpu.err what=command_buffer error=Caused_GPU_Hang_Error (kIOGPUCommandBufferCallbackErrorHang)` y después
+  nada avanza (el usuario pulsó Parar). Hallazgos para la siguiente sesión de trabajo (en este orden):
+  1. Robustez del run: tras un error de command buffer (hang/fault) VPKEngine debe señalar fences/semáforos y
+     devolver `VK_ERROR_DEVICE_LOST` (hoy se queda esperando); pasar `--deqp-watchdog=enable` (su aborto lo recoge
+     la recuperación por caso); NO prewarm en el guest exe (`gpu.prewarm` recompila ~1700 pipelines del recipe store
+     en CADA vkCreateDevice → memoria 0,7→1,4 GB y lentitud; forzar `precompileShaders=false` para el CTS).
+  2. Resumen: añadir «No soportados por motivo» (top N mensajes de NotSupported del .qpa) para decidir qué
+     implementar (4188 NotSupported; objetivo = perfil de features del Adreno 740, no todo).
+  3. Traductor: `unsupported SPIR-V instruction 68` = OpArrayLength (SSBO runtime arrays) → necesita tamaño de buffer
+     en un buffer auxiliar (como el sizes buffer de otros traductores).
+  4. Fails conocidos (104): texel buffers (formatos sint/snorm/16-bit), fragment_shader_output int/snorm, blits 1D
+     (1D-como-2D), device_init unsupported features (multiview/shader_draw_parameters deben devolver
+     FEATURE_NOT_PRESENT si no se anuncian), format_properties (A1R5G5B5, A8B8G8R8_SNORM, R32G32B32 vertex),
+     image_format_properties sampleCounts>1 en formatos sin color attachment, protected memory props,
+     submit_wait_many_semaphores.
 - Pendiente: primera sesión de Vulkan CTS en el visor (sin probar nada aún en dispositivo); analizar su resumen y
   corregir por grupos; luego OpenXR CTS.
 
