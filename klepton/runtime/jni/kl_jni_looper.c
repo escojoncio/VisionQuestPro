@@ -525,6 +525,25 @@ static klj_val klj_Message_sendToTarget(void *env, void *self, const klj_val *a,
     return (klj_val){.j = 0};
 }
 
+// Message.getTarget() / Handler.getLooper() — the standard HandlerThread
+// teardown (AoT log 44, Unity AndroidVideoMedia): the handler callback for the
+// "stop" message runs `msg.getTarget().getLooper().quit()`, and the caller then
+// Thread.join()s the HandlerThread. With getTarget() simulated as null the quit
+// never happened, join() blocked the guest main thread forever and the game
+// stopped submitting frames (compositor "stale in a row", audio all zeros).
+static klj_val klj_Message_getTarget(void *env, void *self, const klj_val *a, int n) {
+    (void)env; (void)a; (void)n;
+    klj_message *m = klj_as_message(self);
+    return (klj_val){.l = m ? m->target : NULL};
+}
+// The Looper the Handler was built with; a Handler made without one is bound to
+// the calling thread's looper, which in this shim is the main one.
+static klj_val klj_Handler_getLooper(void *env, void *self, const klj_val *a, int n) {
+    klj_handler *h = klj_as_handler(self);
+    if (h && h->looper) return (klj_val){.l = h->looper};
+    return klj_Looper_getMainLooper(env, self, a, n);
+}
+
 // ---- android.os.HandlerThread ----
 // The thread is not started here — Android requires an explicit start() — so the
 // looper exists but nothing delivers on it until then.
@@ -1182,6 +1201,8 @@ const klj_binding klj_bind_looper[] = {
     // waiting on it. See the looper section above.
     {"android/os/Handler", "obtainMessage", "(I)Landroid/os/Message;", klj_Handler_obtainMessage},
     {"android/os/Message", "sendToTarget", "()V", klj_Message_sendToTarget},
+    {"android/os/Message", "getTarget", "()Landroid/os/Handler;", klj_Message_getTarget},
+    {"android/os/Handler", "getLooper", "()Landroid/os/Looper;", klj_Handler_getLooper},
     {"android/view/Choreographer", "getInstance", "()Landroid/view/Choreographer;", klj_Choreographer_getInstance},
     {"android/view/Choreographer", "postFrameCallback", "(Landroid/view/Choreographer$FrameCallback;)V", klj_Choreographer_postFrameCallback},
     {"android/os/HandlerThread", "<init>", "(Ljava/lang/String;)V", klj_HandlerThread_init},

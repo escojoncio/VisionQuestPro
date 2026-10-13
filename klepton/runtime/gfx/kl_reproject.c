@@ -83,6 +83,15 @@ int kl_reproject_chroma(float rgb[3], float *dmin, float *dmax) {
     return __atomic_load_n(&s_chroma_on, __ATOMIC_ACQUIRE);
 }
 
+// kl_ovrp's EyeLevel offset (see kl_ovrp_guest_origin_y). A weak DEFINITION
+// answering 0: this file is also built without kl_ovrp (`make reproject`), and
+// in the app the strong one in kl_ovrp.c replaces it at link time.
+__attribute__((weak)) float kl_ovrp_guest_origin_y(void) { return 0.0f; }
+static float klr_guest_origin_y(void) {
+    float y = kl_ovrp_guest_origin_y();
+    return isfinite(y) ? y : 0.0f;
+}
+
 static int klr_translate(void) {
     static int on = -1;
     if (on < 0) on = kl_env_on("KL_REPROJECT_TRANSLATE", 1);
@@ -967,7 +976,10 @@ kl_reproject_uniforms kl_reproject_build(const kl_ovrp_render_pose *rendered, in
     // floor height, a recentre) cancels and neither space has to be the other.
     simd_float4x4 render_m = render_rot, device_m = device_rot;
     if (klr_translate() && rendered && rendered->serial) {
-        render_m.columns[3] = simd_make_float4(rendered->px, rendered->py,
+        // The render pose is in the guest's tracking space; under EyeLevel
+        // that space sits one eye height above the display's world origin.
+        render_m.columns[3] = simd_make_float4(rendered->px,
+                                               rendered->py + klr_guest_origin_y(),
                                                rendered->pz, 1.0f);
         device_m.columns[3] = origin_from_device.columns[3];
     }
@@ -1086,6 +1098,10 @@ kl_overlay_uniforms kl_overlay_build(const kl_ovrp_overlay *ov, int eye,
     // here: the layer has a position and the display's eye offset is what gives
     // it the stereo disparity a quad at 7 m is supposed to have.
     simd_float4x4 world_from_quad = klr_pose_matrix(ov->pose);
+    // A world-locked quad is stated in the guest's tracking space: under
+    // EyeLevel its y ~ 0 means eye height, not the floor (AC Nexus quads at
+    // ~(0,0,0) were composited on the floor).
+    if (!ov->head_locked) world_from_quad.columns[3].y += klr_guest_origin_y();
     if (ov->head_locked)
         // Stated, not silently treated as world-locked: the two differ by the
         // whole head pose. Nothing in the corpus submits one yet, so this arm

@@ -2128,6 +2128,36 @@ static float klovrp_eye_height(void) {
 
 float kl_ovrp_eye_height(void) { return klovrp_eye_height(); }
 
+// --- EyeLevel is a SPACE, not just a default height ------------------------
+// The published head is in the display's world: y measured from the floor
+// (1.02-1.04 m seated in logs 44-46). Under EyeLevel (0) a Quest reports the
+// head at y ~ 0 — the origin IS the eye — and every pose the guest submits
+// (eye layer, quads) is in that space. Serving the floor height there put the
+// camera a full eye height above the rig (AC Nexus sets EyeLevel during its
+// loading: head Y=1.025 origin=0 in log 45) and every world-locked quad the
+// guest placed at its eye level (y ~ 0) was composited on the floor.
+// So: OVRPlugin reads subtract this, and the compositor adds it back to
+// anything the guest states in its tracking space. Only once an OVRPlugin node
+// read has happened (`g_ovrp_space_used`): an OpenXR guest never speaks
+// OVRPlugin, keeps g_tracking_origin at 0 and does its own LOCAL/STAGE.
+// KL_OVRP_EYELEVEL_ZERO=0 restores the old absolute height.
+static int g_ovrp_space_used;
+static int klovrp_eyelevel_zero(void) {
+    static int on = -1;
+    if (on < 0) on = kl_env_on("KL_OVRP_EYELEVEL_ZERO", 1);
+    return on;
+}
+static float klovrp_guest_origin_y(void) {
+    if (g_tracking_origin != 0 || !klovrp_eyelevel_zero()) return 0.0f;
+    // No published head yet: the default head is already y = 0 under EyeLevel.
+    if (!__atomic_load_n(&g_head_set, __ATOMIC_ACQUIRE)) return 0.0f;
+    return klovrp_measured_eye_height();
+}
+float kl_ovrp_guest_origin_y(void) {
+    if (!__atomic_load_n(&g_ovrp_space_used, __ATOMIC_ACQUIRE)) return 0.0f;
+    return klovrp_guest_origin_y();
+}
+
 // --- One pose per guest frame, and why the live one is wrong ---------------
 //
 // **This is what was left of the judder after the swapchain was fixed.**
@@ -2529,9 +2559,14 @@ static uint64_t klovrp_Update3(int step, int frame_index, double prediction) {
 // that does not use this part of the API.
 static klovrp_pose klovrp_step_head(int step) {
     int ix = klovrp_step_ix(step);
-    if (__atomic_load_n(&g_step_valid[ix], __ATOMIC_ACQUIRE))
-        return klovrp_seq_read(&g_step_head[ix], &g_step_seq);
-    return klovrp_head();
+    klovrp_pose h = __atomic_load_n(&g_step_valid[ix], __ATOMIC_ACQUIRE)
+                    ? klovrp_seq_read(&g_step_head[ix], &g_step_seq)
+                    : klovrp_head();
+    // OVRPlugin's read: into the guest's tracking space (see
+    // kl_ovrp_guest_origin_y). The stored sample stays in display space.
+    __atomic_store_n(&g_ovrp_space_used, 1, __ATOMIC_RELEASE);
+    h.py -= klovrp_guest_origin_y();
+    return h;
 }
 
 // Where an Oculus Touch's TRACKED origin sits in its own OpenXR grip frame,
@@ -2610,6 +2645,8 @@ static klovrp_pose klovrp_step_hand(int step, int hand) {
         p = klovrp_seq_read(&g_step_hand[ix][hand], &g_step_seq);
     else
         p = klovrp_hand(hand);
+    __atomic_store_n(&g_ovrp_space_used, 1, __ATOMIC_RELEASE);
+    p.py -= klovrp_guest_origin_y();      // guest tracking space, as the head
     // Here and not in klovrp_hand: this is the OVRPlugin guest's read.
     // kl_ovrp_hand_motion is kl_openxr's and must keep the grip.
     klovrp_grip_to_touch(&p, hand);
@@ -2719,8 +2756,9 @@ static uint64_t klovrp_begin_frame_impl(int guest_frame_index) {
     // and rendered every eye from. Not a fresh read: a fresh read at this
     // moment is a pose the picture was never drawn with, and reprojection
     // subtracts whatever is recorded here.
-    klovrp_pose h = __atomic_load_n(&g_saw_update2, __ATOMIC_ACQUIRE)
-                    ? klovrp_step_head(KLOVRP_STEP_RENDER) : klovrp_head();
+    klovrp_pose h = klovrp_head();
+    if (__atomic_load_n(&g_saw_update2, __ATOMIC_ACQUIRE)) h = klovrp_step_head(KLOVRP_STEP_RENDER);
+    else h.py -= kl_ovrp_guest_origin_y();   // same space GetNodePoseState answered in
     pthread_mutex_lock(&g_frames.mu);
     uint64_t s = ++g_frames.serial;
     // Into the PENDING record, not into a stage. Which stage this frame goes to
@@ -3841,6 +3879,9 @@ static uint64_t klovrp_GetTrackingTransformRelativePose(float *out, int origin) 
         // Latched inside klovrp_measured_eye_height only once the headset has
         // reported a real height (1.6 m until then, never frozen at a default).
         out[5] = klovrp_measured_eye_height();
+    } else if ((origin == 1 || origin == 2) && cur == 0 && klovrp_eyelevel_zero()) {
+        // ...and the mirror: under EyeLevel the floor is one eye height BELOW.
+        out[5] = -klovrp_measured_eye_height();
     } else if (origin == 4) {
         klovrp_pose h = klovrp_step_head(-1);
         out[0] = h.qx; out[1] = h.qy; out[2] = h.qz; out[3] = h.qw;

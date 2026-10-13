@@ -757,6 +757,12 @@ int kl_ovrp_head_motion(float *vel, float *ang);
 // the guest asked for an eye-level tracking origin. This is the offset between
 // OpenXR's STAGE space (floor) and its LOCAL space (where the head started).
 float kl_ovrp_eye_height(void);
+// World Y of the OVRPlugin guest's tracking origin: the measured eye height
+// while it runs EyeLevel (its poses are served with y ~ 0 there), else 0 — and
+// 0 for a guest that never read an OVRPlugin node (OpenXR). Add it to any
+// position the guest states in its tracking space before placing it in the
+// display's world. KL_OVRP_EYELEVEL_ZERO=0 makes it 0 always.
+float kl_ovrp_guest_origin_y(void);
 
 // ---------------------------------------------------------------------------
 // The read side of the pose seam, for the OTHER XR API

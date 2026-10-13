@@ -539,6 +539,14 @@ static int klplat_user_default(void) {
     const char *t = kl_driver_target_name();
     if (t) for (unsigned i = 0; i < sizeof on / sizeof on[0]; i++)
         if (strcmp(t, on[i]) == 0) return 1;
+    // VisionQuestPro names the target after the game FOLDER, so the list above
+    // never matches there: key on the package too. Ubisoft titles run their
+    // online init (UbiServices, ProfilePolicy UsePlatform) as a chain that
+    // needs the platform user: AC Nexus log 45 passes the entitlement check,
+    // gets 0 here, prints "An unknown error occurred. Request failed." and
+    // stays on the Background-Looping loading video for good.
+    const char *pkg = kl_jni_guest_package();
+    if (pkg && strncasecmp(pkg, "com.ubisoft.", 12) == 0) return 1;
     return 0;
 }
 static uint64_t klplat_User_GetLoggedInUser(void) {
@@ -734,8 +742,20 @@ static const char *klplat_AssetDetails_GetFilepath(const klplat_asset *a) {
     plat_hit("ovr_AssetDetails_GetFilepath");
     return a ? a->path : "";
 }
-static const char *klplat_AssetDetails_GetAssetType(const void *a) {
-    plat_hit("ovr_AssetDetails_GetAssetType"); (void)a; return "default";
+// Language packs. A Quest title that ships per-language asset files (AC Nexus:
+// en.lang, fr.lang, ... beside start0/1/2 in its obb dir) finds its own by
+// AssetType "language_pack" and LanguagePackInfo.Tag. Answering "default" and a
+// NULL language for all of them hides every pack. A file named "<tag>.lang" is
+// taken as the pack for <tag>; the handle is the asset entry itself.
+static int asset_is_lang(const klplat_asset *a) {
+    if (!a || !a->name) return 0;
+    const char *dot = strrchr(a->name, '.');
+    return dot && dot != a->name && strcasecmp(dot, ".lang") == 0 &&
+           kl_env_on("KL_PLAT_LANGPACKS", 1);
+}
+static const char *klplat_AssetDetails_GetAssetType(const klplat_asset *a) {
+    plat_hit("ovr_AssetDetails_GetAssetType");
+    return asset_is_lang(a) ? "language_pack" : "default";
 }
 static const char *klplat_AssetDetails_GetDownloadStatus(const void *a) {
     plat_hit("ovr_AssetDetails_GetDownloadStatus"); (void)a; return "installed";
@@ -746,13 +766,39 @@ static const char *klplat_AssetDetails_GetIapStatus(const void *a) {
 static const char *klplat_AssetDetails_GetMetadata(const void *a) {
     plat_hit("ovr_AssetDetails_GetMetadata"); (void)a; return "";
 }
-// No language pack: NULL handle; the SDK's LanguagePackInfo wrapper may still
-// read its fields through it, so those answer "" for any handle.
-static uint64_t klplat_AssetDetails_GetLanguage(const void *a) {
-    plat_hit("ovr_AssetDetails_GetLanguage"); (void)a; return 0;
+static uint64_t klplat_AssetDetails_GetLanguage(const klplat_asset *a) {
+    plat_hit("ovr_AssetDetails_GetLanguage");
+    if (!asset_is_lang(a)) return 0;
+    static int said;
+    if (said < 8) { said++;
+        fprintf(stderr, "  [plat] language pack: %s (tag from the file name)\n", a->name); }
+    return (uint64_t)(uintptr_t)a;
 }
-static const char *klplat_LanguagePackInfo_str(const void *h) {
-    plat_hit("ovr_LanguagePackInfo_Get*"); (void)h; return "";
+// "<tag>.lang" -> "<tag>", in a per-thread buffer (the SDK marshals it at once).
+static const char *lang_tag(const klplat_asset *a) {
+    static __thread char buf[64];
+    if (!asset_is_lang(a)) return "";
+    const char *dot = strrchr(a->name, '.');
+    size_t n = (size_t)(dot - a->name);
+    if (n >= sizeof buf) n = sizeof buf - 1;
+    memcpy(buf, a->name, n); buf[n] = 0;
+    return buf;
+}
+static const char *lang_english(const char *tag) {
+    static const struct { const char *t, *n; } k[] = {
+        {"en","English"},{"fr","French"},{"de","German"},{"es","Spanish"},{"it","Italian"},
+        {"ja","Japanese"},{"ko","Korean"},{"pt","Portuguese"},{"ru","Russian"},{"zh","Chinese"},
+        {"pl","Polish"},{"nl","Dutch"},{"ar","Arabic"},{"tr","Turkish"},{"sv","Swedish"}};
+    for (unsigned i = 0; i < sizeof k / sizeof k[0]; i++)
+        if (strncasecmp(tag, k[i].t, 2) == 0 && (!tag[2] || tag[2] == '-' || tag[2] == '_'))
+            return k[i].n;
+    return tag;
+}
+static const char *klplat_LanguagePackInfo_GetTag(const klplat_asset *h) {
+    plat_hit("ovr_LanguagePackInfo_Get*"); return lang_tag(h);
+}
+static const char *klplat_LanguagePackInfo_GetEnglishName(const klplat_asset *h) {
+    plat_hit("ovr_LanguagePackInfo_Get*"); return lang_english(lang_tag(h));
 }
 // GetList's array: the obb dir's own files, all installed.
 static uint64_t klplat_AssetFileDeliveryList_GetSize(const void *h) {
@@ -1279,9 +1325,9 @@ static const struct { const char *name; void *fn; } g_plat_impl[] = {
     {"ovr_AssetDetails_GetMetadata",           (void *)klplat_AssetDetails_GetMetadata},
     {"ovr_AssetFileDownloadResult_GetAssetId", (void *)klplat_AssetDetails_GetAssetId},
     {"ovr_AssetFileDownloadResult_GetFilepath",(void *)klplat_AssetDetails_GetFilepath},
-    {"ovr_LanguagePackInfo_GetEnglishName",    (void *)klplat_LanguagePackInfo_str},
-    {"ovr_LanguagePackInfo_GetNativeName",     (void *)klplat_LanguagePackInfo_str},
-    {"ovr_LanguagePackInfo_GetTag",            (void *)klplat_LanguagePackInfo_str},
+    {"ovr_LanguagePackInfo_GetEnglishName",    (void *)klplat_LanguagePackInfo_GetEnglishName},
+    {"ovr_LanguagePackInfo_GetNativeName",     (void *)klplat_LanguagePackInfo_GetEnglishName},
+    {"ovr_LanguagePackInfo_GetTag",            (void *)klplat_LanguagePackInfo_GetTag},
     // The user access token and the achievement catalogue — two request-style
     // calls the game issues during platform init and gates its menu on. Both
     // complete with benign, empty/offline data (see the handlers above) rather

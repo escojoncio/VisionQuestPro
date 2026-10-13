@@ -47,6 +47,15 @@ final class KleptonTAA {
     private let mvMap = KleptonTAA.envS("KL_VPKTAA_MV_MAP") ?? "auto"
     private let depthMap = KleptonTAA.envS("KL_VPKTAA_DEPTH_MAP") ?? "auto"
     private let depthWaitMs = Double(KleptonTAA.envF("KL_VPKTAA_DEPTH_WAIT_MS", 25))
+    // Jitter/frame pairing: the frame record carries the LAST frustum offset kl_ovrp served; a
+    // guest that reads the frustum for the NEXT frame while the GPU still renders this one (UE4
+    // game thread one frame ahead of the render thread) renders frame N with the offset of
+    // record N−1 (lag −1), or the reverse (lag +1). Wrongly paired jitter = every frame
+    // un-shifted by the wrong sub-pixel amount: shimmer + blur. KL_VPKTAA_JITTER_LAG =
+    // auto (default: starts 0, follows the shader's vote) | -1 | 0 | 1.
+    private let jitterLagAuto: Bool
+    private var jitterLag = 0
+    private var jitterLagUnknown = 0          // records whose jitter is not a Halton(2,3) x8 entry
 
     private let device: MTLDevice
     private let core: VPKTAACore
@@ -74,6 +83,7 @@ final class KleptonTAA {
     private var lastSubmitAt = Date.distantPast
     private var lastDepthOK = Date.distantPast
     // Stats / diagnostics.
+    private var rawFrames = 0, lastRawSerial: UInt64 = 0   // guest frames shown without TAA
     private var resolved = 0, depthFrames = [0, 0], mvFrames = [0, 0], depthLate = 0
     private var lastStats = Date()
     private var lastInputsKey = ""
@@ -88,6 +98,8 @@ final class KleptonTAA {
         self.device = device
         self.core = c
         self.mvAuto = sign == "auto"
+        let lag = KleptonTAA.envS("KL_VPKTAA_JITTER_LAG") ?? "auto"
+        self.jitterLagAuto = Int(lag) == nil
         self.queue = device.makeCommandQueue()
         // Every stored property is set from here on.
         queue?.label = "VPKTAA"
@@ -95,7 +107,39 @@ final class KleptonTAA {
         c.sharpness = sharp
         c.disocclusion = min(max(KleptonTAA.envF("KL_VPKTAA_DISOCC", 0.1), 0.02), 1)
         if sign == "-1" { mvSign = SIMD2<Float>(-1, -1) }
+        if let l = Int(lag) { jitterLag = max(-2, min(2, l)) }
         if KleptonTAA.envS("KL_VPKTAA_MV_YFLIP") == "1" { mvSign.y = -mvSign.y }
+    }
+
+    private static func halton(_ i: Int, _ b: Int) -> Float {
+        var f: Float = 1, r: Float = 0, i = i
+        while i > 0 { f /= Float(b); r += f * Float(i % b); i /= b }
+        return r
+    }
+
+    /// kl_ovrp's offset k (1...8) of the sequence, in tangent units for this frustum/size.
+    private static func haltonJitter(_ k: Int, _ tan: SIMD4<Float>, _ w: Int, _ h: Int) -> SIMD2<Float> {
+        let kk = ((k - 1) % 8 + 8) % 8 + 1
+        return SIMD2((halton(kk, 2) - 0.5) * (tan.x + tan.y) / Float(w),
+                     (halton(kk, 3) - 0.5) * (tan.z + tan.w) / Float(h))
+    }
+
+    /// (jitter to use, [previous, next] alternatives) from the record's jitter and the lag.
+    /// Same formula as klovrp_jit_frustum (pixels of the eye storage = colour texture size).
+    private func pairedJitter(_ j: SIMD2<Float>, _ tan: SIMD4<Float>, _ w: Int, _ h: Int)
+        -> (SIMD2<Float>, [SIMD2<Float>]) {
+        var bestK = 0
+        var bestE: Float = 1e9
+        for k in 1...8 {
+            let c = KleptonTAA.haltonJitter(k, tan, w, h)
+            let d = (c - j) * SIMD2(Float(w) / max(tan.x + tan.y, 1e-6), Float(h) / max(tan.z + tan.w, 1e-6))
+            let e = abs(d.x) + abs(d.y)
+            if e < bestE { bestE = e; bestK = k }
+        }
+        guard bestE < 0.02 else { jitterLagUnknown += 1; return (j, []) }   // not ours: as is
+        let k = bestK + jitterLag
+        return (KleptonTAA.haltonJitter(k, tan, w, h),
+                [KleptonTAA.haltonJitter(k - 1, tan, w, h), KleptonTAA.haltonJitter(k + 1, tan, w, h)])
     }
 
     /// Output picture: rgba8 sRGB, written by the kernels through a non-sRGB view with the
@@ -114,9 +158,16 @@ final class KleptonTAA {
     }
 
     /// The newest finished resolve, pinned until `cmd` (the composite that samples it) completes.
-    func acquire(for cmd: MTLCommandBuffer) -> Published? {
+    /// nil when it is 2+ guest frames behind `newestSerial`: the compositor then shows the
+    /// guest's own newest picture, so VPKTAA never drops the shown cadence below the game's
+    /// (one frame behind = the resolve of the newest frame is still running: normal latency).
+    func acquire(for cmd: MTLCommandBuffer, newestSerial: UInt64 = 0) -> Published? {
         lock.lock(); defer { lock.unlock() }
         guard let p = published, p.slot < pins.count else { return nil }
+        if newestSerial > p.pose.serial + 1 {
+            if lastRawSerial != newestSerial { lastRawSerial = newestSerial; rawFrames += 1 }
+            return nil
+        }
         pins[p.slot] += 1
         let slot = p.slot
         cmd.addCompletedHandler { [weak self] _ in
@@ -328,7 +379,9 @@ final class KleptonTAA {
         let t = r.tangents
         let tan: SIMD4<Float> = eye == 0 ? SIMD4(t.0.0, t.0.1, t.0.2, t.0.3) : SIMD4(t.1.0, t.1.1, t.1.2, t.1.3)
         let j = r.jitter
-        let jit: SIMD2<Float> = r.jitter_mode == 1 ? (eye == 0 ? SIMD2(j.0.0, j.0.1) : SIMD2(j.1.0, j.1.1)) : .zero
+        var jit: SIMD2<Float> = r.jitter_mode == 1 ? (eye == 0 ? SIMD2(j.0.0, j.0.1) : SIMD2(j.1.0, j.1.1)) : .zero
+        var jitAlt: [SIMD2<Float>] = []
+        if jit != .zero { (jit, jitAlt) = pairedJitter(jit, tan, w, h) }
         var crop = SIMD2<Float>(1, 1)
         var cropOff = SIMD2<Float>(0, 0)
         let vp = eye == 0 ? r.viewport.0 : r.viewport.1
@@ -371,7 +424,7 @@ final class KleptonTAA {
         }
         return VPKTAAEyeInput(color: color, slice: slice, flipY: flipY, tangents: tan, jitter: jit,
                               crop: crop, cropOff: cropOff, orientation: qh * qe, position: pos,
-                              depth: dep, motion: mot)
+                              depth: dep, motion: mot, jitterAlt: jitAlt)
     }
 
     private func pct(_ a: UInt32, _ b: UInt32) -> String {
@@ -404,11 +457,13 @@ final class KleptonTAA {
         lock.unlock()
         var line = "[taa] stats (30 s, async queue): resolves=\(resolved) resets=\(core.resets - resetsLogged) "
             + "gpu=\(String(format: "%.2f", gpuAvg)) ms/frame (max \(String(format: "%.1f", gpuMax))) "
-            + "depth-late=\(depthLate)"
+            + "depth-late=\(depthLate) raw-fallback=\(rawFrames) frames"
         var votes: [UInt32] = [0, 0, 0, 0]
+        var jv: [UInt32] = [0, 0, 0]
         for e in 0..<2 {
             let s = core.takeStats(eye: e)
             for k in 0..<4 { votes[k] += s.votes[k] }
+            for k in 0..<3 { jv[k] += s.jitterVotes[k] }
             line += " | eye\(e): frames depth=\(depthFrames[e]) mv=\(mvFrames[e]) "
                 + "depthValid=\(pct(s.depthValid, s.pixels)) pct disocc=\(pct(s.disoccluded, s.pixels)) pct "
                 + "rejected=\(pct(s.rejected, s.pixels)) pct offscreen=\(pct(s.offscreen, s.pixels)) pct "
@@ -425,7 +480,25 @@ final class KleptonTAA {
                 line += " -> AUTO switch to (\(sg.x > 0 ? "+" : "-")x\(sg.y > 0 ? "+" : "-")y)"
             }
         }
+        // Jitter pairing: votes for the used offset / the previous one / the next one.
+        let jt = jv.reduce(0, +)
+        line += " | jitter votes (used,prev,next)=\(jv[0]),\(jv[1]),\(jv[2]) lag=\(jitterLag)"
+            + (jitterLagAuto ? "(auto)" : "(forced)")
+            + (jitterLagUnknown > 0 ? " non-halton=\(jitterLagUnknown)" : "")
+        if jitterLagAuto && jt >= 300 {
+            let alt = jv[1] >= jv[2] ? 1 : 2
+            if Double(jv[alt]) / Double(jt) >= 0.5 && jv[alt] >= 2 * jv[0] {
+                let nl = max(-2, min(2, jitterLag + (alt == 1 ? -1 : 1)))
+                if nl != jitterLag {
+                    jitterLag = nl
+                    core.invalidate()
+                    line += " -> AUTO jitter lag \(nl)"
+                }
+            }
+        }
+        jitterLagUnknown = 0
         NSLog("%@", line)
+        lock.lock(); rawFrames = 0; lock.unlock()
         resolved = 0; depthFrames = [0, 0]; mvFrames = [0, 0]; depthLate = 0
         resetsLogged = core.resets
     }
