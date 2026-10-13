@@ -5622,6 +5622,28 @@ static void klovrp_asw_frame(const void *layer_submits, int count, int named_sta
     static unsigned frames;
     static int last_flags = -1, dumps;
     unsigned f = frames++;
+    // AppSW is switched on by the GAME's C# (Unity.XR.Oculus.Utils.SetSpaceWarp
+    // -> the OculusXRPlugin export `SetSpaceWarp(bool)`); a title that allocates
+    // the storage (flag 0x1000) but never enables it renders no motion vectors
+    // (Batman log 38: GetLayerTextureSpaceWarp never called in 2400 frames).
+    // With VPKTAA on, enable it ourselves once the plugin is running: the
+    // plugin then asks GetLayerTextureSpaceWarp for the images and the render
+    // pipeline fills them. The frame rate is NOT halved here (no throttle).
+    // KL_VPKTAA_FORCE_SW=0 skips this.
+    static int sw_done;
+    if (wants && !sw_done && f >= 90 && kl_env_on("KL_VPKTAA_FORCE_SW", 1)) {
+        sw_done = 1;
+        static const char *const names[] = { "SetSpaceWarp", "SetAppSpaceWarp" };
+        void (*set_sw)(int) = NULL;
+        const char *which = NULL;
+        for (unsigned i = 0; i < sizeof names / sizeof *names && !set_sw; i++) {
+            set_sw = (void (*)(int))kl_guest_sym_global(names[i]);
+            which = names[i];
+        }
+        fprintf(stderr, "  [asw] guest export %s = %p%s\n", which, (void *)set_sw,
+                set_sw ? " — calling it with true" : " (not exported: cannot enable AppSW)");
+        if (set_sw) set_sw(1);
+    }
     if (wants && (f < 4 || (eye->submit_flags != last_flags && dumps < 24))) {
         dumps++;
         uint32_t wd[0x130 / 4];
