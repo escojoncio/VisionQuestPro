@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Khronos Vulkan CTS (deqp-vk) packaged as a Quest-style APK so VisionQuestPro prepares and runs it
+     exactly like a game: same conversion, same signing, same Klepton runtime, same VPKEngine driver.
+     deqp-vk is built as an Android executable (DEQP_ANDROID_EXE) and shipped as lib/arm64-v8a/libdeqp-vk.so;
+     the app calls its main() with the batch's command line (guest kind "exe"). -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="com.khronos.vulkancts"
+    android:versionCode="1"
+    android:versionName="@VERSION@">
+    <uses-sdk android:minSdkVersion="29" android:targetSdkVersion="32" />
+    <uses-feature android:name="android.hardware.vulkan.level" android:required="true" />
+    <application android:label="Vulkan CTS (Khronos)" android:hasCode="false">
+        <meta-data android:name="com.visionquestpro.guest" android:value="exe" />
+        <meta-data android:name="com.visionquestpro.conformance" android:value="vulkan" />
+        <meta-data android:name="com.oculus.supportedDevices" android:value="quest2|questpro|quest3" />
+        <activity android:name="android.app.NativeActivity" android:exported="true">
+            <meta-data android:name="android.app.lib_name" android:value="deqp-vk" />
+        </activity>
+    </application>
+</manifest>
