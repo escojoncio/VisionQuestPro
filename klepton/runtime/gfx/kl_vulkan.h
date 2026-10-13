@@ -190,6 +190,11 @@ unsigned kl_vulkan_spacewarp_writes(int stage, int kind);
 // so the asynchronous VPKTAA never reads a depth the next frame is drawing.
 // kl_ovrp tags the record with the frame-record serial (kl_vulkan_eye_depth_tag)
 // so a consumer can tell "this depth belongs to frame N" from a stale one.
+// INLINE VPKTAA (kl_vulkan_taa_inline, below) reads the depth inside
+// kl_vulkan_frame_done, before the next frame can draw into it: no snapshot is
+// ever taken, `mtl` is always the guest's live image, and a multisampled depth
+// is filed too (samples > 1, `mtl` = the MS texture; eye-sized MS depth images
+// are then also created SAMPLED and not TRANSIENT).
 //
 // Depth convention (Vulkan clip z in [0,1]): reversed_z = 1 when the eye pass
 // cleared depth to 0.0 (Unity/Unreal on Vulkan), else from the census of
@@ -199,7 +204,8 @@ typedef struct {
     int   w, h, layers;     // of that texture
     int   slice;            // the array layer holding the requested eye
     int   vk_format;        // VkFormat of the guest's image
-    int   samples;          // 1 unless the guest kept MSAA (then not usable)
+    int   samples;          // 1 unless the guest kept MSAA (async path: not usable;
+                            // inline: `mtl` is then the multisample texture, live)
     int   reversed_z;       // 1 reversed (far = 0), 0 standard, -1 unknown
     float clear_depth;      // depth clear value seen on the eye pass, -1 if none
     int   source;           // 1 eye pass, 2 spacewarp depth, 3 size match
@@ -234,6 +240,62 @@ void kl_vulkan_capture_layers(void);
 // this one is a CPU stall and what would remove it.
 void kl_vulkan_frame_done(int stage);
 unsigned long long kl_vulkan_frame_serial(void);
+
+// ---------------------------------------------------------------------------
+// VPKTAA INLINE — the resolve runs at the guest's frame end, on VPEngine's own
+// Metal queue, instead of asynchronously in the compositor.
+//
+// VPEngine (VPVulkan) jitters the eye geometry's VIEWPORT when it translates a
+// submit and records what it applied (vpvk_taa_*); Klepton calls a hook (set
+// by the Swift side) inside kl_vulkan_frame_done, after the eye depth is filed
+// and BEFORE the frame-end vkQueueWaitIdle — so the resolve, encoded into a
+// command buffer on the same queue, is ordered after the frame and covered by
+// the same wait. Its output is published as the stage's eye picture.
+//
+// Every function here is safe without VPVulkan (MoltenVK, or no Vulkan at all):
+// the vpvk_* exports are resolved lazily from the loaded driver and every
+// answer is then 0 / NULL. The async path is untouched when inline is off.
+
+// 1 when inline mode is active: KL_VPKTAA=1, KL_VPKTAA_INLINE != 0 (default
+// 1), a Vulkan guest, and VPVulkan's vpvk_native_submit resolves. Decided
+// (and logged) once, the first time it is asked with a Vulkan guest up.
+int  kl_vulkan_taa_inline(void);
+// The resolve hook. Called on the guest's frame thread from
+// kl_vulkan_frame_done(stage) — only in inline mode, only when kl_ovrp filed
+// THIS frame's record under `stage` (kl_ovrp_stage_render_pose(stage) then
+// returns it, complete, with its serial) and with this frame's eye depth
+// filed (kl_vulkan_eye_depth_get(stage, eye, 0, ...)). fn = NULL unregisters.
+typedef void (*kl_vulkan_taa_hook_fn)(int stage, void *user);
+void kl_vulkan_set_taa_hook(kl_vulkan_taa_hook_fn fn, void *user);
+// Forwards to vpvk_native_submit: a command buffer on the queue VPEngine sends
+// all guest work to, after everything sent so far; fn encodes into it
+// (id<MTLCommandBuffer>, unretained), then it is committed. Synchronous.
+// 1 = committed, 0 = no VPVulkan / no queue.
+int  kl_vulkan_native_submit(void (*fn)(void *mtl_cmdbuf, void *user), void *user);
+// vpvk_native_device: id<MTLDevice>, unretained. NULL without VPVulkan.
+void *kl_vulkan_native_device(void);
+// The guest's LIVE eye colour for (stage, eye) — the image it rendered, never
+// the VPKTAA output published over it. id<MTLTexture> (borrowed); *slice is
+// the array layer holding `eye` (Array/multiview layout), 0 under Stereo.
+void *kl_vulkan_eye_color_mtl(int stage, int eye, int *slice, int *w, int *h);
+// Publish `tex` (2DArray, 2 layers: slice 0 = left, 1 = right, the eye's size
+// and format) as `stage`'s eye picture for every compositor (kl_glfb's eye
+// table, as an override over the live entry). tex = NULL restores the live
+// image. The override is dropped by itself when the stage's live eye image
+// changes (reallocation, size), and refused when w x h is not the eye's size.
+void kl_vulkan_taa_publish(int stage, void *tex, int w, int h);
+// The jitter VPEngine actually applied to the frame that is ending
+// (vpvk_taa_get_applied, which resets its counters — call once per frame).
+// Returns 1 when ≥1 draw was jittered, else 0; the out-parameters (any may be
+// NULL) are filled either way (zeros without VPVulkan). jx/jy in pixels of
+// the jittered target (+x right, +y down), target_w/h its size.
+int  kl_vulkan_taa_applied(float *jx, float *jy, int *target_w, int *target_h,
+                           unsigned *jittered, unsigned *skipped, unsigned *mixed);
+// kl_ovrp, right BEFORE kl_vulkan_frame_done: the frame about to finish was
+// filed as the record of `stage` with `serial` (stage -1 / serial 0 = not
+// filed: dropped, or a path that files after the frame end). The hook only
+// runs when this names the stage kl_vulkan_frame_done is called with.
+void kl_vulkan_taa_frame_record(int stage, unsigned long long serial);
 
 // How many frames have been presented, and how many were written out. The
 // end-of-run report reads these; a run with a healthy frame loop and zero

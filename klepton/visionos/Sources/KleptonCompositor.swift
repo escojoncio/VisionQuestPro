@@ -2154,7 +2154,8 @@ final class KleptonCompositor {
             let res = haveRendered && rendered.viewport_of.0 > 0
                 ? "\(rendered.viewport_of.0)x\(rendered.viewport_of.1)" : "-"
             hudLine = String(format: "Juego %.0f fps  Visor %.0f Hz  %@  VPKTAA %@",
-                             game, comp, res, taaOut.isEmpty ? "off" : "on")
+                             game, comp, res,
+                             !taaOut.isEmpty || taa?.inlineShowing == true ? "on" : "off")
             hudGuestFrames = 0; hudPresents = 0; hudWindowStart = Date()
             hudTex = makeHudTexture(hudLine) ?? hudTex
         }
@@ -2280,6 +2281,11 @@ final class KleptonCompositor {
         taaOut.removeAll(keepingCapacity: true)
         taaPose = nil
         guard let taa else { return }
+        // Inline mode (Vulkan guest on VPVulkan): the resolve runs at the guest's frame end and
+        // its output is published AS the eye image, so the picture eyeSource hands the
+        // composite already is the resolved one, paired with its own frame record. Nothing to
+        // submit, acquire or invalidate here, and the frustum jitter stays off (VPEngine jitters).
+        if taa.pollInline() { kl_ovrp_set_taa_active(0); return }
         // Jitter is only served to the game while resolves really run (else it would shimmer).
         defer { kl_ovrp_set_taa_active(taa.running ? 1 : 0) }
         guard completeStage >= 0, kl_ovrp_eye_layer_live() != 0, projLayerCount == 0 else {

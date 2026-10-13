@@ -3179,8 +3179,38 @@ void kl_glfb_set_eye_rate_map(int w, int h, int zones_x, int zones_y, void *rate
             rate_map, w, h, zones_x, zones_y);
 }
 
+// VPKTAA inline override — see kl_glfb.h. Only the texture pointer is shared
+// between threads (written on the guest's frame thread, read by the
+// compositor's); the slice is implied (= eye), so a reader can never pair the
+// override texture with the live entry's slice or the other way round.
+static void *g_eye_ovr[2][KL_MTL_MAX_STAGES];
+
+int kl_glfb_set_eye_mtl_override(int eye, int stage, void *texture, int w, int h) {
+    if (eye < 0 || eye > 1 || stage < 0 || stage >= KL_MTL_MAX_STAGES) return 0;
+    if (texture && (!g_eye_mtl[eye][stage].tex ||
+                    g_eye_mtl[eye][stage].w != w || g_eye_mtl[eye][stage].h != h))
+        texture = NULL;      // nothing live to stand in for, or another shape
+    void *old = __atomic_exchange_n(&g_eye_ovr[eye][stage], texture, __ATOMIC_ACQ_REL);
+    if (!old != !texture) {
+        static unsigned said;
+        if (said < 8) {
+            said++;
+            fprintf(stderr, "  [glfb] eye %d stage %d: %s (%dx%d)\n", eye, stage,
+                    texture ? "VPKTAA output overrides the live eye texture"
+                            : "override cleared — the live eye texture is shown",
+                    w, h);
+        }
+    }
+    return texture != NULL;
+}
+
 void *kl_glfb_eye_mtl_texture(int eye, int stage, int *out_slice) {
     if (eye < 0 || eye > 1 || stage < 0 || stage >= KL_MTL_MAX_STAGES) return NULL;
+    void *ovr = __atomic_load_n(&g_eye_ovr[eye][stage], __ATOMIC_ACQUIRE);
+    if (ovr) {
+        if (out_slice) *out_slice = eye;
+        return ovr;
+    }
     if (out_slice) *out_slice = g_eye_mtl[eye][stage].slice;
     return g_eye_mtl[eye][stage].tex;
 }
@@ -3193,7 +3223,13 @@ void kl_glfb_note_eye_mtl_texture(int eye, int stage, void *texture, int slice,
                                   int w, int h) {
     if (eye < 0 || eye > 1 || stage < 0 || stage >= KL_MTL_MAX_STAGES) return;
     if (g_eye_mtl[eye][stage].tex == texture &&
-        g_eye_mtl[eye][stage].slice == slice) return;
+        g_eye_mtl[eye][stage].slice == slice &&
+        g_eye_mtl[eye][stage].w == w && g_eye_mtl[eye][stage].h == h) return;
+    // The live storage changed: a VPKTAA output resolved from the old one is
+    // no longer a picture of this stage (kl_glfb_set_eye_mtl_override).
+    if (__atomic_exchange_n(&g_eye_ovr[eye][stage], NULL, __ATOMIC_ACQ_REL))
+        fprintf(stderr, "  [glfb] eye %d stage %d: live eye texture changed — VPKTAA "
+                        "override dropped\n", eye, stage);
     g_eye_mtl[eye][stage].tex   = texture;
     g_eye_mtl[eye][stage].slice = slice;
     g_eye_mtl[eye][stage].image = NULL;
@@ -3271,6 +3307,7 @@ void kl_glfb_release_eye_texture(int eye, int stage) {
         klfb_census_killed(KLC_TEX, 1);
     }
     g_eye_mtl[eye][stage] = (typeof(g_eye_mtl[0][0])){0};
+    __atomic_store_n(&g_eye_ovr[eye][stage], NULL, __ATOMIC_RELEASE);   // never outlives its stage
     fprintf(stderr, "  [glfb] eye=%d stage=%d released (GL texture %u, image %p)\n",
             eye, stage, gl_tex, img);
 }
@@ -3393,6 +3430,7 @@ int kl_glfb_bind_eye_mtl_texture(int eye, int stage, uint32_t gl_tex,
     }
     if (g_eye_mtl[eye][stage].image && a_eglDestroyImageKHR)
         a_eglDestroyImageKHR(g_dpy, g_eye_mtl[eye][stage].image);
+    __atomic_store_n(&g_eye_ovr[eye][stage], NULL, __ATOMIC_RELEASE);   // new storage: see the override
     g_eye_mtl[eye][stage].tex    = t.texture;
     g_eye_mtl[eye][stage].slice  = t.slice;
     g_eye_mtl[eye][stage].image  = img;
