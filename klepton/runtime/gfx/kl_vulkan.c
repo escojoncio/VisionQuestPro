@@ -28,6 +28,7 @@
 #include "kl_env.h"
 #include "kl_driver.h"   // kl_driver_target_name() — per-target GPU identity spoof
 #include "klepton.h"       // kl_addr_image() — call-site logging (klvk_who)
+#include "kl_fault.h"     // kl_fault_try_recover — a lost device ends the running test (exe door)
 
 // Matched on with a prefix test rather than equality: the guest asks by plain
 // soname, but a path can arrive too (kl_dl.c hands through whatever the guest
@@ -5912,6 +5913,49 @@ static VkResult VKAPI_CALL klvk_GetPhysicalDeviceImageFormatProperties2(
             info->flags, (int)r, r != VK_SUCCESS ? "  <== UNSUPPORTED" : "");
     return r;
 }
+// VK_ERROR_DEVICE_LOST reaching the guest: the GPU hung or refused work and the driver gave up on
+// the device (VPKEngine: gpu.err what=device_lost) instead of leaving the caller waiting forever.
+// A game cannot go on with a lost device either way. The executable door's test runner
+// (KL_GUEST_KIND=exe) abandons the case on its own thread instead, so the next case runs on a
+// fresh VkDevice; kl_exe.c records the case as DeviceLost. Other threads just get the result.
+static VkResult klvk_lost(const char *call, VkResult r) {
+    if (r != VK_ERROR_DEVICE_LOST) return r;
+    static atomic_int said;
+    if (atomic_fetch_add(&said, 1) < 8)
+        fprintf(stderr, "[vk] %s -> VK_ERROR_DEVICE_LOST (the GPU hung or refused work; "
+                        "see gpu.err what=device_lost)\n", call);
+    const char *kind = getenv("KL_GUEST_KIND");
+    if (kind && !strcmp(kind, "exe")) {
+        fflush(stderr);
+        kl_fault_try_recover(KL_RECOVER_DEVICE_LOST);   // returns only off the runner thread
+    }
+    return r;
+}
+// The guest's waits on the GPU, for klvk_lost (pass-through otherwise).
+static VkResult VKAPI_CALL klvk_WaitForFences(VkDevice dev, uint32_t n, const VkFence *fs,
+        VkBool32 all, uint64_t timeout) {
+    static PFN_vkWaitForFences real;
+    if (!real && real_gdpa) real = (PFN_vkWaitForFences)real_gdpa(dev, "vkWaitForFences");
+    return real ? klvk_lost("vkWaitForFences", real(dev, n, fs, all, timeout)) : VK_ERROR_INITIALIZATION_FAILED;
+}
+static VkResult VKAPI_CALL klvk_GetFenceStatus(VkDevice dev, VkFence f) {
+    static PFN_vkGetFenceStatus real;
+    if (!real && real_gdpa) real = (PFN_vkGetFenceStatus)real_gdpa(dev, "vkGetFenceStatus");
+    return real ? klvk_lost("vkGetFenceStatus", real(dev, f)) : VK_ERROR_INITIALIZATION_FAILED;
+}
+static VkResult VKAPI_CALL klvk_DeviceWaitIdle(VkDevice dev) {
+    static PFN_vkDeviceWaitIdle real;
+    if (!real && real_gdpa) real = (PFN_vkDeviceWaitIdle)real_gdpa(dev, "vkDeviceWaitIdle");
+    return real ? klvk_lost("vkDeviceWaitIdle", real(dev)) : VK_ERROR_INITIALIZATION_FAILED;
+}
+static VkResult VKAPI_CALL klvk_QueueWaitIdle(VkQueue q) {
+    static PFN_vkQueueWaitIdle real;
+    if (!real && real_gdpa && g_ndev && g_devs[0])
+        real = (PFN_vkQueueWaitIdle)real_gdpa(g_devs[0]->dev, "vkQueueWaitIdle");
+    if (!real && real_gipa) real = (PFN_vkQueueWaitIdle)real_gipa(g_instance, "vkQueueWaitIdle");
+    return real ? klvk_lost("vkQueueWaitIdle", real(q)) : VK_ERROR_INITIALIZATION_FAILED;
+}
+
 // KL_TRACE: which thread submits guest work. Compared with [thr] createRT this
 // shows whether Unity creates its temp render targets on the same thread that
 // records/submits the frame, or a different one (the temp-RT race hypothesis).
@@ -5933,6 +5977,7 @@ static VkResult VKAPI_CALL klvk_QueueSubmit(VkQueue q, uint32_t n,
         r = real(q, n, si, fence);
         pthread_mutex_unlock(&g_qsub_mu);
     }
+    if (r == VK_ERROR_DEVICE_LOST) return klvk_lost("vkQueueSubmit", r);
     // Same thread, same queue, right after the guest's work: copy every wanted
     // overlay texture into its persistent shadow (see klvk_shadow_pump).
     if (r == VK_SUCCESS) klvk_shadow_pump();
@@ -7799,6 +7844,7 @@ static const entry g_ours[] = {
     E(AcquireNextImageKHR), E(QueuePresentKHR),
     E(AllocateMemory), E(BindImageMemory),
     E(QueueSubmit),
+    E(WaitForFences), E(GetFenceStatus), E(DeviceWaitIdle), E(QueueWaitIdle),
     E(GetPhysicalDeviceProperties),
     E(GetPhysicalDeviceProperties2),
     E(GetPhysicalDeviceQueueFamilyProperties),

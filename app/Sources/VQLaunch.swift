@@ -41,7 +41,9 @@ enum VQLaunch {
         let psoCache = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("VisionQuestPro/PipelineCache/\(game.id)", isDirectory: true)
         setenv("VP_PIPELINE_CACHE_DIR", psoCache.path, 1)
-        VQPrewarm.run(gameFolder: game.folder, cache: psoCache)
+        // The conformance tests compile their own pipelines; a prewarm of earlier runs' recipes
+        // would only slow every vkCreateDevice down (prepareRun turns it off in the driver too).
+        if !VQConformance.isConformance(game) { VQPrewarm.run(gameFolder: game.folder, cache: psoCache) }
         VQLanguage.apply(game, useSystem: VQSettings.shared.systemLanguage)
         VQOVRPluginVersion.apply(apk: game.apk)
         VQLog.log("Arranque: \(game.id) (\(game.package)) tree=\(choice.prepared.tree.path) dylibs=\(choice.prepared.dylibs.path) "
@@ -330,6 +332,11 @@ final class VQSettings: ObservableObject {
         setenv("KL_VPKTAA_PCT", String(format: "%.0f", vpktaaPercent), 1)
         setenv("KL_VPKTAA_SHARP", String(format: "%.2f", vpktaaSharpness), 1)
         vq_prewarm_set_enabled(precompileShaders ? 1 : 0)
+        // Also through the environment: the call above reaches VPVulkan only once it is loaded,
+        // and its first vkCreateDevice may come before the app can repeat it.
+        setenv("VPVK_PREWARM", precompileShaders ? "1" : "0", 1)
+        // Games keep going after a single hung or faulting GPU frame (conformance runs set it to 1).
+        unsetenv("VPVK_DEVICE_LOST_STRICT")
         let detText = detected.map { "\($0)x" } ?? "no"
         VQLog.log("Gráficos: foveado Quest siempre apagado; foveado propio \(foveation), AA: modo \(aa.mode.rawValue), MSAA override \(msaaOverride), detectado \(detText) (juego \(aaKey.isEmpty ? "?" : aaKey)\(aa.stored ? "" : ", por defecto")), VPKTAA permitido \(vpktaa) \(Int(vpktaaPercent)) % nitidez \(vpktaaSharpness), forzar 1x \(c.force_single_sample != 0), anisotrópico x\(anisoLevel), diagnóstico de rendimiento \(perfDiag), diagnóstico de ficheros \(fsDiag), escala \(renderScale), ASW apagado \(aswDisabled), perfil Quest 3 \(quest3Profile), FPS en pantalla \(showFps)")
         VQLog.log("Ajustes: sin red \(offline), log del juego \(guestLog), vigilante \(Int(watchdogSeconds)) s")

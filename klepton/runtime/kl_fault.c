@@ -139,8 +139,11 @@ void kl_fault_try_recover(int sig) {
     g_rec_jb = NULL;    // one jump per point: a fault while unwinding must not loop
     g_rec_sig = sig ? sig : SIGABRT;
     if (g_crash_fd >= 0) fsync(g_crash_fd);   // stays open: later reports append
-    char m[160];
-    int n = snprintf(m, sizeof m, "[klepton] recovering: signal %d on a thread with a recovery point; "
+    char m[200];
+    int n = sig == KL_RECOVER_DEVICE_LOST
+          ? snprintf(m, sizeof m, "[klepton] recovering: the GPU device was lost on a thread with a recovery "
+                                  "point; unwinding to it instead of ending the process\n")
+          : snprintf(m, sizeof m, "[klepton] recovering: signal %d on a thread with a recovery point; "
                                   "unwinding to it instead of ending the process\n", sig);
     if (n > 0) klf_emit(m, (size_t)n);
     siglongjmp(*jb, 1);

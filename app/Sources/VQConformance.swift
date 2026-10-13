@@ -136,6 +136,14 @@ enum VQConformance {
         // Window only: no immersive space, no compositor frames for a test run (a stalled test can
         // never take the immersive compositor down with it).
         setenv("KL_IMMERSIVE", "0", 1)
+        // No pipeline prewarm in the driver: every vkCreateDevice of the tests would recompile the
+        // recipes of earlier runs (log 59: ~1700 pipelines, 0.7 -> 1.4 GB, per device).
+        setenv("VPVK_PREWARM", "0", 1)
+        vq_prewarm_set_enabled(0)
+        // A hung or faulting GPU command buffer loses the device, as Vulkan defines it: the case
+        // ends as DeviceLost and the next one runs on a fresh device (Klepton's exe runner) instead
+        // of the whole run waiting forever (log 59, draw).
+        setenv("VPVK_DEVICE_LOST_STRICT", "1", 1)
 
         VQLog.log("Conformidad: \(batches.count) tandas, \(totalCases) casos (perfil \(profile)); hechos \(done), "
                   + "pendientes \(totalCases - done) en \(planned.count) tandas; esta sesión: hasta \(Int(budget / 60)) min, "
@@ -194,6 +202,9 @@ enum VQConformance {
         var totals: [String: Int] = [:]
         var byGroup: [String: [String: Int]] = [:]
         var failures: [(String, Outcome)] = []
+        // Why cases are not supported, most common first: what to implement next (the target is the
+        // Adreno 740 feature profile a Quest game sees, not everything).
+        var notSupportedWhy: [String: Int] = [:]
         var ran = 0
         for b in batches {
             let res = outcomes(batch: b, in: work)
@@ -202,6 +213,7 @@ enum VQConformance {
                 totals[o.status, default: 0] += 1
                 byGroup[b.group, default: [:]][o.status, default: 0] += 1
                 if !okStatuses.contains(o.status) { failures.append((name, o)) }
+                if o.status == "NotSupported" { notSupportedWhy[reason(o.detail), default: 0] += 1 }
             }
         }
         failures.sort { $0.0 < $1.0 }
@@ -222,9 +234,23 @@ enum VQConformance {
             let f = g.values.reduce(0, +) - p - n
             out += "  \(b): \(p) / \(f) / \(n)" + (f > 0 ? "  <--" : "") + "\n"
         }
+        // Cases that hung the GPU or the test itself first: they are what stops a run.
+        let stuck = failures.filter { ["DeviceLost", "Timeout", "Crash"].contains($0.1.status) }
+        if !stuck.isEmpty {
+            out += "\nColgados / dispositivo perdido / crash (\(stuck.count)):\n"
+            for (name, o) in stuck {
+                out += "  \(o.status) \(name)" + (o.detail.isEmpty ? "" : " — \(o.detail)") + "\n"
+            }
+        }
         out += "\nFallos (\(failures.count)):\n"
         for (name, o) in failures {
             out += "  \(o.status) \(name)" + (o.detail.isEmpty ? "" : " — \(o.detail)") + "\n"
+        }
+        if !notSupportedWhy.isEmpty {
+            out += "\nNo soportados por motivo (\(notSupportedWhy.count) motivos):\n"
+            for (why, n) in notSupportedWhy.sorted(by: { $0.value != $1.value ? $0.value > $1.value : $0.key < $1.key }).prefix(40) {
+                out += "  \(n)  \(why)\n"
+            }
         }
         try? out.write(to: summaryFile, atomically: true, encoding: .utf8)
         // The log gets the head and the first failures; the file has all of them.
@@ -235,6 +261,17 @@ enum VQConformance {
     }
 
     static let okStatuses: Set<String> = ["Pass", "NotSupported", "QualityWarning", "CompatibilityWarning"]
+
+    /// A NotSupported message reduced to its reason: numbers and quoted values vary per case
+    /// ("Format 37 not supported", "...: 4096") and would split one reason into hundreds.
+    static func reason(_ detail: String) -> String {
+        var d = detail.trimmingCharacters(in: .whitespacesAndNewlines)
+        if d.isEmpty { return VQL("(sin mensaje)", "(no message)") }
+        // A trailing source location ("... at vktFoo.cpp:123") only; "at least" stays.
+        d = d.replacingOccurrences(of: #"\s+at\s+\S+\.(cpp|hpp|h|c|inl):[0-9]+.*$"#, with: "", options: .regularExpression)
+        d = d.replacingOccurrences(of: "[0-9]+", with: "N", options: .regularExpression)
+        return String(d.prefix(140))
+    }
 
     // MARK: - Files
 
