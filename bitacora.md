@@ -1,253 +1,108 @@
 # Bitácora — VisionQuestPro
 
-Historial completo: `git log -p bitacora.md` (compactada el 2026-10-13 tras el log 54; todo lo anterior al 2026-10-13
-tarde está resumido abajo y detallado en git).
+Historial completo: `git log -p bitacora.md` (compactada el 2026-10-14; lo cerrado queda en una línea con referencia).
 
-## EMPEZAR AQUÍ — 2026-10-14: arreglo del bloqueo del CTS en `048-draw-001` (log 59), build pendiente de prueba
-VPKEngine (bitácora 2026-10-14 (2)) + Klepton + app. Qué cambia y dónde:
-- VPKEngine `gpu/metal2` + `gpu/vulkan`: ninguna espera a la GPU es infinita. Dispositivo PERDIDO
-  (`gpu.err what=device_lost reason=…`) si un command buffer falla con revoked/ignored/removed, con CUALQUIER fallo
-  no-memoryless si `VPVK_DEVICE_LOST_STRICT=1` (lo pone el CTS), o si hay 20 s esperando sin que termine ningún
-  command buffer (las pausas de la app no cuentan). Perdido ⇒ no se envía más trabajo, esperas/submit devuelven
-  `VK_ERROR_DEVICE_LOST`, el backend se filtra (no se libera) si quedan command buffers colgados
-  (`what=device_lost_leak`). Juegos (sin strict): un frame colgado suelto NO pierde el dispositivo (como antes).
-- Fences PRECISAS (antes: cada vkWaitForFences/vkGetFenceStatus vaciaba toda la GPU): la fence guarda el nº de
-  frame vpgpu de su submit y espera solo a ese (`waitFrames`, marca `finishedBelow`); se respeta el timeout
-  (0 = sondeo). Afecta también a juegos: menos serialización CPU/GPU (vigilar regresiones de lectura de buffers).
-- `VPVK_PREWARM=0/1` (entorno, gana a `vpvk_config_set_prewarm`, que no llegaba antes de cargar el driver: por eso
-  el CTS precalentaba ~1700 pipelines en cada vkCreateDevice). La app lo pone según «Precompilar shaders» y a 0
-  en el CTS (además no ejecuta `VQPrewarm.run` para el CTS).
-- Klepton `kl_vulkan.c`: envoltorios guest de vkWaitForFences/vkGetFenceStatus/vkDeviceWaitIdle/vkQueueWaitIdle y
-  vkQueueSubmit → `klvk_lost`: log `[vk] … -> VK_ERROR_DEVICE_LOST` y, si `KL_GUEST_KIND=exe`,
-  `kl_fault_try_recover(KL_RECOVER_DEVICE_LOST=1001)` (salto al punto de recuperación del hilo del CTS).
-- Klepton `kl_exe.c`: resultado del caso abandonado = `DeviceLost` | `Timeout` | `Crash` (`#terminateTestCaseResult`).
-  Vigilante propio por caso (`KL_EXE_CASE_TIMEOUT_S`, 240 s sin escribir el .qpa) → SIGABRT dirigido al hilo del test
-  (informe de crash con su backtrace = dónde se colgó) → Timeout y sigue; si no se desenrolla en 60 s, `_exit(0)`.
-  Tras una recuperación, main() que no escribe su log en 240 s → `_exit(0)` (cerrojo heredado). NO se usa
-  `--deqp-watchdog` (límite de 30 s por iteración y aborta desde otro hilo = mata toda la sesión).
-- App `VQConformance.swift`: resumen con «Colgados / dispositivo perdido / crash» y «No soportados por motivo»
-  (top 40, números → N). El caso colgado del log 59 sale como Crash en el resumen inicial de la próxima sesión.
-- Riesgo conocido: cada DeviceLost filtra su VkDevice (cientos de MB); lo corta el límite de memoria entre tandas.
-- Siguiente: probar el CTS (ventana) → leer en el resumen qué caso de draw colgó la GPU y por qué (con strict, el
-  log trae `gpu.err what=command_buffer … encoders=…` del caso). Luego OpArrayLength y fallos por grupo (abajo).
+## EMPEZAR AQUÍ — 2026-10-14
+- Builds: `ac1a840` falló (Swift: `VQConformance.reason(_:)` chocaba con el parámetro `reason` de `summarize`) →
+  renombrada `notSupportedReason`, build `[build]` siguiente en curso. VPKEngine `f55e17e` compila en CI (OK).
+- Sin probar en el visor: todo el bloque «Robustez del CTS» de abajo, y las fences precisas también en juegos.
+- Prueba siguiente: Vulkan CTS (siempre en ventana; la app pone `KL_IMMERSIVE=0`). Leer del resumen
+  (`Registros/conformidad-vulkan.txt` + log): secciones «Colgados / dispositivo perdido / crash» (qué caso de
+  `draw` colgó la GPU en el log 59; con strict el log trae `gpu.err what=command_buffer … encoders=…`) y «No
+  soportados por motivo». Después: OpArrayLength y fallos por grupo (sección Conformidad).
 
-## 2026-10-13 noche (log 55 + capturas; plan de conformidad)
+## Robustez del CTS (2026-10-14, motivo: log 59 bloqueado en `048-draw-001` tras `Caused_GPU_Hang_Error`)
+- VPKEngine (`gpu/metal2`, `gpu/vulkan`; detalle en su bitácora 2026-10-14 (2)): ninguna espera a la GPU es infinita.
+  Dispositivo perdido (`gpu.err what=device_lost`) con revoked/ignored/removed siempre, cualquier fallo no-memoryless
+  si `VPVK_DEVICE_LOST_STRICT=1`, o 20 s esperando sin compleciones (pausas de la app excluidas). Perdido ⇒ sin trabajo
+  nuevo, esperas/submit = `VK_ERROR_DEVICE_LOST`, backend filtrado si quedan CB colgados (`what=device_lost_leak`).
+- Fences precisas (antes vaciaban toda la GPU): `Fence::frames` + `waitFrames`; timeout respetado (0 = sondeo).
+  Afecta a juegos (menos serialización CPU/GPU; vigilar regresiones). `klvk_shadow_pump` ya sondea de verdad.
+- `VPVK_PREWARM=0/1` por entorno (la llamada `vpvk_config_set_prewarm` llegaba tarde: el CTS precalentaba ~1700
+  pipelines por vkCreateDevice). App: según «Precompilar shaders»; CTS = 0 y sin `VQPrewarm.run`.
+- Klepton `kl_vulkan.c`: envoltorios guest WaitForFences/GetFenceStatus/DeviceWaitIdle/QueueWaitIdle/QueueSubmit →
+  `klvk_lost`; con `KL_GUEST_KIND=exe` salta al punto de recuperación (`KL_RECOVER_DEVICE_LOST`=1001, kl_fault.h).
+- Klepton `kl_exe.c`: caso abandonado = `DeviceLost` | `Timeout` | `Crash`. Vigilante por caso
+  (`KL_EXE_CASE_TIMEOUT_S`=240 s sin escribir el .qpa) → SIGABRT al hilo del test (backtrace en el informe) → Timeout;
+  sin desenrollar en 60 s → `_exit(0)`; main() tras recuperación sin escribir log en 240 s → `_exit(0)`; huecos >5 s
+  del bucle (app suspendida) no cuentan. No se usa `--deqp-watchdog` (30 s/iteración, aborta desde otro hilo).
+- App `VQConformance.swift`: resumen con colgados/perdidos y «No soportados por motivo» (top 40, números → N, se
+  quita solo la ubicación `at x.cpp:N`). `VPVK_DEVICE_LOST_STRICT=1` solo en el CTS (`unsetenv` para juegos).
+- Riesgo: cada DeviceLost filtra su VkDevice (cientos de MB); lo para el límite de memoria entre tandas.
 
-### Log 55 (AC Nexus, con capturas): hallazgos firmes
-- **Rosa = capas overlay, no el ojo.** Capturas: `eye0/1` NEGRO en todos los frames; `output` (compositor) rosa;
-  26/33 capas OVROverlay (`capture-*-layerN-0.png`) son 255,0,255 sólido. Patrón: capas escritas por el juego con
-  `vkCmdCopyImage` desde textura (fuente fmt 43/37) = rosa; capas cuyo RT se dibuja en el frame (`pass-600-*`,
-  capas 27/28/29/32/5/16/26) = negro. Magenta exacto ⇒ shader de error de Unity en el origen o fallo de copia/subida
-  en VPKEngine. Siguiente paso: rastrear qué imagen es el src de esos `vkCmdCopyImage` (log del src en
-  `klvk_CmdCopyImage` de capas) y cómo se rellenó (CopyBufferToImage vs pase). El CTS (api.copy_and_blit,
-  texture) debe cubrirlo.
-- Congelado idéntico: serial 624 en cuanto empieza `ShaderWarmupManager.WarmUpShaders` (1700 pipelines en ~2,6 s,
-  luego `PopulatePSOCache`); el usuario salió 1 s después. `gpu.shader.lib hit=0 miss=3488` aunque
-  `gpu.pso.recipe loaded pipelines=3169` → la caché MSL/biblioteca NO acierta (arreglo de la build anterior no funciona).
-- Audio: Wwise busca `main.207706.com.Ubisoft.ACNexusVR.obb` (no existe) y luego `AAssetManager_open` con ruta
-  absoluta → MISS (arreglo pendiente descrito abajo). «Package path couldn't be set» ocurre ANTES de cualquier E/S.
-- Glitch del visor: sin crash ni gpu.err; últimos 2 s: footprint 3,5→4,0 GB, cadencia del compositor 48 ms media /
-  210 ms máx., mientras se guardaban ~36 PNG (capturas frame 1200) con el juego congelado; ojo 3840×2485 (escala 1,3
-  pedida por el juego). Regla nueva: tests de conformidad SOLO en ventana (sin inmersivo).
+## Conformidad (Vulkan CTS / OpenXR CTS como guest dentro de la app)
+- CI `conformance.yml` (Linux, manual o `[conformance]`): VK-GL-CTS `vulkan-cts-1.4.6.2`, `DEQP_ANDROID_EXE=ON`, parche
+  `conformance/vulkan/patch_deqp.py` (exporta `vq_exe_main`), listas `conformance/vulkan/caselists.py` (perfil
+  `rapida` ~36k casos, CRC32 estable, tandas de 400; `completa` con `VQ_CTS_FULL=1`) → release `conformance`
+  (`VulkanCTS.apk`, meta-data `com.visionquestpro.guest=exe`). OpenXR CTS 1.1.58 → release `conformance-openxr`.
+- Klepton `KL_GUEST_EXE` (`runtime/guest/kl_exe.c`): main() en hilo guest de 64 MB por línea de `KL_EXE_ARGS_FILE`
+  (TAB); `KL_EXE_BUDGET`/`KL_EXE_MEM_MB`/`KL_EXE_STOP_FILE`/`KL_EXE_PROGRESS`; recuperación por caso con sigsetjmp
+  (`kl_fault_set_recovery`), reanuda en `<log>.r<k>.txt/.qpa`, máx. `KL_EXE_MAX_RECOVERIES`=50.
+- App: `VQConformance.swift` (tandas desde `assets/caselists/index.txt`, resultados en `QUEST/Partidas/<test>/cts/`,
+  caso abierto = Crash y se salta), `VQConformanceView.swift` (progreso, Parar; Ajustes > Conformidad). Args deqp:
+  `--quiet` (no `--deqp-quiet`), `--deqp-log-flush=enable`. OpenXR: `KL_INTENT_EXTRAS` (graphicsPlugin=Vulkan2…).
+- Escáner de APIs (`VQApiScan.swift`, `app/Native/vq_scan.c`): log «Escáner de APIs» por lanzamiento, caché
+  `Cache/<j>/apiscan-raw.txt`.
+- Sesiones: log 56 fesetround & co. (resuelto); log 57 aborto 1D comprimida (resuelto en VPKEngine) y `[imgfmt]`
+  limitado; log 58: 6551 casos, 96,9 % de los soportados; log 59: bloqueo en draw (resuelto arriba, sin probar).
+- Pendiente (por orden):
+  1. Identificar el caso de draw que cuelga la GPU (siguiente sesión) y arreglar su causa.
+  2. `unsupported SPIR-V instruction 68` = OpArrayLength (SSBO runtime arrays): tamaño del buffer en un buffer auxiliar.
+  3. Fails conocidos (104): texel buffers sint/snorm/16-bit, fragment_shader_output int/snorm, blits 1D (1D como 2D),
+     device_init (multiview/shader_draw_parameters → FEATURE_NOT_PRESENT si no se anuncian), format_properties
+     (A1R5G5B5, A8B8G8R8_SNORM, R32G32B32 vertex), image_format_properties sampleCounts>1 sin color attachment,
+     protected memory props, submit_wait_many_semaphores.
+  4. NotSupported: implementar según «No soportados por motivo», con objetivo el perfil Adreno 740 (no todo).
+  5. OpenXR CTS en el visor.
 
-### Conformidad: implementado (commits b517056, e87d43b; build de app pendiente)
-- CI `.github/workflows/conformance.yml` (Linux, manual o `[conformance]`): VK-GL-CTS `vulkan-cts-1.4.6.2`,
-  `DEQP_ANDROID_EXE=ON`, NDK del runner, API 29, `-Wl,--export-dynamic-symbol=main`, parche
-  `conformance/vulkan/patch_deqp.py` (describePlatform sin activity), listas `conformance/vulkan/caselists.py`
-  (perfil `rapida` ~36k casos de grupos relevantes para Quest, muestreo CRC32 estable, tandas de 400;
-  `completa` solo con `VQ_CTS_FULL=1`). Empaqueta `VulkanCTS.apk` (aapt2: manifest `conformance/vulkan/
-  AndroidManifest.xml`, meta-data `com.visionquestpro.guest=exe`, lib `libdeqp-vk.so` = el ejecutable, assets
-  `vulkan/` + `caselists/`). Release `conformance`.
-- Klepton: guest kind `KL_GUEST_EXE` (`runtime/guest/kl_exe.c`): carga como NativeActivity (`kl_native_load`), luego
-  (entrada `vq_exe_main` exportada por el parche de deqp, o `main`)
-  `main()` en hilo guest de 64 MB (`kl_guest_thread_create` en kl_pthread.c) una vez por línea de
-  `KL_EXE_ARGS_FILE` (args separados por TAB); para entre líneas por `KL_EXE_BUDGET` s, `KL_EXE_MEM_MB`,
-  `KL_EXE_STOP_FILE`; progreso en `KL_EXE_PROGRESS` ("i running" / "i done rc" / "N finished").
-- App: `VQConformance.swift` (planifica tandas desde `assets/caselists/index.txt`, resultados en
-  `QUEST/Partidas/<test>/cts/<tanda>.<parte>.qpa`; caso abierto sin `#endTestCaseResult` = Crash y se reanuda desde
-  el siguiente; resumen en log + `Registros/conformidad-vulkan.txt`), `VQConformanceView.swift` (ventana con
-  progreso, Parar, aviso de cuelgue a 5 min; Ajustes > Conformidad: descarga, minutos, memoria, borrar resultados).
-  `KL_IMMERSIVE=0` para el guest exe. URL de descarga desde `VQBuildInfo.swift` (CI escribe `$GITHUB_REPOSITORY`).
-- Escáner de APIs (`VQApiScan.swift` + `app/Native/vq_scan.c`; Klepton `kl_shim_known`, `kl_jni_knows_class`):
-  cada lanzamiento, log «Escáner de APIs: …» con importaciones nativas sin implementar y clases Java del sistema
-  sin binding.
-- CI OK: release `conformance` (VulkanCTS.apk 68 MB, API 30, `vq_exe_main` exportada; `main` NO sale en dynsym
-  aunque se pida) y release `conformance-openxr` (OpenXRCTS.apk 41 MB, gradle oficial, NDK 23.2). Build de app
-  `96abece` OK (guest exe busca `vq_exe_main`; args deqp: `--quiet`, NO `--deqp-quiet`).
-- OpenXR CTS en la app: paquete `org.khronos.openxr.cts` se trata como Vulkan; `KL_INTENT_EXTRAS`
-  graphicsPlugin=Vulkan2, args=~[interactive], xmlFilename=openxr_cts.xml (relativo a externalDataPath);
-  `Intent.getBooleanExtra` ahora lee los extras de lanzamiento (true/false/1/0). Inmersivo, resultado en el log.
-- Log 56 (1ª sesión CTS): arranca y llega a main(), muere en `called unresolved import 'fesetround'` antes del primer
-  caso (0/0/0). Arreglo: kl_shim.c añade fegetround/fesetround/feraiseexcept/fe(get|set)exceptflag/
-  fe(enable|disable)except/fegetexcept y dato `__fe_dfl_env` (fegetenv/fesetenv/feholdexcept/feupdateenv ya
-  eran klb_* en kl_libc_slink.c). Escáner de APIs: leía tree/lib (VQPrepare borra los ELF) → ahora extrae los .so
-  del APK una vez y cachea `Cache/<j>/apiscan-raw.txt` (líneas L/E/I/W/C, sello tamaño+mtime del APK).
-- Log 57 (2ª sesión): 18 tandas ejecutadas; aborto por Metal en `vkBindImageMemory` (1D comprimida) → arreglado en
-  VPKEngine (ver su bitácora 2026-10-14). Log de 577 MB por `[imgfmt]` → limitado a 400 líneas + 1/100000
-  (`klvk_imgfmt_log_ok`, kl_vulkan.c). Varias tandas terminan en 0,1 s con main()=1: revisar el resumen que imprime
-  la siguiente sesión al arrancar.
-- Log 58 (3ª sesión): 6551 casos, 96,9 % de los soportados (2617 ok, 3851 no soportados, 81 Fail, 2 Crash); lista
-  en Registros/conformidad-vulkan.txt del usuario: buffer_view texel buffers (sint/snorm/16-bit), fragment_shader_output
-  sint/uint/snorm, blits 1D y astc→e5b9g9r9, device_init unsupported features (multiview/shader_draw_parameters),
-  format_properties (A1R5G5B5, A8B8G8R8_SNORM, R32G32B32 vertex), protected memory props, image_format_properties
-  sampleCounts!=1 para formatos no-color-attachment, submit_wait_many_semaphores. Aborto: ETC2 3D → VPKEngine.
-- Recuperación de crashes por caso (solo guest exe): `kl_fault_set_recovery`/`kl_fault_try_recover` (kl_fault.c,
-  globales + hilo, sin TLS), también desde `kl_fatal_prepare`; kl_exe.c sigsetjmp por main(), cierra el caso abierto
-  con `#terminateTestCaseResult Crash`, reanuda con `<log>.r<k>.txt/.qpa`, máx. 50 (`KL_EXE_MAX_RECOVERIES`),
-  respeta presupuesto/memoria, vigilante: sin progreso 240 s tras recuperar → `_exit(0)` (`KL_EXE_STALL_S`).
-- README: sección «Atribución obligatoria» (petición del usuario) + créditos.
-- Log 59 (4ª sesión, build 874984e): 31 tandas en ~2,5 min, sin crashes; se bloqueó en `048-draw-001`:
-  `gpu.err what=command_buffer error=Caused_GPU_Hang_Error (kIOGPUCommandBufferCallbackErrorHang)` y después
-  nada avanza (el usuario pulsó Parar). Hallazgos para la siguiente sesión de trabajo (en este orden):
-  1. HECHO 2026-10-14 (ver arriba; vigilante propio en vez de `--deqp-watchdog`).
-  2. HECHO 2026-10-14 («No soportados por motivo»).
-  3. Traductor: `unsupported SPIR-V instruction 68` = OpArrayLength (SSBO runtime arrays) → necesita tamaño de buffer
-     en un buffer auxiliar (como el sizes buffer de otros traductores).
-  4. Fails conocidos (104): texel buffers (formatos sint/snorm/16-bit), fragment_shader_output int/snorm, blits 1D
-     (1D-como-2D), device_init unsupported features (multiview/shader_draw_parameters deben devolver
-     FEATURE_NOT_PRESENT si no se anuncian), format_properties (A1R5G5B5, A8B8G8R8_SNORM, R32G32B32 vertex),
-     image_format_properties sampleCounts>1 en formatos sin color attachment, protected memory props,
-     submit_wait_many_semaphores.
-- Pendiente: primera sesión de Vulkan CTS en el visor (sin probar nada aún en dispositivo); analizar su resumen y
-  corregir por grupos; luego OpenXR CTS.
+## Juegos: problemas abiertos (AC Nexus / AoT; última prueba logs 53–55, builds `de2bf58` + VPKEngine `166f0b1`)
+- Rosa = capas OVROverlay, no el ojo (log 55, capturas): `eye0/1` negros; 26/33 capas 255,0,255. Las rosas son las que
+  el juego rellena con `vkCmdCopyImage` desde textura (fmt 43/37); las de RT dibujado = negro. Siguiente: loguear el
+  src de esos `vkCmdCopyImage` (`klvk_CmdCopyImage`) y cómo se rellenó (CopyBufferToImage vs pase).
+- Congelado: serial del compositor parado (624–632) tras `ShaderWarmupManager.WarmUpShaders` (~1700 pipelines).
+  `[snap]`: los 24 hilos guest en `kl_futex_impl` ← `libunity.so+0xb8fe50` (FUTEX_WAIT con timeout relativo);
+  nadie en vk. Hipótesis: (1) despertar perdido en `kl_futex_impl`; (2) hilo que debía señalar murió;
+  (3) respuesta de Platform/AssetFile que no llega. Siguiente: leer `kl_futex_impl` y añadir al `[snap]` contador por
+  dirección (addr, val, waiters, último WAKE). El error memoryless del log 53 NO era la causa (fue al ir a segundo plano).
+- Caché de shaders: `gpu.shader.lib hit=0 miss=3488` con `gpu.pso.recipe loaded pipelines=3169` → la caché MSL no acierta.
+- Audio AC (Wwise 2019.2): bancos en `Master.pck` + `en.lang` (no hay `main.*.obb`). Wwise abre con
+  `AAssetManager_open` y RUTA ABSOLUTA (`/sdcard/Android/obb/…/Init.bnk` MISS). Arreglo genérico pendiente en
+  `kl_AAssetManager_open`/`openDir` (`klepton/runtime/guest/kl_ndk.c`): si empieza por '/', `kl_guest_path` y abrir ese
+  fichero. Probable causa también de «Package path couldn't be set» (C# de Ubisoft).
+- Glitch del visor (log 55): footprint 3,5→4,0 GB mientras se guardaban capturas con el juego congelado.
+- libc sin shim (genérico): fstatat(64), faccessat, open64, openat64, __openat_2, freopen, readlink(at), mkdirat,
+  rmdir, unlinkat, renameat, statfs64, statvfs64, truncate, chmod, utime/utimes/utimensat, nftw/ftw, glob, creat,
+  remove, pathconf, __realpath_chk, __getcwd_chk, fchdir. Con `kl_guest_path` + conversión de structs y de constantes
+  *at (AT_FDCWD −100/−2; AT_SYMLINK_NOFOLLOW 0x100/0x20; AT_REMOVEDIR 0x200/0x80; AT_EACCESS 0x200/0x10).
+- Otros: juegos solo GLES bloqueados («solo Vulkan»); aborto final `mutex lock failed: Invalid argument` (log 22);
+  Boundary «no configurado»; VPKTAA inline sin probar en un juego sin MSAA; tirones: precompilar todo antes de jugar.
 
-## Estado al cierre del 2026-10-13 tarde (logs 53–54, AC Nexus)
-Última build: `de2bf58` (VisionQuestPro) + `166f0b1` (VPKEngine). Usuario: **AC Nexus y AoT siguen igual** (rosa
-constante, también sobre los vídeos; el juego no avanza de la carga). En el log 54 el usuario NO activó «Diagnóstico
-de ficheros» (solo 24 líneas `[fs]`). Reporta además que el visor se quedó «glitcheado» y tuvo que reiniciarlo
-(sin evidencia en el log; probable relación con los 4 GB+ de imágenes/MSAA 4x — sin confirmar).
-
-### Corrección importante de un diagnóstico anterior
-- En el log 53 atribuí el congelado a `gpu.err … Too much geometry to support memoryless render pass attachments`
-  (f=808, 16,5 s). **Era falso**: ese error ocurre a las 21:59:02, justo con `[app] scene phase -> background`
-  (el usuario salió de la app); el congelado empezó a las 21:58:44. En el log 54, con el arreglo de memoryless
-  aplicado, **no hay ningún gpu.err** y el congelado es idéntico. El arreglo de memoryless (VPKEngine `HeavyGeometry`
-  + `memorylessFailed`) es correcto como defensa pero NO es la causa.
-
-### Congelado de AC (y probablemente AoT): datos firmes
-- Logs 53 y 54: el serial del compositor se para SIEMPRE en **632** tras `ShaderWarmupManager.WarmUpShaders` y
-  ~1700 pipelines (`[vk] pipeline warmup: 1700 graphics`), ~5 s de compilación. Después no hay más
-  vkCreateGraphicsPipelines ni submits; heartbeat sigue (`phase=frame pump`).
-- `[snap]` (log 54 l.10955; log 53 l.9657): los 24 hilos guest (incluido "Klepton Guest" = hilo principal de Unity)
-  están en `kl_futex_impl` ← `libunity.so+0xb8fe50`. Desensamblado (libunity de AC): esa función es
-  `syscall(98 /*futex*/, addr, 128 /*FUTEX_WAIT|PRIVATE*/, val, &timespec{ms/1000, (ms%1000)*1e6})` = espera de
-  semáforo con timeout relativo. Ningún hilo está dentro de VPVulkan/Klepton vk → nadie está bloqueado en GPU.
-  Hipótesis a verificar (en orden): (1) despertar perdido en `kl_futex_impl` (FUTEX_WAKE vs WAIT con timeout,
-  `val` comparado de forma no atómica); (2) Unity espera un evento que debe señalar un hilo que murió/salió
-  (buscar hilos que terminan cerca de 632: `pthread_exit`, excepciones JNI); (3) espera a una respuesta de
-  Platform/AssetFile (`[plat]`) que no llega. Siguiente paso: leer `kl_futex_impl` (klepton/runtime/libc/kl_pthread.c
-  o kl_libc.c) y añadir contador por dirección de futex en el `[snap]` (addr, val actual, waiters, último WAKE).
-- APK de AC extraído para estudio (no se sube nada): libunity/libAkSoundEngine/global-metadata en el scratchpad de
-  la sesión; el usuario dio acceso a `A:\QuestSideload\Juegos\Assassins Creed Nexus VR` y `…\Attack on Titan VR-
-  Unbreakable` (solo lectura, vía puente del PC).
-
-### Rosa (AC, "todo el rato, incluso en los vídeos")
-- No hay textura placeholder rosa en VPKEngine. El vídeo de carga lo dibuja nuestro compositor (AVPlayer, skybox
-  Equirect capa 4) → si se ve rosa encima, es la **capa de ojo del juego** (opaca, `.full`) pintada en rosa.
-  Rosa/magenta uniforme en Unity = **shader de error de Unity** (variante no soportada / pipeline fallido) o memoria
-  sin inicializar. Log 54 no tiene `vk.err`, ni `Shader Unsupported`.
-- Siguiente paso: activar `diagCaptures` (KL_CAPTURE, ya existe en Ajustes) una vez y pedir la captura del ojo para
-  ver si es rosa sólido (shader de error) o basura; comparar con `VPVK_FORCE_1X=1` (modo AA VPKTAA en Ajustes del
-  juego) para descartar el nuevo camino MSAA 4x (antes de hoy se forzaba 1x y el rosa ya existía según el usuario).
-
-### Audio de AC (Wwise 2019.2.13): datos firmes
-- La copia del usuario NO tiene `main.*.obb` (release VRP v207706; no es necesario): los bancos están en
-  `Master.pck` (1,3 GB) en la carpeta obb, más `en.lang` (paquete de idioma).
-- `CSharp_SetBasePath` (0x5dd60) → SetBasePath del low-level IO (0x5c3a8): solo copia la ruta (falla solo si >259).
-  «Package path couldn't be set, check paths» es del C# de Ubisoft (global-metadata), no de Wwise.
-- Log 54: `[asset] AAssetManager_open("/sdcard/Android/obb/com.Ubisoft.ACNexusVR/English(US)/Init.bnk") MISS` →
-  Wwise de Android abre por **AAssetManager_open con RUTA ABSOLUTA**. Nuestro `kl_AAssetManager_open`
-  (klepton/runtime/guest/kl_ndk.c:381) antepone siempre la raíz de assets → falla. Arreglo genérico pendiente: si
-  `fname` empieza por '/', mapear con `kl_guest_path` y abrir ese fichero (igual en `AAssetManager_openDir`).
-  Probable causa también del «Package path couldn't be set» (comprobación vía openDir/open de Master.pck).
-
-### Cobertura libc pendiente (genérica)
-Sin shim (si un juego las importa → «called unresolved import»): fstatat(64), faccessat, open64, openat64,
-__openat_2, freopen, readlink(at), mkdirat, rmdir, unlinkat, renameat, statfs64, statvfs64, truncate, chmod,
-utime/utimes/utimensat, nftw/ftw, glob, creat, remove, pathconf, __realpath_chk, __getcwd_chk, fchdir. Implementar
-con `kl_guest_path` + conversión de struct (stat_to_bionic, bionic_statfs) y de constantes *at (AT_FDCWD Linux −100 /
-Darwin −2; AT_SYMLINK_NOFOLLOW 0x100/0x20; AT_REMOVEDIR 0x200/0x80; AT_EACCESS 0x200/0x10).
-
-### Plan acordado con el usuario (no hacer parches por juego)
-1. **Conformidad** (en curso, nada compilado aún): tests oficiales Khronos ejecutados como guest dentro de la app.
-   - Hecho: lanzador por motor (`VQGames.guestKind/entryLib/nativeFuncName`, env `KL_GUEST_KIND/ENTRY/FUNC`,
-     `kl_app.c` y `kl_native.c`), extras de Intent genéricos `KL_INTENT_EXTRAS` ("k=v" por línea) con
-     `getStringExtra`/`getStringArrayExtra` (TAB) en `kl_jni_android.c`. Quitado el bloqueo «solo Unity».
-   - Falta: workflow `conformance.yml` (Linux + NDK del runner; manual): VK-GL-CTS `vulkan-cts-1.4.6.2` con
-     `scripts/android/build_apk.py --sdk $ANDROID_HOME --ndk $ANDROID_NDK_LATEST_HOME --abis arm64-v8a
-     --native-build-type Release` (NativeActivity lib `deqp`, `android.app.func_name=createTestActivity`, extra
-     `cmdLine`; manifest sin feature Vulkan → excepción por paquete `com.drawelements.deqp` en VQGames);
-     OpenXR-CTS `openxr-cts-1.1.58.0` (gradle en `src/conformance`, NDK 23.2.8568313, lib `conformance_test`,
-     extras `args` (array), `graphicsPlugin`, `xmlFilename`; excluir tests interactivos). Release `conformance`.
-     Después: botón «Conformidad» en la app (descarga, lanza, resume .qpa/.xml en el log; /sdcard = carpeta de
-     partidas del juego). Regla: agentes ≤1 h, reporte cada 20 min.
-2. **Escáner de APIs Android por juego** (al preparar): importaciones de cada .so (libc/NDK) + cadenas JNI de
-   .so/classes.dex vs lo implementado → log de faltantes. Inventario base: `docs/android-ndk-inventario.md`.
-3. Tirones de shaders: fase posterior (precompilar todos los pipelines antes de jugar, nunca compilar en un frame).
-- Juegos solo GLES siguen bloqueados («solo Vulkan»): pendiente.
-
-## Hecho el 2026-10-13 (builds 57ba002 → de2bf58; detalle en git)
-- AA por juego: `KL_AA_MODE` auto|vpktaa|msaa|off (def. auto), `VPVK_MSAA` 0/2/4/8 (chip del usuario: máx. 4x),
-  detección `vq.aaDetected.<key>` (funciona: AC → `vk.msaa detected eye=4x`, VPKTAA off). Hoja «Ajustes del juego».
-- VPKTAA inline sin `QueueWaitIdle` (serial publicado al completar en GPU), core «pt-port v1» (algoritmo de PT,
-  historial rgba16Float, sharp 1.0, disocc 0.05). Sin probar aún en un juego sin MSAA.
-- Vídeo sin surface (buffers CPU NV12), overlays nunca escritos → limpieza única transparente, imágenes viejas
-  liberadas a los 5 s, near = frustum.
-- SDK Quest: Platform con errores «offline» tipados (cola 256), 485 `ovrp_*` explícitos (boundary virtual 3×3 m),
-  OpenXR 105 funciones de extensión + 1.1. Ajuste «Diagnóstico de ficheros» (`vq.fsDiag` → `KL_TRACE_FS=1`) y log
-  `[asset] … MISS`.
-
-## Resumen logs 44–52 (detalle en git)
-- VPKTAA: ruta async sustituida por INLINE (jitter aplicado por VPKEngine al traducir, `vpvk_native_submit`); en
-  logs 50–52 inline funcionaba pero serializaba (Batman ~90→37 fps) → corregido hoy; ver arriba.
-- AoT 44/47: cuelgue en teardown de vídeo (`Message.getTarget`/`Handler.getLooper`) y congelado por QueueSubmit sin
-  sincronización externa (`g_qsub_mu`/`klvk_qsubmit`); vigilante `[snap]` (`KL_STALL_SNAP`).
-- AC 45/48: usuario offline Ubisoft (`klplat_user_default` con paquete `com.ubisoft.`), idiomas `*.lang`,
-  `klplat_called` sin abort (respuesta neutra), frontera del set de overlays = `ovrp_EndFrame4`.
-- Pose EyeLevel (origin 0) restando la altura medida (`kl_ovrp_guest_origin_y`), Unity/UE4 en inmersión `.full`.
-
-## Resumen logs 24–43 (detalle en git)
-- VPKTAA (ruta async, ya sustituida por INLINE): core reutilizable `VPKTAACore.swift` (API en su cabecera: color
-  2DArray, tangentes sin jitter, jitter, crop/cropOff, pose del ojo, depth `VPKTAADepthInput`, MV `VPKTAAMotionInput`);
-  reproyección por profundidad, MV AppSW, desoclusión, clip YCoCg, RCAS fusionado, AA espacial; profundidad elegida
-  en `kl_vulkan.c` (`klvk_ed_*`, prioridad pase-ojo > SpaceWarp > tamaño), reversed-Z por clear/censo; env
-  `KL_VPKTAA_NEAR/FAR/REVZ/MV/MV_SCALE/MV_SIGN/MV_MAP/DEPTH_MAP/DISOCC`.
-- SpaceWarp: flags 0x300 (AC/AoT) con `GetLayerTextureSpaceWarp`; MV size en el desc del ojo; Batman (0x1000) no la usa.
-- Overlays/compositor: rect de textura y color por capa, `SetColorScaleAndOffset` (fundidos), origen abajo (bit 3),
-  imagen propia de capa si el juego la escribe, OVROverlay con `VkImage*` en celda estable, vídeos 180° SBS por capa
-  Equirect, skybox de carga solo con vídeo vivo, HUD FPS, capturas de diagnóstico, OpenXR color scale/bias.
-- Sistema/JNI: Object.toString/hashCode/equals, NO-OP de métodos void del juego, excepciones JNI por hilo, pthread
-  attr/sched, OpenSL volume/feeder, AAsset 64 bits, índice genérico de la carpeta del juego (obb), imágenes nuevas a
-  negro, audio 40 ms, MSAA del juego configurable (`vq.gameMSAA`).
-- Rendimiento Batman resuelto en log 26 (~90 fps; VPKEngine locales en slots por variable, `gpu.hold`).
-
-## Resuelto en logs 8–22 (referencia breve; detalle en git)
-- Vulkan en Batman: spoof Adreno 740 / driverVersion bit 31, `ovrp_GetDisplayAdapterId2` → NULL (log 7–8),
-  `-force-vulkan` vía extra `unity` del Intent, AssetFile StatusByName como petición fallida.
-- Sistema: StatFs, ELF TLS (TLSDESC), liblog completo, libdl namespaces, AAudio MMap, OpenSL PCM_EX float y
-  GetConfiguration, AudioManager.getDevices/AudioDeviceInfo → audio OK desde log 17.
-- Gráficos VPKEngine: point_size, SubpassData como Texture y D2Array con multiview, VkComponentMapping → swizzle
-  (fuentes OK log 22), pipelines fuera del mutex + MTLBinaryArchive persistente.
-- XR: zNear/zFar, Time de poses, RelativePose EyeLevel con altura medida por el Vision Pro, LateLatching off,
-  postura auto/sentado/de pie, recentrado con PS derecho largo, PS izq = Start, toques capacitivos, manos ocultas,
-  idioma del sistema (`Locale.preferredLanguages`), versión OVRPlugin leída del APK.
-- Foveado Quest siempre apagado (ovrp, OpenXR FB/META, extensiones Vulkan FDM/VRS ocultas).
-- Pendiente antiguo aún abierto: aborto final `mutex lock failed: Invalid argument` (log 22); Boundary «no configurado».
+## Resuelto (referencia; detalle en git)
+- 2026-10-13: AA por juego (`KL_AA_MODE`, `VPVK_MSAA`, detección `vq.aaDetected.<key>`), VPKTAA inline sin
+  `QueueWaitIdle` (core «pt-port v1»), vídeo sin surface (NV12 CPU), SDK Quest offline (Platform tipado, 485 `ovrp_*`,
+  boundary virtual 3×3 m, OpenXR 105 funciones + 1.1), «Diagnóstico de ficheros» (`KL_TRACE_FS`).
+- Logs 44–52: VPKTAA inline, QueueSubmit serializado (`g_qsub_mu`), vigilante `[snap]`, usuario offline Ubisoft,
+  idiomas `*.lang`, frontera de overlays `ovrp_EndFrame4`, pose EyeLevel con altura medida.
+- Logs 24–43: VPKTAA core (`VPKTAACore.swift`: profundidad, MV de SpaceWarp, desoclusión, YCoCg, RCAS), SpaceWarp
+  0x300, compositor de overlays (rects, color scale, Equirect 180° SBS, HUD FPS, capturas), JNI/OpenSL/AAsset varios;
+  Batman ~90 fps (log 26).
+- Logs 8–22: Vulkan en Batman (spoof Adreno 740), TLS ELF, liblog, libdl, AAudio/OpenSL (audio OK log 17), SubpassData,
+  swizzle, MTLBinaryArchive, poses/postura/recentrado, mandos Sense (PS = botones Meta), manos ocultas, idioma del
+  sistema, foveado Quest siempre apagado.
 
 ## Arquitectura (referencia)
 - Base Klepton (MIT, copia `ce74582` en `klepton/`, ver `THIRD-PARTY-NOTICES.md`): cada `.so` ARM64 se envuelve en un
-  dylib firmado (`tools/klepton_ld.c` en proceso, `klepton_ld_run`) y se carga con `dlopen`; relocs ELF propias;
-  bionic/JNI/OVRPlugin/OpenXR propios. Sin traducción de CPU.
-- Gráficos: VPKEngine VPVulkan.framework (`scripts/build-vpvulkan.sh`, cacheado por hash de `vpkengine/gpu/**`) en lugar de
-  MoltenVK (`VQSettings.useVPKEngine`, `KL_MVK_DYLIB`). VisionQuestPro usa `gpu/metal2`.
-- Firma: conversión sin firmar en `QUEST/Cache/<j>/dylibs`; copias firmadas en
-  `Library/Application Support/VisionQuestPro/Signed/<j>/` (`VQPrepare`, `VQSigner`, variantes req4k/req16k/plain).
-- App (`app/Sources/`): `VQLog`, `VQFolder` (QUEST: Juegos/Cache/Partidas), `VQGames`, `VQPrepare`, `VQLaunch`
-  (+ `VQSettings`, todos los ajustes en la app), `VQLauncher`; `app/Native/vq_apk.c` (ZIP + AXML), `vq_config.c`
-  (reenvío `vpvk_config_set_*`).
-- CI `.github/workflows/visionos.yml`: solo `[build]` o manual; release `visionos` (`VisionQuestPro.ipa`, bundle
-  `com.kdt.livecontainer`); logs de CI en rama `ci-logs` (`visionos.txt`).
+  dylib firmado (`tools/klepton_ld.c`, `klepton_ld_run`) y se carga con `dlopen`; bionic/JNI/OVRPlugin/OpenXR propios.
+  Sin traducción de CPU.
+- Gráficos: VPKEngine `VPVulkan.framework` (`scripts/build-vpvulkan.sh`, caché por hash de `vpkengine/gpu/**`; la CI
+  clona VPKEngine `main`) en lugar de MoltenVK (`VQSettings.useVPKEngine`, `KL_MVK_DYLIB`). Usa `gpu/metal2`.
+- Firma: conversión sin firmar en `QUEST/Cache/<j>/dylibs`; firmadas en
+  `Library/Application Support/VisionQuestPro/Signed/<j>/` (`VQPrepare`, `VQSigner`).
+- App (`app/Sources/`): `VQLog`, `VQFolder`, `VQGames`, `VQPrepare`, `VQLaunch` (+ `VQSettings`), `VQLauncher`,
+  `VQConformance*`; `app/Native/vq_apk.c` (ZIP + AXML), `vq_config.c` (reenvío `vpvk_config_set_*`).
+- CI `visionos.yml`: solo `[build]` o manual; release `visionos` (`VisionQuestPro.ipa`, bundle `com.kdt.livecontainer`);
+  log de CI en rama `ci-logs` (`visionos.txt`; `gh run view --log-failed` da 403 desde aquí).
 
 ## Batman: Arkham Shadow (com.camouflaj.manta, solo estudio)
-- Unity 2022.3.45 IL2CPP, Vulkan multiview, SRP propio «Manta» (derivado de HDRP), OculusXRPlugin → libOVRPlugin
-  1.98; Wwise (OpenSL); `supportedDevices=quest3+`. x18 usado como registro normal (Klepton lo parchea).
+- Unity 2022.3.45 IL2CPP, Vulkan multiview, SRP «Manta» (derivado de HDRP), libOVRPlugin 1.98, Wwise (OpenSL),
+  `supportedDevices=quest3+`. x18 usado como registro normal (Klepton lo parchea).
