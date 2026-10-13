@@ -137,7 +137,7 @@ struct VQConformanceSettings: View {
                         }
                     })
                 }
-                .disabled(model.folderPath == nil)
+                .disabled(model.folderPath == nil || downloadingXR)
             }
             if downloadingXR {
                 ProgressView(value: fraction) { Text(VQL("Descargando…", "Downloading…")).font(.caption) }

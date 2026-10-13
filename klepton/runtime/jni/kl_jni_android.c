@@ -598,8 +598,13 @@ static klj_val klj_Intent_getAction(void *env, void *self, const klj_val *a, int
 // Answering the defaults is what selects the ordinary stereo XR path — inventing
 // either boolean would silently turn the headset off, and inventing an argument
 // string would hand the guest a command line nobody typed.
+static const char *klj_launch_extra(void *env, void *self, const char *key);
+// A boolean only when the host's launch extras (KL_INTENT_EXTRAS) carry the key ("true"/"1");
+// otherwise the caller's default, as above.
 static klj_val klj_Intent_getBooleanExtra(void *env, void *self, const klj_val *a, int n) {
-    (void)env; (void)self;
+    const char *v = n > 0 ? klj_launch_extra(env, self, klj_str(a[0].l)) : NULL;
+    if (v && (!strcmp(v, "true") || !strcmp(v, "1")))  return (klj_val){.j = 1};
+    if (v && (!strcmp(v, "false") || !strcmp(v, "0"))) return (klj_val){.j = 0};
     return (klj_val){.j = n > 1 ? (a[1].j & 1) : 0};
 }
 // Launch extra by key (NULL when absent).
