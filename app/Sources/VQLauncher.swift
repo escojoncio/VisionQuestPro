@@ -231,8 +231,8 @@ struct VQSettingsView: View {
                             value: $settings.watchdogSeconds, in: 30...600, step: 30)
                 }
                 Section(VQL("Gráficos", "Graphics")) {
-                    Toggle(VQL("Motor gráfico VPEngine (apagado: MoltenVK)", "VPEngine graphics (off: MoltenVK)"),
-                           isOn: $settings.useVPEngine)
+                    Toggle(VQL("Motor gráfico VPKEngine (apagado: MoltenVK)", "VPKEngine graphics (off: MoltenVK)"),
+                           isOn: $settings.useVPKEngine)
                     Picker(VQL("Foveado", "Foveation"), selection: $settings.foveation) {
                         Text(VQL("Apagado", "Off")).tag(VQSettings.Foveation.off)
                         Text("M2").tag(VQSettings.Foveation.m2)
@@ -308,8 +308,8 @@ struct VQSettingsView: View {
                     Toggle(VQL("Forzar Vulkan en juegos Unity", "Force Vulkan in Unity games"), isOn: $settings.forceVulkan)
                     Toggle(VQL("Capturas de diagnóstico", "Diagnostic captures"), isOn: $settings.diagCaptures)
                     Toggle(VQL("Diagnóstico de rendimiento", "Performance diagnostics"), isOn: $settings.perfDiag)
-                    Text(VQL("El foveado propio del juego (Quest) está siempre apagado. Foveado y VPKTAA los aplica VPEngine (aún sin efecto con MoltenVK). M5 solo aparece en un Vision Pro M5. Se aplica al lanzar el juego.",
-                             "The game's own (Quest) foveation is always off. Foveation and VPKTAA are applied by VPEngine (no effect yet with MoltenVK). M5 only appears on a Vision Pro M5. Applied when the game launches."))
+                    Text(VQL("El foveado propio del juego (Quest) está siempre apagado. Foveado y VPKTAA los aplica VPKEngine (aún sin efecto con MoltenVK). M5 solo aparece en un Vision Pro M5. Se aplica al lanzar el juego.",
+                             "The game's own (Quest) foveation is always off. Foveation and VPKTAA are applied by VPKEngine (no effect yet with MoltenVK). M5 only appears on a Vision Pro M5. Applied when the game launches."))
                         .font(.caption)
                 }
                 Section(VQL("Carpeta QUEST", "QUEST folder")) {

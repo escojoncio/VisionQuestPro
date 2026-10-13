@@ -8474,7 +8474,7 @@ void kl_ovrp_set_taa_active(int on) { __atomic_store_n(&g_taa_live, on ? 1 : 0, 
 
 static void klovrp_jit_frustum(int eye, float *f) {
     if (!klovrp_jit_want()) return;
-    // VPKTAA inline: VPEngine jitters the viewport itself and reports what it
+    // VPKTAA inline: VPKEngine jitters the viewport itself and reports what it
     // applied; a frustum jitter on top would be a second, unrecorded one.
     if (kl_vulkan_taa_inline()) return;
     __atomic_store_n(&g_jit.read, 1, __ATOMIC_RELAXED);
@@ -8506,7 +8506,7 @@ static void klovrp_jit_frame_begin(kl_ovrp_render_pose *r) {
     if (kl_vulkan_taa_inline()) {
         static int said;
         if (!said++)
-            fprintf(stderr, "  [taa-inline] frustum jitter OFF (VPEngine jitters the viewport) — "
+            fprintf(stderr, "  [taa-inline] frustum jitter OFF (VPKEngine jitters the viewport) — "
                             "frame records carry jitter_mode 0\n");
         memset(r->jitter, 0, sizeof r->jitter);
         r->jitter_mode = 0;

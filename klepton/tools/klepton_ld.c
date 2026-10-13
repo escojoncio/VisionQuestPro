@@ -550,7 +550,7 @@ int main(int argc, char **argv) {
     uint32_t sz_dst  = sizeof(struct dysymtab_command);
     uint32_t sz_uuid = sizeof(struct uuid_command);
     // VisionQuestPro: an EMPTY LC_CODE_SIGNATURE at the end of __LINKEDIT (dataoff
-    // 16-aligned, datasize 0). vp_codesign (VPEngine) fills it in on the headset;
+    // 16-aligned, datasize 0). vp_codesign (VPKEngine) fills it in on the headset;
     // it refuses a Mach-O without one.
     uint32_t sz_cs   = sizeof(struct linkedit_data_command);
 

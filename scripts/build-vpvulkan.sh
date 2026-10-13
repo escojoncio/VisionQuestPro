@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# VPEngine's Vulkan driver (gpu/vulkan, target VPVulkan) for the visionOS device, packaged as
+# VPKEngine's Vulkan driver (gpu/vulkan, target VPVulkan) for the visionOS device, packaged as
 # VPVulkan.framework for the app's Frameworks/ (Klepton loads it by path: KL_MVK_DYLIB).
-# Usage: build-vpvulkan.sh <VPEngine checkout> <output dir>
+# Usage: build-vpvulkan.sh <VPKEngine checkout> <output dir>
 set -euo pipefail
 SRC="$1"
 OUT="$2"

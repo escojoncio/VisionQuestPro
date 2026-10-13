@@ -1,7 +1,7 @@
 // VisionQuestPro: signing the converted libraries on the headset with the player's own developer
 // certificate (the one the app itself was signed with), so dyld maps them without JIT. The
-// signature is VPEngine's (runtime/vp_codesign.c, vp_pkcs12.c, taken from VPEngine at build time);
-// this file follows VPEngine's VPGamePack.swift: the certificate is a .p12 imported in the app and
+// signature is VPKEngine's (runtime/vp_codesign.c, vp_pkcs12.c, taken from VPKEngine at build time);
+// this file follows VPKEngine's VPGamePack.swift: the certificate is a .p12 imported in the app and
 // kept in the keychain, and each library is signed in up to four variants (the app's requirement
 // set or none, 4 KiB or 16 KiB pages) until the system accepts one.
 
@@ -104,7 +104,7 @@ enum VQSigner {
                 return Identity(certificate: certificate, key: key, chain: Array(chain.dropFirst()))
             }
         }
-        if !quiet { VQLog.log("Firma: el lector PKCS#12 del sistema dio \(status); probando el de VPEngine") }
+        if !quiet { VQLog.log("Firma: el lector PKCS#12 del sistema dio \(status); probando el de VPKEngine") }
         var parsed = VpPkcs12()
         var error = [CChar](repeating: 0, count: 256)
         let rc = p12.withUnsafeBytes { raw in
@@ -112,7 +112,7 @@ enum VQSigner {
         }
         defer { vp_pkcs12_free(&parsed) }
         let detail = String(cString: error)
-        if rc != 0 && !quiet { VQLog.log("Firma: lector de VPEngine: \(rc), \(detail)") }
+        if rc != 0 && !quiet { VQLog.log("Firma: lector de VPKEngine: \(rc), \(detail)") }
         if status == errSecAuthFailed && rc != 0 && rc != -4 { throw Problem.wrongPassword }
         switch rc {
         case 0: break
@@ -261,10 +261,10 @@ enum VQSigner {
     }
 
     /// Leaf to Apple's root: what the .p12 carried, else Apple's certificates bundled with the app
-    /// (VPEngineCertificates/*.cer), matched by issuer.
+    /// (VPKEngineCertificates/*.cer), matched by issuer.
     private static func chainFor(_ identity: Identity) -> [SecCertificate] {
         var candidates = identity.chain
-        for url in Bundle.main.urls(forResourcesWithExtension: "cer", subdirectory: "VPEngineCertificates") ?? [] {
+        for url in Bundle.main.urls(forResourcesWithExtension: "cer", subdirectory: "VPKEngineCertificates") ?? [] {
             if let data = try? Data(contentsOf: url), let c = SecCertificateCreateWithData(nil, data as CFData) {
                 candidates.append(c)
             }

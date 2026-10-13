@@ -2,11 +2,17 @@
 
 Historial completo de sesiones anteriores: `git log -p bitacora.md` (compactada el 2026-10-13 tras el log 49).
 
+## Renombrado VPEngine → VPKEngine (2026-10-13)
+- Todas las menciones, rutas e identificadores pasan a VPKEngine (repo `escojoncio/VPKEngine`, checkout `vpkengine/`).
+  Datos antiguos del visor (carpetas VPEngine, ajustes, certificado, packs `vpengine.vpgame`) se traspasan solos
+  (`VPKLegacy` en VPKEngine `platform/visionos/Sources/VPGamePack.swift`).
+- `app/Sources/VQLaunch.swift`: ajuste `vq.vpkengine` con respaldo de la clave antigua `vq.vpengine`.
+
 ## VPKTAA a nivel de render — modo INLINE (2026-10-13, sin build aún)
 Sustituye a la ruta asíncrona del compositor (que queda solo con `KL_VPKTAA_INLINE=0`, guests GLES y OpenXR).
 Causas de lo visto en logs 46–49: resolve en cola propia compitiendo con el juego (59 % raw-fallback = alterna
 AA/sin AA) y jitter por frustum no emparejable (el juego lee `ovrp_GetNodeFrustum2` ~5/frame) → borroso.
-- **VPEngine** (`gpu/vulkan`, `gpu/metal2`): jitter aplicado al TRADUCIR cada envío (`commands.cpp` `taaEyePass`/
+- **VPKEngine** (`gpu/vulkan`, `gpu/metal2`): jitter aplicado al TRADUCIR cada envío (`commands.cpp` `taaEyePass`/
   `Translator::jitter`): `viewport.x/y += jx/jy` (px del target, +y abajo) en draws con depth test/write dentro de
   pases de ojo (con depth y tamaño == ojo; multiview también si mide 50–100 % del ojo); excluidos pantalla completa
   (no indexado, ≤6 vértices, sin VB) y draws sin depth (cuentan skipped). Profundidad de pases de ojo forzada a
@@ -32,7 +38,7 @@ AA/sin AA) y jitter por frustum no emparejable (el juego lee `ovrp_GetNodeFrustu
   jitter aplicado. `VPKTAACore.swift`: variante MSL `VPKTAA_DEPTH_MS=1` con `depth2d_ms_array` (muestra más cercana
   según revZ, texture(8)). `KleptonCompositor.swift` `prepareTAA`: en inline no llama a submit/acquire.
 ### Comprobar en el próximo log (Batman, VPKTAA on)
-- `[taa-inline] ON …`, `resolve hook registered`, `jitter ON: Halton … for WxH`; VPEngine `vk.taa jitter … jittered>0`
+- `[taa-inline] ON …`, `resolve hook registered`, `jitter ON: Halton … for WxH`; VPKEngine `vk.taa jitter … jittered>0`
   y `vk.native submit ok=1`. `encodeNative` ya va en 3 command buffers ordenados con MTLEvent entre CBs; si aun así
   se congela, buscar `gpu.err what=native_stuck … head= client= tail=` (dice qué parte no terminó).
 - `[taa] stats (30 s, inline)`: resolved ≈ frames, `gpu=` ms reales, `draws jittered` > 0 y skipped razonable,
@@ -68,7 +74,7 @@ AA/sin AA) y jitter por frustum no emparejable (el juego lee `ovrp_GetNodeFrustu
   native/GLES3JNI/SDL2) → cualquier píxel/frame no opaco enseña la habitación. `visionos/Sources/kl_app.c`: también
   `KL_GUEST_UNITY`/`KL_GUEST_UE4` → `.full`; pasa a `.mixed` en vivo si el juego pide passthrough (`KL_FULL=0` revierte).
   Geometría morada: único error GPU del log = `gpu.err f=845 arg_overflow=2563 skipped_draws` (L7375, frame de
-  `ShaderWarmupManager.PopulatePSOCache`) → pendiente VPEngine (desbordamiento del argument buffer); quads del juego
+  `ShaderWarmupManager.PopulatePSOCache`) → pendiente VPKEngine (desbordamiento del argument buffer); quads del juego
   en EyeLevel ahora a la altura de ojos (antes en el suelo).
 ### Comprobar en el próximo log
 - AC: `[plat] ovr_User_GetLoggedInUser -> request N` (no «-> 0»), sin «Request failed», `[plat] language pack: en.lang`,
@@ -133,9 +139,9 @@ AA/sin AA) y jitter por frustum no emparejable (el juego lee `ovrp_GetNodeFrustu
   (1092 MSL compilados, 25 s, máx. 766 ms); primer run de build nueva puede invalidar → comprobar en un 2.º arranque
   con la misma build. Al entrar en partida `gpu.pso ms=7178 max 886/2814`, `gpu.hold 1504 ms timeouts=1`,
   `missing_pipelines=12` (tirón de carga, no fps sostenido).
-- `gpu.err archive_save pipelines-38.metalar entries=84 Failed_to_generate_machO: cannot pack` (VPEngine; los split
-  de 23/33 entradas sí se guardan) y 18× `vk.err shader compute "internal error: vector"` (emisor MSL de VPEngine;
-  `dispatch_skipped=6`/frame). Ambos en VPEngine, no en este repo.
+- `gpu.err archive_save pipelines-38.metalar entries=84 Failed_to_generate_machO: cannot pack` (VPKEngine; los split
+  de 23/33 entradas sí se guardan) y 18× `vk.err shader compute "internal error: vector"` (emisor MSL de VPKEngine;
+  `dispatch_skipped=6`/frame). Ambos en VPKEngine, no en este repo.
 - Ojo 2976x1912: ovrp recomienda 2383x1912 (base original) y Unity aplica su escala ~1.25 en ancho.
 ### Comprobar en el próximo log (AoT 47 / rendimiento)
 - AoT: tras `SetupLayer -> layer 2, Quad` debe salir `GetLayerTexture2: layer 2 …` y el serial sigue subiendo.
@@ -155,14 +161,14 @@ AA/sin AA) y jitter por frustum no emparejable (el juego lee `ovrp_GetNodeFrustu
 - Sistema/JNI: Object.toString/hashCode/equals, NO-OP de métodos void del juego, excepciones JNI por hilo, pthread
   attr/sched, OpenSL volume/feeder, AAsset 64 bits, índice genérico de la carpeta del juego (obb), imágenes nuevas a
   negro, audio 40 ms, MSAA del juego configurable (`vq.gameMSAA`).
-- Rendimiento Batman resuelto en log 26 (~90 fps; VPEngine locales en slots por variable, `gpu.hold`).
+- Rendimiento Batman resuelto en log 26 (~90 fps; VPKEngine locales en slots por variable, `gpu.hold`).
 
 ## Resuelto en logs 8–22 (referencia breve; detalle en git)
 - Vulkan en Batman: spoof Adreno 740 / driverVersion bit 31, `ovrp_GetDisplayAdapterId2` → NULL (log 7–8),
   `-force-vulkan` vía extra `unity` del Intent, AssetFile StatusByName como petición fallida.
 - Sistema: StatFs, ELF TLS (TLSDESC), liblog completo, libdl namespaces, AAudio MMap, OpenSL PCM_EX float y
   GetConfiguration, AudioManager.getDevices/AudioDeviceInfo → audio OK desde log 17.
-- Gráficos VPEngine: point_size, SubpassData como Texture y D2Array con multiview, VkComponentMapping → swizzle
+- Gráficos VPKEngine: point_size, SubpassData como Texture y D2Array con multiview, VkComponentMapping → swizzle
   (fuentes OK log 22), pipelines fuera del mutex + MTLBinaryArchive persistente.
 - XR: zNear/zFar, Time de poses, RelativePose EyeLevel con altura medida por el Vision Pro, LateLatching off,
   postura auto/sentado/de pie, recentrado con PS derecho largo, PS izq = Start, toques capacitivos, manos ocultas,
@@ -174,8 +180,8 @@ AA/sin AA) y jitter por frustum no emparejable (el juego lee `ovrp_GetNodeFrustu
 - Base Klepton (MIT, copia `ce74582` en `klepton/`, ver `THIRD-PARTY-NOTICES.md`): cada `.so` ARM64 se envuelve en un
   dylib firmado (`tools/klepton_ld.c` en proceso, `klepton_ld_run`) y se carga con `dlopen`; relocs ELF propias;
   bionic/JNI/OVRPlugin/OpenXR propios. Sin traducción de CPU.
-- Gráficos: VPEngine VPVulkan.framework (`scripts/build-vpvulkan.sh`, cacheado por hash de `vpengine/gpu/**`) en lugar de
-  MoltenVK (`VQSettings.useVPEngine`, `KL_MVK_DYLIB`). VisionQuestPro usa `gpu/metal2`.
+- Gráficos: VPKEngine VPVulkan.framework (`scripts/build-vpvulkan.sh`, cacheado por hash de `vpkengine/gpu/**`) en lugar de
+  MoltenVK (`VQSettings.useVPKEngine`, `KL_MVK_DYLIB`). VisionQuestPro usa `gpu/metal2`.
 - Firma: conversión sin firmar en `QUEST/Cache/<j>/dylibs`; copias firmadas en
   `Library/Application Support/VisionQuestPro/Signed/<j>/` (`VQPrepare`, `VQSigner`, variantes req4k/req16k/plain).
 - App (`app/Sources/`): `VQLog`, `VQFolder` (QUEST: Juegos/Cache/Partidas), `VQGames`, `VQPrepare`, `VQLaunch`

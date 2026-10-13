@@ -6,7 +6,7 @@
 //   QUEST/Partidas/<carpeta>/   saves and the game's own files
 //
 // The app keeps a bookmark to it (settings and keychain, which outlives a reinstall), the same
-// scheme as VPEngine's VPS4 folder.
+// scheme as VPKEngine's VPS4 folder.
 
 import Foundation
 import Security

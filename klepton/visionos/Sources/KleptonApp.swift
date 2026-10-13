@@ -138,7 +138,7 @@ enum Lifecycle {
         if let sym = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "vpvk_flush_caches") {
             typealias Flush = @convention(c) () -> Void
             unsafeBitCast(sym, to: Flush.self)()
-            NSLog("[app] VPEngine caches flushed")
+            NSLog("[app] VPKEngine caches flushed")
         }
         UserDefaults.standard.synchronize()
         fflush(nil)

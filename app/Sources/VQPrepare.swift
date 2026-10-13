@@ -10,7 +10,7 @@
 //                                                  the signed copies the game loads, with
 //                                                  sign.txt (conversion stamp, certificate, variant)
 //
-// Why the signed copies live inside the app: VPEngine's packs are only accepted by the system when
+// Why the signed copies live inside the app: VPKEngine's packs are only accepted by the system when
 // signed as a copy in the app's own container (Application Support), with the app's identifier
 // and requirement set and the certificate the app was signed with; libraries mapped from a folder
 // outside the container are not something the system has ever been seen to accept. Signing is
@@ -180,7 +180,7 @@ enum VQPrepare {
         VQLog.log("Preparar: \(game.id) convertido en \(Int(Date().timeIntervalSince(started))) s")
     }
 
-    /// Copies the converted libraries into the app and signs the copies (VPEngine's way: the app's
+    /// Copies the converted libraries into the app and signs the copies (VPKEngine's way: the app's
     /// identifier and requirement set, the variant the system accepts, tried with dlopen on the
     /// first library — a klepton-ld image runs no code when loaded).
     private static func sign(_ game: VQGame, from dylibs: URL, conversion: String, identity: VQSigner.Identity,

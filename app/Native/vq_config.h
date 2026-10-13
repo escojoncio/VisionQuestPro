@@ -1,5 +1,5 @@
 // VisionQuestPro: graphics settings from the app (Settings sheet) to the runtime.
-// Mirrors VPEngine's gpu/vulkan/include/vpvk/config.h (same layout); forwarded to
+// Mirrors VPKEngine's gpu/vulkan/include/vpvk/config.h (same layout); forwarded to
 // libVPVulkan with dlsym when that driver is loaded. Diagnostics: log "vq.fov".
 #pragma once
 #include <stdint.h>
