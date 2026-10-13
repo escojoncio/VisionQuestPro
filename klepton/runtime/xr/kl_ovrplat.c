@@ -228,6 +228,8 @@ static uint64_t klplat_drm(const char *name) {
 // zero answers. Logged ONCE per name so the log still lists the surface.
 // KL_PLAT_STRICT=1 restores the old fail-closed abort for scouting.
 static const char g_plat_empty[] = "";
+static uint32_t plat_msg_type_of(const char *name);       // defined with the queue
+static uint64_t klplat_offline_request(const char *name);
 
 static int plat_name_is_string(const char *name) {
     const char *f = strrchr(name, '_');
@@ -256,6 +258,11 @@ static uint64_t klplat_called(const char *name) {
         kl_fatal_prepare();
         abort();
     }
+    // A request whose message type is known resolves with an offline error
+    // completion instead of a bare 0 the SDK would drop (see
+    // klplat_offline_request) — checked before the string heuristic, because
+    // the type table only holds request entry points.
+    if (plat_msg_type_of(name)) return klplat_offline_request(name);
     int str = plat_name_is_string(name);
     int s = plat_slot(name);
     if (s < 0 || g_plat[s].calls == 1)
@@ -326,12 +333,19 @@ static uint64_t klplat_called(const char *name) {
 // under a live message. The mutex is not defensive — the requests are issued
 // from managed code on the main thread and the pump runs there too, but nothing
 // in the API promises that.
-#define KLPLAT_MSGQ 16
+// 256 rather than 16: since offline ERROR completions (below) every request
+// the guest makes now produces a message, and a title that writes rich
+// presence or leaderboard entries per scene can queue dozens before its pump
+// runs. A full ring is logged (klplat_request_str), never silent.
+#define KLPLAT_MSGQ 256
 // `str` is the STRING payload, for the messages whose managed wrapper is a
 // `Message<string>` — it is read through ovr_Message_GetString rather than
 // through the int payload above, and a message carries one or the other.
+// `is_error`: an offline error completion (klplat_offline_request) — the
+// message is its own ovrErrorHandle and `str` is the error text.
 typedef struct {
     uint32_t type; uint64_t request; int32_t payload; const char *str;
+    int is_error;
 } klplat_msg;
 static klplat_msg      g_msgq[KLPLAT_MSGQ];
 static unsigned        g_msg_head, g_msg_tail;
@@ -346,11 +360,19 @@ static uint64_t klplat_request_str(const char *what, uint32_t type,
                                    int32_t payload, const char *str) {
     pthread_mutex_lock(&g_msg_mu);
     uint64_t id = g_next_request++;
+    int full = 0;
     if (g_msg_tail - g_msg_head < KLPLAT_MSGQ) {
         klplat_msg *m = &g_msgq[g_msg_tail++ % KLPLAT_MSGQ];
         m->type = type; m->request = id; m->payload = payload; m->str = str;
+        m->is_error = 0;
+    } else {
+        full = 1;
     }
     pthread_mutex_unlock(&g_msg_mu);
+    if (full)
+        fprintf(stderr, "  [plat] WARN message queue full (%d): completion of %s "
+                        "(request %llu) DROPPED — the guest pump is not draining\n",
+                KLPLAT_MSGQ, what, (unsigned long long)id);
     fprintf(stderr, "  [plat] %s -> request %llu, completion queued "
                     "(type 0x%08x, payload %d%s%s)\n",
             what, (unsigned long long)id, type, payload,
@@ -389,8 +411,200 @@ static uint64_t klplat_Message_GetType(const klplat_msg *m) {
 }
 static uint64_t klplat_Message_IsError(const klplat_msg *m) {
     plat_hit("ovr_Message_IsError");
-    (void)m;
+    return m ? (uint64_t)(m->is_error != 0) : 0;
+}
+
+// ---------------------------------------------------------------------------
+// Offline ERROR completions — every request resolves, nothing waits forever.
+//
+// An ovrRequest of 0 is NOT an error path in the managed SDK: Callback.AddRequest
+// logs "An unknown error occurred. Request failed." and DROPS the request, so
+// the game's OnComplete never runs and whatever awaited it waits forever (AC
+// Nexus on its loading video). A real Quest with no network answers the same
+// requests with a message whose IsError is true. That is what this does: a real
+// request id, and a queued completion of the request's OWN message type with
+// IsError=1 and a generic "offline" error. The type must be the SDK's: the
+// managed Message.ParseMessageHandle switches on it and an unknown number is
+// dropped ("Unrecognized message type"), which is the same silence. So a name
+// with no known type keeps the old 0 (and says so once). On error the managed
+// Message<T> never reads its payload, so no data accessor is reached.
+//
+// Values: ovrMessageType from OVR_MessageType.h (Platform SDK v74); request
+// types only (the Notification_* push types are not requests). The ones also
+// read out of running guests with KL_PROBE_ENUM agree with this table.
+// KL_PLAT_OFFLINE_ERRORS=0 restores the bare 0.
+static const struct { const char *name; uint32_t type; } g_plat_msg_types[] = {
+    {"AbuseReport_ReportRequestHandled", 0x4B8EFC86},
+    {"Achievements_AddCount", 0x03E76231}, {"Achievements_AddFields", 0x14AA2129},
+    {"Achievements_GetAllDefinitions", 0x03D3458D},
+    {"Achievements_GetAllProgress", 0x4F9FDE1D},
+    {"Achievements_GetDefinitionsByName", 0x629101BC},
+    {"Achievements_GetNextAchievementDefinitionArrayPage", 0x2A7DD255},
+    {"Achievements_GetNextAchievementProgressArrayPage", 0x2F42E727},
+    {"Achievements_GetProgressByName", 0x152663B1},
+    {"Achievements_Unlock", 0x593CCBDD},
+    {"ApplicationLifecycle_GetRegisteredPIDs", 0x04E5CF62},
+    {"ApplicationLifecycle_GetSessionKey", 0x3AAF591D},
+    {"ApplicationLifecycle_RegisterSessionKey", 0x4DB6AFF8},
+    {"Application_CancelAppDownload", 0x7C2060DE},
+    {"Application_CheckAppDownloadProgress", 0x5534A924},
+    {"Application_GetVersion", 0x68670A0E},
+    {"Application_InstallAppUpdateAndRelaunch", 0x14806B85},
+    {"Application_LaunchOtherApp", 0x54E2D1F8},
+    {"Application_StartAppDownload", 0x44FC006E},
+    {"AssetFile_Delete", 0x6D5D7886}, {"AssetFile_DeleteById", 0x5AE8CD52},
+    {"AssetFile_DeleteByName", 0x420AC1CF}, {"AssetFile_Download", 0x11449FC5},
+    {"AssetFile_DownloadById", 0x2D008992}, {"AssetFile_DownloadByName", 0x6336CEFA},
+    {"AssetFile_DownloadCancel", 0x080AD3C7},
+    {"AssetFile_DownloadCancelById", 0x51659514},
+    {"AssetFile_DownloadCancelByName", 0x446AECFA},
+    {"AssetFile_GetList", 0x4AFC6F74}, {"AssetFile_Status", 0x02D32F60},
+    {"AssetFile_StatusById", 0x5D955D38}, {"AssetFile_StatusByName", 0x41CFDA50},
+    {"Avatar_LaunchAvatarEditor", 0x05F1E153},
+    {"Challenges_Create", 0x6859D641}, {"Challenges_DeclineInvite", 0x568E76C0},
+    {"Challenges_Delete", 0x264885CA}, {"Challenges_Get", 0x77584EF3},
+    {"Challenges_GetEntries", 0x121AB45F},
+    {"Challenges_GetEntriesAfterRank", 0x08891A7F},
+    {"Challenges_GetEntriesByIds", 0x316509DC}, {"Challenges_GetList", 0x43264356},
+    {"Challenges_GetNextChallenges", 0x5B7CA1B6},
+    {"Challenges_GetNextEntries", 0x7F4CA0C6},
+    {"Challenges_GetPreviousChallenges", 0x0EB4040D},
+    {"Challenges_GetPreviousEntries", 0x78C90470},
+    {"Challenges_Join", 0x21248069}, {"Challenges_Leave", 0x296116E5},
+    {"Challenges_UpdateInfo", 0x1175BE60},
+    {"Cowatching_GetNextCowatchViewerArrayPage", 0x1D403932},
+    {"Cowatching_GetPresenterData", 0x49864735},
+    {"Cowatching_GetViewersData", 0x5CD7A24F},
+    {"Cowatching_IsInSession", 0x651B4884}, {"Cowatching_JoinSession", 0x6388A554},
+    {"Cowatching_LaunchInviteDialog", 0x22933297},
+    {"Cowatching_LeaveSession", 0x3C9E46CD},
+    {"Cowatching_RequestToPresent", 0x7F79BCAA},
+    {"Cowatching_ResignFromPresenting", 0x4B49C202},
+    {"Cowatching_SetPresenterData", 0x6D1C8906},
+    {"Cowatching_SetViewerData", 0x3CDBE826},
+    {"DeviceApplicationIntegrity_GetIntegrityToken", 0x3271ABDA},
+    {"Entitlement_GetIsViewerEntitled", 0x186B58B1},
+    {"GroupPresence_Clear", 0x6DAA9CC3},
+    {"GroupPresence_GetInvitableUsers", 0x234BC3F1},
+    {"GroupPresence_GetNextApplicationInviteArrayPage", 0x04F8C0F2},
+    {"GroupPresence_GetSentInvites", 0x08260AB1},
+    {"GroupPresence_LaunchInvitePanel", 0x0F9ECF9F},
+    {"GroupPresence_LaunchMultiplayerErrorDialog", 0x2955AF24},
+    {"GroupPresence_LaunchRejoinDialog", 0x1577036F},
+    {"GroupPresence_LaunchRosterPanel", 0x35728882},
+    {"GroupPresence_SendInvites", 0x0DCBD364}, {"GroupPresence_Set", 0x675F5C24},
+    {"GroupPresence_SetDeeplinkMessageOverride", 0x521ADF0D},
+    {"GroupPresence_SetDestination", 0x4C5B268A},
+    {"GroupPresence_SetIsJoinable", 0x2A8F1055},
+    {"GroupPresence_SetLobbySession", 0x48FF55BE},
+    {"GroupPresence_SetMatchSession", 0x314C84B8},
+    {"IAP_ConsumePurchase", 0x1FBB72D9},
+    {"IAP_GetNextProductArrayPage", 0x1BD94AAF},
+    {"IAP_GetNextPurchaseArrayPage", 0x47570A95},
+    {"IAP_GetProductsBySKU", 0x7E9ACAF5}, {"IAP_GetViewerPurchases", 0x3A0F8419},
+    {"IAP_GetViewerPurchasesDurableCache", 0x63599E2B},
+    {"IAP_LaunchCheckoutFlow", 0x3F9B0D0D},
+    {"LanguagePack_GetCurrent", 0x1F90F0D5}, {"LanguagePack_SetCurrent", 0x5B4FBBE0},
+    {"Leaderboard_Get", 0x6AD44EF8}, {"Leaderboard_GetEntries", 0x5DB3474C},
+    {"Leaderboard_GetEntriesAfterRank", 0x18378BEF},
+    {"Leaderboard_GetEntriesByIds", 0x39607BFC},
+    {"Leaderboard_GetNextEntries", 0x4E207CD9},
+    {"Leaderboard_GetNextLeaderboardArrayPage", 0x35F6769B},
+    {"Leaderboard_GetPreviousEntries", 0x4901DAC0},
+    {"Leaderboard_WriteEntry", 0x117FC8FE},
+    {"Leaderboard_WriteEntryWithSupplementaryMetric", 0x72C692FA},
+    {"Media_ShareToFacebook", 0x00E38AEF},
+    {"Notification_MarkAsRead", 0x717259E3},
+    {"Party_GetCurrent", 0x47933760},
+    {"PushNotification_Register", 0x663A8B5F},
+    {"RichPresence_Clear", 0x57B752B3},
+    {"RichPresence_GetDestinations", 0x586F2D14},
+    {"RichPresence_GetNextDestinationArrayPage", 0x67367F45},
+    {"RichPresence_Set", 0x3C147509},
+    {"UserAgeCategory_Get", 0x21CBE0C0}, {"UserAgeCategory_Report", 0x2E4DD8D6},
+    {"User_Get", 0x6BCF9E47}, {"User_GetAccessToken", 0x06A85ABE},
+    {"User_GetBlockedUsers", 0x7D201556}, {"User_GetLinkedAccounts", 0x5793F456},
+    {"User_GetLoggedInUser", 0x436F345D},
+    {"User_GetLoggedInUserFriends", 0x587C2A8D},
+    {"User_GetLoggedInUserManagedInfo", 0x70BA3AEE},
+    {"User_GetNextBlockedUserArrayPage", 0x7C2AFDCB},
+    {"User_GetNextUserArrayPage", 0x267CF743},
+    {"User_GetNextUserCapabilityArrayPage", 0x2309F399},
+    {"User_GetOrgScopedID", 0x18F0B01B}, {"User_GetSdkAccounts", 0x67526A83},
+    {"User_GetUserProof", 0x22810483}, {"User_LaunchBlockFlow", 0x6FD62528},
+    {"User_LaunchFriendRequestFlow", 0x0904B598},
+    {"User_LaunchUnblockFlow", 0x14A22A97},
+    {"Voip_GetMicrophoneAvailability", 0x744CE345},
+    {"Voip_SetSystemVoipSuppressed", 0x453FC9AA},
+};
+
+// "ovr_User_GetLoggedInUser" -> its ovrMessageType, 0 if the name is not a
+// request we know the type of.
+static uint32_t plat_msg_type_of(const char *name) {
+    if (!name || strncmp(name, "ovr_", 4) != 0) return 0;
+    const char *n = name + 4;
+    for (size_t i = 0; i < sizeof g_plat_msg_types / sizeof g_plat_msg_types[0]; i++)
+        if (strcmp(g_plat_msg_types[i].name, n) == 0) return g_plat_msg_types[i].type;
     return 0;
+}
+
+static const char g_plat_offline_text[] =
+    "Oculus Platform is offline: no platform service on this device";
+
+// Queue an IsError completion of `name`'s own type and return its request id,
+// or 0 when the type is unknown (or KL_PLAT_OFFLINE_ERRORS=0). Logged once per
+// name. Never used for an ownership answer: plat_is_drm runs before every
+// classifier, so nothing here grants or delivers anything.
+static uint64_t klplat_offline_request(const char *name) {
+    uint32_t type = plat_msg_type_of(name);
+    int s = plat_slot(name);
+    int first = s < 0 || g_plat[s].calls <= 1;
+    if (!type || !kl_env_on("KL_PLAT_OFFLINE_ERRORS", 1)) {
+        if (first)
+            fprintf(stderr, "  [plat] %s -> 0 (request could not be made; %s)\n", name,
+                    type ? "KL_PLAT_OFFLINE_ERRORS=0" : "no known message type");
+        return 0;
+    }
+    pthread_mutex_lock(&g_msg_mu);
+    uint64_t id = g_next_request++;
+    int full = 0;
+    if (g_msg_tail - g_msg_head < KLPLAT_MSGQ) {
+        klplat_msg *m = &g_msgq[g_msg_tail++ % KLPLAT_MSGQ];
+        m->type = type; m->request = id; m->payload = 0;
+        m->str = g_plat_offline_text; m->is_error = 1;
+    } else {
+        full = 1;
+    }
+    pthread_mutex_unlock(&g_msg_mu);
+    if (full) {
+        fprintf(stderr, "  [plat] WARN message queue full (%d): %s -> 0\n", KLPLAT_MSGQ, name);
+        return 0;
+    }
+    if (first)
+        fprintf(stderr, "  [plat] %s -> request %llu, OFFLINE error completion queued "
+                        "(type 0x%08x; logged once)\n",
+                name, (unsigned long long)id, type);
+    return id;
+}
+
+// The error side of a message. The message IS its own ovrErrorHandle (one
+// payload per message, like every other accessor here).
+static const klplat_msg *klplat_Message_GetError(const klplat_msg *m) {
+    plat_hit("ovr_Message_GetError");
+    return (m && m->is_error) ? m : NULL;
+}
+// ovrError code 1 (generic), HTTP 0: no HTTP exchange took place.
+static uint64_t klplat_Error_GetCode(const klplat_msg *e) {
+    plat_hit("ovr_Error_GetCode");
+    return e ? 1 : 0;
+}
+static uint64_t klplat_Error_GetHttpCode(const klplat_msg *e) {
+    plat_hit("ovr_Error_GetHttpCode"); (void)e;
+    return 0;
+}
+static const char *klplat_Error_GetMessage(const klplat_msg *e) {
+    plat_hit("ovr_Error_GetMessage");
+    return (e && e->str) ? e->str : g_plat_offline_text;
 }
 static uint64_t klplat_Message_GetRequestID(const klplat_msg *m) {
     plat_hit("ovr_Message_GetRequestID");
@@ -589,9 +803,9 @@ static uint64_t klplat_User_GetLoggedInUser(void) {
     if (!kl_env_on("KL_PLAT_USER", klplat_user_default())) {
         static int said;
         if (!said) { said = 1;
-            fprintf(stderr, "  [plat] ovr_User_GetLoggedInUser -> 0 (no platform "
-                    "user; set KL_PLAT_USER=1 for a synthetic offline user)\n"); }
-        return 0;
+            fprintf(stderr, "  [plat] ovr_User_GetLoggedInUser -> offline error (no "
+                    "platform user; set KL_PLAT_USER=1 for a synthetic offline user)\n"); }
+        return klplat_offline_request("ovr_User_GetLoggedInUser");
     }
     return klplat_request("ovr_User_GetLoggedInUser", KLPLAT_MSG_LOGGED_IN_USER, 0);
 }
@@ -731,9 +945,11 @@ static klplat_asset *asset_by_id(uint64_t id) {
 static uint64_t asset_reply(const char *what, uint32_t type, const char *key,
                             klplat_asset *a) {
     if (!a) {
-        fprintf(stderr, "  [plat] AssetFile %s(\"%s\") -> not found (request 0)\n",
-                what, key);
-        return 0;
+        fprintf(stderr, "  [plat] AssetFile %s(\"%s\") -> not found (offline error "
+                        "completion)\n", what, key);
+        char full[64];
+        snprintf(full, sizeof full, "ovr_AssetFile_%s", what);
+        return klplat_offline_request(full);
     }
     fprintf(stderr, "  [plat] AssetFile %s(\"%s\") -> installed %s\n",
             what, key, a->path);
@@ -968,7 +1184,12 @@ static const char *klplat_AppVersion_name(const void *h) {
 static uint64_t klplat_init_async(const char *name) {
     plat_hit(name);
     g_platform_up = 1;
-    return klplat_request(name, KLPLAT_MSG_PLATFORM_INIT, KLPLAT_INIT_SUCCESS);
+    // Each init spelling completes with its OWN message type (OVR_MessageType.h).
+    uint32_t type = KLPLAT_MSG_PLATFORM_INIT;
+    if (strcmp(name, "ovr_PlatformInitializeWithAccessToken") == 0) type = 0x35692F2Bu;
+    else if (strcmp(name, "ovr_Platform_InitializeStandaloneOculus") == 0) type = 0x51F8CE0Cu;
+    else if (strcmp(name, "ovr_PlatformInitializeWindowsAsynchronous") == 0) type = 0x6DA7BA8Fu;
+    return klplat_request(name, type, KLPLAT_INIT_SUCCESS);
 }
 
 static const char *const g_plat_init_async[] = {
@@ -976,6 +1197,12 @@ static const char *const g_plat_init_async[] = {
     "ovr_PlatformInitializeAndroidAsynchronous",
     "ovr_PlatformInitializeAndroidAsynchronousWithOptions",
     "ovr_PlatformInitializeWindowsAsynchronous",
+    // VisionQuestPro: request-returning inits that answered 0 (a request the
+    // SDK drops, so its init callback never ran). Completed like the others.
+    // (ovr_PlatformInitializeStandaloneOculus without the underscore is the
+    // older SYNCHRONOUS form returning a result code: it stays in g_plat_init.)
+    "ovr_PlatformInitializeWithAccessToken",
+    "ovr_Platform_InitializeStandaloneOculus",
 };
 
 static int plat_is_init_async(const char *name) {
@@ -1241,6 +1468,14 @@ static int plat_is_options_sink(const char *name) {
            strstr(name, "Options_Set") != NULL;
 }
 
+// Request-returning entry points with no data here: a real id and an offline
+// error completion of their own type (klplat_offline_request), so the guest's
+// callback runs instead of the request being dropped.
+static uint64_t klplat_request_offline(const char *name) {
+    plat_hit(name);
+    return klplat_offline_request(name);
+}
+
 static int plat_is_request(const char *name) {
     for (size_t i = 0; i < sizeof g_plat_request / sizeof g_plat_request[0]; i++)
         if (strcmp(g_plat_request[i], name) == 0) return 1;
@@ -1412,6 +1647,12 @@ static const struct { const char *name; void *fn; } g_plat_impl[] = {
     // behind ours that it is not already holding.
     {"ovr_Message_GetNativeMessage", (void *)klplat_Message_GetPayload},
     {"ovr_Message_IsError",       (void *)klplat_Message_IsError},
+    // The error half of an offline completion (klplat_offline_request).
+    {"ovr_Message_GetError",      (void *)klplat_Message_GetError},
+    {"ovr_Error_GetCode",         (void *)klplat_Error_GetCode},
+    {"ovr_Error_GetHttpCode",     (void *)klplat_Error_GetHttpCode},
+    {"ovr_Error_GetMessage",      (void *)klplat_Error_GetMessage},
+    {"ovr_Error_GetDisplayableMessage", (void *)klplat_Error_GetMessage},
     {"ovr_Message_GetRequestID",  (void *)klplat_Message_GetRequestID},
     {"ovr_Message_GetPlatformInitialize",      (void *)klplat_Message_GetPayload},
     {"ovr_PlatformInitialize_GetResult",       (void *)klplat_payload_int},
@@ -1474,7 +1715,9 @@ void *kl_ovrplat_sym(const char *name) {
         return kl_named_stub(name, (void *)klplat_void);
     if (plat_is_init_async(name))
         return kl_named_stub(name, (void *)klplat_init_async);
-    if (plat_is_absent_ok(name) || plat_is_init(name) || plat_is_request(name))
+    if (plat_is_request(name))
+        return kl_named_stub(name, (void *)klplat_request_offline);
+    if (plat_is_absent_ok(name) || plat_is_init(name))
         return kl_named_stub(name, (void *)klplat_init_fails);
     return kl_named_stub(name, (void *)klplat_called);
 }

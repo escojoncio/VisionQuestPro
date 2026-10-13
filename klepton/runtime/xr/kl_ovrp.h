@@ -672,6 +672,21 @@ void   kl_ovrp_set_predicted_display_time(double t);
 double kl_ovrp_predicted_display_time(void);
 float kl_ovrp_display_frequency(void);
 
+// The rates a guest may pick (panel rate first, then lower cadences
+// 100/96/90/72; never above the panel), shared by ovrp_GetSystemDisplay-
+// AvailableFrequencies and xrEnumerateDisplayRefreshRatesFB. Returns the count.
+int   kl_ovrp_display_frequencies(float *out, int cap);
+// A guest request through either API: 1 = accepted (an offered rate, or 0 for
+// "the panel's own"), 0 = refused. The panel is unaffected; the request is
+// what both getters report back (kl_ovrp_guest_display_frequency).
+int   kl_ovrp_request_display_frequency(float hz);
+float kl_ovrp_guest_display_frequency(void);
+
+// The play area both XR APIs report (OVRPlugin boundary, OpenXR STAGE bounds):
+// a width x depth rectangle in metres centred on the tracking origin, on the
+// floor. 0 (and zeros) when KL_OVRP_BOUNDARY=0 — no guardian.
+int   kl_ovrp_boundary(float *width, float *depth);
+
 // The per-eye render target size the guest is told to use
 // (ovrp_GetEyeTextureSize). Defaults to the Quest 2's recommended 2290x2400,
 // for the same reason everything else here describes a Quest 2.
@@ -854,6 +869,9 @@ void kl_ovrp_haptics_stop(int hand);
 
 // Compositor → shim: 1 while the VPKTAA resolve runs (gates projection jitter).
 void kl_ovrp_set_taa_active(int on);
+// VPKTAA depth linearisation: the zNear ovrp_GetNodeFrustum2 serves the guest
+// (what it builds its projection from), 0.1 m before the first call.
+float kl_ovrp_frustum_near(void);
 
 // VPKTAA per-pixel reprojection: the eye's pose RELATIVE TO THE HEAD exactly as
 // the guest was told it (ovrp_GetNodePoseState nodes 0/1): `off` = head-local

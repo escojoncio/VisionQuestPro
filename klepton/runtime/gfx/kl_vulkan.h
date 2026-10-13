@@ -237,7 +237,9 @@ void kl_vulkan_capture_layers(void);
 // submitted. `kl_vulkan_frame_serial` is the value — monotonic, 0 before the
 // first frame, and exactly the role kl_glfb_gpu_fence_value plays on the GL
 // path (where the wait is on the GPU instead). See the implementation for why
-// this one is a CPU stall and what would remove it.
+// this one is a CPU stall and what would remove it. Inline VPKTAA removes it for
+// every frame it resolves: the serial then advances when the resolve completes
+// on the GPU (kl_vulkan_taa_frame_complete), never past a frame not complete.
 void kl_vulkan_frame_done(int stage);
 unsigned long long kl_vulkan_frame_serial(void);
 
@@ -247,10 +249,14 @@ unsigned long long kl_vulkan_frame_serial(void);
 //
 // VPKEngine (VPVulkan) jitters the eye geometry's VIEWPORT when it translates a
 // submit and records what it applied (vpvk_taa_*); Klepton calls a hook (set
-// by the Swift side) inside kl_vulkan_frame_done, after the eye depth is filed
-// and BEFORE the frame-end vkQueueWaitIdle — so the resolve, encoded into a
-// command buffer on the same queue, is ordered after the frame and covered by
-// the same wait. Its output is published as the stage's eye picture.
+// by the Swift side) inside kl_vulkan_frame_done, after the eye depth is filed.
+// The resolve is encoded into a command buffer on the same queue (ordered after
+// the frame on the GPU, and before the next frame's work: VPKEngine fences it)
+// and NOT waited for: a frame the hook resolved skips the frame-end
+// vkQueueWaitIdle, and the Swift side publishes the output (with its frame
+// record) and calls kl_vulkan_taa_frame_complete when its command buffer has
+// COMPLETED on the GPU. At most 2 resolves are in flight (Swift side). A frame
+// the hook did not resolve keeps the old wait + serial.
 //
 // Every function here is safe without VPVulkan (MoltenVK, or no Vulkan at all):
 // the vpvk_* exports are resolved lazily from the loaded driver and every
@@ -264,9 +270,38 @@ int  kl_vulkan_taa_inline(void);
 // kl_vulkan_frame_done(stage) — only in inline mode, only when kl_ovrp filed
 // THIS frame's record under `stage` (kl_ovrp_stage_render_pose(stage) then
 // returns it, complete, with its serial) and with this frame's eye depth
-// filed (kl_vulkan_eye_depth_get(stage, eye, 0, ...)). fn = NULL unregisters.
-typedef void (*kl_vulkan_taa_hook_fn)(int stage, void *user);
+// filed (kl_vulkan_eye_depth_get(stage, eye, 0, ...)), and only while the AA
+// gate is open (kl_vulkan_aa_gate). fn = NULL unregisters. `vk_serial` is the
+// kl_vulkan_frame_serial value this frame stands for. Returns 1 when a resolve
+// was COMMITTED (then no frame-end wait, and the hook's owner must call
+// kl_vulkan_taa_frame_complete(vk_serial) once it completed on the GPU), 0 when
+// the frame goes out unresolved (wait + serial as without VPKTAA).
+typedef int (*kl_vulkan_taa_hook_fn)(int stage, unsigned long long vk_serial, void *user);
 void kl_vulkan_set_taa_hook(kl_vulkan_taa_hook_fn fn, void *user);
+// The resolve of the frame `vk_serial` has completed on the GPU: advances
+// kl_vulkan_frame_serial to it (monotonic; any thread).
+void kl_vulkan_taa_frame_complete(unsigned long long vk_serial);
+// Frame ends whose record was filed for the stage being finished, in inline mode
+// (whether or not the hook ran): > 0 = this guest goes through the frame-end
+// hook path, so the inline mode is the right one for the whole run.
+unsigned long long kl_vulkan_taa_inline_frames(void);
+// The frame-record serial (kl_ovrp_render_pose.serial) of the newest frame that
+// went out UNRESOLVED in inline mode and was waited for at its frame end (its
+// live eye picture is complete); 0 = none yet. A compositor showing VPKTAA
+// outputs shows that frame's live picture instead while it is newer than the
+// newest published output (gaps: loading, AA gate closed, refused resolves).
+unsigned long long kl_vulkan_taa_raw_record(void);
+
+// Automatic AA (KL_AA_MODE = auto | vpktaa | msaa | off).
+// The game's ORIGINAL eye-pass sample count from VPKEngine (vpvk_msaa_detected,
+// looked up weakly in the loaded driver): 0 = not seen yet, 1 = no MSAA, 2/4/8;
+// -1 = the driver has no such export (MoltenVK) or no Vulkan driver is loaded.
+// *device_max (may be NULL) = vpvk_msaa_device_max, or -1.
+int  kl_vulkan_aa_detected(int *device_max);
+// 1 while VPKTAA may run now: vpktaa mode always; auto only once the eye pass is
+// seen at 1x (pending, MSAA > 1 or no detection = 0); msaa/off never. Logs
+// "[aa] ..." on every change of the answer.
+int  kl_vulkan_aa_gate(void);
 // Forwards to vpvk_native_submit: a command buffer on the queue VPKEngine sends
 // all guest work to, after everything sent so far; fn encodes into it
 // (id<MTLCommandBuffer>, unretained), then it is committed. Synchronous.
@@ -283,6 +318,8 @@ void *kl_vulkan_eye_color_mtl(int stage, int eye, int *slice, int *w, int *h);
 // table, as an override over the live entry). tex = NULL restores the live
 // image. The override is dropped by itself when the stage's live eye image
 // changes (reallocation, size), and refused when w x h is not the eye's size.
+// Applied at once. (KleptonTAA no longer publishes this way: its output goes to
+// KleptonCompositor with its frame record when the GPU completes it.)
 void kl_vulkan_taa_publish(int stage, void *tex, int w, int h);
 // The jitter VPKEngine actually applied to the frame that is ending
 // (vpvk_taa_get_applied, which resets its counters — call once per frame).

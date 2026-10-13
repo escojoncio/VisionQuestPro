@@ -21,6 +21,8 @@ int vq_gfx_config_forward(void) {
     void (*set_q3)(int) = (void (*)(int))dlsym(RTLD_DEFAULT, "vpvk_config_set_quest3_profile");
     void (*set_aniso)(int) = (void (*)(int))dlsym(RTLD_DEFAULT, "vpvk_config_set_anisotropy");
     void (*set_1x)(int) = (void (*)(int))dlsym(RTLD_DEFAULT, "vpvk_config_set_force_single_sample");
+    // Newer VPKEngine only (also read from VPVK_MSAA by the driver): weak, may be absent.
+    void (*set_msaa)(int) = (void (*)(int))dlsym(RTLD_DEFAULT, "vpvk_config_set_msaa_override");
     if (!set_fov || !set_taa) {
         fprintf(stderr, "vq.fov config stored; VPVulkan not loaded (MoltenVK path): own foveation/VPKTAA not applied\n");
         return 0;
@@ -34,6 +36,10 @@ int vq_gfx_config_forward(void) {
     if (set_q3) set_q3(g_cfg.quest3_profile);
     if (set_aniso) set_aniso(g_cfg.anisotropy);
     if (set_1x) set_1x(g_cfg.force_single_sample);
+    if (set_msaa) set_msaa(g_cfg.msaa_override);
+    else if (g_cfg.msaa_override)
+        fprintf(stderr, "vq.aa msaa override %d: vpvk_config_set_msaa_override not in this VPVulkan (env VPVK_MSAA only)\n",
+                g_cfg.msaa_override);
     fprintf(stderr, "vq.fov config forwarded to VPVulkan\n");
     return 1;
 }
@@ -45,9 +51,10 @@ int vq_gfx_config_apply(const vq_gfx_config *c) {
     static const char *const names[] = { "off", "m2", "m5", "custom" };
     int m = (c->foveation_mode >= 0 && c->foveation_mode <= 3) ? c->foveation_mode : 0;
     fprintf(stderr, "vq.fov settings quest_foveation=off(always) own=%s sharp=%.2f periphery=%.2f height=%.2f "
-            "vpktaa=%d %.0f%% sharp=%.2f scale=%.2f asw_off=%d quest3=%d aniso=%d\n",
+            "vpktaa=%d %.0f%% sharp=%.2f scale=%.2f asw_off=%d quest3=%d aniso=%d force1x=%d msaa=%d\n",
             names[m], c->sharp_zone, c->periphery, c->height, c->vpktaa_enabled, c->vpktaa_percent,
-            c->vpktaa_sharpness, c->render_scale, c->asw_disabled, c->quest3_profile, c->anisotropy);
+            c->vpktaa_sharpness, c->render_scale, c->asw_disabled, c->quest3_profile, c->anisotropy,
+            c->force_single_sample, c->msaa_override);
     return vq_gfx_config_forward();
 }
 

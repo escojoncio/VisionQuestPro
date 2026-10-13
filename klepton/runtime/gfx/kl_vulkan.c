@@ -15,6 +15,9 @@
 #include <dlfcn.h>
 #include <pthread.h>
 #include <stdint.h>
+#ifdef __APPLE__
+#include <mach/mach.h>   // vm_read_overwrite — read a guest pointer without faulting (klvk_resolve_cell)
+#endif
 #include <stdio.h>
 #include <time.h>
 #include <stdlib.h>
@@ -100,6 +103,11 @@ unsigned long long kl_vulkan_frame_serial(void) { return 0; }
 // VPKTAA inline: never active without a Vulkan driver.
 int   kl_vulkan_taa_inline(void) { return 0; }
 void  kl_vulkan_set_taa_hook(kl_vulkan_taa_hook_fn fn, void *u) { (void)fn; (void)u; }
+void  kl_vulkan_taa_frame_complete(unsigned long long s) { (void)s; }
+unsigned long long kl_vulkan_taa_inline_frames(void) { return 0; }
+unsigned long long kl_vulkan_taa_raw_record(void) { return 0; }
+int   kl_vulkan_aa_detected(int *dm) { if (dm) *dm = -1; return -1; }
+int   kl_vulkan_aa_gate(void) { return 0; }
 int   kl_vulkan_native_submit(void (*fn)(void *, void *), void *u) { (void)fn; (void)u; return 0; }
 void *kl_vulkan_native_device(void) { return NULL; }
 void *kl_vulkan_eye_color_mtl(int s, int e, int *sl, int *w, int *h) {
@@ -1704,6 +1712,15 @@ static VkImage klvk_image_alloc(klvk_device *d, VkFormat fmt,
     return img;
 }
 
+// Replaced eye / SpaceWarp / depth-snapshot images: destroyed a few seconds
+// later (klvk_retire_pump, at a frame end) instead of never — AC Nexus reached
+// 5921/6144 MiB with every reallocation kept. Defined beside kl_vulkan_frame_done.
+static void klvk_retire_image(klvk_device *d, VkImage img, VkDeviceMemory mem, const char *what,
+                              uint32_t w, uint32_t h, uint32_t layers);
+// The guest used `img` (attachment, copy): if it is waiting to be freed, its
+// grace period restarts — it is not dead yet. One load while nothing waits.
+static void klvk_retire_touch(VkImage img, const char *how);
+
 // A non-eye layer's slot table, found or claimed by the guest's layer id.
 // NULL when the table is full, which is named by the caller.
 static klvk_img_slot *layer_slots_for(int key) {
@@ -1789,12 +1806,19 @@ unsigned long long kl_vulkan_layer_image(int layer_key, int stage, int eye,
     // instant, and freeing storage under them is a worse failure than holding a
     // few images that no longer describe anything. This happens at startup, once
     // per stage.
+    // EXCEPT the eye's: those are large (2 x eye size, every stage) and a game
+    // that changes its resolution several times (AC Nexus) ran out of memory.
+    // The old eye image is RETIRED — destroyed once nothing can still be
+    // sampling it (seconds and frames later, see klvk_retire_pump).
     if (slot->img && (slot->w != w || slot->h != h ||
                       slot->layers != (uint32_t)layers || slot->fmt != fmt)) {
+        int retire = is_eye && kl_env_on("KL_VK_FREE_OLD", 1);
         VKI("layer %d stage %d %s: was %ux%u (%u layer(s)), now %ux%u (%d) — "
-            "allocating fresh; the old image is kept, not freed\n",
+            "allocating fresh; the old image is %s\n",
             layer_key, stage, eye ? "eye 1" : "eye 0",
-            slot->w, slot->h, slot->layers, w, h, layers);
+            slot->w, slot->h, slot->layers, w, h, layers,
+            retire ? "retired (freed in a few seconds)" : "kept, not freed");
+        if (retire) klvk_retire_image(d, slot->img, slot->mem, "eye image", slot->w, slot->h, slot->layers);
         slot->img = VK_NULL_HANDLE;
         slot->mem = VK_NULL_HANDLE;
     }
@@ -1979,10 +2003,16 @@ unsigned long long kl_vulkan_spacewarp_image(int stage, int eye, int kind,
     klvk_img_slot *slot = &g_asw[stage][eye][kind];
     if (slot->img && (slot->w != w || slot->h != h ||
                       slot->layers != (uint32_t)layers || slot->fmt != fmt)) {
+        int retire = kl_env_on("KL_VK_FREE_OLD", 1);
         VKI("[asw] %s stage %d eye %d: was %ux%u fmt %d (%u layer(s)), now %ux%u fmt %d "
-            "(%d) — allocating fresh; the old image is kept, not freed\n",
+            "(%d) — allocating fresh; the old image is %s\n",
             kind == KLVK_ASW_MOTION ? "motion-vector" : "depth", stage, eye,
-            slot->w, slot->h, (int)slot->fmt, slot->layers, w, h, (int)fmt, layers);
+            slot->w, slot->h, (int)slot->fmt, slot->layers, w, h, (int)fmt, layers,
+            retire ? "retired (freed in a few seconds)" : "kept, not freed");
+        if (retire)
+            klvk_retire_image(d, slot->img, slot->mem,
+                              kind == KLVK_ASW_MOTION ? "SpaceWarp motion-vector image" : "SpaceWarp depth image",
+                              slot->w, slot->h, slot->layers);
         slot->img = VK_NULL_HANDLE;
         slot->mem = VK_NULL_HANDLE;
     }
@@ -2064,6 +2094,12 @@ unsigned kl_vulkan_spacewarp_writes(int stage, int kind) {
 // stage record. Everything is inert unless KL_VPKTAA=1 (KL_VPKTAA_DEPTH=0 turns
 // just this off): no usage/storeOp rewrite, no tracking, no copy.
 // ---------------------------------------------------------------------------
+static int klvk_aa_mode(void);    // KL_AA_MODE, defined with the AA gate
+// A MULTISAMPLED depth is only ever read by VPKTAA in the explicit vpktaa mode
+// (VPKEngine then renders it 1x anyway): in auto the eye pass being MSAA means
+// VPKTAA is off for that game, so forcing such a depth SAMPLED / STORE would only
+// cost tile bandwidth.
+static int klvk_taa_wants_ms_depth(void);
 static int klvk_taa_depth_on(void) {
     static int v = -1;
     if (v < 0) v = kl_env_on("KL_VPKTAA", 0) && kl_env_on("KL_VPKTAA_DEPTH", 1);
@@ -2308,7 +2344,14 @@ static int klvk_ed_snapshot(klvk_device *d, int stage, int eye, VkImage src, VkF
                  g_ed[stage][eye].snap_h != h || g_ed[stage][eye].snap_layers != layers;
     pthread_mutex_unlock(&g_ed_rec_mu);
     if (remake) {
-        // The old one is kept, not freed: VPKTAA may be sampling it on its queue.
+        // The old one is retired (freed seconds later): VPKTAA may be sampling it.
+        if (dst && kl_env_on("KL_VK_FREE_OLD", 1)) {
+            pthread_mutex_lock(&g_ed_rec_mu);
+            VkDeviceMemory om = g_ed[stage][eye].snap_mem;
+            uint32_t ow = g_ed[stage][eye].snap_w, oh = g_ed[stage][eye].snap_h, ol = g_ed[stage][eye].snap_layers;
+            pthread_mutex_unlock(&g_ed_rec_mu);
+            klvk_retire_image(d, dst, om, "depth snapshot", ow, oh, ol);
+        }
         VkDeviceMemory mem = VK_NULL_HANDLE;
         dst = klvk_image_alloc(d, fmt, w, h, layers, 1,
                                VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
@@ -2348,6 +2391,10 @@ static int klvk_ed_snapshot(klvk_device *d, int stage, int eye, VkImage src, VkF
     }
     return 1;
 }
+
+// Frames that reached kl_vulkan_frame_done (incremented at its start): the
+// number of the frame ending right now. See kl_vulkan_frame_serial.
+static uint64_t g_frame_issued;
 
 // At the guest's frame end for `stage`, before the idle wait: file the pick.
 static void klvk_ed_frame_done(klvk_device *d, int stage) {
@@ -2419,11 +2466,17 @@ static void klvk_ed_frame_done(klvk_device *d, int stage) {
         void *mtl = NULL;
         int snap = 0;
         int inl = kl_vulkan_taa_inline();
-        if (inl) {
-            // Inline: the resolve runs before the frame-end wait, i.e. before
-            // the next frame can draw into this depth — no copy, shared or not,
-            // and a multisampled depth is handed over as is (the resolve reads
-            // its samples). It must have been created SAMPLED (vkCreateImage).
+        if (inl && samples > 1 && !klvk_taa_wants_ms_depth()) {
+            // A multisampled eye depth outside the vpktaa mode: VPKTAA is off for
+            // this game (auto keeps the game's MSAA), and asking VPKEngine for the
+            // texture would allocate a depth that may live on tile only.
+            mtl = NULL;
+        } else if (inl) {
+            // Inline: the resolve is ordered on VPKEngine's queue before the next
+            // frame's work (vpvk_native_submit fences it), so the next frame can
+            // never draw into this depth first — no copy, shared or not, and a
+            // multisampled depth is handed over as is (the resolve reads its
+            // samples). It must have been created SAMPLED (vkCreateImage).
             mtl = eye_mtl_texture(d, img);
         } else if (samples > 1) {
             mtl = NULL;              // a multisampled depth: VPKTAA cannot use it (logged there)
@@ -2461,7 +2514,7 @@ static void klvk_ed_frame_done(klvk_device *d, int stage) {
         info.source = kind;
         info.snapshot = snap;
         info.tag = 0;
-        info.vk_serial = kl_vulkan_frame_serial() + 1;   // the serial this frame_done publishes
+        info.vk_serial = __atomic_load_n(&g_frame_issued, __ATOMIC_ACQUIRE);   // this frame's number
         pthread_mutex_lock(&g_ed_rec_mu);
         g_ed[stage][e].info = info;
         g_ed[stage][e].valid = mtl != NULL || (samples > 1 && !inl);
@@ -3104,10 +3157,33 @@ void kl_vulkan_capture_eyes(unsigned frame, int stage) {
 // nothing has yet measured. `KL_VK_FRAME_SYNC=0` removes the wait and keeps the
 // serial — the A/B for "is the compositor showing a torn frame?", and the shape
 // the timeline-semaphore version would have.
+//
+// VPKTAA inline changes one thing: a frame whose resolve the hook COMMITTED is
+// not waited for. Its number (g_frame_issued) is handed to the hook, and the
+// serial reaches it when the resolve's command buffer completes on the GPU
+// (kl_vulkan_taa_frame_complete) — the resolve is ordered after the whole frame
+// on VPKEngine's queue, so "resolve complete" implies "frame complete". The
+// serial therefore means "the newest frame whose GPU work is complete", and it
+// only moves forward (a late completion of an older frame is ignored).
 static uint64_t g_frame_serial;
+// g_frame_issued (frames that reached kl_vulkan_frame_done) is declared above
+// klvk_ed_frame_done, which files it with the eye depth.
 
 unsigned long long kl_vulkan_frame_serial(void) {
     return __atomic_load_n(&g_frame_serial, __ATOMIC_ACQUIRE);
+}
+
+static void klvk_serial_advance(uint64_t to) {
+    uint64_t cur = __atomic_load_n(&g_frame_serial, __ATOMIC_ACQUIRE);
+    while (cur < to &&
+           !__atomic_compare_exchange_n(&g_frame_serial, &cur, to, 1,
+                                        __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) { }
+}
+
+void kl_vulkan_taa_frame_complete(unsigned long long vk_serial) {
+    // Never past what was issued: a stray value cannot run the serial ahead.
+    uint64_t issued = __atomic_load_n(&g_frame_issued, __ATOMIC_ACQUIRE);
+    klvk_serial_advance(vk_serial < issued ? vk_serial : issued);
 }
 
 // ---------------------------------------------------------------------------
@@ -3244,8 +3320,10 @@ static void klvk_eye_fb_note(VkImage img, uint32_t w, uint32_t h) {
 // copy the depth so the next frame would not overwrite it, and shared the GPU
 // with the guest at a different cadence. Here VPKEngine jitters the viewport and
 // says what it applied, and the resolve is encoded at the frame end on
-// VPKEngine's own queue: ordered after the frame, finished by the frame-end
-// wait, and reading the depth before the next frame can touch it.
+// VPKEngine's own queue: ordered after the frame and before the next one (so it
+// reads the depth before the next frame can touch it), and NOT waited for on the
+// CPU — the serial advances when its command buffer completes (KleptonTAA,
+// kl_vulkan_taa_frame_complete), with at most 2 resolves in flight.
 // ---------------------------------------------------------------------------
 
 // VPVulkan's exports (gpu/vulkan/include/vpvk/config.h), mirrored field for
@@ -3273,6 +3351,8 @@ static struct {
     int   (*get_applied)(klvk_vpvk_taa_applied *);
     int   (*native_submit)(klvk_vpvk_encode_fn, void *);
     void *(*native_device)(void);
+    int   (*msaa_detected)(void);      // weak: VPKEngine with the automatic AA API only
+    int   (*msaa_device_max)(void);
 } g_vpvk;
 static pthread_mutex_t g_vpvk_mu = PTHREAD_MUTEX_INITIALIZER;
 
@@ -3287,6 +3367,8 @@ static void klvk_vpvk_resolve(void) {
         g_vpvk.get_applied   = (int (*)(klvk_vpvk_taa_applied *))mvk_sym("vpvk_taa_get_applied");
         g_vpvk.native_submit = (int (*)(klvk_vpvk_encode_fn, void *))mvk_sym("vpvk_native_submit");
         g_vpvk.native_device = (void *(*)(void))mvk_sym("vpvk_native_device");
+        g_vpvk.msaa_detected   = (int (*)(void))mvk_sym("vpvk_msaa_detected");
+        g_vpvk.msaa_device_max = (int (*)(void))mvk_sym("vpvk_msaa_device_max");
         __atomic_store_n(&g_vpvk.resolved, 1, __ATOMIC_RELEASE);
     }
     pthread_mutex_unlock(&g_vpvk_mu);
@@ -3321,6 +3403,64 @@ int kl_vulkan_taa_inline(void) {
         v = expect;     // another thread decided first
     }
     return v;
+}
+
+// ---------------------------------------------------------------------------
+// Automatic AA (KL_AA_MODE; contract in kl_vulkan.h). The app picks the mode per
+// game; VPKEngine reports the game's ORIGINAL eye-pass sample count. This gate
+// decides, live, whether the inline resolve (and with it the jitter) may run.
+// ---------------------------------------------------------------------------
+enum { KLVK_AA_AUTO, KLVK_AA_VPKTAA, KLVK_AA_MSAA, KLVK_AA_OFF };
+static int klvk_aa_mode(void) {
+    static int m = -1;
+    if (m < 0) {
+        const char *e = getenv("KL_AA_MODE");
+        m = (e && !strcmp(e, "vpktaa")) ? KLVK_AA_VPKTAA :
+            (e && !strcmp(e, "msaa"))   ? KLVK_AA_MSAA :
+            (e && !strcmp(e, "off"))    ? KLVK_AA_OFF : KLVK_AA_AUTO;   // unset/other = auto
+    }
+    return m;
+}
+static const char *klvk_aa_mode_name(int m) {
+    return m == KLVK_AA_VPKTAA ? "vpktaa" : m == KLVK_AA_MSAA ? "msaa" :
+           m == KLVK_AA_OFF ? "off" : "auto";
+}
+
+static int klvk_taa_wants_ms_depth(void) {
+    return klvk_aa_mode() == KLVK_AA_VPKTAA || kl_env_on("KL_VPKTAA_MS_DEPTH", 0);
+}
+
+int kl_vulkan_aa_detected(int *device_max) {
+    if (device_max) *device_max = -1;
+    if (!kl_vulkan_guest_active()) return -1;
+    klvk_vpvk_resolve();
+    if (device_max && g_vpvk.msaa_device_max) *device_max = g_vpvk.msaa_device_max();
+    return g_vpvk.msaa_detected ? g_vpvk.msaa_detected() : -1;
+}
+
+int kl_vulkan_aa_gate(void) {
+    int m = klvk_aa_mode();
+    int det = -2, open;
+    if (m == KLVK_AA_VPKTAA) open = 1;
+    else if (m != KLVK_AA_AUTO) open = 0;
+    else { det = kl_vulkan_aa_detected(NULL); open = det == 1; }
+    // Logged on every change of (answer, detection): rare, and the one line that
+    // says why a run has (or has not) VPKTAA.
+    static int last = -1000;
+    int key = open * 100 + det;
+    if (__atomic_exchange_n(&last, key, __ATOMIC_ACQ_REL) != key) {
+        char why[160];
+        if (m == KLVK_AA_VPKTAA)      snprintf(why, sizeof why, "vpktaa mode (game MSAA forced to 1x)");
+        else if (m != KLVK_AA_AUTO)   snprintf(why, sizeof why, "%s mode never runs VPKTAA", klvk_aa_mode_name(m));
+        else if (det < 0)             snprintf(why, sizeof why, "the Vulkan driver has no vpvk_msaa_detected "
+                                               "(MoltenVK?) — auto cannot tell, VPKTAA stays off");
+        else if (det == 0)            snprintf(why, sizeof why, "game eye pass not seen yet — no resolve, no jitter");
+        else if (det == 1)            snprintf(why, sizeof why, "game eye pass is 1x");
+        else                          snprintf(why, sizeof why, "game eye pass is MSAA %dx — the game's MSAA is "
+                                               "kept (not forced to 1x)", det);
+        VKI("[aa] mode %s: VPKTAA inline %s — %s\n", klvk_aa_mode_name(m), open ? "ON" : "off", why);
+    }
+    return open;
 }
 
 static struct { kl_vulkan_taa_hook_fn fn; void *user; } g_taa_hook;
@@ -3394,15 +3534,10 @@ void *kl_vulkan_eye_color_mtl(int stage, int eye, int *slice, int *w, int *h) {
     return mtl;
 }
 
-// A publish made from inside the hook is held until the frame-end wait has
-// finished: the output is complete only then, and a compositor must never be
-// pointed at a texture the GPU is still writing. Outside the hook (Swift
-// restoring a stage, say) it applies at once.
-static __thread int   t_taa_hook_stage = -1;
-static __thread int   t_taa_pend_set;
-static __thread void *t_taa_pend_tex;
-static __thread int   t_taa_pend_w, t_taa_pend_h;
-
+// kl_vulkan_taa_publish: an override applied at once (any thread). The inline
+// resolve no longer goes through it — its output reaches the compositor with
+// its own frame record once the GPU has completed it (KleptonTAA) — but the
+// clears (kl_ovrp's EndFrame4, hook removal) still do.
 static int klvk_taa_apply_publish(int stage, void *tex, int w, int h) {
     int ok0 = kl_glfb_set_eye_mtl_override(0, stage, tex, w, h);
     int ok1 = kl_glfb_set_eye_mtl_override(1, stage, tex, w, h);
@@ -3423,10 +3558,6 @@ static int klvk_taa_apply_publish(int stage, void *tex, int w, int h) {
 
 void kl_vulkan_taa_publish(int stage, void *tex, int w, int h) {
     if (stage < 0 || stage >= KLVK_EYE_STAGES) return;
-    if (stage == t_taa_hook_stage) {
-        t_taa_pend_set = 1; t_taa_pend_tex = tex; t_taa_pend_w = w; t_taa_pend_h = h;
-        return;
-    }
     klvk_taa_apply_publish(stage, tex, w, h);
 }
 
@@ -3456,19 +3587,176 @@ void kl_vulkan_taa_frame_record(int stage, unsigned long long serial) {
     g_taa_rec_serial = serial;
 }
 
+// Frame ends that went through the inline hook path (record filed for the stage
+// being finished), whether or not the AA gate let the hook resolve them.
+static unsigned long long g_taa_inline_frames;
+unsigned long long kl_vulkan_taa_inline_frames(void) {
+    return __atomic_load_n(&g_taa_inline_frames, __ATOMIC_ACQUIRE);
+}
+
+// The frame record serial of the newest frame that went out UNRESOLVED and has
+// been waited for (its live eye picture is complete) — see kl_vulkan.h.
+static unsigned long long g_taa_raw_record;
+unsigned long long kl_vulkan_taa_raw_record(void) {
+    return __atomic_load_n(&g_taa_raw_record, __ATOMIC_ACQUIRE);
+}
+
+// ---------------------------------------------------------------------------
+// Deferred destruction of OUR replaced images (eye, SpaceWarp, depth snapshots).
+// They used to be kept forever, because a compositor or the VPKTAA resolve may
+// be sampling one on another thread at the moment it is replaced. Instead they
+// wait here for KL_VK_FREE_AFTER_S seconds (default 5) AND 8 frame ends — far
+// longer than any composite or resolve command buffer lives — and are then
+// destroyed on the guest's frame thread. VPVulkan itself releases the MTLTexture
+// only when the frame slot that last used it is reused, and a texture view still
+// cached somewhere (compositor, VPKTAA) keeps its storage alive by retaining it,
+// so a late reader never reads freed memory. KL_VK_FREE_OLD=0 keeps them.
+// ---------------------------------------------------------------------------
+#define KLVK_RETIRE_MAX 64
+static struct { VkImage img; VkDeviceMemory mem; double at; unsigned long long frame; const char *what;
+                uint32_t w, h, layers; }
+    g_retire[KLVK_RETIRE_MAX];
+static unsigned g_retire_n;
+static pthread_mutex_t g_retire_mu = PTHREAD_MUTEX_INITIALIZER;
+static unsigned long long g_retired_bytes_est;
+
+static double klvk_now_s(void) {
+    struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec + (double)ts.tv_nsec / 1e9;
+}
+
+static unsigned g_retire_live;   // entries waiting (atomic hint for klvk_retire_touch)
+
+static void klvk_retire_touch(VkImage img, const char *how) {
+    if (!img || !__atomic_load_n(&g_retire_live, __ATOMIC_ACQUIRE)) return;
+    pthread_mutex_lock(&g_retire_mu);
+    for (unsigned i = 0; i < g_retire_n; i++) {
+        if (g_retire[i].img != img) continue;
+        g_retire[i].at = klvk_now_s();
+        g_retire[i].frame = __atomic_load_n(&g_frame_issued, __ATOMIC_ACQUIRE);
+        static unsigned said;
+        if (said++ < 8)
+            VKI("[mem] old %s %p still used by the guest (%s) — kept a while longer\n",
+                g_retire[i].what, (void *)img, how);
+        break;
+    }
+    pthread_mutex_unlock(&g_retire_mu);
+}
+
+static void klvk_retire_image(klvk_device *d, VkImage img, VkDeviceMemory mem, const char *what,
+                              uint32_t w, uint32_t h, uint32_t layers) {
+    (void)d;
+    if (!img) return;
+    pthread_mutex_lock(&g_retire_mu);
+    if (g_retire_n < KLVK_RETIRE_MAX) {
+        g_retire[g_retire_n].img = img;
+        g_retire[g_retire_n].mem = mem;
+        g_retire[g_retire_n].at = klvk_now_s();
+        g_retire[g_retire_n].frame = __atomic_load_n(&g_frame_issued, __ATOMIC_ACQUIRE);
+        g_retire[g_retire_n].what = what;
+        g_retire[g_retire_n].w = w; g_retire[g_retire_n].h = h;
+        g_retire[g_retire_n].layers = layers ? layers : 1;
+        g_retire_n++;
+        __atomic_store_n(&g_retire_live, g_retire_n, __ATOMIC_RELEASE);
+    } else {
+        static int said;
+        if (!said++) VKI("[mem] retire queue full (%d) — %s %p kept, not freed\n",
+                         KLVK_RETIRE_MAX, what, (void *)img);
+    }
+    pthread_mutex_unlock(&g_retire_mu);
+}
+
+// Every cache keyed by the VkImage handle forgets it before the handle can be
+// reused by a new image (VPVulkan handles are heap addresses).
+static void klvk_retire_forget(klvk_device *d, VkImage img) {
+    // kl_glfb's eye table holds a RAW MTLTexture pointer: if it still names this
+    // image (the replacement was never published there), empty that entry
+    // rather than leave it pointing at a destroyed texture.
+    void *mtl = eye_mtl_texture(d, img);
+    for (int st = 0; mtl && st < KLVK_EYE_STAGES; st++)
+        for (int e = 0; e < 2; e++) {
+            int sl = 0;
+            if (kl_glfb_eye_mtl_texture(e, st, &sl) == mtl) {
+                kl_glfb_note_eye_mtl_texture(e, st, NULL, 0, 0, 0);
+                VKI("[mem] eye %d stage %d still named the old image — entry cleared\n", e, st);
+            }
+        }
+    klvk_img_reg_del(img);
+    klvk_img_info_del(img);
+    klvk_depth_info_del(img);
+    klvk_shadow_forget(img);
+    pthread_mutex_lock(&g_taa_color_mu);
+    for (int st = 0; st < KLVK_EYE_STAGES; st++)
+        for (int e = 0; e < 2; e++)
+            if (g_taa_color_cache[st][e].img == img) {
+                g_taa_color_cache[st][e].img = VK_NULL_HANDLE;
+                g_taa_color_cache[st][e].mtl = NULL;
+            }
+    pthread_mutex_unlock(&g_taa_color_mu);
+    pthread_mutex_lock(&g_ed_rec_mu);
+    for (int st = 0; st < KLVK_EYE_STAGES; st++)
+        for (int e = 0; e < 2; e++) {
+            if (g_ed[st][e].live == img) g_ed[st][e].live = VK_NULL_HANDLE;
+            // A filed record (SpaceWarp depth pick) still pointing at its texture.
+            if (mtl && g_ed[st][e].info.mtl == mtl) { g_ed[st][e].valid = 0; g_ed[st][e].info.mtl = NULL; }
+            if (g_ed[st][e].snap == img) {     // cannot happen (replaced first), belt and braces
+                g_ed[st][e].snap = VK_NULL_HANDLE; g_ed[st][e].snap_mtl = NULL; g_ed[st][e].valid = 0;
+            }
+        }
+    pthread_mutex_unlock(&g_ed_rec_mu);
+}
+
+static void klvk_retire_pump(klvk_device *d) {
+    if (!d || !d->DestroyImage) return;
+    static double after = -1;
+    if (after < 0) {
+        const char *e = getenv("KL_VK_FREE_AFTER_S");
+        after = e && *e ? atof(e) : 5.0;
+        if (after < 1.0) after = 1.0;
+    }
+    double now = klvk_now_s();
+    unsigned long long f = __atomic_load_n(&g_frame_issued, __ATOMIC_ACQUIRE);
+    struct { VkImage img; VkDeviceMemory mem; const char *what; uint32_t w, h, layers; } go[KLVK_RETIRE_MAX];
+    unsigned n = 0;
+    pthread_mutex_lock(&g_retire_mu);
+    for (unsigned i = 0; i < g_retire_n;) {
+        if (now - g_retire[i].at >= after && f >= g_retire[i].frame + 8) {
+            go[n].img = g_retire[i].img; go[n].mem = g_retire[i].mem; go[n].what = g_retire[i].what;
+            go[n].w = g_retire[i].w; go[n].h = g_retire[i].h; go[n].layers = g_retire[i].layers; n++;
+            g_retire[i] = g_retire[--g_retire_n];
+        } else i++;
+    }
+    __atomic_store_n(&g_retire_live, g_retire_n, __ATOMIC_RELEASE);
+    pthread_mutex_unlock(&g_retire_mu);
+    for (unsigned i = 0; i < n; i++) {
+        uint32_t w = go[i].w, h = go[i].h;
+        klvk_retire_forget(d, go[i].img);
+        d->DestroyImage(d->dev, go[i].img, NULL);
+        if (go[i].mem && d->FreeMemory) d->FreeMemory(d->dev, go[i].mem, NULL);
+        g_retired_bytes_est += (unsigned long long)w * h * go[i].layers * 4ull;   // ~4 B/texel
+        static unsigned said;
+        if (said++ < 32)
+            VKI("[mem] freed old %s %p (%ux%u) after %.0f s — ~%llu MiB of replaced images freed so far\n",
+                go[i].what, (void *)go[i].img, w, h, after, g_retired_bytes_est >> 20);
+    }
+}
+
 static float klvk_halton(unsigned i, unsigned b) {
     float f = 1.0f, r = 0.0f;
     while (i > 0) { f /= (float)b; r += f * (float)(i % b); i /= b; }
     return r;
 }
 
-// The next frame's jitter, after this frame's wait: Halton(2,3) x8 in pixels
-// of the eye, centred. Only while frames are actually being resolved (the hook
-// ran for this one): a jittered picture nothing resolves just shimmers — no
-// hook registered, or a path whose records are filed after the frame end
-// (OpenXR). A frame rendered without jitter is still a valid TAA input
+// The next frame's jitter, at this frame's end: Halton(2,3) x8 in pixels of the
+// eye, centred. Only while frames are actually being resolved (the hook
+// committed a resolve for this one): a jittered picture nothing resolves just
+// shimmers — no hook registered, the AA gate closed (game MSAA, detection
+// pending, msaa/off mode), or a path whose records are filed after the frame
+// end (OpenXR). A frame rendered without jitter is still a valid TAA input
 // (kl_vulkan_taa_applied reports 0 draws), so a dropped frame costs nothing.
-static void klvk_taa_next_jitter(int stage, int resolving, int hook_on) {
+// Set as soon as the hook has committed (VPKEngine applies it to submits
+// translated from then on: the next frame's), no GPU wait needed.
+static void klvk_taa_next_jitter(int stage, int resolving, int hook_on, int gate) {
     if (!g_vpvk.set_jitter) {
         static int said;
         if (!said++) VKI("[taa-inline] vpvk_taa_set_jitter missing — frames are rendered without jitter\n");
@@ -3481,9 +3769,9 @@ static void klvk_taa_next_jitter(int stage, int resolving, int hook_on) {
     }
     klvk_vpvk_taa_jitter j;
     memset(&j, 0, sizeof j);
-    // Tagged with the serial the NEXT kl_vulkan_frame_done will publish: the
-    // frame this jitter is rendered into.
-    unsigned long long n = kl_vulkan_frame_serial() + 1;
+    // Tagged with the number of the NEXT kl_vulkan_frame_done: the frame this
+    // jitter is rendered into.
+    unsigned long long n = __atomic_load_n(&g_frame_issued, __ATOMIC_ACQUIRE) + 1;
     j.tag = n;
     if (stage >= 0 && stage < KLVK_EYE_STAGES) { j.width = g_eye[stage][0].w; j.height = g_eye[stage][0].h; }
     j.enabled = want && resolving && j.width && j.height;
@@ -3493,18 +3781,29 @@ static void klvk_taa_next_jitter(int stage, int resolving, int hook_on) {
         j.jy = klvk_halton(k, 3) - 0.5f;
     }
     g_vpvk.set_jitter(&j);
-    static int said_on, said_off;
-    if (j.enabled && !said_on++)
-        VKI("[taa-inline] jitter ON: Halton(2,3) x8 for %ux%u eye targets (first tag %llu)\n",
-            j.width, j.height, n);
-    if (!j.enabled && want && !said_off++)
-        VKI("[taa-inline] jitter held off (%s)\n",
-            !hook_on ? "no resolve hook registered" :
-            !resolving ? "this frame was not resolved" : "eye size unknown");
+    // Every change of on/off is logged (rare: AA gate, gaps), with the reason.
+    static int last = -1;
+    if (j.enabled != last && (j.enabled || want)) {
+        static unsigned said_on;
+        if (j.enabled && (said_on++ < 16 || said_on % 600 == 0))
+            VKI("[taa-inline] jitter ON: Halton(2,3) x8 for %ux%u eye targets (tag %llu, #%u)\n",
+                j.width, j.height, n, said_on);
+        else if (last == 1 || last < 0) {
+            static unsigned said_off;
+            if (said_off++ < 16)
+                VKI("[taa-inline] jitter off (%s) at frame %llu\n",
+                    !gate ? "AA gate closed: no VPKTAA for this game now" :
+                    !hook_on ? "no resolve hook registered" :
+                    !resolving ? "this frame was not resolved" : "eye size unknown", n - 1);
+        }
+    }
+    last = j.enabled;
 }
 
 void kl_vulkan_frame_done(int stage) {
     if (!kl_vulkan_guest_active()) return;
+    // This frame's number (the serial it stands for), before the depth is filed.
+    unsigned long long issued = __atomic_add_fetch(&g_frame_issued, 1, __ATOMIC_ACQ_REL);
     {
         static unsigned frames, warned;
         unsigned f = frames++;
@@ -3532,22 +3831,20 @@ void kl_vulkan_frame_done(int stage) {
     // VPKTAA eye depth: file this frame's pick (and copy a shared depth) on the
     // guest's queue BEFORE the idle wait below, which then also covers the copy.
     klvk_ed_frame_done(d, stage);
+    klvk_retire_pump(d);     // replaced images whose grace period is over
 
-    // VPKTAA inline: the resolve, encoded by the hook on VPKEngine's queue —
-    // after all of this frame's work, and covered by the wait below. Only when
-    // kl_ovrp filed THIS frame's record under this stage (it says so just
-    // before calling here); otherwise the hook would pair this picture with
-    // another frame's pose, so the stage is shown unresolved instead.
+    // VPKTAA inline: the resolve, encoded by the hook on VPKEngine's queue
+    // after all of this frame's work. Only when kl_ovrp filed THIS frame's
+    // record under this stage (it says so just before calling here); otherwise
+    // the hook would pair this picture with another frame's pose, so the frame
+    // goes out unresolved instead. A committed resolve is NOT waited for: the
+    // hook's owner advances the serial when it completes on the GPU.
     int taa_inline = kl_vulkan_taa_inline();
-    int hook_on = 0, hook_ran = 0, resolved = 0;
+    int hook_on = 0, committed = 0, gate = 0, hook_called = 0, mine = 0;
+    unsigned long long rec_serial = 0;
     if (taa_inline) {
-        // The stage now holds a NEW picture (its record is filed), so last
-        // cycle's output over it is a frame from the past — and the hook is
-        // about to write into that very texture. Live until the new output is
-        // complete (kl_ovrp already did this for the stage the submit named).
-        if (stage >= 0 && stage < KLVK_EYE_STAGES) klvk_taa_apply_publish(stage, NULL, 0, 0);
         int rec_stage = g_taa_rec_stage;
-        unsigned long long rec_serial = g_taa_rec_serial;
+        rec_serial = g_taa_rec_serial;
         g_taa_rec_stage = -1; g_taa_rec_serial = 0;      // consumed: one frame only
         kl_vulkan_taa_hook_fn fn;
         void *user;
@@ -3555,16 +3852,16 @@ void kl_vulkan_frame_done(int stage) {
         fn = g_taa_hook.fn; user = g_taa_hook.user;
         pthread_mutex_unlock(&g_taa_hook_mu);
         hook_on = fn != NULL;
-        if (fn && rec_serial && rec_stage == stage) {
+        mine = rec_serial && rec_stage == stage;
+        if (mine) __atomic_add_fetch(&g_taa_inline_frames, 1, __ATOMIC_RELEASE);
+        gate = kl_vulkan_aa_gate();
+        if (fn && mine && gate) {
             // The depth record carries the frame-record serial before the hook
             // reads it (kl_ovrp tags it again after this returns, same value).
             kl_vulkan_eye_depth_tag(stage, rec_serial);
-            t_taa_hook_stage = stage;
-            t_taa_pend_set = 0;
-            fn(stage, user);
-            t_taa_hook_stage = -1;
-            hook_ran = 1;
-        } else if (fn) {
+            hook_called = 1;
+            committed = fn(stage, issued, user) != 0;
+        } else if (fn && !mine) {
             static unsigned said;
             if (said < 4) {
                 said++;
@@ -3574,37 +3871,57 @@ void kl_vulkan_frame_done(int stage) {
                     "dropped, or a path that files after the frame end (OpenXR)");
             }
         }
+        // The hook reads VPKEngine's applied-jitter counters once per frame
+        // (the read resets them); without it they would pile up over a gap and
+        // be read as the first resolved frame's.
+        if (!hook_called && g_vpvk.get_applied) {
+            klvk_vpvk_taa_applied a;
+            memset(&a, 0, sizeof a);
+            g_vpvk.get_applied(&a);
+        }
+        static unsigned long long n_commit, n_raw;
+        if (committed) n_commit++; else n_raw++;
+        if ((n_commit + n_raw) % 1800 == 1)
+            VKI("[taa-inline] frame ends: %llu resolved without a CPU wait, %llu unresolved (waited) "
+                "— serial %llu of %llu issued\n", n_commit, n_raw,
+                (unsigned long long)kl_vulkan_frame_serial(), issued);
     }
 
-    if (kl_env_on("KL_VK_FRAME_SYNC", 1) && d && d->queue) {
-        VkResult r = d->QueueWaitIdle ? d->QueueWaitIdle(d->queue)
-                   : d->DeviceWaitIdle ? d->DeviceWaitIdle(d->dev)
-                                       : VK_SUCCESS;
-        if (r != VK_SUCCESS) {
-            static int said;
-            if (!said++)
-                VKI("waiting for the guest's queue at frame end answered %d — a "
-                    "compositor may sample an eye the GPU is still writing\n", (int)r);
+    // KL_VPKTAA_NOWAIT=0: keep the frame-end wait even for resolved frames (A/B:
+    // the wait used to order the guest's OVERLAY layer images before the
+    // compositor samples them as well; a flickering quad layer with VPKTAA on and
+    // not with this =0 points there).
+    static int nowait = -1;
+    if (nowait < 0) {
+        nowait = kl_env_on("KL_VPKTAA_NOWAIT", 1);
+        if (!nowait && taa_inline) VKI("[taa-inline] KL_VPKTAA_NOWAIT=0 — resolved frames are waited for too\n");
+    }
+    if (committed && !nowait) {
+        if (d && d->queue && d->QueueWaitIdle) d->QueueWaitIdle(d->queue);
+        klvk_serial_advance(issued);
+    }
+    if (!committed) {
+        if (kl_env_on("KL_VK_FRAME_SYNC", 1) && d && d->queue) {
+            VkResult r = d->QueueWaitIdle ? d->QueueWaitIdle(d->queue)
+                       : d->DeviceWaitIdle ? d->DeviceWaitIdle(d->dev)
+                                           : VK_SUCCESS;
+            if (r != VK_SUCCESS) {
+                static int said;
+                if (!said++)
+                    VKI("waiting for the guest's queue at frame end answered %d — a "
+                        "compositor may sample an eye the GPU is still writing\n", (int)r);
+            }
         }
+        // Waited: this frame's live picture is complete (and so is every
+        // earlier resolve, ordered before it on the same queue).
+        if (taa_inline && mine)
+            __atomic_store_n(&g_taa_raw_record, rec_serial, __ATOMIC_RELEASE);
+        klvk_serial_advance(issued);
     }
-    if (taa_inline) {
-        // Published after the wait (the output is complete) and before the
-        // serial (a compositor that sees this frame sees its output). A stage
-        // the hook did not resolve, or did not publish, goes back to live: an
-        // older output over a newer picture is a frame from the past.
-        if (hook_ran && t_taa_pend_set && t_taa_pend_tex)
-            resolved = klvk_taa_apply_publish(stage, t_taa_pend_tex, t_taa_pend_w, t_taa_pend_h);
-        else if (stage >= 0 && stage < KLVK_EYE_STAGES)
-            klvk_taa_apply_publish(stage, NULL, 0, 0);
-        t_taa_pend_set = 0; t_taa_pend_tex = NULL;
-    }
-    __atomic_add_fetch(&g_frame_serial, 1, __ATOMIC_RELEASE);
-    // ...and the next frame's jitter, once this frame's GPU work is finished
-    // (VPKEngine applies it to submits translated from now on).
-    // Jitter only stays on while frames are actually resolved and shown: a
-    // jittered picture nobody resolves is pure shimmer (failed resolve, refused
-    // publish, unsupported eye format...).
-    if (taa_inline) klvk_taa_next_jitter(stage, resolved, hook_on);
+    // ...and the next frame's jitter. Jitter only stays on while frames are
+    // actually resolved: a jittered picture nobody resolves is pure shimmer
+    // (failed resolve, AA gate closed, unsupported eye format...).
+    if (taa_inline) klvk_taa_next_jitter(stage, committed, hook_on, gate);
 }
 
 static VkResult klvk_QueuePresentKHR(VkQueue q, const VkPresentInfoKHR *pi) {
@@ -3643,6 +3960,110 @@ static VkResult klvk_QueuePresentKHR(VkQueue q, const VkPresentInfoKHR *pi) {
     return VK_SUCCESS;
 }
 
+// A handle that no create produced may still name a REAL image one level
+// down: a `VkImage*` handed around where a `VkImage` is expected. Unity's
+// Vulkan backend passes native texture pointers as VkImage* (GetNativeTexturePtr
+// shape), and kl_ovrp hands out exactly such cells (GetLayerTexturePtr) — so a
+// guest path that forwards one of those as the image itself gives vkCreateImage-
+// View / barriers / framebuffers an address inside our own data (AC Nexus log
+// 50–52: the SpaceWarp motion pass's depth was 0x100c88430, the MV pass then
+// rendered against the wild-handle scratch and its motion vectors read zero).
+// Read the 8 bytes behind the handle WITHOUT faulting (vm_read_overwrite) and,
+// if they are a registered image, that image is the one meant. Re-read on every
+// call: a cell is re-pointed in place (kl_ovrp's texcells). Returns the image,
+// or VK_NULL_HANDLE when the handle is not such a cell. KL_VK_CELL_RESOLVE=0 off.
+static VkImage klvk_resolve_cell(VkImage img) {
+    static int on = -1;
+    if (on < 0) on = kl_env_on("KL_VK_CELL_RESOLVE", 1);
+    uintptr_t a = (uintptr_t)img;
+    if (!on || !img || (a & 7u) || a < 0x100000000ull) return VK_NULL_HANDLE;
+    uint64_t v = 0;
+#ifdef __APPLE__
+    vm_size_t got = 0;
+    if (vm_read_overwrite(mach_task_self(), (vm_address_t)a, sizeof v, (vm_address_t)&v, &got) !=
+            KERN_SUCCESS || got != sizeof v)
+        return VK_NULL_HANDLE;
+#else
+    return VK_NULL_HANDLE;     // no fault-free read here: never dereference a guess
+#endif
+    VkImage inner = (VkImage)(uintptr_t)v;
+    if (!inner || inner == img || !klvk_img_reg_has(inner)) {
+        // Readable but not a cell of ours: say what it holds (first few), so
+        // the next log names the handle's origin.
+        static unsigned said;
+        if (said < 8) {
+            said++;
+            Dl_info di;
+            memset(&di, 0, sizeof di);
+            int in_img = dladdr((const void *)a, &di) && di.dli_fname;
+            const char *base = in_img ? strrchr(di.dli_fname, '/') : NULL;
+            VKI("[asw] unknown image handle %#llx (%s%s%s%s+%#llx): readable, first word %#llx is %s — "
+                "left to the wild-handle guards\n", (unsigned long long)a,
+                in_img ? "inside " : "heap/anon", in_img ? (base ? base + 1 : di.dli_fname) : "",
+                in_img && di.dli_sname ? " near " : "", in_img && di.dli_sname ? di.dli_sname : "",
+                (unsigned long long)(in_img ? a - (uintptr_t)(di.dli_saddr ? di.dli_saddr : di.dli_fbase) : 0),
+                (unsigned long long)v,
+                !v ? "zero" : inner == img ? "itself" : "not a registered image either");
+        }
+        return VK_NULL_HANDLE;
+    }
+    // Once per distinct (cell, image): what it was and what it resolved to.
+    static struct { VkImage cell, inner; } seen[32];
+    static unsigned nseen;
+    static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
+    int fresh = 1;
+    pthread_mutex_lock(&mu);
+    for (unsigned i = 0; i < nseen && i < 32; i++)
+        if (seen[i].cell == img && seen[i].inner == inner) { fresh = 0; break; }
+    if (fresh) { seen[nseen % 32].cell = img; seen[nseen % 32].inner = inner; nseen++; }
+    pthread_mutex_unlock(&mu);
+    if (fresh) {
+        int ast = -1, akind = -1, eye = -1;
+        const char *what = klvk_asw_find(inner, &ast, &akind)
+                               ? (akind == KLVK_ASW_MOTION ? "SpaceWarp motion-vector image" : "SpaceWarp depth image")
+                         : klvk_eye_image_which(inner, &eye) ? "eye image"
+                         : klvk_layer_image_key(inner) ? "layer image" : "guest image";
+        Dl_info di;
+        memset(&di, 0, sizeof di);
+        int in_img = dladdr((const void *)a, &di) && di.dli_fname;
+        const char *base = in_img ? strrchr(di.dli_fname, '/') : NULL;
+        VKI("[asw] handle %#llx (%s%s) is not an image but a VkImage* cell holding %s %#llx%s — "
+            "resolved to it (KL_VK_CELL_RESOLVE=0 restores the scratch substitution)\n",
+            (unsigned long long)a, in_img ? "inside " : "heap/anon",
+            in_img ? (base ? base + 1 : di.dli_fname) : "", what, (unsigned long long)(uintptr_t)inner,
+            ast >= 0 ? (ast == 0 ? " (stage 0)" : ast == 1 ? " (stage 1)" : " (stage 2+)") : "");
+    }
+    return inner;
+}
+// The format of an image we know: ours (eye, layer, SpaceWarp tables) or the
+// guest's (vkCreateImage side tables). UNDEFINED when unknown.
+static VkFormat klvk_known_format(VkImage img) {
+    if (!img) return VK_FORMAT_UNDEFINED;
+    for (int st = 0; st < KLVK_EYE_STAGES; st++)
+        for (int e = 0; e < 2; e++) {
+            if (g_eye[st][e].img == img) return g_eye[st][e].fmt;
+            for (int k = 0; k < 2; k++) if (g_asw[st][e][k].img == img) return g_asw[st][e][k].fmt;
+        }
+    VkFormat f = VK_FORMAT_UNDEFINED;
+    if (klvk_depth_info_get(img, &f, NULL, NULL, NULL, NULL)) return f;
+    if (klvk_img_info_get(img, &f, NULL, NULL)) return f;
+    for (int i = 0; i < KLVK_MAX_LAYERS; i++) {
+        if (!g_layer_img[i].key) continue;
+        for (int st = 0; st < KLVK_EYE_STAGES; st++)
+            for (int e = 0; e < 2; e++)
+                if (g_layer_img[i].s[st][e].img == img) return g_layer_img[i].s[st][e].fmt;
+    }
+    return VK_FORMAT_UNDEFINED;
+}
+
+// The image a guest handle means: itself when registered, else the image in the
+// cell it points to (above), else itself unchanged (the wild guards decide).
+static VkImage klvk_img_fix(VkImage img) {
+    if (!img || klvk_img_reg_has(img)) return img;
+    VkImage in = klvk_resolve_cell(img);
+    return in ? in : img;
+}
+
 // Forward decls: the wild-handle -> scratch substitution used by the copy/blit
 // wrappers below, defined further down beside klvk_CreateImageView.
 static VkImage klvk_wild_scratch(void);
@@ -3658,6 +4079,8 @@ static void VKAPI_CALL klvk_CmdCopyImage(VkCommandBuffer cb, VkImage src,
         const VkImageCopy *regions) {
     static PFN_vkCmdCopyImage real;
     if (!real) real = (PFN_vkCmdCopyImage)mvk_sym("vkCmdCopyImage");
+    src = klvk_img_fix(src); dst = klvk_img_fix(dst);   // VkImage* cells -> their image
+    klvk_retire_touch(src, "copy source"); klvk_retire_touch(dst, "copy destination");
     if (dst) klvk_layer_mark_written_how(dst, "vkCmdCopyImage", src);
     if (dst) klvk_asw_note_write(dst, "vkCmdCopyImage");
     if (klvk_trace() && klvk_trace_once((unsigned long long)(uintptr_t)src,(unsigned long long)(uintptr_t)dst)) {
@@ -3791,6 +4214,8 @@ static void VKAPI_CALL klvk_CmdBlitImage(VkCommandBuffer cb, VkImage src,
         const VkImageBlit *r, VkFilter f) {
     static PFN_vkCmdBlitImage real;
     if (!real) real = (PFN_vkCmdBlitImage)mvk_sym("vkCmdBlitImage");
+    src = klvk_img_fix(src); dst = klvk_img_fix(dst);   // VkImage* cells -> their image
+    klvk_retire_touch(src, "blit source"); klvk_retire_touch(dst, "blit destination");
     if (dst) klvk_layer_mark_written_how(dst, "vkCmdBlitImage", src);
     if (dst) klvk_asw_note_write(dst, "vkCmdBlitImage");
     if (KLVK_IMG_BAD(src) || KLVK_IMG_BAD(dst)) {
@@ -3923,6 +4348,21 @@ static void VKAPI_CALL klvk_CmdPipelineBarrier(VkCommandBuffer cb,
     int bad = 0;
     for (uint32_t i = 0; i < ibc; i++) if (KLVK_IMG_BAD(ib[i].image)) { bad = 1; break; }
     if (!bad) { real(cb, ss, ds, df, mbc, mb, bbc, bb, ibc, ib); return; }
+    // VkImage* cells (klvk_resolve_cell) transition the image they hold, like
+    // their views; only what is still unknown after that goes to the scratch.
+    VkImageMemoryBarrier *cellb = calloc(ibc ? ibc : 1, sizeof *cellb);
+    if (cellb) {
+        int still = 0;
+        for (uint32_t i = 0; i < ibc; i++) {
+            cellb[i] = ib[i];
+            if (KLVK_IMG_BAD(ib[i].image)) {
+                cellb[i].image = klvk_img_fix(ib[i].image);
+                if (KLVK_IMG_BAD(cellb[i].image)) still = 1;
+            }
+        }
+        if (!still) { real(cb, ss, ds, df, mbc, mb, bbc, bb, ibc, cellb); free(cellb); return; }
+        free(cellb);
+    }
     // A wild handle here is AC Nexus's menu/composite render target, which also
     // reaches vkCreateImageView and vkCmdCopyImage - both now SUBSTITUTE the
     // scratch for it. Its layout transitions must land on that SAME scratch or
@@ -4037,7 +4477,7 @@ static VkResult VKAPI_CALL klvk_CreateImage(VkDevice dev, const VkImageCreateInf
         (ci->usage & VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT) &&
         klvk_eye_size_match(ci->extent.width, ci->extent.height) &&
         (ci->samples == VK_SAMPLE_COUNT_1_BIT || kl_env_on("VPVK_FORCE_1X", 0) ||
-         kl_vulkan_taa_inline())) {
+         (kl_vulkan_taa_inline() && klvk_taa_wants_ms_depth()))) {
         VkImageUsageFlags want = (ci->usage | VK_IMAGE_USAGE_SAMPLED_BIT) &
                                  ~(VkImageUsageFlags)VK_IMAGE_USAGE_TRANSIENT_ATTACHMENT_BIT;
         if (want != ci->usage) {
@@ -4215,6 +4655,26 @@ static VkResult VKAPI_CALL klvk_CreateImageView(VkDevice dev,
                 (int)ci->format, r->aspectMask, r->baseMipLevel, r->levelCount,
                 r->baseArrayLayer, r->layerCount, ci->flags);
         }
+    }
+    // A VkImage* cell where the image belongs (klvk_resolve_cell): view the
+    // image it holds instead of substituting the scratch for it.
+    VkImageViewCreateInfo cellfix;
+    if (ci && ci->image && !klvk_img_reg_has(ci->image)) {
+        VkImage in = klvk_resolve_cell(ci->image);
+        VkFormat ifmt = in ? klvk_known_format(in) : VK_FORMAT_UNDEFINED;
+        // Only when the view fits the image it would land on: a colour image
+        // behind a depth view (or the reverse) is not the image that was meant.
+        if (in && ifmt != VK_FORMAT_UNDEFINED &&
+            klvk_is_depth_format(ifmt) != klvk_is_depth_format(ci->format)) {
+            static int said;
+            if (said++ < 8)
+                VKI("[asw] cell %#llx holds image %#llx (fmt %d) but the view asks for fmt %d — "
+                    "not resolved (scratch substitution as before)\n",
+                    (unsigned long long)(uintptr_t)ci->image, (unsigned long long)(uintptr_t)in,
+                    (int)ifmt, (int)ci->format);
+            in = VK_NULL_HANDLE;
+        }
+        if (in) { cellfix = *ci; cellfix.image = in; ci = &cellfix; }
     }
     // SpaceWarp images: how the guest views its motion vectors / depth is the
     // check that the format we allocated is the one it expected (a mismatch
@@ -4458,7 +4918,22 @@ static void klvk_asw_fb_add(VkFramebuffer fb, const VkFramebufferCreateInfo *ci)
             ci->attachmentCount, n, (unsigned long long)(uintptr_t)hit[0],
             (unsigned long long)(uintptr_t)hit[1]);
 }
+static void klvk_retire_note_pass(const VkRenderPassBeginInfo *bi) {
+    if (!bi || !__atomic_load_n(&g_retire_live, __ATOMIC_ACQUIRE)) return;
+    VkImage im[8] = { 0 };
+    uint32_t n = 0;
+    for (const VkBaseInStructure *p = bi->pNext; p; p = p->pNext) {
+        if (p->sType != VK_STRUCTURE_TYPE_RENDER_PASS_ATTACHMENT_BEGIN_INFO) continue;
+        const VkRenderPassAttachmentBeginInfo *ab = (const VkRenderPassAttachmentBeginInfo *)p;
+        for (uint32_t k = 0; ab->pAttachments && k < ab->attachmentCount && n < 8; k++)
+            im[n++] = klvk_view_image(ab->pAttachments[k]);
+    }
+    if (!n) n = klvk_fbd_get(bi->framebuffer, im);   // filled while VPKTAA depth tracking is on
+    if (!n) { im[0] = klvk_fb_image0(bi->framebuffer); n = im[0] ? 1 : 0; }
+    for (uint32_t k = 0; k < n; k++) klvk_retire_touch(im[k], "render pass attachment");
+}
 static void klvk_asw_note_pass(const VkRenderPassBeginInfo *bi, const char *how) {
+    klvk_retire_note_pass(bi);
     if (!bi || !__atomic_load_n(&g_asw_any, __ATOMIC_ACQUIRE)) return;
     // Imageless framebuffer: the attachments arrive with the begin, not the fb.
     for (const VkBaseInStructure *p = bi->pNext; p; p = p->pNext) {
@@ -4493,6 +4968,7 @@ static VkResult VKAPI_CALL klvk_CreateFramebuffer(VkDevice dev,
         // A layer image bound as a colour attachment is one the guest renders into.
         for (uint32_t k = 0; ci->pAttachments && k < ci->attachmentCount && k < 8; k++) {
             VkImage ak = k == 0 ? img0 : klvk_view_image(ci->pAttachments[k]);
+            klvk_retire_touch(ak, "framebuffer attachment");
             klvk_layer_mark_written(ak);
             klvk_eye_fb_note(ak, ci->width, ci->height);   // diagnostic, see kl_vulkan_frame_done
         }
@@ -4655,6 +5131,7 @@ static VkResult VKAPI_CALL klvk_CreateRenderPass(VkDevice dev,
         if (ed_att >= 0 && klvk_is_depth_format(ci->pAttachments[ed_att].format)) {
             ed_clear = ci->pAttachments[ed_att].loadOp == VK_ATTACHMENT_LOAD_OP_CLEAR;
             if (ci->pAttachments[ed_att].storeOp == VK_ATTACHMENT_STORE_OP_DONT_CARE &&
+                (ci->pAttachments[ed_att].samples == VK_SAMPLE_COUNT_1_BIT || klvk_taa_wants_ms_depth()) &&
                 (ed_atts = malloc(ci->attachmentCount * sizeof *ed_atts))) {
                 memcpy(ed_atts, ci->pAttachments, ci->attachmentCount * sizeof *ed_atts);
                 ed_atts[ed_att].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
@@ -4720,6 +5197,7 @@ static VkResult VKAPI_CALL klvk_CreateRenderPass2(VkDevice dev,
         if (ed_att >= 0 && klvk_is_depth_format(ci->pAttachments[ed_att].format)) {
             ed_clear = ci->pAttachments[ed_att].loadOp == VK_ATTACHMENT_LOAD_OP_CLEAR;
             if (ci->pAttachments[ed_att].storeOp == VK_ATTACHMENT_STORE_OP_DONT_CARE &&
+                (ci->pAttachments[ed_att].samples == VK_SAMPLE_COUNT_1_BIT || klvk_taa_wants_ms_depth()) &&
                 (ed_atts = malloc(ci->attachmentCount * sizeof *ed_atts))) {
                 memcpy(ed_atts, ci->pAttachments, ci->attachmentCount * sizeof *ed_atts);
                 ed_atts[ed_att].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
@@ -4831,6 +5309,14 @@ static void VKAPI_CALL klvk_CmdBeginRendering(VkCommandBuffer cb,
                 (unsigned long long)(uintptr_t)im, klvk_img_tag(im), klvk_layer_image_key(im));
         }
     }
+    if (ri && __atomic_load_n(&g_retire_live, __ATOMIC_ACQUIRE)) {
+        for (uint32_t i = 0; i < ri->colorAttachmentCount && ri->pColorAttachments; i++) {
+            klvk_retire_touch(klvk_view_image(ri->pColorAttachments[i].imageView), "dynamic rendering");
+            klvk_retire_touch(klvk_view_image(ri->pColorAttachments[i].resolveImageView), "dynamic rendering");
+        }
+        if (ri->pDepthAttachment)
+            klvk_retire_touch(klvk_view_image(ri->pDepthAttachment->imageView), "dynamic rendering");
+    }
     if (ri && __atomic_load_n(&g_asw_any, __ATOMIC_ACQUIRE)) {
         for (uint32_t i = 0; i < ri->colorAttachmentCount && ri->pColorAttachments; i++)
             klvk_asw_note_write(klvk_view_image(ri->pColorAttachments[i].imageView),
@@ -4854,7 +5340,9 @@ static void VKAPI_CALL klvk_CmdBeginRendering(VkCommandBuffer cb,
         int cl = da->loadOp == VK_ATTACHMENT_LOAD_OP_CLEAR;
         klvk_ed_candidate(klvk_view_image(da->imageView), eye_hit, eye, cl,
                           cl ? da->clearValue.depthStencil.depth : 0.0f);
-        if (da->storeOp == VK_ATTACHMENT_STORE_OP_DONT_CARE) {
+        uint32_t dsmp = 1;
+        klvk_depth_info_get(klvk_view_image(da->imageView), NULL, NULL, NULL, NULL, &dsmp);
+        if (da->storeOp == VK_ATTACHMENT_STORE_OP_DONT_CARE && (dsmp <= 1 || klvk_taa_wants_ms_depth())) {
             ed_da = *da; ed_da.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
             ed_ri = *ri; ed_ri.pDepthAttachment = &ed_da;
             // VkRenderingInfo may name the same view as its stencil attachment;

@@ -28,6 +28,14 @@ struct VQGame: Identifiable, Equatable {
     var contentNames: [String] = []  // lowercased APK entries + data file names (language detection)
 
     var compatible: Bool { problems.isEmpty }
+
+    /// Stable key for per-game settings and runtime detections (VQ_GAME_KEY): the Android
+    /// package (same game, any folder name), else the folder name.
+    var aaKey: String {
+        let p = package.trimmingCharacters(in: .whitespaces)
+        let raw = (p.isEmpty || p == "?") ? id : p
+        return String(raw.map { $0.isLetter || $0.isNumber || $0 == "." || $0 == "_" || $0 == "-" ? $0 : "_" })
+    }
 }
 
 enum VQGames {

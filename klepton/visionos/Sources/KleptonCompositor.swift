@@ -225,6 +225,12 @@ final class KleptonCompositor {
     private lazy var taa: KleptonTAA? = KleptonTAA(device: device)
     private var taaOut: [Int: MTLTexture] = [:]
     private var taaPose: kl_ovrp_render_pose?
+    /// Inline VPKTAA showing an UNRESOLVED frame (KleptonTAA.acquireInline .raw): the stage
+    /// whose live picture belongs to taaPose (may differ from the newest complete stage).
+    private var taaStage: Int?
+    /// Inline VPKTAA: no complete picture yet (KleptonTAA.acquireInline .hide) — the eye quad
+    /// is left out for this composite rather than sample an eye the GPU is still drawing.
+    private var taaHide = false
     private var taaFlip: [Bool] = [false, false]
     // The guest fence the VPKTAA job must wait on (GL guests), set with the composite's own.
     private var taaWait: (MTLSharedEvent, UInt64)?
@@ -2280,12 +2286,36 @@ final class KleptonCompositor {
                             rendered: kl_ovrp_render_pose, haveRendered: Bool) {
         taaOut.removeAll(keepingCapacity: true)
         taaPose = nil
+        taaStage = nil
+        taaHide = false
+        // Automatic AA: store the game's detected eye MSAA for the app (whether or not VPKTAA
+        // is on for this game).
+        KleptonTAA.pollAADetection()
         guard let taa else { return }
-        // Inline mode (Vulkan guest on VPVulkan): the resolve runs at the guest's frame end and
-        // its output is published AS the eye image, so the picture eyeSource hands the
-        // composite already is the resolved one, paired with its own frame record. Nothing to
-        // submit, acquire or invalidate here, and the frustum jitter stays off (VPKEngine jitters).
-        if taa.pollInline() { kl_ovrp_set_taa_active(0); return }
+        // Inline mode (Vulkan guest on VPVulkan): the resolve runs at the guest's frame end on
+        // VPKEngine's queue and is shown once its command buffer has COMPLETED, with its own
+        // frame record (or, while frames go out unresolved, the newest waited-for frame with
+        // its record and stage). Nothing to submit here; the frustum jitter stays off
+        // (VPKEngine jitters). Never falls back to the async path once the hook path is seen.
+        if taa.pollInline() {
+            kl_ovrp_set_taa_active(0)
+            switch taa.acquireInline(for: cmd) {
+            case .resolved(let p)?:
+                taaOut[0] = p.out[0]; taaOut[1] = p.out[1]
+                taaFlip = p.flipY
+                taaPose = p.pose
+            case .raw(let r, let st)?:
+                taaPose = r
+                taaStage = st
+            case .hide?:
+                taaHide = true
+            case nil:
+                break
+            }
+            return
+        }
+        // Async path: on a Vulkan guest only while kl_vulkan's AA gate is open (KL_AA_MODE).
+        guard taa.asyncAllowed() else { taa.invalidate(); kl_ovrp_set_taa_active(0); return }
         // Jitter is only served to the game while resolves really run (else it would shimmer).
         defer { kl_ovrp_set_taa_active(taa.running ? 1 : 0) }
         guard completeStage >= 0, kl_ovrp_eye_layer_live() != 0, projLayerCount == 0 else {
@@ -2321,6 +2351,8 @@ final class KleptonCompositor {
         // resolved from (one frame older than `rendered` while the next resolve runs).
         let rendered = taaPose ?? rendered
         let haveRendered = taaPose != nil ? true : haveRendered
+        // Inline VPKTAA showing an unresolved frame: that frame's own stage.
+        let stage = taaStage ?? stage
         let firstMap = drawable.views[first].textureMap
 
         let pass = MTLRenderPassDescriptor()
@@ -2436,7 +2468,7 @@ final class KleptonCompositor {
             // menu, out of the SAME swapchains) that is one screen composited
             // twice, full-field underneath its own panel. kl_ovrp.h has the
             // measurement.
-            var alloc = (completeStage < 0 || kl_ovrp_eye_layer_live() == 0) ? nil : a
+            var alloc = (completeStage < 0 || kl_ovrp_eye_layer_live() == 0 || taaHide) ? nil : a
             // VPKTAA: the resolved picture replaces the guest's, same geometry (slice 0 of its
             // own array, same flip).
             if alloc != nil, let t = taaOut[vi] {
@@ -2978,9 +3010,15 @@ final class KleptonCompositor {
                 // (Batman's loading icon: a 2048x128 sprite strip whose frame is
                 // picked by the submit's texture-rect matrix).
                 let ownFirst = kl_vulkan_layer_written(ov.layer_id) != 0
+                // The layer's own image as a FALLBACK (texL did not resolve) is
+                // only shown once it holds defined pixels: never written by the
+                // guest -> cleared once to transparent (unwrittenLayerReady), so
+                // uninitialised memory (AC Nexus: pink/purple flashes) never
+                // reaches the display.
                 let t = (ownFirst ? kl_vulkan_layer_mtl_texture(ov.layer_id, ov.stage, Int32(vi), &w, &h) : nil)
                     ?? kl_vulkan_mtl_for_handle(ov.tex)
-                    ?? kl_vulkan_layer_mtl_texture(ov.layer_id, ov.stage, Int32(vi), &w, &h)
+                    ?? ownLayerFallback(ov.layer_id, stage: ov.stage, view: Int32(vi),
+                                        written: ownFirst, w: &w, h: &h)
                     ?? kl_glfb_layer_mtl_texture(ov.layer_id, ov.stage, &w, &h)
                 if texture == nil, let t { texture = Unmanaged<MTLTexture>
                     .fromOpaque(t).takeUnretainedValue() }
@@ -3114,8 +3152,8 @@ final class KleptonCompositor {
         let t = (ownFirst ? kl_vulkan_layer_mtl_texture(ov.layer_id, ov.stage,
                                                         Int32(viewIndices.first ?? 0), &w, &h) : nil)
             ?? kl_vulkan_mtl_for_handle(ov.tex)
-            ?? kl_vulkan_layer_mtl_texture(ov.layer_id, ov.stage,
-                                            Int32(viewIndices.first ?? 0), &w, &h)
+            ?? ownLayerFallback(ov.layer_id, stage: ov.stage, view: Int32(viewIndices.first ?? 0),
+                                written: ownFirst, w: &w, h: &h)
             ?? kl_glfb_layer_mtl_texture(ov.layer_id, ov.stage, &w, &h)
         guard let t else {
             if !loggedOverlayMiss.contains(ov.layer_id) {
@@ -3627,6 +3665,70 @@ final class KleptonCompositor {
     private let overlaysEnabled = klEnvOn("KL_GUEST_OVERLAYS", default: true)
     private var loggedOverlayMiss = Set<Int32>()
     private var loggedOverlayDraw = Set<Int32>()
+    /// Layer images (by texture) the guest never wrote that were cleared once to
+    /// transparent before their first composite (unwrittenLayerReady).
+    private var clearedUnwritten = Set<ObjectIdentifier>()
+    private var refusedUnwritten = Set<ObjectIdentifier>()
+    private var loggedUnwritten = Set<Int32>()
+    /// KL_OVERLAY_UNWRITTEN: "clear" (default) clears a never-written layer image once
+    /// and composites it (transparent until the guest draws — a write the census
+    /// misses, e.g. dynamic rendering, still shows up); "skip" never composites it;
+    /// "show" = old behaviour (samples whatever the memory holds).
+    private static let unwrittenMode: String =
+        ProcessInfo.processInfo.environment["KL_OVERLAY_UNWRITTEN"] ?? "clear"
+
+    /// Rung 3 of the overlay texture ladder: the layer's own Vulkan image, which
+    /// since the clear on allocation was dropped (KL_VK_LAYER_NOCLEAR, game-thread
+    /// stall) holds uninitialised memory until the guest writes it.
+    private func ownLayerFallback(_ layer: Int32, stage: Int32, view: Int32, written: Bool,
+                                  w: inout Int32, h: inout Int32) -> UnsafeMutableRawPointer? {
+        guard let p = kl_vulkan_layer_mtl_texture(layer, stage, view, &w, &h) else { return nil }
+        if written || Self.unwrittenMode == "show" { return p }
+        let tex = Unmanaged<MTLTexture>.fromOpaque(p).takeUnretainedValue()
+        return unwrittenLayerReady(tex, layer: layer) ? p : nil
+    }
+
+    /// Deferred clear: the first time a never-written layer image would be
+    /// composited, clear every slice to (0,0,0,0) in a command buffer of its own,
+    /// committed now on the compositor queue — so it runs before the composite
+    /// that samples it (same queue, commit order). Once per texture. A texture
+    /// that cannot be a render target is skipped instead (never sampled).
+    private func unwrittenLayerReady(_ tex: MTLTexture, layer: Int32) -> Bool {
+        let id = ObjectIdentifier(tex)
+        if clearedUnwritten.contains(id) { return true }
+        if refusedUnwritten.contains(id) { return false }
+        let skip = Self.unwrittenMode == "skip"
+        let canClear = !skip && tex.usage.contains(.renderTarget)
+            && (tex.textureType == .type2D || tex.textureType == .type2DArray)
+        guard canClear, let cmd = queue?.makeCommandBuffer() else {
+            refusedUnwritten.insert(id)
+            if !loggedUnwritten.contains(layer) {
+                loggedUnwritten.insert(layer)
+                NSLog("[cp] overlay layer \(layer): own image \(tex.width)x\(tex.height) never written by "
+                      + "the guest -> SKIPPED (" + (skip ? "KL_OVERLAY_UNWRITTEN=skip" : "not clearable") + ")")
+            }
+            return false
+        }
+        cmd.label = "klepton clear unwritten layer \(layer)"
+        let slices = tex.textureType == .type2DArray ? max(1, tex.arrayLength) : 1
+        for s in 0..<slices {
+            let pass = MTLRenderPassDescriptor()
+            pass.colorAttachments[0].texture = tex
+            pass.colorAttachments[0].slice = s
+            pass.colorAttachments[0].loadAction = .clear
+            pass.colorAttachments[0].storeAction = .store
+            pass.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 0)
+            cmd.makeRenderCommandEncoder(descriptor: pass)?.endEncoding()
+        }
+        cmd.commit()
+        clearedUnwritten.insert(id)
+        if !loggedUnwritten.contains(layer) {
+            loggedUnwritten.insert(layer)
+            NSLog("[cp] overlay layer \(layer): own image \(tex.width)x\(tex.height)x\(slices) never written "
+                  + "by the guest -> cleared once to transparent before compositing (no uninitialised memory)")
+        }
+        return true
+    }
     private var loggedSplitEyes = false
     /// Said once: what the two texture slots resolved to, and whether the eyes
     /// share one texture or arrive as one swapchain each. Two guests of

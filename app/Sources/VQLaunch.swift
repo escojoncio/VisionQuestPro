@@ -37,7 +37,7 @@ enum VQLaunch {
         let frameworks = Bundle.main.privateFrameworksPath ?? (Bundle.main.bundlePath + "/Frameworks")
         setenv("KL_MVK_DIR", frameworks, 1)
         setenv("KL_ANGLE_DIR", frameworks, 1)
-        VQSettings.shared.applyToEnvironment()
+        VQSettings.shared.applyToEnvironment(game: game)
         let psoCache = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("VisionQuestPro/PipelineCache/\(game.id)", isDirectory: true)
         setenv("VP_PIPELINE_CACHE_DIR", psoCache.path, 1)
@@ -79,7 +79,8 @@ final class VQSettings: ObservableObject {
     @Published var sharpZone: Double { didSet { save() } }      // 0.05...1
     @Published var periphery: Double { didSet { save() } }      // 0.1...1
     @Published var fovHeight: Double { didSet { save() } }      // -0.5...0.5
-    @Published var vpktaa: Bool { didSet { save() } }
+    // The old global AA switches (vq.vpktaa4, vq.gameMSAA) are no longer read: antialiasing
+    // is per game (VQGameAA), automatic by default.
     @Published var vpktaaPercent: Double { didSet { save() } }  // 0...100
     @Published var vpktaaSharpness: Double { didSet { save() } } // 0...1
     /// 16x anisotropic filtering on the game's mipmapped linear samplers (VPVulkan).
@@ -93,8 +94,6 @@ final class VQSettings: ObservableObject {
     @Published var resolutionBase: String { didSet { save() } }
     /// Head-locked FPS counter in the compositor (KL_FPS_HUD).
     @Published var showFps: Bool { didSet { save() } }
-    /// Keep the game's own MSAA (default). Off: render 1x (VPVK_FORCE_1X).
-    @Published var gameMSAA: Bool { didSet { save() } }
     @Published var aswDisabled: Bool { didSet { save() } }
     @Published var quest3Profile: Bool { didSet { save() } }
     @Published var forceVulkan: Bool { didSet { save() } }
@@ -121,9 +120,8 @@ final class VQSettings: ObservableObject {
         sharpZone = d.object(forKey: "vq.fovSharp") as? Double ?? 0.35
         periphery = d.object(forKey: "vq.fovPeriphery") as? Double ?? 0.5
         fovHeight = d.object(forKey: "vq.fovHeight") as? Double ?? 0
-        vpktaa = d.object(forKey: "vq.vpktaa4") as? Bool ?? false  // off by default: game MSAA is the default AA
         vpktaaPercent = d.object(forKey: "vq.vpktaaPercent") as? Double ?? 80
-        vpktaaSharpness = d.object(forKey: "vq.vpktaaSharp2") as? Double ?? 0.3
+        vpktaaSharpness = d.object(forKey: "vq.vpktaaSharp3") as? Double ?? 1.0  // 3: reconstruction sharpening (PT default 1.0)
         // Older builds stored a bool (vq.aniso16); off there stays off.
         anisoLevel = d.object(forKey: "vq.anisoLevel") as? Int
             ?? ((d.object(forKey: "vq.aniso16") as? Bool) == false ? 0 : 16)
@@ -135,7 +133,6 @@ final class VQSettings: ObservableObject {
             resolutionBase = (d.object(forKey: "vq.resAVP") as? Bool ?? false) ? "compositor" : "original"
         }
         showFps = d.object(forKey: "vq.showFps") as? Bool ?? false
-        gameMSAA = d.object(forKey: "vq.gameMSAA") as? Bool ?? true
         aswDisabled = d.object(forKey: "vq.aswOff") as? Bool ?? true
         quest3Profile = d.object(forKey: "vq.quest3v2") as? Bool ?? true  // Quest 3 for every game by default
         forceVulkan = d.object(forKey: "vq.forceVulkan") as? Bool ?? true
@@ -174,15 +171,13 @@ final class VQSettings: ObservableObject {
         d.set(sharpZone, forKey: "vq.fovSharp")
         d.set(periphery, forKey: "vq.fovPeriphery")
         d.set(fovHeight, forKey: "vq.fovHeight")
-        d.set(vpktaa, forKey: "vq.vpktaa4")
         d.set(vpktaaPercent, forKey: "vq.vpktaaPercent")
-        d.set(vpktaaSharpness, forKey: "vq.vpktaaSharp2")
+        d.set(vpktaaSharpness, forKey: "vq.vpktaaSharp3")
         d.set(anisoLevel, forKey: "vq.anisoLevel")
         d.set(perfDiag, forKey: "vq.perfDiag")
         d.set(renderScale, forKey: "vq.renderScale")
         d.set(resolutionBase, forKey: "vq.resBase")
         d.set(showFps, forKey: "vq.showFps")
-        d.set(gameMSAA, forKey: "vq.gameMSAA")
         d.set(aswDisabled, forKey: "vq.aswOff")
         d.set(quest3Profile, forKey: "vq.quest3v2")
         d.set(forceVulkan, forKey: "vq.forceVulkan")
@@ -221,8 +216,8 @@ final class VQSettings: ObservableObject {
         unsetenv("KL_MVK_DYLIB")
     }
 
-    /// Klepton's knobs for these settings.
-    func applyToEnvironment() {
+    /// Klepton's knobs for these settings (and the chosen game's own AA).
+    func applyToEnvironment(game: VQGame?) {
         selectDriver()
         setenv("KL_NET_OFFLINE", offline ? "1" : "0", 1)
         setenv("KL_LOG_FILE", guestLog ? "1" : "0", 1)
@@ -281,14 +276,28 @@ final class VQSettings: ObservableObject {
         c.sharp_zone = Float(sharpZone)
         c.periphery = Float(periphery)
         c.height = Float(fovHeight)
+        // Antialiasing, per game (VQGameAA): KL_AA_MODE auto|vpktaa|msaa|off, VPVK_MSAA
+        // 0/2/4/8 (only where the game asked for MSAA), VQ_GAME_KEY for the detection
+        // KleptonTAA stores (vq.aaDetected.<key>). VPKTAA is allowed in auto/vpktaa.
+        let aaKey = game?.aaKey ?? ""
+        let aa = VQGameAA.load(key: aaKey)
+        let msaaOverride = aa.effectiveMSAA
+        let vpktaa = aa.mode == .auto || aa.mode == .vpktaa
+        if aaKey.isEmpty { unsetenv("VQ_GAME_KEY") } else { setenv("VQ_GAME_KEY", aaKey, 1) }
+        setenv("KL_AA_MODE", aa.mode.rawValue, 1)
+        setenv("VPVK_MSAA", String(msaaOverride), 1)
+        let detected = VQGameAA.detected(key: aaKey)
         c.vpktaa_enabled = vpktaa ? 1 : 0
+        c.msaa_override = Int32(msaaOverride)
         c.vpktaa_percent = Float(vpktaaPercent)
         c.vpktaa_sharpness = Float(vpktaaSharpness)
         c.anisotropy = Int32(anisoLevel)
         setenv("VPVK_ANISO", String(anisoLevel), 1)  // read by VPVulkan even if the dlsym forward misses
         // Per-pass GPU timing in VPKEngine (gpu.passtime lines, one rendering frame every 90).
         if perfDiag { setenv("VP_PASS_TIMING", "90", 1) } else { unsetenv("VP_PASS_TIMING") }
-        c.force_single_sample = gameMSAA ? 0 : 1  // game MSAA kept by default; independent of VPKTAA
+        // Game MSAA forced to 1x ONLY in the explicit VPKTAA mode; auto keeps a game's MSAA
+        // (and turns VPKTAA off for it, live, once VPKEngine sees the eye pass).
+        c.force_single_sample = aa.mode == .vpktaa ? 1 : 0
         setenv("KL_FPS_HUD", showFps ? "1" : "0", 1)
         setenv("VPVK_FORCE_1X", c.force_single_sample != 0 ? "1" : "0", 1)
         c.render_scale = Float(renderScale)
@@ -300,8 +309,55 @@ final class VQSettings: ObservableObject {
         setenv("KL_VPKTAA_PCT", String(format: "%.0f", vpktaaPercent), 1)
         setenv("KL_VPKTAA_SHARP", String(format: "%.2f", vpktaaSharpness), 1)
         vq_prewarm_set_enabled(precompileShaders ? 1 : 0)
-        VQLog.log("Gráficos: foveado Quest siempre apagado; foveado propio \(foveation), VPKTAA \(vpktaa) \(Int(vpktaaPercent)) % nitidez \(vpktaaSharpness), anisotrópico x\(anisoLevel), diagnóstico de rendimiento \(perfDiag), escala \(renderScale), ASW apagado \(aswDisabled), perfil Quest 3 \(quest3Profile), MSAA del juego \(gameMSAA), FPS en pantalla \(showFps)")
+        let detText = detected.map { "\($0)x" } ?? "no"
+        VQLog.log("Gráficos: foveado Quest siempre apagado; foveado propio \(foveation), AA: modo \(aa.mode.rawValue), MSAA override \(msaaOverride), detectado \(detText) (juego \(aaKey.isEmpty ? "?" : aaKey)\(aa.stored ? "" : ", por defecto")), VPKTAA permitido \(vpktaa) \(Int(vpktaaPercent)) % nitidez \(vpktaaSharpness), forzar 1x \(c.force_single_sample != 0), anisotrópico x\(anisoLevel), diagnóstico de rendimiento \(perfDiag), escala \(renderScale), ASW apagado \(aswDisabled), perfil Quest 3 \(quest3Profile), FPS en pantalla \(showFps)")
         VQLog.log("Ajustes: sin red \(offline), log del juego \(guestLog), vigilante \(Int(watchdogSeconds)) s")
+    }
+}
+
+/// Antialiasing chosen per game (the contract with Klepton/VPKEngine, via environment):
+///   KL_AA_MODE  auto (default): VPKTAA on a game whose eye pass is 1x, the game's own MSAA
+///               (VPKTAA off) on one that uses MSAA — decided live once VPKEngine sees it.
+///               vpktaa: game MSAA forced to 1x (VPVK_FORCE_1X=1) + VPKTAA. msaa: never VPKTAA.
+///               off: neither VPKTAA nor an MSAA override.
+///   VPVK_MSAA   0 = the game's own sample count, else 2/4/8 where the game asked for MSAA
+///               (VPKEngine clamps to what the chip supports).
+/// Saved by game key (package, else folder name): vq.aaMode.<key>, vq.aaMSAA.<key>.
+/// Read-only here, written by KleptonTAA: vq.aaDetected.<key> (1/2/4/8) and vq.msaaDeviceMax.
+struct VQGameAA: Equatable {
+    enum Mode: String, CaseIterable { case auto, vpktaa, msaa, off }
+    var mode: Mode = .auto
+    var msaa: Int = 0          // 0 (original) | 2 | 4 | 8
+    var stored = false         // false: default (no per-game setting saved yet)
+
+    /// The override actually sent: none in vpktaa (forced 1x) and off modes.
+    var effectiveMSAA: Int { (mode == .auto || mode == .msaa) ? msaa : 0 }
+
+    static func load(key: String) -> VQGameAA {
+        let d = UserDefaults.standard
+        var aa = VQGameAA()
+        if !key.isEmpty, let m = d.string(forKey: "vq.aaMode." + key), let mode = Mode(rawValue: m) {
+            aa.mode = mode
+            aa.stored = true
+        }
+        if !key.isEmpty, let n = d.object(forKey: "vq.aaMSAA." + key) as? Int, [0, 2, 4, 8].contains(n) {
+            aa.msaa = n
+        }
+        return aa
+    }
+
+    func save(key: String) {
+        guard !key.isEmpty else { return }
+        let d = UserDefaults.standard
+        d.set(mode.rawValue, forKey: "vq.aaMode." + key)
+        d.set(msaa, forKey: "vq.aaMSAA." + key)
+    }
+
+    /// The game's own eye-pass sample count seen on an earlier run (1 = no MSAA), nil if never seen.
+    static func detected(key: String) -> Int? {
+        guard !key.isEmpty, let n = UserDefaults.standard.object(forKey: "vq.aaDetected." + key) as? Int,
+              n >= 1 else { return nil }
+        return n
     }
 }
 
@@ -441,7 +497,13 @@ final class VQPrewarm: ObservableObject {
     /// mid-play even the first time. Cached: a stamp file marks it done for this version.
     static func firstRun(gameFolder: URL, cache: URL) {
         let fm = FileManager.default
-        let stamp = cache.appendingPathComponent("firstrun.v\(firstRunVersion)")
+        // Stamp follows the translator's source fingerprint: any translator change re-runs the precompile.
+        var tag = "v\(firstRunVersion)"
+        if let sym = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "vpmsl_translator_fingerprint") {
+            typealias FP = @convention(c) () -> UnsafePointer<CChar>?
+            if let c = unsafeBitCast(sym, to: FP.self)() { tag = "v\(firstRunVersion)." + String(String(cString: c).prefix(16)) }
+        }
+        let stamp = cache.appendingPathComponent("firstrun.\(tag)")
         if fm.fileExists(atPath: stamp.path) { return }
         // Only with VPVulkan loaded (MoltenVK path has no precompiler): avoids re-scanning every launch.
         guard dlsym(UnsafeMutableRawPointer(bitPattern: -2), "vpvk_precompile_spirv") != nil else {
