@@ -12,9 +12,9 @@
   - `visionos/Sources/KleptonApp.swift`: ventana raíz = lanzador de VisionQuestPro; configuración con las rutas del juego.
   - `visionos/Sources/Klepton-Bridging-Header.h`, `visionos/Info.plist`: cabeceras y claves del lanzador.
 
-## VPEngine
+## VPKEngine
 - `runtime/vp_codesign.c`, `runtime/vp_pkcs12.c` (firma de librerías en el visor) se toman de
-  el repositorio VPEngine (mismo propietario que este) al compilar (CI); no se copian a este repositorio. Licencia: la de VPEngine.
+  el repositorio VPKEngine (mismo propietario que este) al compilar (CI); no se copian a este repositorio. Licencia: la de VPKEngine.
 - `app/Sources/VQFolder.swift` y `app/Sources/VQSigner.swift` siguen el diseño de `VPS4Folder.swift` y `VPGamePack.swift`.
 
 ## MoltenVK (Apache-2.0)

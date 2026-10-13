@@ -182,7 +182,7 @@ unsigned kl_vulkan_spacewarp_writes(int stage, int kind);
 //                  the eye image's size (URP final-blit pattern: the scene pass
 //                  has no eye attachment).
 // To make that depth readable at all, eye-sized depth images are created with
-// SAMPLED usage and without TRANSIENT (VPEngine would keep them on tile), and
+// SAMPLED usage and without TRANSIENT (VPKEngine would keep them on tile), and
 // every depth attachment's storeOp is forced to STORE (DONT_CARE discards it
 // on Metal). At kl_vulkan_frame_done(stage) the pick is filed for the stage;
 // a depth image the guest shares between stages is first COPIED (on the
@@ -242,10 +242,10 @@ void kl_vulkan_frame_done(int stage);
 unsigned long long kl_vulkan_frame_serial(void);
 
 // ---------------------------------------------------------------------------
-// VPKTAA INLINE — the resolve runs at the guest's frame end, on VPEngine's own
+// VPKTAA INLINE — the resolve runs at the guest's frame end, on VPKEngine's own
 // Metal queue, instead of asynchronously in the compositor.
 //
-// VPEngine (VPVulkan) jitters the eye geometry's VIEWPORT when it translates a
+// VPKEngine (VPVulkan) jitters the eye geometry's VIEWPORT when it translates a
 // submit and records what it applied (vpvk_taa_*); Klepton calls a hook (set
 // by the Swift side) inside kl_vulkan_frame_done, after the eye depth is filed
 // and BEFORE the frame-end vkQueueWaitIdle — so the resolve, encoded into a
@@ -267,7 +267,7 @@ int  kl_vulkan_taa_inline(void);
 // filed (kl_vulkan_eye_depth_get(stage, eye, 0, ...)). fn = NULL unregisters.
 typedef void (*kl_vulkan_taa_hook_fn)(int stage, void *user);
 void kl_vulkan_set_taa_hook(kl_vulkan_taa_hook_fn fn, void *user);
-// Forwards to vpvk_native_submit: a command buffer on the queue VPEngine sends
+// Forwards to vpvk_native_submit: a command buffer on the queue VPKEngine sends
 // all guest work to, after everything sent so far; fn encodes into it
 // (id<MTLCommandBuffer>, unretained), then it is committed. Synchronous.
 // 1 = committed, 0 = no VPVulkan / no queue.
@@ -284,7 +284,7 @@ void *kl_vulkan_eye_color_mtl(int stage, int eye, int *slice, int *w, int *h);
 // image. The override is dropped by itself when the stage's live eye image
 // changes (reallocation, size), and refused when w x h is not the eye's size.
 void kl_vulkan_taa_publish(int stage, void *tex, int w, int h);
-// The jitter VPEngine actually applied to the frame that is ending
+// The jitter VPKEngine actually applied to the frame that is ending
 // (vpvk_taa_get_applied, which resets its counters — call once per frame).
 // Returns 1 when ≥1 draw was jittered, else 0; the out-parameters (any may be
 // NULL) are filled either way (zeros without VPVulkan). jx/jy in pixels of

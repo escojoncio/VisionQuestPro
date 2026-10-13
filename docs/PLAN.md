@@ -4,9 +4,9 @@
 Klepton ya resuelve la parte de CPU/sistema: `klepton-ld` (`tools/klepton_ld.c`) convierte cada `.so` en dylib firmable
 con el código casi intacto, parchea x18 (slots TLS por librería), y aporta bionic, NDK, JNI sintético y `ovrp_*`
 reimplementado; probado con Beat Saber, BONELAB, RE4 VR, Red Matter 2… Lo que aporta VisionQuestPro encima:
-- Vulkan → **VPEngine** en lugar de MoltenVK (lector SPIR-V → VPIR + capa de API Vulkan).
+- Vulkan → **VPKEngine** en lugar de MoltenVK (lector SPIR-V → VPIR + capa de API Vulkan).
 - VPKTAA, foveado propio, resolución, ASW desactivable, perfil Quest 3.
-- Launcher con `QUEST/Juegos` y conversión sin Mac (klepton-ld en el visor o en CI; firma propia de VPEngine).
+- Launcher con `QUEST/Juegos` y conversión sin Mac (klepton-ld en el visor o en CI; firma propia de VPKEngine).
 Las secciones de abajo describen el mecanismo; donde Klepton ya lo implementa, se usa el de Klepton.
 
 ## Idea central
@@ -16,8 +16,8 @@ El código nativo de un juego de Quest ya es **ARM64**, la misma ISA del Vision 
 ## Cómo se carga el código sin JIT
 - Conversión (una vez, en el visor): cada `.so` ELF se envuelve en un Mach-O dylib **sin tocar sus bytes de código**:
   mismos segmentos con los mismos desplazamientos relativos (`__TEXT` = PT_LOAD ejecutable, `__DATA` = PT_LOAD RW).
-  Se firma con la firma propia de VPEngine (`runtime/vp_codesign.c`) y se guarda en `QUEST/Cache/<juego>/`.
-- Carga: `dlopen` del dylib firmado (camino ya aceptado por visionOS en VPEngine, variante `req4k`). Un cargador propio
+  Se firma con la firma propia de VPKEngine (`runtime/vp_codesign.c`) y se guarda en `QUEST/Cache/<juego>/`.
+- Carga: `dlopen` del dylib firmado (camino ya aceptado por visionOS en VPKEngine, variante `req4k`). Un cargador propio
   aplica las relocaciones ELF (`R_AARCH64_RELATIVE/GLOB_DAT/JUMP_SLOT/ABS64`, RELR) sobre las páginas de datos y
   resuelve los imports contra nuestras capas. El código nunca se escribe → no hace falta JIT.
 - Relocaciones de texto: no existen en ARM64 PIC (se rechaza el juego con aviso si aparecen).
@@ -28,7 +28,7 @@ El código nativo de un juego de Quest ya es **ARM64**, la misma ISA del Vision 
 | bionic | libc/libm/libdl/liblog de Android sobre Darwin | ABI distinta (`FILE`, `pthread_*` de tamaño distinto, errno, `__system_property_get`, TLS por TPIDR_EL0) |
 | JNI | `JavaVM`/`JNIEnv` falsos | Unity y Unreal llaman a la actividad Java; se responden solo los métodos que use cada motor |
 | OpenXR | runtime propio sobre CompositorServices + ARKit | cabeza, manos; mandos Quest → mandos PS VR2 Sense (`SenseTracking.swift`) |
-| Vulkan | `libvulkan` propio → VPEngine (VPIR, emisor MSL, backend Metal) | SPIR-V → VPIR nuevo; sin MoltenVK |
+| Vulkan | `libvulkan` propio → VPKEngine (VPIR, emisor MSL, backend Metal) | SPIR-V → VPIR nuevo; sin MoltenVK |
 | GLES | fuera de la primera versión | se avisa como no compatible |
 | Audio | AAudio/OpenSL ES → AVAudioEngine espacial | |
 | Ficheros | APK (zip) + OBB montados de solo lectura; guardados en `QUEST/` | |
@@ -45,5 +45,5 @@ El código nativo de un juego de Quest ya es **ARM64**, la misma ISA del Vision 
    segmentos, uso de x18, lista exacta de imports por librería → define la superficie de bionic/JNI/OpenXR/Vulkan.
 2. Envoltorio ELF→Mach-O + cargador + bionic mínimo: el `JNI_OnLoad` del juego se ejecuta en el visor (prueba de vida).
 3. JNI + OpenXR + bucle de frames con Vulkan nulo (sin dibujar): el juego llega a su bucle principal.
-4. Vulkan → VPEngine: primer frame visible.
+4. Vulkan → VPKEngine: primer frame visible.
 5. Ajustes (resolución, VPKTAA, foveado, ASW off, perfil Quest 3), audio, mandos.

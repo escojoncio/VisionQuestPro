@@ -1351,7 +1351,7 @@ static XrResult klxr_CreateInstance(const XrInstanceCreateInfo *info, void **ins
     for (uint32_t i = 0; i < info->enabledExtensionCount; i++) {
         const char *name = info->enabledExtensionNames[i];
         int known = klxr_ext_advertised(name);
-        // Quest foveation is always OFF on this host (VPEngine applies its own).
+        // Quest foveation is always OFF on this host (VPKEngine applies its own).
         // These are never advertised; a guest that enables them blindly is let
         // through and its entry points answer success with no effect.
         if (!known && klxr_is_foveation_ext(name)) {

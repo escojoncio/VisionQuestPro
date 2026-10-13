@@ -3,7 +3,7 @@
 #include <dlfcn.h>
 #include <stdio.h>
 
-// Same layout as vpvk/config.h (VPEngine); kept local so the app builds without the header.
+// Same layout as vpvk/config.h (VPKEngine); kept local so the app builds without the header.
 typedef struct { int32_t mode; float sharp_zone, periphery, height; } vpvk_foveation;
 typedef struct { int enabled; float percent, sharpness; } vpvk_vpktaa;
 

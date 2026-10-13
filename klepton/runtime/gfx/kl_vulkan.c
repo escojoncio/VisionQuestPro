@@ -644,7 +644,7 @@ static VkResult klvk_CreateDevice(VkPhysicalDevice phys, const VkDeviceCreateInf
     extlist keep = {{0}, 0};
     for (uint32_t i = 0; ci && i < ci->enabledExtensionCount; i++) {
         const char *e = ci->ppEnabledExtensionNames[i];
-        // VisionQuestPro: the game's foveation is always off (VPEngine's own
+        // VisionQuestPro: the game's foveation is always off (VPKEngine's own
         // applies), whatever the driver underneath supports.
         if (!strncmp(e, "VK_EXT_fragment_density_map", 27) ||
             !strcmp(e, "VK_KHR_fragment_shading_rate") ||
@@ -3242,14 +3242,14 @@ static void klvk_eye_fb_note(VkImage img, uint32_t w, uint32_t h) {
 // The async resolve (KleptonCompositor, its own Metal queue) could not know
 // which jitter a frame used (the frustum is read ~5 times per frame), had to
 // copy the depth so the next frame would not overwrite it, and shared the GPU
-// with the guest at a different cadence. Here VPEngine jitters the viewport and
+// with the guest at a different cadence. Here VPKEngine jitters the viewport and
 // says what it applied, and the resolve is encoded at the frame end on
-// VPEngine's own queue: ordered after the frame, finished by the frame-end
+// VPKEngine's own queue: ordered after the frame, finished by the frame-end
 // wait, and reading the depth before the next frame can touch it.
 // ---------------------------------------------------------------------------
 
 // VPVulkan's exports (gpu/vulkan/include/vpvk/config.h), mirrored field for
-// field: this file cannot include VPEngine's headers, and the driver is a
+// field: this file cannot include VPKEngine's headers, and the driver is a
 // dylib whose symbols are looked up, not linked.
 typedef struct {
     int      enabled;
@@ -3310,8 +3310,8 @@ int kl_vulkan_taa_inline(void) {
     if (__atomic_compare_exchange_n(&g_taa_inline, &expect, v, 0,
                                     __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
         if (v)
-            VKI("[taa-inline] ON: resolve at the guest's frame end on VPEngine's queue; viewport "
-                "jitter by VPEngine (set_jitter %s, get_applied %s, native_device %s), frustum "
+            VKI("[taa-inline] ON: resolve at the guest's frame end on VPKEngine's queue; viewport "
+                "jitter by VPKEngine (set_jitter %s, get_applied %s, native_device %s), frustum "
                 "jitter off, live eye depth (MSAA included), no depth snapshots\n",
                 g_vpvk.set_jitter ? "yes" : "MISSING", g_vpvk.get_applied ? "yes" : "MISSING",
                 g_vpvk.native_device ? "yes" : "MISSING");
@@ -3477,7 +3477,7 @@ static void klvk_taa_next_jitter(int stage, int resolving, int hook_on) {
     static int want = -1;
     if (want < 0) {
         want = kl_env_on("KL_VPKTAA_JITTER", 1);
-        if (!want) VKI("[taa-inline] KL_VPKTAA_JITTER=0 — VPEngine applies no jitter\n");
+        if (!want) VKI("[taa-inline] KL_VPKTAA_JITTER=0 — VPKEngine applies no jitter\n");
     }
     klvk_vpvk_taa_jitter j;
     memset(&j, 0, sizeof j);
@@ -3533,7 +3533,7 @@ void kl_vulkan_frame_done(int stage) {
     // guest's queue BEFORE the idle wait below, which then also covers the copy.
     klvk_ed_frame_done(d, stage);
 
-    // VPKTAA inline: the resolve, encoded by the hook on VPEngine's queue —
+    // VPKTAA inline: the resolve, encoded by the hook on VPKEngine's queue —
     // after all of this frame's work, and covered by the wait below. Only when
     // kl_ovrp filed THIS frame's record under this stage (it says so just
     // before calling here); otherwise the hook would pair this picture with
@@ -3600,7 +3600,7 @@ void kl_vulkan_frame_done(int stage) {
     }
     __atomic_add_fetch(&g_frame_serial, 1, __ATOMIC_RELEASE);
     // ...and the next frame's jitter, once this frame's GPU work is finished
-    // (VPEngine applies it to submits translated from now on).
+    // (VPKEngine applies it to submits translated from now on).
     // Jitter only stays on while frames are actually resolved and shown: a
     // jittered picture nobody resolves is pure shimmer (failed resolve, refused
     // publish, unsupported eye format...).
@@ -4027,7 +4027,7 @@ static VkResult VKAPI_CALL klvk_CreateImage(VkDevice dev, const VkImageCreateInf
                 ci->extent.width, ci->extent.height); }
     }
     // VPKTAA eye depth (kl_vulkan.h): an eye-sized depth attachment must be
-    // readable afterwards — SAMPLED (else VPEngine makes it render-target only)
+    // readable afterwards — SAMPLED (else VPKEngine makes it render-target only)
     // and not TRANSIENT (else it never leaves tile memory). Only eye-sized,
     // single-sample (or forced-1x) depth images; everything else untouched.
     // Inline VPKTAA also reads a MULTISAMPLED depth (depth2d_ms_array), so
@@ -4096,7 +4096,7 @@ static VkResult VKAPI_CALL klvk_CreateImage(VkDevice dev, const VkImageCreateInf
     if (r == VK_SUCCESS && out && *out && ci && klvk_taa_depth_on() &&
         klvk_is_depth_format(ci->format) &&
         (ci->usage & VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT)) {
-        // VPEngine creates a forced-1x MSAA image single-sampled: record what it IS.
+        // VPKEngine creates a forced-1x MSAA image single-sampled: record what it IS.
         uint32_t smp = (uint32_t)ci->samples;
         if (smp > 1 && kl_env_on("VPVK_FORCE_1X", 0)) smp = 1;
         klvk_depth_info_add(*out, ci->format, ci->extent.width, ci->extent.height,

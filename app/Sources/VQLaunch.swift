@@ -73,7 +73,7 @@ final class VQSettings: ObservableObject {
     @Published var offline: Bool { didSet { save() } }
     @Published var guestLog: Bool { didSet { save() } }
     @Published var watchdogSeconds: Double { didSet { save() } }
-    // Graphics (VPEngine). The game's own Quest foveation is always off.
+    // Graphics (VPKEngine). The game's own Quest foveation is always off.
     enum Foveation: Int, CaseIterable { case off = 0, m2 = 1, m5 = 2, custom = 3 }
     @Published var foveation: Foveation { didSet { save() } }
     @Published var sharpZone: Double { didSet { save() } }      // 0.05...1
@@ -99,8 +99,8 @@ final class VQSettings: ObservableObject {
     @Published var quest3Profile: Bool { didSet { save() } }
     @Published var forceVulkan: Bool { didSet { save() } }
     @Published var diagCaptures: Bool { didSet { save() } }
-    /// Vulkan driver: VPEngine's own (VPVulkan) or MoltenVK (to compare, or if VPEngine fails).
-    @Published var useVPEngine: Bool { didSet { save() } }
+    /// Vulkan driver: VPKEngine's own (VPVulkan) or MoltenVK (to compare, or if VPKEngine fails).
+    @Published var useVPKEngine: Bool { didSet { save() } }
     /// Initial posture for the OVRPlugin eye height (KL_OVRP_POSTURE); auto re-measure always on.
     @Published var posture: String { didSet { save() } }   // "auto" | "seated" | "standing"
     /// Passthrough (KL_PASSTHROUGH): "auto" follows the game, "off" always VR, "on" always mixed.
@@ -140,7 +140,8 @@ final class VQSettings: ObservableObject {
         quest3Profile = d.object(forKey: "vq.quest3v2") as? Bool ?? true  // Quest 3 for every game by default
         forceVulkan = d.object(forKey: "vq.forceVulkan") as? Bool ?? true
         diagCaptures = d.object(forKey: "vq.diagCaptures2") as? Bool ?? false
-        useVPEngine = d.object(forKey: "vq.vpengine") as? Bool ?? true
+        // Saved as "vq.vpengine" before the engine was renamed VPKEngine.
+        useVPKEngine = (d.object(forKey: "vq.vpkengine") ?? d.object(forKey: "vq.vpengine")) as? Bool ?? true
         posture = d.string(forKey: "vq.posture") ?? "auto"
         if let pt = d.string(forKey: "vq.passthrough"), ["auto", "off", "on"].contains(pt) {
             passthrough = pt
@@ -186,7 +187,7 @@ final class VQSettings: ObservableObject {
         d.set(quest3Profile, forKey: "vq.quest3v2")
         d.set(forceVulkan, forKey: "vq.forceVulkan")
         d.set(diagCaptures, forKey: "vq.diagCaptures2")
-        d.set(useVPEngine, forKey: "vq.vpengine")
+        d.set(useVPKEngine, forKey: "vq.vpkengine")
         d.set(posture, forKey: "vq.posture")
         d.set(passthrough, forKey: "vq.passthrough")
         d.set(systemLanguage, forKey: "vq.sysLang")
@@ -204,15 +205,15 @@ final class VQSettings: ObservableObject {
     /// RTLD_GLOBAL, so the settings reach it (vpvk_config_set_*) before the game creates its device;
     /// Klepton's own dlopen of the same path then returns this handle.
     func selectDriver() {
-        if useVPEngine, let path = VQSettings.vpvulkanPath {
+        if useVPKEngine, let path = VQSettings.vpvulkanPath {
             if dlopen(path, RTLD_NOW | RTLD_GLOBAL) != nil {
                 setenv("KL_MVK_DYLIB", path, 1)
-                VQLog.log("Gráficos: VPEngine (VPVulkan) \(path)")
+                VQLog.log("Gráficos: VPKEngine (VPVulkan) \(path)")
                 return
             }
             let reason = dlerror().map { String(cString: $0) } ?? "?"
             VQLog.log("Gráficos: VPVulkan no carga (\(reason)); se usa MoltenVK")
-        } else if useVPEngine {
+        } else if useVPKEngine {
             VQLog.log("Gráficos: esta build no trae VPVulkan; se usa MoltenVK")
         } else {
             VQLog.log("Gráficos: MoltenVK (elegido en ajustes)")
@@ -242,7 +243,7 @@ final class VQSettings: ObservableObject {
             try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
             setenv("KL_CAPTURE_DIR", dir.path, 1)
             VQLog.log("Capturas en \(dir.path)")
-            // VPEngine per-pass dump (PNG per render/compute pass + gpu.dump lines) at GPU frame 600.
+            // VPKEngine per-pass dump (PNG per render/compute pass + gpu.dump lines) at GPU frame 600.
             if diagCaptures {
                 setenv("VP_DUMP_FRAME", "600", 1)
                 setenv("VP_DUMP_DIR", dir.path, 1)
@@ -285,7 +286,7 @@ final class VQSettings: ObservableObject {
         c.vpktaa_sharpness = Float(vpktaaSharpness)
         c.anisotropy = Int32(anisoLevel)
         setenv("VPVK_ANISO", String(anisoLevel), 1)  // read by VPVulkan even if the dlsym forward misses
-        // Per-pass GPU timing in VPEngine (gpu.passtime lines, one rendering frame every 90).
+        // Per-pass GPU timing in VPKEngine (gpu.passtime lines, one rendering frame every 90).
         if perfDiag { setenv("VP_PASS_TIMING", "90", 1) } else { unsetenv("VP_PASS_TIMING") }
         c.force_single_sample = gameMSAA ? 0 : 1  // game MSAA kept by default; independent of VPKTAA
         setenv("KL_FPS_HUD", showFps ? "1" : "0", 1)
@@ -412,7 +413,7 @@ final class VQPrewarm: ObservableObject {
     @Published var compiling = false  // first run: harvested SPIR-V being compiled ("Compilando shaders")
 
     /// Bump when the harvest or the SPIR-V -> MSL translator changes: the first-run precompile repeats.
-    static let firstRunVersion = 2  // 2: VPEngine per-variable private slots (new MSL)
+    static let firstRunVersion = 2  // 2: VPKEngine per-variable private slots (new MSL)
 
     static func run(gameFolder: URL, cache: URL) {
         guard VQSettings.shared.precompileShaders else {

@@ -1,9 +1,9 @@
 // VPKTAA: the Klepton adapter around VPKTAACore (VPKTAACore.swift, the self-contained TAA
 // module). Two modes:
 //   * INLINE (kl_vulkan_taa_inline() == 1: Vulkan guest on VPVulkan, KL_VPKTAA_INLINE != 0):
-//     VPEngine jitters the eye draws' viewport itself and reports the jitter it APPLIED; at
+//     VPKEngine jitters the eye draws' viewport itself and reports the jitter it APPLIED; at
 //     the guest's frame end kl_vulkan calls inlineFrame (guest thread, before its idle wait),
-//     which encodes both eyes into a command buffer of VPEngine's own queue
+//     which encodes both eyes into a command buffer of VPKEngine's own queue
 //     (kl_vulkan_native_submit: ordered after the whole frame) writing a per-stage 2-layer
 //     output, and publishes it as that stage's eye image (kl_vulkan_taa_publish). The
 //     compositor then shows it with the frame's own pose and never touches the async path.
@@ -391,7 +391,7 @@ final class KleptonTAA {
         noteInputs(rendered: rendered, w: w, h: h, depth: dDesc, motion: mDesc)
     }
 
-    /// `applied` (inline mode): the jitter VPEngine REALLY applied (vpvk_taa_applied): `px` =
+    /// `applied` (inline mode): the jitter VPKEngine REALLY applied (vpvk_taa_applied): `px` =
     /// shift of the rendered content in pixels of the jittered target (+x right, +y down =
     /// next texel row), `target` = that target's size. It replaces the frame record's frustum
     /// jitter (kl_ovrp serves none in inline mode).
@@ -439,7 +439,7 @@ final class KleptonTAA {
             // (dy > 0) = the scene lands LOWER, i.e. higher row numbers when row 0 is the top
             // (flipY). That is the old path's convention too: klovrp_jit_frustum served
             // dx = hx*(l+r)/w, dy = hy*(t+b)/h for a Halton pixel offset (hx, hy), i.e. the
-            // content moved by (-hx, +hy) texels. VPEngine instead moves the CONTENT directly
+            // content moved by (-hx, +hy) texels. VPKEngine instead moves the CONTENT directly
             // by +s texels (viewport.x/y += jx/jy, scissor unchanged; +y = down in Vulkan
             // framebuffer = Metal texel rows, with a negative-height viewport as well), so the
             // content of an unjittered pixel centre sits at centre + s: shift must equal s, and
@@ -600,7 +600,7 @@ final class KleptonTAA {
     private var hookSet = false                  // compositor thread only
     private let inlineLock = NSLock()            // one inline resolve at a time
     // Two outputs per stage (A/B, keyed stage*2+k): the compositor samples a stage's last
-    // output on ITS queue while VPEngine's queue may already write that stage's next one, and
+    // output on ITS queue while VPKEngine's queue may already write that stage's next one, and
     // Metal tracks no hazards across queues — alternating keeps the write off the read.
     private var stageOuts: [Int: StageOut] = [:]
     private var stageFlip: [Int: Int] = [:]
@@ -625,10 +625,10 @@ final class KleptonTAA {
         if !hookSet {
             hookSet = true
             hookSetAt = Date()
-            // VPEngine's queue resolves into textures made on the compositor's device.
+            // VPKEngine's queue resolves into textures made on the compositor's device.
             if let nd = kl_vulkan_native_device(),
                nd != Unmanaged.passUnretained(device as AnyObject).toOpaque() {
-                NSLog("[taa] INLINE: WARNING VPEngine's MTLDevice differs from the compositor's")
+                NSLog("[taa] INLINE: WARNING VPKEngine's MTLDevice differs from the compositor's")
             }
             // Retained on purpose: the hook is called on the guest thread for the rest of the
             // run, independently of the compositor's lifetime (one KleptonTAA per run).
@@ -637,8 +637,8 @@ final class KleptonTAA {
                 guard let user else { return }
                 Unmanaged<KleptonTAA>.fromOpaque(user).takeUnretainedValue().inlineFrame(stage: Int(stage))
             }, me)
-            NSLog("%@", "[taa] INLINE mode: resolve at the guest's frame end on VPEngine's queue, jitter "
-                  + "applied by VPEngine (viewport), output published as the eye image "
+            NSLog("%@", "[taa] INLINE mode: resolve at the guest's frame end on VPKEngine's queue, jitter "
+                  + "applied by VPKEngine (viewport), output published as the eye image "
                   + "(pct=\(Int(percent)) rcas=\(sharp) spatial=\(spatialMode))")
         }
         // Inline only while the frame-end hook is actually being called: a path that never
@@ -713,8 +713,8 @@ final class KleptonTAA {
 
     /// Resolve `stage`'s frame into its output and publish it; nil on success, else why not.
     private func inlineResolve(stage: Int) -> String? {
-        // Jitter VPEngine applied to this frame. Read every frame, first: the read resets
-        // VPEngine's counters, so they always cover exactly one guest frame.
+        // Jitter VPKEngine applied to this frame. Read every frame, first: the read resets
+        // VPKEngine's counters, so they always cover exactly one guest frame.
         var jx: Float = 0, jy: Float = 0
         var tw: Int32 = 0, th: Int32 = 0
         var nj: UInt32 = 0, nsk: UInt32 = 0, nmx: UInt32 = 0
@@ -770,7 +770,7 @@ final class KleptonTAA {
         guard let out = so else { return "output allocation failed" }
 
         // Spatial edge AA: forced by KL_VPKTAA_SPATIAL=0/1; auto = only without applied jitter
-        // (VPEngine reports what it jittered, so there is nothing to prove).
+        // (VPKEngine reports what it jittered, so there is nothing to prove).
         core.spatial = spatialMode == "0" ? 0 : spatialMode == "1" ? 1 : (applied == nil ? 1 : 0)
 
         var inputs: [VPKTAAEyeInput] = []
@@ -812,7 +812,7 @@ final class KleptonTAA {
             if let why = core.motionRefused[e] { mDesc[e] += " REFUSED: \(why)" }
         }
         noteInlineInputs(w: w, h: h, applied: applied != nil, depth: dDesc, motion: mDesc)
-        guard committed == 1 else { return "native submit refused (no VPEngine queue)" }
+        guard committed == 1 else { return "native submit refused (no VPKEngine queue)" }
         guard encoded else { return "encode failed" }
         for e in 0..<2 {
             if let d = inputs[e].depth, core.depthRefused[e] == nil {
@@ -821,7 +821,7 @@ final class KleptonTAA {
             }
             if inputs[e].motion != nil, core.motionRefused[e] == nil { inMV[e] += 1 }
         }
-        // Committed on VPEngine's queue after the whole frame; kl_vulkan_frame_done's idle wait
+        // Committed on VPKEngine's queue after the whole frame; kl_vulkan_frame_done's idle wait
         // follows, so the picture is complete before the compositor can see the new serial.
         kl_vulkan_taa_publish(Int32(stage), Unmanaged.passUnretained(out.tex).toOpaque(),
                               Int32(w), Int32(h))

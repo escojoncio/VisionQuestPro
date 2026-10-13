@@ -1,7 +1,7 @@
 # VisionQuestPro
 
 App para Apple Vision Pro que ejecuta juegos de Quest a partir de sus ficheros descomprimidos
-(APK + carpeta de datos), sin necesitar un Quest. Gráficos con VPEngine (escojoncio/VPEngine) y
+(APK + carpeta de datos), sin necesitar un Quest. Gráficos con VPKEngine (escojoncio/VPKEngine) y
 antialiasing VPKTAA (escojoncio/PTVisionPro).
 
 ## Flujo
@@ -28,7 +28,7 @@ antialiasing VPKTAA (escojoncio/PTVisionPro).
   seleccionable en un Vision Pro M5).
 
 ## Gráficos
-- Traductor propio Vulkan/SPIR-V → Metal dentro de VPEngine, reutilizando su IR (VPIR), emisor MSL,
+- Traductor propio Vulkan/SPIR-V → Metal dentro de VPKEngine, reutilizando su IR (VPIR), emisor MSL,
   backend Metal y grafo de pases. Código 100 % propio (sin MoltenVK, SPIRV-Cross ni Mesa).
 - Se quita el MSAA del juego y se aplica VPKTAA.
 - Si el juego genera vectores de movimiento (juegos con SpaceWarp), VPKTAA los usa para no dejar

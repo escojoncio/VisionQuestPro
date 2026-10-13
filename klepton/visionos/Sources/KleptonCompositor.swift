@@ -2284,7 +2284,7 @@ final class KleptonCompositor {
         // Inline mode (Vulkan guest on VPVulkan): the resolve runs at the guest's frame end and
         // its output is published AS the eye image, so the picture eyeSource hands the
         // composite already is the resolved one, paired with its own frame record. Nothing to
-        // submit, acquire or invalidate here, and the frustum jitter stays off (VPEngine jitters).
+        // submit, acquire or invalidate here, and the frustum jitter stays off (VPKEngine jitters).
         if taa.pollInline() { kl_ovrp_set_taa_active(0); return }
         // Jitter is only served to the game while resolves really run (else it would shimmer).
         defer { kl_ovrp_set_taa_active(taa.running ? 1 : 0) }

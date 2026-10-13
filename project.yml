@@ -1,6 +1,6 @@
 # VisionQuestPro for Apple Vision Pro, as an XcodeGen project: `xcodegen generate` writes
 # VisionQuestPro.xcodeproj. Built by .github/workflows/visionos.yml, which first makes
-# klepton/build/xros/libklepton.a (Klepton's runtime), MoltenVK and the VPEngine checkout (vpengine/).
+# klepton/build/xros/libklepton.a (Klepton's runtime), MoltenVK and the VPKEngine checkout (vpkengine/).
 name: VisionQuestPro
 options:
   deploymentTarget:
@@ -26,9 +26,9 @@ targets:
           - "*.h"
       - path: klepton/tools/klepton_ld.c
         compilerFlags: ["-DKLEPTON_LD_INPROC", "-Wno-unused-function"]
-      - path: vpengine/runtime/vp_codesign.c
-      - path: vpengine/runtime/vp_pkcs12.c
-      - path: build/VPEngineCertificates
+      - path: vpkengine/runtime/vp_codesign.c
+      - path: vpkengine/runtime/vp_pkcs12.c
+      - path: build/VPKEngineCertificates
         type: folder
         buildPhase: resources
     dependencies:
@@ -63,7 +63,7 @@ targets:
           - $(SRCROOT)/klepton/visionos/Sources
           - $(SRCROOT)/klepton/vendor-moltenvk/out/include
           - $(SRCROOT)/app/Native
-          - $(SRCROOT)/vpengine/runtime
+          - $(SRCROOT)/vpkengine/runtime
           - $(inherited)
         LIBRARY_SEARCH_PATHS:
           - $(SRCROOT)/klepton/build/xros
