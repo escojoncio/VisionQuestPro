@@ -1,10 +1,8 @@
-# conformance-openxr - 3cb32a5639b08b1c001586cbcf82963df829ea61 - 2026-10-13T21:31:45Z
+# conformance-openxr - 68da3eab4c7a58e75912ad89f29dda2edee7cb40 - 2026-10-13T21:50:21Z
 
-## build-xr.log: 36 lines
+## build-xr.log: 34 lines
 ### errors
 ### end
-Downloading https://services.gradle.org/distributions/gradle-8.5-bin.zip
-............10%.............20%............30%.............40%.............50%............60%.............70%.............80%............90%.............100%
 Welcome to Gradle 8.5!
 Here are the highlights of this release:
  - Support for running on Java 21
@@ -37,7 +35,7 @@ C/C++: /home/runner/work/VisionQuestPro/VisionQuestPro/xrcts/src/external/basis_
 C/C++: #pragma GCC diagnostic ignored "-Wclass-memaccess"            
 C/C++:                                ^
 C/C++: 5 warnings generated.
-BUILD SUCCESSFUL in 3m 40s
+BUILD SUCCESSFUL in 3m 6s
 44 actionable tasks: 44 executed
 
 ## package-xr.log: 7 lines
@@ -49,4 +47,4 @@ xrcts/src/conformance/build/intermediates/apk/release/conformance-release-unsign
   7613832  1981-01-01 01:01   lib/arm64-v8a/libconformance_test.so
   1204576  1981-01-01 01:01   lib/arm64-v8a/libopenxr_loader.so
      5032  1981-01-01 01:01   AndroidManifest.xml
--rw-r--r-- 1 runner runner 40821926 Oct 13 21:31 OpenXRCTS.apk
+-rw-r--r-- 1 runner runner 40821926 Oct 13 21:50 OpenXRCTS.apk
