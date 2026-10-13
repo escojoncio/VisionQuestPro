@@ -80,7 +80,7 @@ jobs:
             -DANDROID_NDK_PATH="$NDK" -DANDROID_ABI=arm64-v8a -DDE_ANDROID_API="$ANDROID_API" \
             -DDEQP_ANDROID_EXE=ON -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
-            "-DCMAKE_EXE_LINKER_FLAGS=-Wl,--export-dynamic-symbol=main" 2>&1 | tail -60 | tee configure.log
+            2>&1 | tail -60 | tee configure.log
 
       - name: Build deqp-vk
         run: |
@@ -107,7 +107,7 @@ jobs:
           cp "$EXE" pkg/lib/arm64-v8a/libdeqp-vk.so
           "$STRIP" --strip-unneeded pkg/lib/arm64-v8a/libdeqp-vk.so
           "$READELF" -h pkg/lib/arm64-v8a/libdeqp-vk.so | grep -E "Type|Machine" | tee package.log
-          "$READELF" --dyn-syms -W pkg/lib/arm64-v8a/libdeqp-vk.so | awk '$8=="main"' | tee -a package.log
+          "$READELF" --dyn-syms -W pkg/lib/arm64-v8a/libdeqp-vk.so | grep -wE "main|_start" | tee -a package.log || true
           "$READELF" --dyn-syms -W pkg/lib/arm64-v8a/libdeqp-vk.so | awk '$8=="main"' | grep -q main
           "$READELF" -d pkg/lib/arm64-v8a/libdeqp-vk.so | grep NEEDED | tee -a package.log
           cp -R "$DATA" pkg/assets/vulkan
