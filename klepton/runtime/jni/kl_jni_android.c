@@ -376,9 +376,10 @@ static klj_val klj_Intent_getExtras(void *env, void *self, const klj_val *a, int
         const char *gx = getenv("KL_INTENT_EXTRAS");
         if (gx && *gx) {
             char *copy = strdup(gx);
-            for (char *line = copy, *next; line && *line && k < KL_LAUNCH_KV_MAX - 2; line = next) {
+            for (char *line = copy, *next; line && k < KL_LAUNCH_KV_MAX - 2; line = next) {
                 next = strchr(line, '\n');
                 if (next) *next++ = '\0';
+                if (!*line) continue;
                 char *eq = strchr(line, '=');
                 if (!eq || eq == line) continue;
                 *eq = '\0';

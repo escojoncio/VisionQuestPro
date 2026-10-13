@@ -2,6 +2,13 @@
 
 Historial completo de sesiones anteriores: `git log -p bitacora.md` (compactada el 2026-10-13 tras el log 49).
 
+## Log 53 (AC Nexus, 2026-10-13) → build siguiente
+- AA auto OK: `vk.msaa detected eye=4x`, VPKTAA off, MSAA 4x conservado; chip máx. MSAA 4x (x8 desactivado).
+- Congelado en `ShaderWarmupManager.WarmUpShaders`: f=808 `Too much geometry to support memoryless…` (16,5 s) → todos
+  los hilos de Unity en futex. Arreglado en VPKEngine (HeavyGeometry + memorylessFailed).
+- Audio: Wwise busca los bancos dentro de `main.207706.com.Ubisoft.ACNexusVR.obb`, que NO está en la carpeta del juego
+  (falta el fichero; no es bug). Recetas PSO: 3168 cargadas, 0 fallidas.
+
 ## Conformidad (en curso, 2026-10-13, sin build)
 - Motor por juego: `VQGames.swift` `guestKind` (unity|ue4|native) + `entryLib` (libmain / libUE4|libUnreal / `android.app.lib_name`)
   + `nativeFuncName` (`android.app.func_name`); `VQLaunch` exporta `KL_GUEST_KIND`/`KL_GUEST_ENTRY`/`KL_GUEST_FUNC`;
