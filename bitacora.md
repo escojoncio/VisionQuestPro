@@ -85,8 +85,8 @@ Historial completo: `git log -p bitacora.md` (compactada el 2026-10-14; lo cerra
   idiomas `*.lang`, frontera de overlays `ovrp_EndFrame4`, pose EyeLevel con altura medida.
 - Logs 24–43: VPKTAA core (`VPKTAACore.swift`: profundidad, MV de SpaceWarp, desoclusión, YCoCg, RCAS), SpaceWarp
   0x300, compositor de overlays (rects, color scale, Equirect 180° SBS, HUD FPS, capturas), JNI/OpenSL/AAsset varios;
-  Batman ~90 fps (log 26).
-- Logs 8–22: Vulkan en Batman (spoof Adreno 740), TLS ELF, liblog, libdl, AAudio/OpenSL (audio OK log 17), SubpassData,
+  rendimiento ~90 fps (log 26).
+- Logs 8–22: Vulkan en Unity (spoof Adreno 740), TLS ELF, liblog, libdl, AAudio/OpenSL (audio OK log 17), SubpassData,
   swizzle, MTLBinaryArchive, poses/postura/recentrado, mandos Sense (PS = botones Meta), manos ocultas, idioma del
   sistema, foveado Quest siempre apagado.
 
@@ -102,7 +102,3 @@ Historial completo: `git log -p bitacora.md` (compactada el 2026-10-14; lo cerra
   `VQConformance*`; `app/Native/vq_apk.c` (ZIP + AXML), `vq_config.c` (reenvío `vpvk_config_set_*`).
 - CI `visionos.yml`: solo `[build]` o manual; release `visionos` (`VisionQuestPro.ipa`, bundle `com.kdt.livecontainer`);
   log de CI en rama `ci-logs` (`visionos.txt`; `gh run view --log-failed` da 403 desde aquí).
-
-## Batman: Arkham Shadow (com.camouflaj.manta, solo estudio)
-- Unity 2022.3.45 IL2CPP, Vulkan multiview, SRP «Manta» (derivado de HDRP), libOVRPlugin 1.98, Wwise (OpenSL),
-  `supportedDevices=quest3+`. x18 usado como registro normal (Klepton lo parchea).
