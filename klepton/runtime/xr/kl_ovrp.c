@@ -3154,6 +3154,11 @@ static uint64_t klovrp_EndFrame4(int guest_frame_index, const void *layer_submit
     // record's fallback ladder tests it (klovrp_end_frame_impl).
     int named = klovrp_submit_stage(layer_submits, layer_submit_count);
     klovrp_asw_frame(layer_submits, layer_submit_count, named);
+    // VPKTAA inline: the stage the guest just drew is about to be filed as the
+    // newest complete one, and the resolve output over it is last cycle's —
+    // a compositor must see the live picture until this frame's output is
+    // published (kl_vulkan_frame_done), never an older picture with the new pose.
+    if (named >= 0 && kl_vulkan_taa_inline()) kl_vulkan_taa_publish(named, NULL, 0, 0);
     // VPKTAA: which frame record this EndFrame files (for kl_vulkan_eye_depth_tag).
     pthread_mutex_lock(&g_frames.mu);
     uint64_t pend_serial = g_frames.pending.serial;
@@ -3179,6 +3184,20 @@ static uint64_t klovrp_EndFrame4(int guest_frame_index, const void *layer_submit
         // has to mean the same frame as `vk_f09900_*.png`, or a script written
         // by looking at the captures presses at some other screen.
         kl_vulkan_capture_eyes(g_vk_frame++, named < 0 ? 0 : named);
+        // VPKTAA inline: the resolve hook runs inside kl_vulkan_frame_done and
+        // reads kl_ovrp_stage_render_pose(stage). klovrp_end_frame_impl above
+        // has already filed this frame's record (complete, with its serial), so
+        // the record is in place; say which stage it went to so the hook only
+        // runs when that is the stage being finished (a dropped frame, or one
+        // filed elsewhere, leaves the stage unresolved rather than mispaired).
+        {
+            int filed = -1;
+            pthread_mutex_lock(&g_frames.mu);
+            for (int st = 0; pend_serial && st < KLOVRP_MAX_STAGES && filed < 0; st++)
+                if (g_frames.r[st].serial == pend_serial && g_frames.r[st].complete) filed = st;
+            pthread_mutex_unlock(&g_frames.mu);
+            kl_vulkan_taa_frame_record(filed, filed >= 0 ? pend_serial : 0);
+        }
         // After the capture, not before: the capture's own submit is work on
         // the same queue, and a compositor let loose between the two would race
         // it. Ordinary runs write no captures at all, so this is the only
@@ -8455,6 +8474,9 @@ void kl_ovrp_set_taa_active(int on) { __atomic_store_n(&g_taa_live, on ? 1 : 0, 
 
 static void klovrp_jit_frustum(int eye, float *f) {
     if (!klovrp_jit_want()) return;
+    // VPKTAA inline: VPEngine jitters the viewport itself and reports what it
+    // applied; a frustum jitter on top would be a second, unrecorded one.
+    if (kl_vulkan_taa_inline()) return;
     __atomic_store_n(&g_jit.read, 1, __ATOMIC_RELAXED);
     if (__atomic_load_n(&g_jit.state, __ATOMIC_ACQUIRE) != 1) return;
     if (!__atomic_load_n(&g_taa_live, __ATOMIC_ACQUIRE)) return;
@@ -8477,6 +8499,17 @@ static void klovrp_jit_frame_begin(kl_ovrp_render_pose *r) {
     if (!klovrp_jit_want()) {
         memset(r->jitter, 0, sizeof r->jitter);
         r->jitter_mode = 2;
+        return;
+    }
+    // VPKTAA inline: no frustum jitter (see klovrp_jit_frustum); the record
+    // carries none, and the applied one comes from kl_vulkan_taa_applied.
+    if (kl_vulkan_taa_inline()) {
+        static int said;
+        if (!said++)
+            fprintf(stderr, "  [taa-inline] frustum jitter OFF (VPEngine jitters the viewport) — "
+                            "frame records carry jitter_mode 0\n");
+        memset(r->jitter, 0, sizeof r->jitter);
+        r->jitter_mode = 0;
         return;
     }
     int read = __atomic_exchange_n(&g_jit.read, 0, __ATOMIC_RELAXED);

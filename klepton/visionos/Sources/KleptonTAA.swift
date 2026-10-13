@@ -1,5 +1,15 @@
-// VPKTAA in the compositor: the Klepton adapter around VPKTAACore (VPKTAACore.swift, the
-// self-contained TAA module). This file owns everything Klepton-specific:
+// VPKTAA: the Klepton adapter around VPKTAACore (VPKTAACore.swift, the self-contained TAA
+// module). Two modes:
+//   * INLINE (kl_vulkan_taa_inline() == 1: Vulkan guest on VPVulkan, KL_VPKTAA_INLINE != 0):
+//     VPEngine jitters the eye draws' viewport itself and reports the jitter it APPLIED; at
+//     the guest's frame end kl_vulkan calls inlineFrame (guest thread, before its idle wait),
+//     which encodes both eyes into a command buffer of VPEngine's own queue
+//     (kl_vulkan_native_submit: ordered after the whole frame) writing a per-stage 2-layer
+//     output, and publishes it as that stage's eye image (kl_vulkan_taa_publish). The
+//     compositor then shows it with the frame's own pose and never touches the async path.
+//     No queue of ours, no frame pairing guesswork, no raw fallback: a frame that cannot be
+//     resolved publishes NULL and goes out as the guest drew it.
+//   * ASYNC (GL guests, KL_VPKTAA_INLINE=0), everything below:
 //   * the ASYNC queue: each new guest frame is resolved on VPKTAA's own MTLCommandQueue into
 //     one of 3 output slots; the compositor shows the newest COMPLETED slot with the pose of the
 //     guest frame it came from, so a slow resolve costs one guest frame of latency, never a
@@ -69,7 +79,7 @@ final class KleptonTAA {
         let out: [MTLTexture]         // per eye, 2D array slice 0, rgba8 sRGB
         let flipY: [Bool]
     }
-    private let queue: MTLCommandQueue?
+    private let queue: MTLCommandQueue?     // async mode only
     private let lock = NSLock()
     private var slots: [[MTLTexture]] = []      // slots[k][eye]
     private var slotSize = (0, 0)
@@ -103,6 +113,8 @@ final class KleptonTAA {
         self.mvAuto = sign == "auto"
         let lag = KleptonTAA.envS("KL_VPKTAA_JITTER_LAG") ?? "auto"
         self.jitterLagAuto = Int(lag) == nil
+        // Made even if the inline mode takes over later (it never uses it): whether the guest
+        // is a Vulkan one on VPVulkan may not be known yet here.
         self.queue = device.makeCommandQueue()
         // Every stored property is set from here on.
         queue?.label = "VPKTAA"
@@ -202,12 +214,16 @@ final class KleptonTAA {
         }
     }
 
-    /// Depth of `eye` for exactly this frame record, or nil (+ why, for the log).
-    private func depthInput(_ eye: Int, _ r: kl_ovrp_render_pose) -> (VPKTAADepthInput?, String, Bool) {
+    /// Depth of `eye` for exactly this frame record, or nil (+ why, for the log). Async path:
+    /// `stage`/`tag` = the record's, single-sample only (its depth may be a copy). Inline path:
+    /// tag 0 (the depth kl_vulkan picked for the frame ending right now, live) and multisampled
+    /// depth accepted (VPKTAACore reads the nearest sample).
+    private func depthInput(_ eye: Int, _ r: kl_ovrp_render_pose, stage: Int, tag: UInt64,
+                            allowMS: Bool) -> (VPKTAADepthInput?, String, Bool) {
         var info = kl_vulkan_eye_depth()
-        let ok = kl_vulkan_eye_depth_get(Int32(r.stage), Int32(eye), r.serial, &info) != 0
+        let ok = kl_vulkan_eye_depth_get(Int32(stage), Int32(eye), tag, &info) != 0
         if !ok { return (nil, "none", false) }
-        if info.samples > 1 { return (nil, "msaa\(info.samples)x(unusable)", true) }
+        if info.samples > 1 && !allowMS { return (nil, "msaa\(info.samples)x(unusable)", true) }
         guard let p = info.mtl else { return (nil, "no-mtl", true) }
         let tex = Unmanaged<MTLTexture>.fromOpaque(p).takeUnretainedValue() as MTLTexture
         let rev: Bool
@@ -221,7 +237,7 @@ final class KleptonTAA {
         let far = fromSubmit ? max(r.depth_far, 0) : farDefault
         let src = info.source == 1 ? "eye-pass" : info.source == 2 ? "spacewarp" : "size-match"
         let desc = "\(src) \(info.snapshot != 0 ? "copy" : "live") \(KleptonTAA.fmtName(info.vk_format)) "
-            + "\(info.w)x\(info.h) s\(info.slice) revZ=\(rev ? 1 : 0)"
+            + "\(info.w)x\(info.h)\(info.samples > 1 ? " ms\(info.samples)x" : "") s\(info.slice) revZ=\(rev ? 1 : 0)"
             + (revZOverride >= 0 ? "(forced)" : info.clear_depth >= 0
                 ? "(clear \(String(format: "%.3f", info.clear_depth)))" : "(census)")
             + " near=\(String(format: "%.3f", near))\(fromSubmit ? "(submit)" : "(default)")"
@@ -292,7 +308,7 @@ final class KleptonTAA {
             var ds = ["none", "none"]
             var seen = false
             for e in 0..<2 {
-                let (d, desc, sn) = depthInput(e, r)
+                let (d, desc, sn) = depthInput(e, r, stage: Int(r.stage), tag: r.serial, allowMS: false)
                 dd[e] = d; ds[e] = desc; seen = seen || sn
             }
             if seen || !depthActive {
@@ -375,15 +391,23 @@ final class KleptonTAA {
         noteInputs(rendered: rendered, w: w, h: h, depth: dDesc, motion: mDesc)
     }
 
+    /// `applied` (inline mode): the jitter VPEngine REALLY applied (vpvk_taa_applied): `px` =
+    /// shift of the rendered content in pixels of the jittered target (+x right, +y down =
+    /// next texel row), `target` = that target's size. It replaces the frame record's frustum
+    /// jitter (kl_ovrp serves none in inline mode).
     private func makeInput(eye: Int, color: MTLTexture, slice: Int, flipY: Bool,
                            rendered r: kl_ovrp_render_pose,
-                           depth: VPKTAADepthInput?, motion: VPKTAAMotionInput?) -> VPKTAAEyeInput? {
+                           depth: VPKTAADepthInput?, motion: VPKTAAMotionInput?,
+                           inline: Bool = false,
+                           applied: (px: SIMD2<Float>, target: SIMD2<Float>)? = nil) -> VPKTAAEyeInput? {
         guard color.textureType == .type2DArray else { return nil }
         let w = color.width, h = color.height
         let t = r.tangents
         let tan: SIMD4<Float> = eye == 0 ? SIMD4(t.0.0, t.0.1, t.0.2, t.0.3) : SIMD4(t.1.0, t.1.1, t.1.2, t.1.3)
         let j = r.jitter
-        var jit: SIMD2<Float> = r.jitter_mode == 1 ? (eye == 0 ? SIMD2(j.0.0, j.0.1) : SIMD2(j.1.0, j.1.1)) : .zero
+        // Inline: the record never carries a frustum jitter; only `applied` counts.
+        var jit: SIMD2<Float> = r.jitter_mode == 1 && !inline
+            ? (eye == 0 ? SIMD2(j.0.0, j.0.1) : SIMD2(j.1.0, j.1.1)) : .zero
         var jitAlt: [SIMD2<Float>] = []
         if jit != .zero { (jit, jitAlt) = pairedJitter(jit, tan, w, h) }
         var crop = SIMD2<Float>(1, 1)
@@ -396,6 +420,35 @@ final class KleptonTAA {
             crop = SIMD2(min(1, Float(vp.2) / Float(r.viewport_of.0)), min(1, Float(vp.3) / Float(r.viewport_of.1)))
             cropOff = SIMD2(min(max(Float(vp.0) / Float(r.viewport_of.0), 0), 1 - crop.x),
                             min(max(Float(vp.1) / Float(r.viewport_of.1), 0), 1 - crop.y))
+        }
+        if let a = applied {
+            // Target pixels -> texels of THIS colour texture. A target of the colour's size IS
+            // it (the guest's viewport may cover only the crop rect: same pixels). Any other
+            // size is an intermediate scene buffer that ends up in the crop rect (URP/UE4
+            // scene colour then a blit into the eye): its pixel = crop*size/target texels.
+            let cs = SIMD2<Float>(Float(w), Float(h))
+            var k = SIMD2<Float>(1, 1)
+            if a.target.x > 0, a.target.y > 0, a.target != cs { k = crop * cs / a.target }
+            let s = a.px * k
+            // Texel shift -> VPKTAACore's tangent jitter. VPKTAACore.encode turns `jitter` (the
+            // frustum offset: x in [-l+dx, r+dx], y in [-b+dy, t+dy]) back into the source
+            // shift = where, relative to an output pixel centre, its content was rendered:
+            //   shift.x = -dx / (l+r) * crop.x * w
+            //   shift.y = (flipY ? +1 : -1) * dy / (t+b) * crop.y * h
+            // Frustum moved right (dx > 0) = the scene lands further LEFT (-x texels); moved up
+            // (dy > 0) = the scene lands LOWER, i.e. higher row numbers when row 0 is the top
+            // (flipY). That is the old path's convention too: klovrp_jit_frustum served
+            // dx = hx*(l+r)/w, dy = hy*(t+b)/h for a Halton pixel offset (hx, hy), i.e. the
+            // content moved by (-hx, +hy) texels. VPEngine instead moves the CONTENT directly
+            // by +s texels (viewport.x/y += jx/jy, scissor unchanged; +y = down in Vulkan
+            // framebuffer = Metal texel rows, with a negative-height viewport as well), so the
+            // content of an unjittered pixel centre sits at centre + s: shift must equal s, and
+            // the lines below are the exact inverse of the two above. Vulkan eye images have
+            // row 0 at the top (flipY true); the flipY = false branch only mirrors the formula.
+            // crop > 0 always (min(1, rect/of) with rect > 0, else 1).
+            jit = SIMD2(-s.x * (tan.x + tan.y) / (crop.x * Float(w)),
+                        (flipY ? 1 : -1) * s.y * (tan.z + tan.w) / (crop.y * Float(h)))
+            jitAlt = []
         }
         if cropOff != .zero && !saidCropOff[eye] {
             saidCropOff[eye] = true
@@ -429,6 +482,23 @@ final class KleptonTAA {
         return VPKTAAEyeInput(color: color, slice: slice, flipY: flipY, tangents: tan, jitter: jit,
                               crop: crop, cropOff: cropOff, orientation: qh * qe, position: pos,
                               depth: dep, motion: mot, jitterAlt: jitAlt)
+    }
+
+    /// The MV sign-vote part of a stats line; with KL_VPKTAA_MV_SIGN=auto it follows a clear
+    /// winner (>= 55 % of >= 200 votes).
+    private func mvVotes(_ votes: [UInt32]) -> String {
+        let tot = votes.reduce(0, +)
+        var line = " | mv sign votes (+x+y,+x-y,-x+y,-x-y)=\(votes[0]),\(votes[1]),\(votes[2]),\(votes[3]) "
+            + "using (\(mvSign.x > 0 ? "+" : "-")x\(mvSign.y > 0 ? "+" : "-")y)"
+        if mvAuto && tot >= 200, let best = (0..<4).max(by: { votes[$0] < votes[$1] }),
+           Double(votes[best]) / Double(tot) >= 0.55 {
+            let sg = SIMD2<Float>((best & 2) != 0 ? -1 : 1, (best & 1) != 0 ? -1 : 1)
+            if sg != mvSign {
+                mvSign = sg
+                line += " -> AUTO switch to (\(sg.x > 0 ? "+" : "-")x\(sg.y > 0 ? "+" : "-")y)"
+            }
+        }
+        return line
     }
 
     private func pct(_ a: UInt32, _ b: UInt32) -> String {
@@ -473,17 +543,7 @@ final class KleptonTAA {
                 + "rejected=\(pct(s.rejected, s.pixels)) pct offscreen=\(pct(s.offscreen, s.pixels)) pct "
                 + "moving=\(pct(s.moving, s.pixels)) pct mean|mv|=\(String(format: "%.2f", s.meanMvPx)) px"
         }
-        let tot = votes.reduce(0, +)
-        line += " | mv sign votes (+x+y,+x-y,-x+y,-x-y)=\(votes[0]),\(votes[1]),\(votes[2]),\(votes[3]) "
-            + "using (\(mvSign.x > 0 ? "+" : "-")x\(mvSign.y > 0 ? "+" : "-")y)"
-        if mvAuto && tot >= 200, let best = (0..<4).max(by: { votes[$0] < votes[$1] }),
-           Double(votes[best]) / Double(tot) >= 0.55 {
-            let sg = SIMD2<Float>((best & 2) != 0 ? -1 : 1, (best & 1) != 0 ? -1 : 1)
-            if sg != mvSign {
-                mvSign = sg
-                line += " -> AUTO switch to (\(sg.x > 0 ? "+" : "-")x\(sg.y > 0 ? "+" : "-")y)"
-            }
-        }
+        line += mvVotes(votes)
         // Jitter pairing: votes for the used offset / the previous one / the next one.
         let jt = jv.reduce(0, +)
         line += " | jitter votes (used,prev,next)=\(jv[0]),\(jv[1]),\(jv[2]) lag=\(jitterLag)"
@@ -519,6 +579,313 @@ final class KleptonTAA {
         NSLog("%@", line)
         lock.lock(); rawFrames = 0; lock.unlock()
         resolved = 0; depthFrames = [0, 0]; mvFrames = [0, 0]; depthLate = 0
+        resetsLogged = core.resets
+    }
+
+    // ── INLINE mode (see the header) ─────────────────────────────────────────────────────────
+    /// Box for the encode step kl_vulkan_native_submit calls back into (a C callback cannot
+    /// capture; the box travels as its `user` pointer, alive for the synchronous call).
+    private final class InlineEncode {
+        let body: (MTLCommandBuffer) -> Void
+        init(_ body: @escaping (MTLCommandBuffer) -> Void) { self.body = body }
+    }
+    /// One stage's output: 2-layer array (layer = eye) in the eye's sRGB format, written per
+    /// eye through a single-layer non-sRGB view (the kernel encodes sRGB itself).
+    private struct StageOut {
+        let tex: MTLTexture
+        let layers: [MTLTexture]
+        let w: Int, h: Int
+        let fmt: MTLPixelFormat
+    }
+    private var hookSet = false                  // compositor thread only
+    private let inlineLock = NSLock()            // one inline resolve at a time
+    // Two outputs per stage (A/B, keyed stage*2+k): the compositor samples a stage's last
+    // output on ITS queue while VPEngine's queue may already write that stage's next one, and
+    // Metal tracks no hazards across queues — alternating keeps the write off the read.
+    private var stageOuts: [Int: StageOut] = [:]
+    private var stageFlip: [Int: Int] = [:]
+    private var hookSetAt = Date.distantPast        // compositor thread only
+    private var lastHookAt = Date.distantPast       // under `lock`
+    private var retiredOuts: [MTLTexture] = []   // replaced outputs, kept a few frames
+    private var colourViews: [ObjectIdentifier: MTLTexture] = [:]
+    private var inShown = false                  // under `lock`: the last inline frame was resolved
+    private var inFrames = 0, inResolved = 0, inJitFrames = 0, inMixedFrames = 0
+    private var inJittered: UInt64 = 0, inSkipped: UInt64 = 0, inMixed: UInt64 = 0
+    private var inDepth = [0, 0], inDepthMS = [0, 0], inMV = [0, 0]
+    private var inRawWhy: [String: Int] = [:]
+    private var inLastJ = SIMD2<Float>(0, 0)
+    private var inLastTarget = (Int32(0), Int32(0))
+    private var inSaidFmt = false
+
+    /// Called by the compositor every frame: true while the inline mode is on (the compositor
+    /// then leaves submit/acquire alone: the eye image it samples already IS the resolve).
+    /// Registers the frame-end hook the first time.
+    func pollInline() -> Bool {
+        guard kl_vulkan_taa_inline() == 1 else { return false }
+        if !hookSet {
+            hookSet = true
+            hookSetAt = Date()
+            // VPEngine's queue resolves into textures made on the compositor's device.
+            if let nd = kl_vulkan_native_device(),
+               nd != Unmanaged.passUnretained(device as AnyObject).toOpaque() {
+                NSLog("[taa] INLINE: WARNING VPEngine's MTLDevice differs from the compositor's")
+            }
+            // Retained on purpose: the hook is called on the guest thread for the rest of the
+            // run, independently of the compositor's lifetime (one KleptonTAA per run).
+            let me = Unmanaged.passRetained(self).toOpaque()
+            kl_vulkan_set_taa_hook({ stage, user in
+                guard let user else { return }
+                Unmanaged<KleptonTAA>.fromOpaque(user).takeUnretainedValue().inlineFrame(stage: Int(stage))
+            }, me)
+            NSLog("%@", "[taa] INLINE mode: resolve at the guest's frame end on VPEngine's queue, jitter "
+                  + "applied by VPEngine (viewport), output published as the eye image "
+                  + "(pct=\(Int(percent)) rcas=\(sharp) spatial=\(spatialMode))")
+        }
+        // Inline only while the frame-end hook is actually being called: a path that never
+        // calls it (OpenXR files its frame record after the frame end) keeps the async resolve
+        // instead of silently losing VPKTAA. 3 s of grace after registering.
+        let now = Date()
+        if now.timeIntervalSince(hookSetAt) < 3 { return true }
+        lock.lock(); let last = lastHookAt; lock.unlock()
+        return now.timeIntervalSince(last) < 1
+    }
+
+    /// Inline: the last guest frame went out resolved (HUD).
+    var inlineShowing: Bool { lock.lock(); defer { lock.unlock() }; return inShown }
+
+    /// rgba8/bgra8 sRGB eye formats -> the plain view format the kernel writes through.
+    private static func writeFormat(_ f: MTLPixelFormat) -> MTLPixelFormat? {
+        switch f {
+        case .rgba8Unorm_srgb: return .rgba8Unorm
+        case .bgra8Unorm_srgb: return .bgra8Unorm
+        default: return nil     // linear / float eyes: the kernel's sRGB encode would be wrong
+        }
+    }
+
+    private func makeStageOut(_ w: Int, _ h: Int, _ fmt: MTLPixelFormat, _ stage: Int) -> StageOut? {
+        guard let wf = KleptonTAA.writeFormat(fmt) else { return nil }
+        let d = MTLTextureDescriptor()
+        d.textureType = .type2DArray
+        d.pixelFormat = fmt
+        d.width = w; d.height = h; d.arrayLength = 2
+        d.usage = [.shaderRead, .shaderWrite, .pixelFormatView]
+        d.storageMode = .private
+        guard let t = device.makeTexture(descriptor: d) else { return nil }
+        t.label = "vpktaa inline out s\(stage)"
+        var layers: [MTLTexture] = []
+        for e in 0..<2 {
+            guard let v = t.makeTextureView(pixelFormat: wf, textureType: .type2DArray,
+                                            levels: 0..<1, slices: e..<(e + 1)) else { return nil }
+            layers.append(v)
+        }
+        return StageOut(tex: t, layers: layers, w: w, h: h, fmt: fmt)
+    }
+
+    /// The colour as a 2D array (VPKTAACore's input type); a 2D texture gets a cached view.
+    private func colourArray(_ t: MTLTexture) -> MTLTexture? {
+        if t.textureType == .type2DArray { return t }
+        guard t.textureType == .type2D else { return nil }
+        let k = ObjectIdentifier(t)
+        if let v = colourViews[k] { return v }
+        guard let v = t.makeTextureView(pixelFormat: t.pixelFormat, textureType: .type2DArray,
+                                        levels: 0..<1, slices: 0..<1) else { return nil }
+        if colourViews.count > 16 { colourViews.removeAll() }   // the view retains its texture
+        colourViews[k] = v
+        return v
+    }
+
+    /// The hook (guest thread, inside kl_vulkan_frame_done, before its idle wait).
+    private func inlineFrame(stage: Int) {
+        inlineLock.lock(); defer { inlineLock.unlock() }
+        lock.lock(); lastHookAt = Date(); lock.unlock()
+        inFrames += 1
+        let why = inlineResolve(stage: stage)
+        if let why {
+            // This frame goes out as the guest drew it (live eye image restored).
+            kl_vulkan_taa_publish(Int32(stage), nil, 0, 0)
+            inRawWhy[why, default: 0] += 1
+        } else {
+            inResolved += 1
+        }
+        lock.lock(); inShown = why == nil; lock.unlock()
+        inlineStats()
+    }
+
+    /// Resolve `stage`'s frame into its output and publish it; nil on success, else why not.
+    private func inlineResolve(stage: Int) -> String? {
+        // Jitter VPEngine applied to this frame. Read every frame, first: the read resets
+        // VPEngine's counters, so they always cover exactly one guest frame.
+        var jx: Float = 0, jy: Float = 0
+        var tw: Int32 = 0, th: Int32 = 0
+        var nj: UInt32 = 0, nsk: UInt32 = 0, nmx: UInt32 = 0
+        let had = kl_vulkan_taa_applied(&jx, &jy, &tw, &th, &nj, &nsk, &nmx) != 0
+        var applied: (px: SIMD2<Float>, target: SIMD2<Float>)? = nil
+        if had {
+            inJittered += UInt64(nj); inSkipped += UInt64(nsk); inMixed += UInt64(nmx)
+            if nmx > 0 { inMixedFrames += 1 }   // still use the reported (last) value
+            if nj > 0, jx.isFinite, jy.isFinite, abs(jx) <= 1, abs(jy) <= 1 {
+                applied = (px: SIMD2<Float>(jx, jy), target: SIMD2<Float>(Float(max(tw, 0)), Float(max(th, 0))))
+                inJitFrames += 1
+                inLastJ = SIMD2(jx, jy); inLastTarget = (tw, th)
+            }
+        }
+
+        var r = kl_ovrp_render_pose()
+        guard withUnsafeMutablePointer(to: &r, { kl_ovrp_stage_render_pose(Int32(stage), $0) }) != 0,
+              r.serial != 0 else { return "no frame record" }
+
+        // Live colour of both eyes (never the published output).
+        var srcs: [(MTLTexture, Int)] = []
+        for e in 0..<2 {
+            var sl: Int32 = 0, cw: Int32 = 0, ch: Int32 = 0
+            guard let p = kl_vulkan_eye_color_mtl(Int32(stage), Int32(e), &sl, &cw, &ch) else {
+                return "no eye colour"
+            }
+            let t = Unmanaged<MTLTexture>.fromOpaque(p).takeUnretainedValue() as MTLTexture
+            guard let a = colourArray(t) else { return "eye colour type \(t.textureType.rawValue)" }
+            guard sl >= 0, Int(sl) < a.arrayLength else { return "eye colour slice \(sl) out of range" }
+            srcs.append((a, Int(sl)))
+        }
+        let w = srcs[0].0.width, h = srcs[0].0.height, fmt = srcs[0].0.pixelFormat
+        guard srcs[1].0.width == w, srcs[1].0.height == h, srcs[1].0.pixelFormat == fmt else {
+            return "eyes differ in size/format"
+        }
+        guard KleptonTAA.writeFormat(fmt) != nil else {
+            if !inSaidFmt {
+                inSaidFmt = true
+                NSLog("[taa] INLINE: eye format \(fmt.rawValue) is not rgba8/bgra8 sRGB — frames go out unresolved")
+            }
+            return "eye format \(fmt.rawValue)"
+        }
+        let flip = (stageFlip[stage] ?? 0) ^ 1
+        stageFlip[stage] = flip
+        let key = stage &* 2 &+ flip
+        var so = stageOuts[key]
+        if so == nil || so!.w != w || so!.h != h || so!.fmt != fmt {
+            if let old = so { retiredOuts.append(old.tex) }
+            if retiredOuts.count > 6 { retiredOuts.removeFirst(retiredOuts.count - 6) }
+            so = makeStageOut(w, h, fmt, stage)
+            stageOuts[key] = so
+        }
+        guard let out = so else { return "output allocation failed" }
+
+        // Spatial edge AA: forced by KL_VPKTAA_SPATIAL=0/1; auto = only without applied jitter
+        // (VPEngine reports what it jittered, so there is nothing to prove).
+        core.spatial = spatialMode == "0" ? 0 : spatialMode == "1" ? 1 : (applied == nil ? 1 : 0)
+
+        var inputs: [VPKTAAEyeInput] = []
+        var dDesc = ["none", "none"], mDesc = ["none", "none"]
+        for e in 0..<2 {
+            let (d, dd, _) = depthInput(e, r, stage: stage, tag: 0, allowMS: true)
+            let (m, md) = motionInput(e, r)
+            dDesc[e] = dd; mDesc[e] = md
+            // flipY: a Vulkan eye image has its origin at the top left (kl_glfb notes the same).
+            guard let inp = makeInput(eye: e, color: srcs[e].0, slice: srcs[e].1, flipY: true,
+                                      rendered: r, depth: d, motion: m, inline: true,
+                                      applied: applied) else { return "eye \(e) input" }
+            inputs.append(inp)
+        }
+
+        var encoded = false
+        let box = InlineEncode { [self] cmd in
+            for e in 0..<2 {
+                if !self.core.encode(cmd: cmd, eye: e, input: inputs[e], output: out.layers[e]) { return }
+            }
+            encoded = true
+            cmd.addCompletedHandler { [weak self] cb in
+                guard let self, cb.status == .completed else { return }
+                let ms = max(0, cb.gpuEndTime - cb.gpuStartTime) * 1000
+                self.lock.lock()
+                self.gpuMsSum += ms; self.gpuMsN += 1; self.gpuMsMax = max(self.gpuMsMax, ms)
+                self.lock.unlock()
+            }
+        }
+        let committed = withExtendedLifetime(box) { () -> Int32 in
+            kl_vulkan_native_submit({ cb, user in
+                guard let cb, let user else { return }
+                let b = Unmanaged<InlineEncode>.fromOpaque(user).takeUnretainedValue()
+                b.body(Unmanaged<MTLCommandBuffer>.fromOpaque(cb).takeUnretainedValue() as MTLCommandBuffer)
+            }, Unmanaged.passUnretained(box).toOpaque())
+        }
+        for e in 0..<2 {
+            if let why = core.depthRefused[e] { dDesc[e] += " REFUSED: \(why)" }
+            if let why = core.motionRefused[e] { mDesc[e] += " REFUSED: \(why)" }
+        }
+        noteInlineInputs(w: w, h: h, applied: applied != nil, depth: dDesc, motion: mDesc)
+        guard committed == 1 else { return "native submit refused (no VPEngine queue)" }
+        guard encoded else { return "encode failed" }
+        for e in 0..<2 {
+            if let d = inputs[e].depth, core.depthRefused[e] == nil {
+                inDepth[e] += 1
+                if d.texture.sampleCount > 1 { inDepthMS[e] += 1 }
+            }
+            if inputs[e].motion != nil, core.motionRefused[e] == nil { inMV[e] += 1 }
+        }
+        // Committed on VPEngine's queue after the whole frame; kl_vulkan_frame_done's idle wait
+        // follows, so the picture is complete before the compositor can see the new serial.
+        kl_vulkan_taa_publish(Int32(stage), Unmanaged.passUnretained(out.tex).toOpaque(),
+                              Int32(w), Int32(h))
+        return nil
+    }
+
+    private var inLastInputsKey = ""
+    private var inLastInputsLog = Date.distantPast
+    private var inLastStats = Date()
+
+    /// [taa] inputs line on a change (at most every 5 s) and with every stats line.
+    private func noteInlineInputs(w: Int, h: Int, applied: Bool, depth: [String], motion: [String]) {
+        let key = "\(applied)|\(depth[0].prefix(24))|\(depth[1].prefix(24))|\(motion[0].prefix(12))|\(motion[1].prefix(12))"
+        let now = Date()
+        let due = now.timeIntervalSince(inLastStats) > 30
+        guard (key != inLastInputsKey && now.timeIntervalSince(inLastInputsLog) > 5) || due else { return }
+        inLastInputsKey = key
+        inLastInputsLog = now
+        NSLog("%@", "[taa] inputs (inline) \(w)x\(h) jitter=\(applied ? "applied" : "none") "
+              + "pct=\(Int(percent)) rcas=\(sharp) | eye0 depth=\(depth[0]) mv=\(motion[0]) "
+              + "| eye1 depth=\(depth[1]) mv=\(motion[1])")
+    }
+
+    /// The inline stats line, every 30 s (guest thread).
+    private func inlineStats() {
+        let now = Date()
+        guard now.timeIntervalSince(inLastStats) > 30 else { return }
+        inLastStats = now
+        lock.lock()
+        let gpuAvg = gpuMsN > 0 ? gpuMsSum / Double(gpuMsN) : 0
+        let gpuMax = gpuMsMax, gpuN = gpuMsN
+        gpuMsSum = 0; gpuMsN = 0; gpuMsMax = 0
+        lock.unlock()
+        // Built in short statements: one long interpolated "+" chain can exceed the type
+        // checker's budget ("expression too complex").
+        let gpuS = String(format: "%.2f", gpuAvg), gpuMaxS = String(format: "%.1f", gpuMax)
+        let jxS = String(format: "%+.3f", inLastJ.x), jyS = String(format: "%+.3f", inLastJ.y)
+        let resets = core.resets - resetsLogged
+        var line = "[taa] stats (30 s, inline): frames=\(inFrames) resolved=\(inResolved) resets=\(resets) "
+        line += "gpu=\(gpuS) ms/frame (max \(gpuMaxS), n=\(gpuN)) "
+        line += "| jitter: frames=\(inJitFrames) draws jittered=\(inJittered) skipped=\(inSkipped) "
+        line += "mixed=\(inMixed) (in \(inMixedFrames) frames) "
+        line += "last=(\(jxS),\(jyS)) px of \(inLastTarget.0)x\(inLastTarget.1) "
+        line += "spatial=\(core.spatial > 0 ? "on" : "off")"
+        var votes: [UInt32] = [0, 0, 0, 0]
+        for e in 0..<2 {
+            let s = core.takeStats(eye: e)
+            for k in 0..<4 { votes[k] += s.votes[k] }
+            let mvS = String(format: "%.2f", s.meanMvPx)
+            line += " | eye\(e): frames depth=\(inDepth[e]) (ms=\(inDepthMS[e])) mv=\(inMV[e]) "
+            line += "depthValid=\(pct(s.depthValid, s.pixels)) pct disocc=\(pct(s.disoccluded, s.pixels)) pct "
+            line += "rejected=\(pct(s.rejected, s.pixels)) pct offscreen=\(pct(s.offscreen, s.pixels)) pct "
+            line += "moving=\(pct(s.moving, s.pixels)) pct mean|mv|=\(mvS) px"
+        }
+        line += mvVotes(votes)
+        if !inRawWhy.isEmpty {
+            line += " | unresolved: " + inRawWhy.sorted { $0.value > $1.value }
+                .map { "\($0.key)=\($0.value)" }.joined(separator: ", ")
+        }
+        NSLog("%@", line)
+        inFrames = 0; inResolved = 0; inJitFrames = 0; inMixedFrames = 0
+        inJittered = 0; inSkipped = 0; inMixed = 0
+        inDepth = [0, 0]; inDepthMS = [0, 0]; inMV = [0, 0]
+        inRawWhy.removeAll()
         resetsLogged = core.resets
     }
 }

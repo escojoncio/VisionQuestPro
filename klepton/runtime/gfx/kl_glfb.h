@@ -278,6 +278,19 @@ void *kl_glfb_eye_mtl_texture(int eye, int stage, int *out_slice);
 void kl_glfb_note_eye_mtl_texture(int eye, int stage, void *texture, int slice,
                                   int w, int h);
 
+// VPKTAA inline (kl_vulkan_taa_publish): a texture that REPLACES what
+// kl_glfb_eye_mtl_texture answers for (eye, stage), without touching the live
+// entry underneath. The override is always slice `eye` of `texture` (a 2-layer
+// 2DArray holding both eyes). It is a layer on top rather than a rewrite of the
+// table so that the live image keeps being republished by its owners (eye
+// image allocation, the eye shadow, OpenXR) without silently clobbering an
+// active override — and so that any CHANGE of the live entry (new image, new
+// size, release) drops the override: an output resolved from storage that no
+// longer exists must never outlive it. Refused (returns 0, override cleared)
+// when the live entry is empty or its size is not w x h. texture = NULL clears.
+// Not retained: the caller keeps it alive while it is published.
+int kl_glfb_set_eye_mtl_override(int eye, int stage, void *texture, int w, int h);
+
 // Copy one array LAYER of a guest-owned texture into a provider-backed 2D eye
 // texture, and return the SLOT that now holds that picture (-1 on failure).
 //

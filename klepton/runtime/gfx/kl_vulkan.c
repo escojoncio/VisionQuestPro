@@ -97,6 +97,22 @@ void kl_vulkan_eye_depth_tag(int s, unsigned long long t) { (void)s; (void)t; }
 void  kl_vulkan_capture_eyes(unsigned f, int s) { (void)f; (void)s; }
 void  kl_vulkan_frame_done(int s) { (void)s; }
 unsigned long long kl_vulkan_frame_serial(void) { return 0; }
+// VPKTAA inline: never active without a Vulkan driver.
+int   kl_vulkan_taa_inline(void) { return 0; }
+void  kl_vulkan_set_taa_hook(kl_vulkan_taa_hook_fn fn, void *u) { (void)fn; (void)u; }
+int   kl_vulkan_native_submit(void (*fn)(void *, void *), void *u) { (void)fn; (void)u; return 0; }
+void *kl_vulkan_native_device(void) { return NULL; }
+void *kl_vulkan_eye_color_mtl(int s, int e, int *sl, int *w, int *h) {
+    (void)s; (void)e; if (sl) *sl = 0; if (w) *w = 0; if (h) *h = 0; return NULL;
+}
+void  kl_vulkan_taa_publish(int s, void *t, int w, int h) { (void)s; (void)t; (void)w; (void)h; }
+int   kl_vulkan_taa_applied(float *jx, float *jy, int *tw, int *th,
+                            unsigned *j, unsigned *sk, unsigned *m) {
+    if (jx) *jx = 0; if (jy) *jy = 0; if (tw) *tw = 0; if (th) *th = 0;
+    if (j) *j = 0; if (sk) *sk = 0; if (m) *m = 0;
+    return 0;
+}
+void  kl_vulkan_taa_frame_record(int s, unsigned long long n) { (void)s; (void)n; }
 // The OpenXR seam. Answering "not supported" here is what keeps
 // XR_KHR_vulkan_enable OUT of the advertised extension list on a checkout with
 // no MoltenVK, so a Vulkan OpenXR guest is refused at xrCreateInstance — where
@@ -2402,7 +2418,14 @@ static void klvk_ed_frame_done(klvk_device *d, int stage) {
         }
         void *mtl = NULL;
         int snap = 0;
-        if (samples > 1) {
+        int inl = kl_vulkan_taa_inline();
+        if (inl) {
+            // Inline: the resolve runs before the frame-end wait, i.e. before
+            // the next frame can draw into this depth — no copy, shared or not,
+            // and a multisampled depth is handed over as is (the resolve reads
+            // its samples). It must have been created SAMPLED (vkCreateImage).
+            mtl = eye_mtl_texture(d, img);
+        } else if (samples > 1) {
             mtl = NULL;              // a multisampled depth: VPKTAA cannot use it (logged there)
         } else if (shared && kl_env_on("KL_VPKTAA_DEPTH_COPY", 1)) {
             // Both eyes of a multiview depth are one image: copy once, from eye 0.
@@ -2441,7 +2464,7 @@ static void klvk_ed_frame_done(klvk_device *d, int stage) {
         info.vk_serial = kl_vulkan_frame_serial() + 1;   // the serial this frame_done publishes
         pthread_mutex_lock(&g_ed_rec_mu);
         g_ed[stage][e].info = info;
-        g_ed[stage][e].valid = mtl != NULL || samples > 1;
+        g_ed[stage][e].valid = mtl != NULL || (samples > 1 && !inl);
         pthread_mutex_unlock(&g_ed_rec_mu);
         if (e == 0 && said_kind[kind] < 2) {
             said_kind[kind]++;
@@ -2450,7 +2473,8 @@ static void klvk_ed_frame_done(klvk_device *d, int stage) {
                 "MTLTexture %p\n", f, stage,
                 kind == 1 ? "eye-pass" : kind == 2 ? "spacewarp" : "size-match",
                 (void *)img, w, h, (int)fmt, layers, samples,
-                snap ? "copied (shared between stages)" : "live (per-stage image)",
+                snap ? "copied (shared between stages)" :
+                inl ? "live (inline: read before the next frame)" : "live (per-stage image)",
                 cleared ? "" : "none ", (double)(cleared ? clear : 0.0f), g, l,
                 info.reversed_z, mtl);
         }
@@ -3212,6 +3236,273 @@ static void klvk_eye_fb_note(VkImage img, uint32_t w, uint32_t h) {
             }
 }
 
+// ---------------------------------------------------------------------------
+// VPKTAA INLINE — contract in kl_vulkan.h.
+//
+// The async resolve (KleptonCompositor, its own Metal queue) could not know
+// which jitter a frame used (the frustum is read ~5 times per frame), had to
+// copy the depth so the next frame would not overwrite it, and shared the GPU
+// with the guest at a different cadence. Here VPEngine jitters the viewport and
+// says what it applied, and the resolve is encoded at the frame end on
+// VPEngine's own queue: ordered after the frame, finished by the frame-end
+// wait, and reading the depth before the next frame can touch it.
+// ---------------------------------------------------------------------------
+
+// VPVulkan's exports (gpu/vulkan/include/vpvk/config.h), mirrored field for
+// field: this file cannot include VPEngine's headers, and the driver is a
+// dylib whose symbols are looked up, not linked.
+typedef struct {
+    int      enabled;
+    uint32_t width, height;
+    float    jx, jy;
+    uint64_t tag;
+} klvk_vpvk_taa_jitter;
+typedef struct {
+    uint64_t tag;
+    float    jx, jy;
+    uint32_t target_w, target_h;
+    uint32_t jittered_draws, skipped_draws;
+    uint32_t submits;
+    uint32_t mixed;
+} klvk_vpvk_taa_applied;
+typedef void (*klvk_vpvk_encode_fn)(void *mtl_command_buffer, void *user);
+
+static struct {
+    int   resolved;
+    void  (*set_jitter)(const klvk_vpvk_taa_jitter *);
+    int   (*get_applied)(klvk_vpvk_taa_applied *);
+    int   (*native_submit)(klvk_vpvk_encode_fn, void *);
+    void *(*native_device)(void);
+} g_vpvk;
+static pthread_mutex_t g_vpvk_mu = PTHREAD_MUTEX_INITIALIZER;
+
+// Lazily, once the driver is loaded: under MoltenVK every lookup is NULL and
+// every answer below is 0 / NULL. Not resolved before g_mvk exists, so an
+// early caller does not freeze "absent" for the run.
+static void klvk_vpvk_resolve(void) {
+    if (__atomic_load_n(&g_vpvk.resolved, __ATOMIC_ACQUIRE) || !g_mvk) return;
+    pthread_mutex_lock(&g_vpvk_mu);
+    if (!g_vpvk.resolved) {
+        g_vpvk.set_jitter    = (void (*)(const klvk_vpvk_taa_jitter *))mvk_sym("vpvk_taa_set_jitter");
+        g_vpvk.get_applied   = (int (*)(klvk_vpvk_taa_applied *))mvk_sym("vpvk_taa_get_applied");
+        g_vpvk.native_submit = (int (*)(klvk_vpvk_encode_fn, void *))mvk_sym("vpvk_native_submit");
+        g_vpvk.native_device = (void *(*)(void))mvk_sym("vpvk_native_device");
+        __atomic_store_n(&g_vpvk.resolved, 1, __ATOMIC_RELEASE);
+    }
+    pthread_mutex_unlock(&g_vpvk_mu);
+}
+
+static int g_taa_inline = -1;    // -1 undecided
+
+int kl_vulkan_taa_inline(void) {
+    int v = __atomic_load_n(&g_taa_inline, __ATOMIC_ACQUIRE);
+    if (v >= 0) return v;
+    // Undecided until a Vulkan guest exists: a GLES guest asks too (kl_ovrp's
+    // frustum), and must not freeze a "no" a later Vulkan device would change.
+    if (!kl_vulkan_guest_active()) return 0;
+    klvk_vpvk_resolve();
+    const char *why = NULL;
+    if (!kl_env_on("KL_VPKTAA", 0)) v = 0;      // VPKTAA off: nothing to say
+    else if (!kl_env_on("KL_VPKTAA_INLINE", 1)) why = "KL_VPKTAA_INLINE=0 (async compositor path)", v = 0;
+    else if (!g_vpvk.native_submit) why = "the Vulkan driver has no vpvk_native_submit (MoltenVK?) — async compositor path", v = 0;
+    else v = 1;
+    int expect = -1;
+    if (__atomic_compare_exchange_n(&g_taa_inline, &expect, v, 0,
+                                    __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+        if (v)
+            VKI("[taa-inline] ON: resolve at the guest's frame end on VPEngine's queue; viewport "
+                "jitter by VPEngine (set_jitter %s, get_applied %s, native_device %s), frustum "
+                "jitter off, live eye depth (MSAA included), no depth snapshots\n",
+                g_vpvk.set_jitter ? "yes" : "MISSING", g_vpvk.get_applied ? "yes" : "MISSING",
+                g_vpvk.native_device ? "yes" : "MISSING");
+        else if (why)
+            VKI("[taa-inline] off: %s\n", why);
+    } else {
+        v = expect;     // another thread decided first
+    }
+    return v;
+}
+
+static struct { kl_vulkan_taa_hook_fn fn; void *user; } g_taa_hook;
+static pthread_mutex_t g_taa_hook_mu = PTHREAD_MUTEX_INITIALIZER;
+
+void kl_vulkan_set_taa_hook(kl_vulkan_taa_hook_fn fn, void *user) {
+    pthread_mutex_lock(&g_taa_hook_mu);
+    int had = g_taa_hook.fn != NULL;
+    g_taa_hook.fn = fn; g_taa_hook.user = user;
+    pthread_mutex_unlock(&g_taa_hook_mu);
+    VKI("[taa-inline] resolve hook %s\n", fn ? (had ? "replaced" : "registered") : "removed");
+    // No resolve any more: nothing may keep showing its last outputs.
+    if (!fn) for (int st = 0; st < KLVK_EYE_STAGES; st++) kl_vulkan_taa_publish(st, NULL, 0, 0);
+}
+
+int kl_vulkan_native_submit(void (*fn)(void *mtl_cmdbuf, void *user), void *user) {
+    klvk_vpvk_resolve();
+    if (!fn || !g_vpvk.native_submit) return 0;
+    int r = g_vpvk.native_submit(fn, user);
+    if (!r) {
+        static unsigned said;
+        if (said < 4) { said++; VKI("[taa-inline] vpvk_native_submit refused (no queue/device yet)\n"); }
+    }
+    return r;
+}
+
+void *kl_vulkan_native_device(void) {
+    klvk_vpvk_resolve();
+    return g_vpvk.native_device ? g_vpvk.native_device() : NULL;
+}
+
+// MTLTexture per eye image, cached by VkImage: the hook asks twice per frame
+// and the export walks a pNext chain through the driver each time.
+static struct { VkImage img; void *mtl; } g_taa_color_cache[KLVK_EYE_STAGES][2];
+static pthread_mutex_t g_taa_color_mu = PTHREAD_MUTEX_INITIALIZER;
+
+void *kl_vulkan_eye_color_mtl(int stage, int eye, int *slice, int *w, int *h) {
+    if (slice) *slice = 0;
+    if (w) *w = 0;
+    if (h) *h = 0;
+    if (!kl_vulkan_guest_active() || stage < 0 || stage >= KLVK_EYE_STAGES || eye < 0 || eye > 1)
+        return NULL;
+    // g_eye, not kl_glfb's table: that table may hold the VPKTAA output (the
+    // override) or the eye shadow, and the resolve must read what the guest drew.
+    // Array layout: slot 0 owns the one image, the eye is its layer.
+    klvk_img_slot s = g_eye[stage][0];
+    int sl = 0;
+    if (s.img && s.layers > 1) sl = eye;
+    else s = g_eye[stage][eye];
+    if (!s.img) return NULL;
+    void *mtl = NULL;
+    pthread_mutex_lock(&g_taa_color_mu);
+    if (g_taa_color_cache[stage][eye].img == s.img) mtl = g_taa_color_cache[stage][eye].mtl;
+    pthread_mutex_unlock(&g_taa_color_mu);
+    if (!mtl) {
+        mtl = eye_mtl_texture(g_devs[0], s.img);
+        if (!mtl) {
+            static unsigned said;
+            if (said < 4) { said++; VKI("[taa-inline] stage %d eye %d: no MTLTexture for the live eye image %p\n",
+                                        stage, eye, (void *)s.img); }
+            return NULL;
+        }
+        pthread_mutex_lock(&g_taa_color_mu);
+        g_taa_color_cache[stage][eye].img = s.img;
+        g_taa_color_cache[stage][eye].mtl = mtl;
+        pthread_mutex_unlock(&g_taa_color_mu);
+    }
+    if (slice) *slice = sl;
+    if (w) *w = (int)s.w;
+    if (h) *h = (int)s.h;
+    return mtl;
+}
+
+// A publish made from inside the hook is held until the frame-end wait has
+// finished: the output is complete only then, and a compositor must never be
+// pointed at a texture the GPU is still writing. Outside the hook (Swift
+// restoring a stage, say) it applies at once.
+static __thread int   t_taa_hook_stage = -1;
+static __thread int   t_taa_pend_set;
+static __thread void *t_taa_pend_tex;
+static __thread int   t_taa_pend_w, t_taa_pend_h;
+
+static int klvk_taa_apply_publish(int stage, void *tex, int w, int h) {
+    int ok0 = kl_glfb_set_eye_mtl_override(0, stage, tex, w, h);
+    int ok1 = kl_glfb_set_eye_mtl_override(1, stage, tex, w, h);
+    if (tex && !(ok0 && ok1)) {
+        // Half an override is a stereo pair from two different pictures.
+        kl_glfb_set_eye_mtl_override(0, stage, NULL, 0, 0);
+        kl_glfb_set_eye_mtl_override(1, stage, NULL, 0, 0);
+        static unsigned said;
+        if (said < 4) {
+            said++;
+            VKI("[taa-inline] stage %d: output %p %dx%d refused by the eye table (no live eye, "
+                "or another size) — this frame is shown unresolved\n", stage, tex, w, h);
+        }
+        return 0;
+    }
+    return tex != NULL;
+}
+
+void kl_vulkan_taa_publish(int stage, void *tex, int w, int h) {
+    if (stage < 0 || stage >= KLVK_EYE_STAGES) return;
+    if (stage == t_taa_hook_stage) {
+        t_taa_pend_set = 1; t_taa_pend_tex = tex; t_taa_pend_w = w; t_taa_pend_h = h;
+        return;
+    }
+    klvk_taa_apply_publish(stage, tex, w, h);
+}
+
+int kl_vulkan_taa_applied(float *jx, float *jy, int *target_w, int *target_h,
+                          unsigned *jittered, unsigned *skipped, unsigned *mixed) {
+    klvk_vpvk_taa_applied a;
+    memset(&a, 0, sizeof a);
+    klvk_vpvk_resolve();
+    int got = g_vpvk.get_applied ? g_vpvk.get_applied(&a) : 0;
+    if (!got) memset(&a, 0, sizeof a);
+    if (jx) *jx = a.jx;
+    if (jy) *jy = a.jy;
+    if (target_w) *target_w = (int)a.target_w;
+    if (target_h) *target_h = (int)a.target_h;
+    if (jittered) *jittered = a.jittered_draws;
+    if (skipped) *skipped = a.skipped_draws;
+    if (mixed) *mixed = a.mixed;
+    return got && a.jittered_draws > 0;
+}
+
+// What kl_ovrp filed for the frame that is about to end (guest frame thread
+// only: EndFrame4 sets it, the kl_vulkan_frame_done right after consumes it).
+static int                g_taa_rec_stage = -1;
+static unsigned long long g_taa_rec_serial;
+void kl_vulkan_taa_frame_record(int stage, unsigned long long serial) {
+    g_taa_rec_stage = serial ? stage : -1;
+    g_taa_rec_serial = serial;
+}
+
+static float klvk_halton(unsigned i, unsigned b) {
+    float f = 1.0f, r = 0.0f;
+    while (i > 0) { f /= (float)b; r += f * (float)(i % b); i /= b; }
+    return r;
+}
+
+// The next frame's jitter, after this frame's wait: Halton(2,3) x8 in pixels
+// of the eye, centred. Only while frames are actually being resolved (the hook
+// ran for this one): a jittered picture nothing resolves just shimmers — no
+// hook registered, or a path whose records are filed after the frame end
+// (OpenXR). A frame rendered without jitter is still a valid TAA input
+// (kl_vulkan_taa_applied reports 0 draws), so a dropped frame costs nothing.
+static void klvk_taa_next_jitter(int stage, int resolving, int hook_on) {
+    if (!g_vpvk.set_jitter) {
+        static int said;
+        if (!said++) VKI("[taa-inline] vpvk_taa_set_jitter missing — frames are rendered without jitter\n");
+        return;
+    }
+    static int want = -1;
+    if (want < 0) {
+        want = kl_env_on("KL_VPKTAA_JITTER", 1);
+        if (!want) VKI("[taa-inline] KL_VPKTAA_JITTER=0 — VPEngine applies no jitter\n");
+    }
+    klvk_vpvk_taa_jitter j;
+    memset(&j, 0, sizeof j);
+    // Tagged with the serial the NEXT kl_vulkan_frame_done will publish: the
+    // frame this jitter is rendered into.
+    unsigned long long n = kl_vulkan_frame_serial() + 1;
+    j.tag = n;
+    if (stage >= 0 && stage < KLVK_EYE_STAGES) { j.width = g_eye[stage][0].w; j.height = g_eye[stage][0].h; }
+    j.enabled = want && resolving && j.width && j.height;
+    if (j.enabled) {
+        unsigned k = (unsigned)(n % 8u) + 1u;
+        j.jx = klvk_halton(k, 2) - 0.5f;
+        j.jy = klvk_halton(k, 3) - 0.5f;
+    }
+    g_vpvk.set_jitter(&j);
+    static int said_on, said_off;
+    if (j.enabled && !said_on++)
+        VKI("[taa-inline] jitter ON: Halton(2,3) x8 for %ux%u eye targets (first tag %llu)\n",
+            j.width, j.height, n);
+    if (!j.enabled && want && !said_off++)
+        VKI("[taa-inline] jitter held off (%s)\n",
+            !hook_on ? "no resolve hook registered" :
+            !resolving ? "this frame was not resolved" : "eye size unknown");
+}
+
 void kl_vulkan_frame_done(int stage) {
     if (!kl_vulkan_guest_active()) return;
     {
@@ -3241,6 +3532,50 @@ void kl_vulkan_frame_done(int stage) {
     // VPKTAA eye depth: file this frame's pick (and copy a shared depth) on the
     // guest's queue BEFORE the idle wait below, which then also covers the copy.
     klvk_ed_frame_done(d, stage);
+
+    // VPKTAA inline: the resolve, encoded by the hook on VPEngine's queue —
+    // after all of this frame's work, and covered by the wait below. Only when
+    // kl_ovrp filed THIS frame's record under this stage (it says so just
+    // before calling here); otherwise the hook would pair this picture with
+    // another frame's pose, so the stage is shown unresolved instead.
+    int taa_inline = kl_vulkan_taa_inline();
+    int hook_on = 0, hook_ran = 0, resolved = 0;
+    if (taa_inline) {
+        // The stage now holds a NEW picture (its record is filed), so last
+        // cycle's output over it is a frame from the past — and the hook is
+        // about to write into that very texture. Live until the new output is
+        // complete (kl_ovrp already did this for the stage the submit named).
+        if (stage >= 0 && stage < KLVK_EYE_STAGES) klvk_taa_apply_publish(stage, NULL, 0, 0);
+        int rec_stage = g_taa_rec_stage;
+        unsigned long long rec_serial = g_taa_rec_serial;
+        g_taa_rec_stage = -1; g_taa_rec_serial = 0;      // consumed: one frame only
+        kl_vulkan_taa_hook_fn fn;
+        void *user;
+        pthread_mutex_lock(&g_taa_hook_mu);
+        fn = g_taa_hook.fn; user = g_taa_hook.user;
+        pthread_mutex_unlock(&g_taa_hook_mu);
+        hook_on = fn != NULL;
+        if (fn && rec_serial && rec_stage == stage) {
+            // The depth record carries the frame-record serial before the hook
+            // reads it (kl_ovrp tags it again after this returns, same value).
+            kl_vulkan_eye_depth_tag(stage, rec_serial);
+            t_taa_hook_stage = stage;
+            t_taa_pend_set = 0;
+            fn(stage, user);
+            t_taa_hook_stage = -1;
+            hook_ran = 1;
+        } else if (fn) {
+            static unsigned said;
+            if (said < 4) {
+                said++;
+                VKI("[taa-inline] frame end on stage %d without this frame's record (filed: "
+                    "stage %d serial %llu) — %s; shown unresolved\n", stage, rec_stage, rec_serial,
+                    rec_serial ? "filed under another stage" :
+                    "dropped, or a path that files after the frame end (OpenXR)");
+            }
+        }
+    }
+
     if (kl_env_on("KL_VK_FRAME_SYNC", 1) && d && d->queue) {
         VkResult r = d->QueueWaitIdle ? d->QueueWaitIdle(d->queue)
                    : d->DeviceWaitIdle ? d->DeviceWaitIdle(d->dev)
@@ -3252,7 +3587,24 @@ void kl_vulkan_frame_done(int stage) {
                     "compositor may sample an eye the GPU is still writing\n", (int)r);
         }
     }
+    if (taa_inline) {
+        // Published after the wait (the output is complete) and before the
+        // serial (a compositor that sees this frame sees its output). A stage
+        // the hook did not resolve, or did not publish, goes back to live: an
+        // older output over a newer picture is a frame from the past.
+        if (hook_ran && t_taa_pend_set && t_taa_pend_tex)
+            resolved = klvk_taa_apply_publish(stage, t_taa_pend_tex, t_taa_pend_w, t_taa_pend_h);
+        else if (stage >= 0 && stage < KLVK_EYE_STAGES)
+            klvk_taa_apply_publish(stage, NULL, 0, 0);
+        t_taa_pend_set = 0; t_taa_pend_tex = NULL;
+    }
     __atomic_add_fetch(&g_frame_serial, 1, __ATOMIC_RELEASE);
+    // ...and the next frame's jitter, once this frame's GPU work is finished
+    // (VPEngine applies it to submits translated from now on).
+    // Jitter only stays on while frames are actually resolved and shown: a
+    // jittered picture nobody resolves is pure shimmer (failed resolve, refused
+    // publish, unsupported eye format...).
+    if (taa_inline) klvk_taa_next_jitter(stage, resolved, hook_on);
 }
 
 static VkResult klvk_QueuePresentKHR(VkQueue q, const VkPresentInfoKHR *pi) {
@@ -3678,11 +4030,14 @@ static VkResult VKAPI_CALL klvk_CreateImage(VkDevice dev, const VkImageCreateInf
     // readable afterwards — SAMPLED (else VPEngine makes it render-target only)
     // and not TRANSIENT (else it never leaves tile memory). Only eye-sized,
     // single-sample (or forced-1x) depth images; everything else untouched.
+    // Inline VPKTAA also reads a MULTISAMPLED depth (depth2d_ms_array), so
+    // there every sample count qualifies.
     if (ci && klvk_taa_depth_on() && ci->imageType == VK_IMAGE_TYPE_2D &&
         klvk_is_depth_format(ci->format) &&
         (ci->usage & VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT) &&
         klvk_eye_size_match(ci->extent.width, ci->extent.height) &&
-        (ci->samples == VK_SAMPLE_COUNT_1_BIT || kl_env_on("VPVK_FORCE_1X", 0))) {
+        (ci->samples == VK_SAMPLE_COUNT_1_BIT || kl_env_on("VPVK_FORCE_1X", 0) ||
+         kl_vulkan_taa_inline())) {
         VkImageUsageFlags want = (ci->usage | VK_IMAGE_USAGE_SAMPLED_BIT) &
                                  ~(VkImageUsageFlags)VK_IMAGE_USAGE_TRANSIENT_ATTACHMENT_BIT;
         if (want != ci->usage) {

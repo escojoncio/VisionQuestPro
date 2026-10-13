@@ -18,8 +18,11 @@
 //     position     that camera's position in the same world space, metres.
 //     depth        optional: the depth buffer the picture was rendered with (same uv layout as
 //                  `color`, any resolution; .depth16Unorm/.depth32Float/.depth32Float_stencil8,
-//                  single-sample, 2D or 2D array) + reversedZ + near/far of the projection
-//                  (far 0 = infinite). Vulkan clip z ∈ [0,1].
+//                  2D or 2D array, single-sample or MULTISAMPLED — then the sample nearest the
+//                  camera is used per texel, by a second library compiled with
+//                  VPKTAA_DEPTH_MS=1 so the single-sample kernel stays exactly as it was and
+//                  a compiler that rejects the MS variant only loses MSAA depth) + reversedZ
+//                  + near/far of the projection (far 0 = infinite). Vulkan clip z ∈ [0,1].
 //     motion       optional: OBJECT motion vectors (camera motion excluded, as Meta AppSW),
 //                  .xy of a float texture, same uv layout as `color`; `scale` maps a texel to
 //                  (current − previous) in crop-uv units (Unity AppSW curNDC−prevNDC: 0.5, 0.5;
@@ -145,6 +148,9 @@ final class VPKTAACore {
 
     private let device: MTLDevice
     private let resolvePSO: MTLComputePipelineState
+    /// The same kernel compiled with VPKTAA_DEPTH_MS=1 (multisampled depth at texture(8)); nil
+    /// when it could not be built — multisampled depth is then refused, as before.
+    private let resolveMSPSO: MTLComputePipelineState?
     private let statBuf: MTLBuffer
     private let dummyDepth: MTLTexture
     private let dummyMV: MTLTexture
@@ -175,6 +181,19 @@ final class VPKTAACore {
             let lib = try device.makeLibrary(source: VPKTAACore.msl, options: nil)
             guard let fr = lib.makeFunction(name: "vpktaa_resolve") else { return nil }
             resolvePSO = try device.makeComputePipelineState(function: fr)
+            do {
+                let o = MTLCompileOptions()
+                o.preprocessorMacros = ["VPKTAA_DEPTH_MS": NSNumber(value: 1)]
+                let libMS = try device.makeLibrary(source: VPKTAACore.msl, options: o)
+                guard let fm = libMS.makeFunction(name: "vpktaa_resolve") else {
+                    throw NSError(domain: "VPKTAA", code: 1)
+                }
+                let ms = try device.makeComputePipelineState(function: fm)
+                resolveMSPSO = ms.maxTotalThreadsPerThreadgroup >= 256 ? ms : nil
+            } catch {
+                NSLog("[taa] VPKTAA multisampled-depth kernel failed to build: \(error) — MSAA depth refused")
+                resolveMSPSO = nil
+            }
         } catch {
             NSLog("[taa] VPKTAA shader failed to build: \(error) — VPKTAA off")
             return nil
@@ -229,12 +248,18 @@ final class VPKTAACore {
     }
 
     /// A 2D-array view of a 2D texture (cached); the texture itself when it already is one.
+    /// Multisampled textures get a multisample-array view the same way.
     private func arrayView(_ t: MTLTexture) -> MTLTexture? {
-        if t.textureType == .type2DArray { return t }
-        if t.textureType != .type2D { return nil }
+        if t.textureType == .type2DArray || t.textureType == .type2DMultisampleArray { return t }
+        let to: MTLTextureType
+        switch t.textureType {
+        case .type2D: to = .type2DArray
+        case .type2DMultisample: to = .type2DMultisampleArray
+        default: return nil
+        }
         let k = ObjectIdentifier(t)
         if let v = views[k] { return v }
-        guard let v = t.makeTextureView(pixelFormat: t.pixelFormat, textureType: .type2DArray,
+        guard let v = t.makeTextureView(pixelFormat: t.pixelFormat, textureType: to,
                                         levels: 0..<1, slices: 0..<1) else { return nil }
         if views.count > 64 { views.removeAll() }
         views[k] = v
@@ -263,17 +288,20 @@ final class VPKTAACore {
 
         // ── Depth / motion inputs: validate, or fall back to rotation-only ──
         var depthTex: MTLTexture = dummyDepth
+        var depthMSTex: MTLTexture? = nil       // multisampled depth (texture(8), MS kernel)
         var depthOn = false
         var depthSlice = 0
         depthRefused[eye] = nil
         if let d = input.depth {
-            if d.texture.sampleCount > 1 { depthRefused[eye] = "multisampled (game MSAA kept: turn it off)" }
+            let ms = d.texture.sampleCount > 1
+            if ms && resolveMSPSO == nil { depthRefused[eye] = "multisampled (no MS kernel: game MSAA kept, turn it off)" }
             else if !VPKTAACore.depthFormats.contains(d.texture.pixelFormat) {
                 depthRefused[eye] = "pixel format \(d.texture.pixelFormat.rawValue) not a depth format"
             } else if !d.texture.usage.contains(.shaderRead) { depthRefused[eye] = "texture not shader-readable" }
             else if !(d.near > 0) { depthRefused[eye] = "near plane \(d.near)" }
             else if let v = arrayView(d.texture), d.slice < v.arrayLength {
-                depthTex = v; depthOn = true; depthSlice = d.slice
+                if ms { depthMSTex = v } else { depthTex = v }
+                depthOn = true; depthSlice = d.slice
             } else { depthRefused[eye] = "no 2D-array view / slice \(d.slice) out of range" }
         }
         var mvTex: MTLTexture = dummyMV
@@ -360,7 +388,7 @@ final class VPKTAACore {
             let b = -input.cropOff / input.crop * ts
             return SIMD4<Float>(a.x, a.y, b.x, b.y)
         }
-        let depthAB = ab(depthTex, input.depth?.mapsCrop ?? false)
+        let depthAB = ab(depthMSTex ?? depthTex, input.depth?.mapsCrop ?? false)
         let mvAB = ab(mvTex, input.motion?.mapsCrop ?? true)
         var p = VPKTAAParams(
             tanCur: t, tanPrev: reset ? t : st.prevTan, rot: rot,
@@ -393,7 +421,12 @@ final class VPKTAACore {
         let tg = MTLSize(width: 16, height: 16, depth: 1)
         // 14x14 owned pixels per 16x16 group (fused RCAS ring).
         let grid = MTLSize(width: (max(ex, 1) + 13) / 14, height: (max(ey, 1) + 13) / 14, depth: 1)
-        enc.setComputePipelineState(resolvePSO)
+        if let m = depthMSTex, let msPSO = resolveMSPSO {
+            enc.setComputePipelineState(msPSO)
+            enc.setTexture(m, index: 8)
+        } else {
+            enc.setComputePipelineState(resolvePSO)
+        }
         enc.setTexture(input.color, index: 0)
         enc.setTexture(prevH, index: 1)
         enc.setTexture(nextH, index: 2)
@@ -433,6 +466,11 @@ final class VPKTAACore {
         float sharpness; float disocc; uint slice; uint depthSlice; uint mvSlice; uint flipY;
         uint reset; uint writeOut; float spatial;
     };
+    // VPKTAA_DEPTH_MS=1 (second library): the depth is multisampled and bound at texture(8)
+    // (depMS); texture(3) then holds a dummy.
+    #ifndef VPKTAA_DEPTH_MS
+    #define VPKTAA_DEPTH_MS 0
+    #endif
     constant float kSky = 60000.0;          // distance stored for the far plane (r16f-safe)
     static float3 toYCoCg(float3 c) {
         return float3(0.25*c.r + 0.5*c.g + 0.25*c.b, 0.5*c.r - 0.5*c.b, -0.25*c.r + 0.5*c.g - 0.25*c.b);
@@ -507,6 +545,9 @@ final class VPKTAACore {
                                texture2d_array<float, access::sample> distIn [[texture(5)]],
                                texture2d_array<float, access::write> distOut [[texture(6)]],
                                texture2d_array<half, access::write> outTex [[texture(7)]],
+    #if VPKTAA_DEPTH_MS
+                               depth2d_ms_array<float> depMS [[texture(8)]],
+    #endif
                                constant Params& p [[buffer(0)]],
                                device atomic_uint* stats [[buffer(1)]],
                                constant uint2& org [[buffer(2)]],
@@ -603,12 +644,28 @@ final class VPKTAACore {
             if (depthOn) {
                 float2 spos = float2(ip + p.shiftInt) + 0.5;
                 int2 dc = int2(floor(spos * p.depthAB.xy + p.depthAB.zw));
+    #if VPKTAA_DEPTH_MS
+                int2 dmx = int2(int(depMS.get_width()) - 1, int(depMS.get_height()) - 1);
+    #else
                 int2 dmx = int2(int(dep.get_width()) - 1, int(dep.get_height()) - 1);
+    #endif
                 bool rev = p.depthP.z > 0.5;
                 float best = rev ? -1.0 : 2.0;
                 const int2 offs[5] = { int2(0, 0), int2(-1, -1), int2(1, -1), int2(-1, 1), int2(1, 1) };
                 for (int k = 0; k < 5; ++k) {
-                    float d = dep.read(uint2(clamp(dc + offs[k], int2(0), dmx)), p.depthSlice);
+                    uint2 dq = uint2(clamp(dc + offs[k], int2(0), dmx));
+    #if VPKTAA_DEPTH_MS
+                    // MSAA depth: the sample nearest the camera (the edge's foreground, as
+                    // the dilation wants); the out-of-range start value never wins below.
+                    float d = rev ? -1.0 : 2.0;
+                    uint ns = depMS.get_num_samples();
+                    for (uint si = 0; si < ns; ++si) {
+                        float ds = depMS.read(dq, p.depthSlice, si);
+                        if (!kbad1(ds) && (rev ? ds > d : ds < d)) d = ds;
+                    }
+    #else
+                    float d = dep.read(dq, p.depthSlice);
+    #endif
                     if (kbad1(d)) continue;
                     if (rev ? d > best : d < best) { best = d; bestOff = float2(offs[k]); }
                 }
