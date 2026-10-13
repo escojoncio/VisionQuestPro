@@ -52,5 +52,8 @@ void kl_fault_set_recovery(void *sigjmp_buf_ptr);
 void kl_fault_try_recover(int sig);
 // The signal of the last recovery (valid after a sigsetjmp that returned 1).
 int  kl_fault_recovered_signal(void);
+// Not a signal: what kl_fault_try_recover is given when the GPU driver returned
+// VK_ERROR_DEVICE_LOST to the thread (kl_vulkan.c); the runner records the case as DeviceLost.
+#define KL_RECOVER_DEVICE_LOST 1001
 
 #endif

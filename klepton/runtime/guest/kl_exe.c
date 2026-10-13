@@ -14,13 +14,17 @@
 //   KL_EXE_MEM_MB      phys_footprint limit; no new command line starts above it (default 3000)
 //   KL_EXE_STOP_FILE   if this file exists, no new command line starts (the app's Stop button)
 //   KL_EXE_PROGRESS    file rewritten before/after each command line: "<index> running|done <rc>"
+//   KL_EXE_CASE_TIMEOUT_S  a test that writes nothing to its log for this long (default 240) is
+//                      interrupted on its own thread and recorded as Timeout (see kl_exe_pump)
 //
 // A command line that crashes takes the process with it; the app reads KL_EXE_PROGRESS and the
 // runner's own result files on the next launch and carries on from there.
 #include "kl_exe.h"
 
 #include <errno.h>
+#include <pthread.h>
 #include <setjmp.h>
+#include <signal.h>
 #include <stdarg.h>
 #include <stdatomic.h>
 #include <stdio.h>
@@ -128,9 +132,9 @@ static int arg_index(char **argv, int argc, const char *prefix) {
     return -1;
 }
 
-// After a crash: closes the open case in the .qpa and points argv at the rest of the list.
-// 1 = run again, 0 = nothing left / cannot tell where it stopped.
-static int prepare_resume(char **argv, int argc, int k) {
+// After a crash: closes the open case in the .qpa (as `result`: Crash, Timeout, DeviceLost) and
+// points argv at the rest of the list. 1 = run again, 0 = nothing left / cannot tell where it stopped.
+static int prepare_resume(char **argv, int argc, int k, const char *result) {
     int il = arg_index(argv, argc, "--deqp-caselist-file="), iq = arg_index(argv, argc, "--deqp-log-filename=");
     if (il < 0 || iq < 0) return 0;
     const char *list = argv[il] + strlen("--deqp-caselist-file=");
@@ -159,8 +163,8 @@ static int prepare_resume(char **argv, int argc, int k) {
     }
     if (open) {
         FILE *f = fopen(qpa, "a");
-        if (f) { fputs("\n#terminateTestCaseResult Crash\n", f); fclose(f); }
-        fprintf(stderr, "[exe] case %s crashed: recorded as Crash\n", last);
+        if (f) { fprintf(f, "\n#terminateTestCaseResult %s\n", result); fclose(f); }
+        fprintf(stderr, "[exe] case %s ended early: recorded as %s\n", last, result);
     }
     // The rest of the list after `last`.
     char *cases = slurp(list, NULL);
@@ -196,7 +200,14 @@ static int prepare_resume(char **argv, int argc, int k) {
 
 static int g_recoveries;
 static volatile double g_last_recovery_t;
-static char g_cur_qpa[1500];   // the log the running main() writes (for the post-crash watchdog)
+static char g_cur_qpa[1500];   // the log the running main() writes (for the case watchdog)
+// Case watchdog (kl_exe_pump): main() is running (between its start and its end or recovery), when
+// it last started, and whether the watchdog has interrupted it (SIGABRT to the runner thread).
+static atomic_int    g_in_main;
+static volatile double g_main_t;
+static volatile time_t g_main_wall;   // CLOCK_REALTIME seconds at that start (vs. the log's mtime)
+static atomic_int    g_interrupted;
+static volatile double g_interrupt_t;
 
 static void note_current_log(char **argv, int argc) {
     int iq = arg_index(argv, argc, "--deqp-log-filename=");
@@ -228,19 +239,33 @@ static int run_line(char *line, int index) {
     for (;;) {
         if (sigsetjmp(jb, 1) == 0) {
             if (recover) kl_fault_set_recovery(&jb);
+            g_main_t = now_s();
+            { struct timespec w; clock_gettime(CLOCK_REALTIME, &w); g_main_wall = w.tv_sec; }
+            atomic_store(&g_in_main, 1);
             rc = g_main(argc, argv);
+            // The recovery point stays armed until the watchdog is off: a SIGABRT it sent just
+            // as main() returned still unwinds here instead of ending the process.
+            atomic_store(&g_in_main, 0);
+            if (atomic_load(&g_interrupted)) usleep(200 * 1000);   // let that signal land
             kl_fault_set_recovery(NULL);
+            atomic_store(&g_interrupted, 0);
             break;
         }
-        // Back from a crash inside main().
-        kl_fault_set_recovery(NULL);
+        // Back from a crash inside main(): a fault, a lost GPU device, or the case watchdog.
+        atomic_store(&g_in_main, 0);
+        kl_fault_set_recovery(NULL);   // kl_fault_try_recover already disarmed it (one jump per point)
         const int sig = kl_fault_recovered_signal();
+        const int timed_out = atomic_exchange(&g_interrupted, 0);
+        const char *result = timed_out ? "Timeout" : sig == KL_RECOVER_DEVICE_LOST ? "DeviceLost" : "Crash";
         g_recoveries++;
         g_last_recovery_t = now_s();
-        fprintf(stderr, "[exe] command line %d: crash (signal %d) after %.1f s, recovery %d of %u "
-                        "(footprint %u MB)\n", index + 1, sig, now_s() - t, g_recoveries, max_rec,
-                footprint_mb());
-        rc = 128 + sig;
+        fprintf(stderr, "[exe] command line %d: %s after %.1f s, recovery %d of %u "
+                        "(footprint %u MB)\n", index + 1,
+                timed_out ? "case timed out" : sig == KL_RECOVER_DEVICE_LOST ? "GPU device lost" : "crash",
+                now_s() - t, g_recoveries, max_rec, footprint_mb());
+        if (!timed_out && sig != KL_RECOVER_DEVICE_LOST)
+            fprintf(stderr, "[exe] (signal %d)\n", sig);
+        rc = sig == KL_RECOVER_DEVICE_LOST ? 128 + 64 : 128 + sig;
         if ((unsigned)g_recoveries > max_rec) {
             fprintf(stderr, "[exe] too many crashes this session: stopping here\n");
             break;
@@ -251,7 +276,7 @@ static int run_line(char *line, int index) {
             fprintf(stderr, "[exe] not resuming after the crash: %s\n", g_stop_reason);
             break;
         }
-        if (!prepare_resume(argv, argc, g_recoveries)) break;
+        if (!prepare_resume(argv, argc, g_recoveries, result)) break;
         note_current_log(argv, argc);
         progress("%d running\n", index);
     }
@@ -355,31 +380,64 @@ int kl_exe_begin(FILE *out) {
 
 double kl_exe_pump(double seconds, const volatile int *quit) {
     double t0 = now_s(), el = 0;
+    const double case_timeout = (double)kl_env_uint("KL_EXE_CASE_TIMEOUT_S", 240);
+    double last_pass = t0, resumed = 0;
     while (atomic_load(&g_started) && !atomic_load(&g_done) && (quit ? !*quit : 1)
            && (seconds < 0 || el < seconds)) {
         usleep(100 * 1000);
         el = now_s() - t0;
-        // After a recovered crash the abandoned main() may have left a lock held (malloc, stdio,
-        // a guest mutex) and the next one can hang on it. If nothing reaches the log for
-        // KL_EXE_STALL_S seconds (240) after a recovery, end the process: the next session
-        // resumes from the open case, which it records as a crash.
-        if (g_recoveries > 0) {
-            double quiet = now_s() - g_last_recovery_t;          // since the last recovery
-            struct stat st;
-            if (g_cur_qpa[0] && stat(g_cur_qpa, &st) == 0) {     // ...or the log's last write, if later
-                struct timespec wall;
-                clock_gettime(CLOCK_REALTIME, &wall);
-                double age = (double)wall.tv_sec - (double)st.st_mtime;
-                if (age < quiet) quiet = age;
-            }
-            if (quiet > (double)kl_env_uint("KL_EXE_STALL_S", 240)) {
+        // The app was suspended (headset off, app in the background): the time it was not running
+        // is not a stuck case.
+        if (now_s() - last_pass > 5.0) resumed = now_s();
+        last_pass = now_s();
+        // Case watchdog. With --deqp-log-flush the log is written at the end of every case, so a
+        // log that has not changed for KL_EXE_CASE_TIMEOUT_S seconds (240) means one case is stuck
+        // (a deadlock, an endless loop; GPU waits end on their own as a lost device). The runner
+        // thread is sent SIGABRT: its crash report shows where it was stuck, and it unwinds to its
+        // recovery point, which records the case as Timeout and goes on with the next one. If that
+        // does not bring the log back to life within 60 s (a lock the abandoned main() held), the
+        // process ends; the next session resumes after the open case.
+        if (!atomic_load(&g_in_main) && !atomic_load(&g_interrupted)) continue;
+        double quiet = now_s() - (g_main_t > g_last_recovery_t ? g_main_t : g_last_recovery_t);
+        struct stat st;
+        int log_written = 0;   // this main() has written its log since it started
+        if (g_cur_qpa[0] && stat(g_cur_qpa, &st) == 0) {
+            struct timespec wall;
+            clock_gettime(CLOCK_REALTIME, &wall);
+            double age = (double)wall.tv_sec - (double)st.st_mtime;
+            if (age < quiet) quiet = age;
+            log_written = st.st_mtime >= g_main_wall;
+        }
+        if (resumed > 0 && now_s() - resumed < quiet) quiet = now_s() - resumed;
+        if (atomic_load(&g_interrupted)) {
+            if (now_s() - g_interrupt_t > 60.0 && quiet > 60.0) {
                 // write(2), not stdio: a lock held by the abandoned main() may be stdio's own.
-                char m[160];
-                int n = snprintf(m, sizeof m, "[exe] no progress for %.0f s after a recovered crash: "
-                                 "ending the session (the next one resumes)\n", quiet);
-                if (n > 0) { ssize_t w = write(2, m, (size_t)n); (void)w; }
+                static const char m[] = "[exe] the timed-out case did not unwind: ending the session "
+                                        "(the next one resumes after it)\n";
+                ssize_t w = write(2, m, sizeof m - 1); (void)w;
                 _exit(0);
             }
+            continue;
+        }
+        // A main() that started after a recovered crash and never wrote its log is most likely
+        // blocked on a lock the abandoned one held (malloc, stdio): interrupting it would only
+        // repeat that, so the process ends instead; the next session resumes.
+        if (case_timeout > 0 && quiet > case_timeout && g_recoveries > 0 && !log_written) {
+            char m[200];
+            int n = snprintf(m, sizeof m, "[exe] no progress for %.0f s after a recovered crash: "
+                             "ending the session (the next one resumes)\n", quiet);
+            if (n > 0) { ssize_t w = write(2, m, (size_t)n); (void)w; }
+            _exit(0);
+        }
+        if (case_timeout > 0 && quiet > case_timeout && kl_env_on("KL_EXE_RECOVER", 1)
+            && atomic_load(&g_in_main)) {
+            char m[200];
+            int n = snprintf(m, sizeof m, "[exe] no log progress for %.0f s: interrupting the stuck case "
+                             "(SIGABRT to the test thread; recorded as Timeout)\n", quiet);
+            if (n > 0) { ssize_t w = write(2, m, (size_t)n); (void)w; }
+            g_interrupt_t = now_s();
+            atomic_store(&g_interrupted, 1);
+            pthread_kill(g_thread, SIGABRT);
         }
     }
     if (atomic_load(&g_done)) pthread_join(g_thread, NULL);

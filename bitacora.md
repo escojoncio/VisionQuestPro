@@ -3,7 +3,35 @@
 Historial completo: `git log -p bitacora.md` (compactada el 2026-10-13 tras el log 54; todo lo anterior al 2026-10-13
 tarde está resumido abajo y detallado en git).
 
-## EMPEZAR AQUÍ — 2026-10-13 noche (log 55 + capturas; plan de conformidad en marcha)
+## EMPEZAR AQUÍ — 2026-10-14: arreglo del bloqueo del CTS en `048-draw-001` (log 59), build pendiente de prueba
+VPKEngine (bitácora 2026-10-14 (2)) + Klepton + app. Qué cambia y dónde:
+- VPKEngine `gpu/metal2` + `gpu/vulkan`: ninguna espera a la GPU es infinita. Dispositivo PERDIDO
+  (`gpu.err what=device_lost reason=…`) si un command buffer falla con revoked/ignored/removed, con CUALQUIER fallo
+  no-memoryless si `VPVK_DEVICE_LOST_STRICT=1` (lo pone el CTS), o si hay 20 s esperando sin que termine ningún
+  command buffer (las pausas de la app no cuentan). Perdido ⇒ no se envía más trabajo, esperas/submit devuelven
+  `VK_ERROR_DEVICE_LOST`, el backend se filtra (no se libera) si quedan command buffers colgados
+  (`what=device_lost_leak`). Juegos (sin strict): un frame colgado suelto NO pierde el dispositivo (como antes).
+- Fences PRECISAS (antes: cada vkWaitForFences/vkGetFenceStatus vaciaba toda la GPU): la fence guarda el nº de
+  frame vpgpu de su submit y espera solo a ese (`waitFrames`, marca `finishedBelow`); se respeta el timeout
+  (0 = sondeo). Afecta también a juegos: menos serialización CPU/GPU (vigilar regresiones de lectura de buffers).
+- `VPVK_PREWARM=0/1` (entorno, gana a `vpvk_config_set_prewarm`, que no llegaba antes de cargar el driver: por eso
+  el CTS precalentaba ~1700 pipelines en cada vkCreateDevice). La app lo pone según «Precompilar shaders» y a 0
+  en el CTS (además no ejecuta `VQPrewarm.run` para el CTS).
+- Klepton `kl_vulkan.c`: envoltorios guest de vkWaitForFences/vkGetFenceStatus/vkDeviceWaitIdle/vkQueueWaitIdle y
+  vkQueueSubmit → `klvk_lost`: log `[vk] … -> VK_ERROR_DEVICE_LOST` y, si `KL_GUEST_KIND=exe`,
+  `kl_fault_try_recover(KL_RECOVER_DEVICE_LOST=1001)` (salto al punto de recuperación del hilo del CTS).
+- Klepton `kl_exe.c`: resultado del caso abandonado = `DeviceLost` | `Timeout` | `Crash` (`#terminateTestCaseResult`).
+  Vigilante propio por caso (`KL_EXE_CASE_TIMEOUT_S`, 240 s sin escribir el .qpa) → SIGABRT dirigido al hilo del test
+  (informe de crash con su backtrace = dónde se colgó) → Timeout y sigue; si no se desenrolla en 60 s, `_exit(0)`.
+  Tras una recuperación, main() que no escribe su log en 240 s → `_exit(0)` (cerrojo heredado). NO se usa
+  `--deqp-watchdog` (límite de 30 s por iteración y aborta desde otro hilo = mata toda la sesión).
+- App `VQConformance.swift`: resumen con «Colgados / dispositivo perdido / crash» y «No soportados por motivo»
+  (top 40, números → N). El caso colgado del log 59 sale como Crash en el resumen inicial de la próxima sesión.
+- Riesgo conocido: cada DeviceLost filtra su VkDevice (cientos de MB); lo corta el límite de memoria entre tandas.
+- Siguiente: probar el CTS (ventana) → leer en el resumen qué caso de draw colgó la GPU y por qué (con strict, el
+  log trae `gpu.err what=command_buffer … encoders=…` del caso). Luego OpArrayLength y fallos por grupo (abajo).
+
+## 2026-10-13 noche (log 55 + capturas; plan de conformidad)
 
 ### Log 55 (AC Nexus, con capturas): hallazgos firmes
 - **Rosa = capas overlay, no el ojo.** Capturas: `eye0/1` NEGRO en todos los frames; `output` (compositor) rosa;
@@ -71,12 +99,8 @@ tarde está resumido abajo y detallado en git).
 - Log 59 (4ª sesión, build 874984e): 31 tandas en ~2,5 min, sin crashes; se bloqueó en `048-draw-001`:
   `gpu.err what=command_buffer error=Caused_GPU_Hang_Error (kIOGPUCommandBufferCallbackErrorHang)` y después
   nada avanza (el usuario pulsó Parar). Hallazgos para la siguiente sesión de trabajo (en este orden):
-  1. Robustez del run: tras un error de command buffer (hang/fault) VPKEngine debe señalar fences/semáforos y
-     devolver `VK_ERROR_DEVICE_LOST` (hoy se queda esperando); pasar `--deqp-watchdog=enable` (su aborto lo recoge
-     la recuperación por caso); NO prewarm en el guest exe (`gpu.prewarm` recompila ~1700 pipelines del recipe store
-     en CADA vkCreateDevice → memoria 0,7→1,4 GB y lentitud; forzar `precompileShaders=false` para el CTS).
-  2. Resumen: añadir «No soportados por motivo» (top N mensajes de NotSupported del .qpa) para decidir qué
-     implementar (4188 NotSupported; objetivo = perfil de features del Adreno 740, no todo).
+  1. HECHO 2026-10-14 (ver arriba; vigilante propio en vez de `--deqp-watchdog`).
+  2. HECHO 2026-10-14 («No soportados por motivo»).
   3. Traductor: `unsupported SPIR-V instruction 68` = OpArrayLength (SSBO runtime arrays) → necesita tamaño de buffer
      en un buffer auxiliar (como el sizes buffer de otros traductores).
   4. Fails conocidos (104): texel buffers (formatos sint/snorm/16-bit), fragment_shader_output int/snorm, blits 1D
