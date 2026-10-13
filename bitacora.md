@@ -3,7 +3,49 @@
 Historial completo: `git log -p bitacora.md` (compactada el 2026-10-13 tras el log 54; todo lo anterior al 2026-10-13
 tarde está resumido abajo y detallado en git).
 
-## EMPEZAR AQUÍ — estado al cierre del 2026-10-13 (logs 53–54, AC Nexus)
+## EMPEZAR AQUÍ — 2026-10-13 noche (log 55 + capturas; plan de conformidad en marcha)
+
+### Log 55 (AC Nexus, con capturas): hallazgos firmes
+- **Rosa = capas overlay, no el ojo.** Capturas: `eye0/1` NEGRO en todos los frames; `output` (compositor) rosa;
+  26/33 capas OVROverlay (`capture-*-layerN-0.png`) son 255,0,255 sólido. Patrón: capas escritas por el juego con
+  `vkCmdCopyImage` desde textura (fuente fmt 43/37) = rosa; capas cuyo RT se dibuja en el frame (`pass-600-*`,
+  capas 27/28/29/32/5/16/26) = negro. Magenta exacto ⇒ shader de error de Unity en el origen o fallo de copia/subida
+  en VPKEngine. Siguiente paso: rastrear qué imagen es el src de esos `vkCmdCopyImage` (log del src en
+  `klvk_CmdCopyImage` de capas) y cómo se rellenó (CopyBufferToImage vs pase). El CTS (api.copy_and_blit,
+  texture) debe cubrirlo.
+- Congelado idéntico: serial 624 en cuanto empieza `ShaderWarmupManager.WarmUpShaders` (1700 pipelines en ~2,6 s,
+  luego `PopulatePSOCache`); el usuario salió 1 s después. `gpu.shader.lib hit=0 miss=3488` aunque
+  `gpu.pso.recipe loaded pipelines=3169` → la caché MSL/biblioteca NO acierta (arreglo de la build anterior no funciona).
+- Audio: Wwise busca `main.207706.com.Ubisoft.ACNexusVR.obb` (no existe) y luego `AAssetManager_open` con ruta
+  absoluta → MISS (arreglo pendiente descrito abajo). «Package path couldn't be set» ocurre ANTES de cualquier E/S.
+- Glitch del visor: sin crash ni gpu.err; últimos 2 s: footprint 3,5→4,0 GB, cadencia del compositor 48 ms media /
+  210 ms máx., mientras se guardaban ~36 PNG (capturas frame 1200) con el juego congelado; ojo 3840×2485 (escala 1,3
+  pedida por el juego). Regla nueva: tests de conformidad SOLO en ventana (sin inmersivo).
+
+### Conformidad: implementado (commits b517056, e87d43b; build de app pendiente)
+- CI `.github/workflows/conformance.yml` (Linux, manual o `[conformance]`): VK-GL-CTS `vulkan-cts-1.4.6.2`,
+  `DEQP_ANDROID_EXE=ON`, NDK del runner, API 29, `-Wl,--export-dynamic-symbol=main`, parche
+  `conformance/vulkan/patch_deqp.py` (describePlatform sin activity), listas `conformance/vulkan/caselists.py`
+  (perfil `rapida` ~36k casos de grupos relevantes para Quest, muestreo CRC32 estable, tandas de 400;
+  `completa` solo con `VQ_CTS_FULL=1`). Empaqueta `VulkanCTS.apk` (aapt2: manifest `conformance/vulkan/
+  AndroidManifest.xml`, meta-data `com.visionquestpro.guest=exe`, lib `libdeqp-vk.so` = el ejecutable, assets
+  `vulkan/` + `caselists/`). Release `conformance`.
+- Klepton: guest kind `KL_GUEST_EXE` (`runtime/guest/kl_exe.c`): carga como NativeActivity (`kl_native_load`), luego
+  `main()` en hilo guest de 64 MB (`kl_guest_thread_create` en kl_pthread.c) una vez por línea de
+  `KL_EXE_ARGS_FILE` (args separados por TAB); para entre líneas por `KL_EXE_BUDGET` s, `KL_EXE_MEM_MB`,
+  `KL_EXE_STOP_FILE`; progreso en `KL_EXE_PROGRESS` ("i running" / "i done rc" / "N finished").
+- App: `VQConformance.swift` (planifica tandas desde `assets/caselists/index.txt`, resultados en
+  `QUEST/Partidas/<test>/cts/<tanda>.<parte>.qpa`; caso abierto sin `#endTestCaseResult` = Crash y se reanuda desde
+  el siguiente; resumen en log + `Registros/conformidad-vulkan.txt`), `VQConformanceView.swift` (ventana con
+  progreso, Parar, aviso de cuelgue a 5 min; Ajustes > Conformidad: descarga, minutos, memoria, borrar resultados).
+  `KL_IMMERSIVE=0` para el guest exe. URL de descarga desde `VQBuildInfo.swift` (CI escribe `$GITHUB_REPOSITORY`).
+- Escáner de APIs (`VQApiScan.swift` + `app/Native/vq_scan.c`; Klepton `kl_shim_known`, `kl_jni_knows_class`):
+  cada lanzamiento, log «Escáner de APIs: …» con importaciones nativas sin implementar y clases Java del sistema
+  sin binding.
+- Pendiente: verificar que la CI del CTS compila/empaqueta; build de app `[build]`; primera tanda en el visor;
+  OpenXR CTS (fase B: gradle en `src/conformance`, NDK 23.2, lib `conformance_test`, necesita sesión inmersiva).
+
+## Estado al cierre del 2026-10-13 tarde (logs 53–54, AC Nexus)
 Última build: `de2bf58` (VisionQuestPro) + `166f0b1` (VPKEngine). Usuario: **AC Nexus y AoT siguen igual** (rosa
 constante, también sobre los vídeos; el juego no avanza de la carga). En el log 54 el usuario NO activó «Diagnóstico
 de ficheros» (solo 24 líneas `[fs]`). Reporta además que el visor se quedó «glitcheado» y tuvo que reiniciarlo
