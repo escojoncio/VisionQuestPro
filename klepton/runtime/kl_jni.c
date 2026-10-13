@@ -2277,6 +2277,19 @@ const klj_binding *const klj_binding_tables[] = {
     NULL,
 };
 
+// Static coverage, for the launcher's API scanner (asked before a game runs; touches no JNI
+// state): 1 when a binding table implements some method of `cls` or the field table gives it a
+// field ('/'-separated class name), else 0.
+int kl_jni_knows_class(const char *cls) {
+    if (!cls || !*cls) return 0;
+    for (const klj_binding *const *t = klj_binding_tables; *t; t++)
+        for (const klj_binding *b = *t; b->cls; b++)
+            if (!strcmp(b->cls, cls)) return 1;
+    for (size_t i = 0; i < sizeof g_fields / sizeof g_fields[0]; i++)
+        if (g_fields[i].cls && !strcmp(g_fields[i].cls, cls)) return 1;
+    return 0;
+}
+
 // ---------------------------------------------------------------- JavaVM impl
 static void *g_env_vtable[KL_JNI_SLOTS_COUNT];
 static void *g_vm_vtable[KL_JVM_SLOTS_COUNT];

@@ -22,6 +22,8 @@ void        kl_xash_tail_enginelog(void);
 int         kl_native_configure(const char *libdir, const char *entry_lib, FILE *out);
 const char *kl_native_error(void);
 int         kl_native_load(FILE *out);      // map + static init + JNI_OnLoad (if any)
+struct kl_image;
+struct kl_image *kl_native_image(void);     // the mapped entry image (NULL before load)
 unsigned    kl_native_gap(FILE *out);       // report unresolved imports
 int         kl_native_create(FILE *out);    // ANativeActivity_onCreate
 void        kl_native_start(FILE *out);     // onStart/onResume/onNativeWindowCreated

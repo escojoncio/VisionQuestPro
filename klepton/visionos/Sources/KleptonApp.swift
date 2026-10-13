@@ -442,7 +442,9 @@ struct BootView: View {
 
     private var bootReport: some View {
         Group {
-          if !showLog {
+          if !showLog, let game = VQLaunch.choice?.game, VQConformance.isConformance(game) {
+            VQConformanceView(finished: finished, succeeded: succeeded, status: status) { showLog = true }
+          } else if !showLog {
             VQLoadingView(running: running, finished: finished, succeeded: succeeded,
                           openedSpace: openedSpace, status: status) { showLog = true }
           } else {
@@ -697,6 +699,8 @@ struct BootView: View {
                 result = kl_app_lifecycle(UInt32(env["KL_FRAMES"] ?? "") ?? 1)
             }
             poll.invalidate()
+            // VisionQuestPro: a conformance run summarises its results once main() has returned.
+            if let game = VQLaunch.choice?.game, VQConformance.isConformance(game) { VQConformance.finish() }
 
             let text = (try? String(contentsOfFile: logPath, encoding: .utf8)) ?? ""
             DispatchQueue.main.async {

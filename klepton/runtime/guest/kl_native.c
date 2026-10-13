@@ -25,6 +25,7 @@ static kl_image *g_img;
 static char      g_err[256];
 
 const char *kl_native_error(void) { return g_err; }
+kl_image   *kl_native_image(void) { return g_img; }
 static int native_fail(const char *m) {
     snprintf(g_err, sizeof g_err, "%s", m);
     return 1;

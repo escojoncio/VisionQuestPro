@@ -217,10 +217,12 @@ int kl_app_configure_game(const char *name, const char *tree, const char *apk,
     kl_guest_kind kind = KL_GUEST_UNITY;
     if (kind_s && !strcmp(kind_s, "ue4"))    kind = KL_GUEST_UE4;
     if (kind_s && !strcmp(kind_s, "native")) kind = KL_GUEST_NATIVE;
+    if (kind_s && !strcmp(kind_s, "exe"))    kind = KL_GUEST_EXE;
     snprintf(s_entry, sizeof s_entry, "%s",
              entry_s && *entry_s ? entry_s : kind == KL_GUEST_UE4 ? "libUE4" : "libmain");
     fprintf(stderr, "  [klepton] guest kind %s, entry %s.so\n",
-            kind == KL_GUEST_UE4 ? "ue4" : kind == KL_GUEST_NATIVE ? "native" : "unity", s_entry);
+            kind == KL_GUEST_UE4 ? "ue4" : kind == KL_GUEST_NATIVE ? "native"
+            : kind == KL_GUEST_EXE ? "exe" : "unity", s_entry);
     t = (kl_target){ .name = s_name, .tree = s_tree, .apk = s_apk,
                      .assets = s_assets, .libdir = s_libdir,
                      .entry_lib = s_entry, .userdata = s_name,

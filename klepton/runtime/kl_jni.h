@@ -228,6 +228,7 @@ void kl_jni_add_manifest_env(const char *key, const char *value);
 // Everything the guest asked us for: classes found, natives registered, and
 // every method/field id it wanted. This is the work list.
 void kl_jni_report(FILE *out);
+int  kl_jni_knows_class(const char *cls);   // static coverage: any binding or field for this class
 
 // Runnables queued by Activity.runOnUiThread that nothing has run yet. Non-zero
 // means the guest is waiting on a UI-thread callback we do not yet deliver.

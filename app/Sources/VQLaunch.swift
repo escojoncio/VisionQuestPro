@@ -46,6 +46,11 @@ enum VQLaunch {
         VQOVRPluginVersion.apply(apk: game.apk)
         VQLog.log("Arranque: \(game.id) (\(game.package)) tree=\(choice.prepared.tree.path) dylibs=\(choice.prepared.dylibs.path) "
                   + "files=\(files.path) obb=\(obbRel)")
+        VQApiScan.run(game: game, tree: choice.prepared.tree)
+        if VQConformance.isConformance(game) {
+            // After applyToEnvironment: the test run is window-only (no immersive space).
+            VQConformance.prepareRun(game: game, tree: choice.prepared.tree, saves: files)
+        }
         setenv("KL_GUEST_KIND", game.guestKind, 1)
         setenv("KL_GUEST_ENTRY", game.entryLib, 1)
         if game.nativeFuncName.isEmpty { unsetenv("KL_GUEST_FUNC") } else { setenv("KL_GUEST_FUNC", game.nativeFuncName, 1) }
@@ -113,6 +118,9 @@ final class VQSettings: ObservableObject {
     @Published var systemLanguage: Bool { didSet { save() } }
     /// Compile the game's known shaders/pipelines before it starts (VPVulkan recipe store).
     @Published var precompileShaders: Bool { didSet { save() } }
+    /// Conformance runs (Vulkan CTS): minutes per session and the memory limit between batches.
+    @Published var conformanceMinutes: Double { didSet { save() } }
+    @Published var conformanceMemoryMB: Int { didSet { save() } }
 
     private init() {
         let d = UserDefaults.standard
@@ -151,6 +159,8 @@ final class VQSettings: ObservableObject {
         } else { passthrough = "auto" }
         systemLanguage = d.object(forKey: "vq.sysLang") as? Bool ?? true
         precompileShaders = d.object(forKey: "vq.precompile") as? Bool ?? true
+        conformanceMinutes = d.object(forKey: "vq.ctsMinutes") as? Double ?? 15
+        conformanceMemoryMB = d.object(forKey: "vq.ctsMemMB") as? Int ?? 3000
     }
 
     /// First Apple Vision Pro (M2) is RealityDevice14,x; a later one is taken as an M5
@@ -194,6 +204,8 @@ final class VQSettings: ObservableObject {
         d.set(passthrough, forKey: "vq.passthrough")
         d.set(systemLanguage, forKey: "vq.sysLang")
         d.set(precompileShaders, forKey: "vq.precompile")
+        d.set(conformanceMinutes, forKey: "vq.ctsMinutes")
+        d.set(conformanceMemoryMB, forKey: "vq.ctsMemMB")
     }
 
     /// VPVulkan inside the app, if this build carries it.

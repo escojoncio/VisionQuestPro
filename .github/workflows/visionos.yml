@@ -90,6 +90,7 @@ jobs:
         run: |
           set -o pipefail
           brew install xcodegen || true
+          printf '// Written by CI.\nlet vqReleaseRepository = "%s"\n' "$GITHUB_REPOSITORY" > app/Sources/VQBuildInfo.swift
           xcodegen generate --spec project.yml
           xcodebuild -project VisionQuestPro.xcodeproj -scheme VisionQuestPro \
             -sdk xros -configuration Release -destination 'generic/platform=visionOS' \

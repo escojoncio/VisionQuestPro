@@ -31,6 +31,7 @@ struct VQGame: Identifiable, Equatable {
 
     /// Klepton guest driver for this engine (KL_GUEST_KIND) and its entry library (KL_GUEST_ENTRY).
     var guestKind: String {
+        if guestOverride == "exe" { return "exe" }
         switch engine {
         case "Unity": return "unity"
         case "Unreal": return "ue4"
@@ -49,6 +50,8 @@ struct VQGame: Identifiable, Equatable {
         }
     }
     var nativeLibName: String = ""
+    /// com.visionquestpro.guest meta-data: "exe" for a command-line program (the Khronos tests).
+    var guestOverride: String = ""
     var nativeFuncName: String = ""   // android.app.func_name (entry other than ANativeActivity_onCreate)
 
     /// Stable key for per-game settings and runtime detections (VQ_GAME_KEY): the Android
@@ -143,6 +146,10 @@ enum VQGames {
         if let label = attribute(m, element: "application", name: "android:label"), !label.hasPrefix("@") { game.name = label }
         if let ln = metaData(m, "android.app.lib_name") { game.nativeLibName = ln }
         if let fn = metaData(m, "android.app.func_name") { game.nativeFuncName = fn }
+        if let g = metaData(m, "com.visionquestpro.guest") {
+            game.guestOverride = g
+            if g == "exe" { game.engine = VQL("Tests Khronos", "Khronos tests") }
+        }
         var vulkan = m.contains("android.hardware.vulkan.version") || m.contains("android.hardware.vulkan.level")
         if let devices = metaData(m, "com.oculus.supportedDevices") {
             game.quest3 = devices.lowercased().contains("quest3")
@@ -159,7 +166,7 @@ enum VQGames {
         if game.libraries.isEmpty {
             game.problems.append(VQL("El APK no trae librerías arm64-v8a.", "The APK has no arm64-v8a libraries."))
         }
-        if game.guestKind == "native" && !game.libraries.isEmpty
+        if (game.guestKind == "native" || game.guestKind == "exe") && !game.libraries.isEmpty
             && !game.libraries.contains(where: { $0.hasSuffix("/\(game.entryLib).so") }) {
             game.problems.append(VQL("Motor nativo: no se encuentra su librería de entrada \(game.entryLib).so.",
                                      "Native engine: its entry library \(game.entryLib).so is missing."))

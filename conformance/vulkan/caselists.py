@@ -58,7 +58,7 @@ GROUPS = [
 # The heavy api sub-groups the second "api" entry samples (and the first one skips).
 API_HEAVY = ["api.copy_and_blit.", "api.image_clearing."]
 
-BATCH = 1200          # cases per batch: ~2-6 minutes on a desktop GPU; the app stops early on time
+BATCH = 400           # cases per batch: short, so Stop and the time budget act within a few minutes
 
 
 def read_list(path):

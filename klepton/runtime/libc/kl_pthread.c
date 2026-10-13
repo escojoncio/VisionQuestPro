@@ -1385,6 +1385,15 @@ int klb_pthread_create(pthread_t *out, const bionic_attr *ga,
                 (ga && (ga->flags & BIONIC_ATTR_DETACHED)) ? " detached" : "", rc);
     return rc;
 }
+// A guest thread started by the HOST (the executable door's main() runner): the same
+// trampoline every guest pthread_create goes through (TPIDR/x18 slot, live registry), with the
+// stack size the host asks for.
+int kl_guest_thread_create(pthread_t *out, size_t stack, void *(*fn)(void *), void *arg) {
+    bionic_attr a;
+    klb_pthread_attr_init(&a);
+    if (stack) a.stack_size = stack;
+    return klb_pthread_create(out, &a, fn, arg);
+}
 int   klb_pthread_join(pthread_t t, void **r)  { return px(pthread_join(t, r)); }
 int   klb_pthread_detach(pthread_t t)          { return px(pthread_detach(t)); }
 void  klb_pthread_exit(void *r)                { thread_unregister(pthread_self()); pthread_exit(r); }
