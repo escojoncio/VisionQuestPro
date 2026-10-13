@@ -8,6 +8,35 @@ Historial completo de sesiones anteriores: `git log -p bitacora.md` (compactada 
   (`VPKLegacy` en VPKEngine `platform/visionos/Sources/VPGamePack.swift`).
 - `app/Sources/VQLaunch.swift`: ajuste `vq.vpkengine` con respaldo de la clave antigua `vq.vpengine`.
 
+## Logs 50–52 (2026-10-13, primera build INLINE) → plan siguiente build
+Inline funciona como diseño (100 % frames resueltos, jitter exacto mixed=0, sin native_stuck) pero EMPEORA fps:
+- **Serialización**: hook TAA antes del `QueueWaitIdle` de `kl_vulkan_frame_done` (kl_vulkan.c ~3564/3579) → frame =
+  CPU + GPU juego + TAA. TAA ≈14,7 ms (Batman 2383x1912x2) / 15–15,5 ms (AoT 2347x1912x2). Batman ~90→~37 fps,
+  AoT partida 25–28 fps, menú 43–45. `gpu=` mide gpuEnd−gpuStart del CB client (puede incluir la espera del event).
+- **Borroso**: MSAA 2x nativo forzado a 1x; historial hw≈0,84 + CR 5 taps remuestreado cada frame (cabeza en VR);
+  reconstrucción gaussiana σ≈0,47 px; RCAS 0,4 débil; near 0,05 por defecto vs 0,1 del frustum (paralaje x2);
+  ojo 2383x1912 ampliado ~2,6x bilineal por el compositor.
+- **pollInline**: >1 s sin gancho (cargas, gpu.hold) → ruta async (lee el override = TAA de TAA, `core` usado desde
+  dos hilos) → saltos/parpadeos. Debe quedarse inline una vez visto el gancho.
+- **AoT cosas faltantes** (no TAA): 18× VPKEngine `vk.err compute "internal error: vector"` (out_of_range en
+  `gpu/shader/spirv/src/lower.cpp`) → dispatch_skipped 3–15/frame (skinning/partículas). Vídeo: `kl_mediandk.c` sin
+  surface entrega getOutputBuffer NULL/size 0 y getOutputFormat sin color-format/stride → 280 dequeued, 0 rendered.
+  SpaceWarp: depth del pase MV = handle salvaje 0x100c88430 → MV a cero (moving 0 %).
+- **AC rosa** (no TAA): skybox de vídeo nunca OFF (ojo nunca compuesto); capas overlay no escritas compuestas (18–22,
+  25, 33–37) porque VPVulkan no exporta `vkGetMTLTextureMVK` (klvk_overlay_mtl_texture y sombras muertos) y desde
+  d574e25 `KL_VK_LAYER_NOCLEAR` ya no limpia → memoria sin inicializar = rosa. AC no está colgado (llega al menú y
+  a una 2.ª carga; sesión de 26 s); Wwise sigue sin bancos (`main.207706…obb` ausente, en.lang no buscado en obb).
+- Comunes: `gpu.shader.lib hit=0` (0 % caché MSL → tirones 1–1,7 s), ASW apagado (26 fps sin reproyección
+  posicional), memoria 5921/6144 MiB en AC (imágenes viejas de ojo/MV/depth no liberadas).
+### Plan (orden)
+1. Quitar la serialización: sin `QueueWaitIdle` por frame; serial publicado al completar en GPU (MTLSharedEvent /
+   completion del tail de encodeNative), 2 frames en vuelo.
+2. Ajuste «AA: MSAA del juego | VPKTAA» (por defecto MSAA del juego si lo trae; sin forzar 1x).
+3. VPKTAA ≤3 ms: historial RG11B10, bilineal, sin textura dist, depth 1 tap, solo zona nítida del foveado, RCAS en el
+   compositor; medir con MTLCounterSampleBuffer. Near por defecto = el de GetNodeFrustum2.
+4. pollInline estable + `core` serializado. 5. AC: exportar `vkGetMTLTextureMVK` en VPVulkan, compositor salta capas no
+   escritas, clear diferido. 6. VPKEngine compute out_of_range (volcar SPIR-V fallido). 7. Vídeo sin surface. 8. Caché MSL.
+
 ## VPKTAA a nivel de render — modo INLINE (2026-10-13, sin build aún)
 Sustituye a la ruta asíncrona del compositor (que queda solo con `KL_VPKTAA_INLINE=0`, guests GLES y OpenXR).
 Causas de lo visto en logs 46–49: resolve en cola propia compitiendo con el juego (59 % raw-fallback = alterna
