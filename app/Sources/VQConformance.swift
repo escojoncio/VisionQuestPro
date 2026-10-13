@@ -213,7 +213,7 @@ enum VQConformance {
                 totals[o.status, default: 0] += 1
                 byGroup[b.group, default: [:]][o.status, default: 0] += 1
                 if !okStatuses.contains(o.status) { failures.append((name, o)) }
-                if o.status == "NotSupported" { notSupportedWhy[reason(o.detail), default: 0] += 1 }
+                if o.status == "NotSupported" { notSupportedWhy[notSupportedReason(o.detail), default: 0] += 1 }
             }
         }
         failures.sort { $0.0 < $1.0 }
@@ -264,7 +264,7 @@ enum VQConformance {
 
     /// A NotSupported message reduced to its reason: numbers and quoted values vary per case
     /// ("Format 37 not supported", "...: 4096") and would split one reason into hundreds.
-    static func reason(_ detail: String) -> String {
+    static func notSupportedReason(_ detail: String) -> String {
         var d = detail.trimmingCharacters(in: .whitespacesAndNewlines)
         if d.isEmpty { return VQL("(sin mensaje)", "(no message)") }
         // A trailing source location ("... at vktFoo.cpp:123") only; "at least" stays.
