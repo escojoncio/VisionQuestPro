@@ -83,9 +83,16 @@ int kl_app_target_wants_full(void) {
     // starts. Default those to .full immersion from boot: the native OpenXR kind
     // (vicecity) and the folder-fed launcher games — hl1 (GLES3JNI) and
     // cs1/hl2/portal (SDL2). KL_FULL=0 forces .mixed back for development.
+    // Quest titles (Unity, UE4) too: they are VR scenes that own every pixel.
+    // In .mixed ANY composite pixel with alpha < 1, or a frame the system fills
+    // in itself, shows the user's room (AC Nexus log 45: room seen through the
+    // loading scene with [pt] never ON). A title that really asks for
+    // passthrough still gets .mixed live (KleptonChroma.passthroughLive).
     return g_target && (g_target->kind == KL_GUEST_NATIVE ||
                         g_target->kind == KL_GUEST_GLES3JNI ||
-                        g_target->kind == KL_GUEST_SDL2);
+                        g_target->kind == KL_GUEST_SDL2 ||
+                        g_target->kind == KL_GUEST_UNITY ||
+                        g_target->kind == KL_GUEST_UE4);
 }
 int kl_app_target_owns_frame_loop(void) {
     return g_target ? kl_driver_owns_frame_loop() : 0;

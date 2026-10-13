@@ -2296,7 +2296,7 @@ final class KleptonCompositor {
                 return srcs.count == 2 ? srcs : nil
             }
         }
-        if let p = taa.acquire(for: cmd) {
+        if let p = taa.acquire(for: cmd, newestSerial: haveRendered ? rendered.serial : 0) {
             taaOut[0] = p.out[0]; taaOut[1] = p.out[1]
             taaFlip = p.flipY
             taaPose = p.pose

@@ -84,6 +84,11 @@ struct VPKTAAEyeInput {
     var position: SIMD3<Float>
     var depth: VPKTAADepthInput? = nil
     var motion: VPKTAAMotionInput? = nil
+    /// Optional: the two jitters the frame may REALLY have been rendered with if the caller's
+    /// frame record is one frame off (previous / next offset of the sequence), same units as
+    /// `jitter`. With them, stat pixels vote which of the three best matches the history
+    /// (`VPKTAAStats.jitterVotes`), so a jitter/frame pairing error shows up (and can be fixed).
+    var jitterAlt: [SIMD2<Float>] = []
 }
 
 /// Counters of one eye since the last `takeStats`, on 1 pixel in 64.
@@ -92,10 +97,11 @@ struct VPKTAAStats {
     var depthValid: UInt32 = 0, disoccluded: UInt32 = 0
     var moving: UInt32 = 0, mvSum16: UInt32 = 0          // |mv| summed in 1/16 px
     var votes: [UInt32] = [0, 0, 0, 0]                   // (+x+y) (+x−y) (−x+y) (−x−y)
+    var jitterVotes: [UInt32] = [0, 0, 0]                // used jitter, jitterAlt[0], jitterAlt[1]
     var meanMvPx: Double { moving > 0 ? Double(mvSum16) / 16 / Double(moving) : 0 }
 }
 
-/// Layout shared with the MSL `Params` below (272 bytes; keep the order).
+/// Layout shared with the MSL `Params` below (304 bytes; keep the order).
 struct VPKTAAParams {
     var tanCur: SIMD4<Float>
     var tanPrev: SIMD4<Float>
@@ -107,6 +113,8 @@ struct VPKTAAParams {
     var mvP: SIMD4<Float>           // scale.xy (signed), mv on, vote on
     var depthAB: SIMD4<Float>       // depth texel pos = colour texel pos * xy + zw
     var mvAB: SIMD4<Float>          // motion texel pos = colour texel pos * xy + zw
+    var shiftMain: SIMD4<Float>     // xy: source shift (px) of the used jitter, z: jitter vote on
+    var shiftAlt: SIMD4<Float>      // source shifts (px) of jitterAlt[0] (xy) and [1] (zw)
     var crop: SIMD2<Float>
     var cropOff: SIMD2<Float>
     var shiftInt: SIMD2<Int32>      // source texel of the output pixel's jittered sample − gid
@@ -134,7 +142,6 @@ final class VPKTAACore {
 
     private let device: MTLDevice
     private let resolvePSO: MTLComputePipelineState
-    private let rcasPSO: MTLComputePipelineState
     private let statBuf: MTLBuffer
     private let dummyDepth: MTLTexture
     private let dummyMV: MTLTexture
@@ -163,17 +170,15 @@ final class VPKTAACore {
         self.device = device
         do {
             let lib = try device.makeLibrary(source: VPKTAACore.msl, options: nil)
-            guard let fr = lib.makeFunction(name: "vpktaa_resolve"),
-                  let fs = lib.makeFunction(name: "vpktaa_rcas") else { return nil }
+            guard let fr = lib.makeFunction(name: "vpktaa_resolve") else { return nil }
             resolvePSO = try device.makeComputePipelineState(function: fr)
-            rcasPSO = try device.makeComputePipelineState(function: fs)
         } catch {
             NSLog("[taa] VPKTAA shader failed to build: \(error) — VPKTAA off")
             return nil
         }
-        if resolvePSO.maxTotalThreadsPerThreadgroup < 256 || rcasPSO.maxTotalThreadsPerThreadgroup < 256 {
-            NSLog("[taa] VPKTAA kernels allow only \(resolvePSO.maxTotalThreadsPerThreadgroup)/"
-                  + "\(rcasPSO.maxTotalThreadsPerThreadgroup) threads per threadgroup (need 256) — VPKTAA off")
+        if resolvePSO.maxTotalThreadsPerThreadgroup < 256 {
+            NSLog("[taa] VPKTAA kernel allows only \(resolvePSO.maxTotalThreadsPerThreadgroup) "
+                  + "threads per threadgroup (need 256) — VPKTAA off")
             return nil
         }
         guard let sb = device.makeBuffer(length: 2 * 64, options: .storageModeShared) else { return nil }
@@ -203,6 +208,7 @@ final class VPKTAACore {
         s.rejected = c[0]; s.offscreen = c[1]; s.pixels = c[2]; s.depthValid = c[3]
         s.disoccluded = c[4]; s.moving = c[5]; s.mvSum16 = c[6]
         s.votes = [c[7], c[8], c[9], c[10]]
+        s.jitterVotes = [c[11], c[12], c[13]]
         memset(statBuf.contents() + eye * 64, 0, 64)
         return s
     }
@@ -311,9 +317,17 @@ final class VPKTAACore {
         let t = input.tangents
         var shiftInt = SIMD2<Int32>(0, 0)
         var wts = [Float](repeating: 0, count: 9)
+        // Source position (px) of the output pixel centre = pixel centre + shift(jitter).
+        func shift(_ j: SIMD2<Float>) -> SIMD2<Float> {
+            SIMD2<Float>(-j.x / max(t.x + t.y, 1e-6) * input.crop.x * Float(w),
+                         (input.flipY ? 1 : -1) * j.y / max(t.z + t.w, 1e-6) * input.crop.y * Float(h))
+        }
+        let sMain = jitterOn ? shift(input.jitter) : SIMD2<Float>(0, 0)
+        let jVote = jitterOn && input.jitterAlt.count == 2
+        let sA0 = jVote ? shift(input.jitterAlt[0]) : SIMD2<Float>(0, 0)
+        let sA1 = jVote ? shift(input.jitterAlt[1]) : SIMD2<Float>(0, 0)
         if jitterOn {
-            let sx = -input.jitter.x / max(t.x + t.y, 1e-6) * input.crop.x * Float(w)
-            let sy = (input.flipY ? 1 : -1) * input.jitter.y / max(t.z + t.w, 1e-6) * input.crop.y * Float(h)
+            let sx = sMain.x, sy = sMain.y
             let ix = (0.5 + sx).rounded(.down), iy = (0.5 + sy).rounded(.down)
             shiftInt = SIMD2<Int32>(Int32(max(-64, min(64, ix))), Int32(max(-64, min(64, iy))))
             let fx = sx - ix, fy = sy - iy
@@ -353,6 +367,8 @@ final class VPKTAACore {
             depthP: SIMD4<Float>(near, max(far, 0), rev, depthOn ? 1 : 0),
             mvP: SIMD4<Float>(mvScale.x, mvScale.y, mvOn ? 1 : 0, mvOn ? 1 : 0),
             depthAB: depthAB, mvAB: mvAB,
+            shiftMain: SIMD4<Float>(sMain.x, sMain.y, jVote ? 1 : 0, 0),
+            shiftAlt: SIMD4<Float>(sA0.x, sA0.y, sA1.x, sA1.y),
             crop: input.crop, cropOff: input.cropOff, shiftInt: shiftInt,
             w8: wts[8], historyWeight: hw, gamma: jitterOn ? 1.25 : 1.0,
             sharpness: min(max(sharpness, 0), 1), disocc: max(disocclusion, 0.01),
@@ -371,7 +387,8 @@ final class VPKTAACore {
         let ey = min(h - oy, Int((input.crop.y * Float(h)).rounded(.up)) + 3)
         var org = SIMD2<UInt32>(UInt32(ox), UInt32(oy))
         let tg = MTLSize(width: 16, height: 16, depth: 1)
-        let grid = MTLSize(width: (max(ex, 1) + 15) / 16, height: (max(ey, 1) + 15) / 16, depth: 1)
+        // 14x14 owned pixels per 16x16 group (fused RCAS ring).
+        let grid = MTLSize(width: (max(ex, 1) + 13) / 14, height: (max(ey, 1) + 13) / 14, depth: 1)
         enc.setComputePipelineState(resolvePSO)
         enc.setTexture(input.color, index: 0)
         enc.setTexture(prevH, index: 1)
@@ -385,15 +402,6 @@ final class VPKTAACore {
         enc.setBuffer(statBuf, offset: eye * 64, index: 1)
         enc.setBytes(&org, length: MemoryLayout<SIMD2<UInt32>>.stride, index: 2)
         enc.dispatchThreadgroups(grid, threadsPerThreadgroup: tg)
-        if sharpOn {
-            enc.memoryBarrier(scope: .textures)
-            enc.setComputePipelineState(rcasPSO)
-            enc.setTexture(nextH, index: 0)
-            enc.setTexture(output, index: 1)
-            enc.setBytes(&p, length: MemoryLayout<VPKTAAParams>.stride, index: 0)
-            enc.setBytes(&org, length: MemoryLayout<SIMD2<UInt32>>.stride, index: 2)
-            enc.dispatchThreadgroups(grid, threadsPerThreadgroup: tg)
-        }
         enc.endEncoding()
 
         st.cur ^= 1
@@ -415,7 +423,8 @@ final class VPKTAACore {
     using namespace metal;
     struct Params {
         float4 tanCur; float4 tanPrev; float3x3 rot; float4 trans; float4 wA; float4 wB;
-        float4 depthP; float4 mvP; float4 depthAB; float4 mvAB; float2 crop; float2 cropOff;
+        float4 depthP; float4 mvP; float4 depthAB; float4 mvAB; float4 shiftMain; float4 shiftAlt;
+        float2 crop; float2 cropOff;
         int2 shiftInt; float w8; float historyWeight; float gamma;
         float sharpness; float disocc; uint slice; uint depthSlice; uint mvSlice; uint flipY;
         uint reset; uint writeOut; uint pad;
@@ -486,7 +495,7 @@ final class VPKTAACore {
         return select(1.055 * pow(c, float3(1.0 / 2.4)) - 0.055, c * 12.92, c <= 0.0031308);
     }
 
-    kernel void vpktaa_resolve(texture2d_array<half, access::read> src [[texture(0)]],
+    kernel void vpktaa_resolve(texture2d_array<half, access::sample> src [[texture(0)]],
                                texture2d_array<float, access::sample> histIn [[texture(1)]],
                                texture2d_array<float, access::write> histOut [[texture(2)]],
                                depth2d_array<float> dep [[texture(3)]],
@@ -497,26 +506,33 @@ final class VPKTAACore {
                                constant Params& p [[buffer(0)]],
                                device atomic_uint* stats [[buffer(1)]],
                                constant uint2& org [[buffer(2)]],
-                               uint2 tid [[thread_position_in_grid]],
                                uint2 lid [[thread_position_in_threadgroup]],
                                uint2 tgp [[threadgroup_position_in_grid]],
                                uint li [[thread_index_in_threadgroup]],
                                uint lane [[thread_index_in_simdgroup]]) {
-        // 18x18 source tile around this 16x16 group's jittered samples: 1 read per texel.
+        // One dispatch: a 16x16 group resolves a 16x16 block whose 14x14 interior it OWNS
+        // (writes history/distance/output, counts stats); the 1-texel ring is resolved only so
+        // the fused RCAS of the interior has its neighbours in threadgroup memory.
+        // 18x18 source tile around the group's jittered samples: 1 read per texel.
         threadgroup half4 tile[324];
+        threadgroup half4 rt[256];
         uint w = src.get_width(), h = src.get_height();
         int2 mx = int2(int(w) - 1, int(h) - 1);
-        int2 base = int2(org) + int2(tgp) * 16 + p.shiftInt - 1;
+        int2 po = int2(org) + int2(tgp) * 14 - 1;
+        int2 base = po + p.shiftInt - 1;
         for (uint i = li; i < 324u; i += 256u) {
             int2 c = clamp(base + int2(int(i % 18u), int(i / 18u)), int2(0), mx);
             tile[i] = src.read(uint2(c), p.slice);
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
 
-        uint2 gid = tid + org;
-        bool inside = gid.x < w && gid.y < h;
-        bool statPx = ((gid.x | gid.y) & 7u) == 0u;
-        uint sRej = 0, sOff = 0, sCnt = 0, sDep = 0, sDis = 0, sMov = 0, sMvSum = 0, vote = 4;
+        int2 gi = po + int2(lid);
+        bool inside = gi.x >= 0 && gi.y >= 0 && gi.x < int(w) && gi.y < int(h);
+        bool owner = inside && lid.x >= 1u && lid.x <= 14u && lid.y >= 1u && lid.y <= 14u;
+        uint2 gid = uint2(max(gi, int2(0)));
+        bool statPx = owner && ((gid.x | gid.y) & 7u) == 0u;
+        half4 outPx = half4(0.0h);
+        uint sRej = 0, sOff = 0, sCnt = 0, sDep = 0, sDis = 0, sMov = 0, sMvSum = 0, vote = 4, jvote = 3;
         if (inside) {
             constexpr sampler lin(filter::linear, address::clamp_to_edge, coord::normalized);
             constexpr sampler pt(filter::nearest, address::clamp_to_edge, coord::normalized);
@@ -596,6 +612,18 @@ final class VPKTAACore {
                     float4 hist4 = sampleCR(histIn, lin, huv, size);
                     if (any(kbad(hist4.rgb))) { hit = false; }
                     else {
+                        // Jitter pairing vote (stat pixels on edges, static ones): which of the
+                        // used / previous / next jitter puts the current samples where the
+                        // history has them. Bilinear for all three so the test is fair.
+                        if (statPx && p.shiftMain.z > 0.5 && sMov == 0u && sigma.x > 0.02) {
+                            float lh = luma(hist4.rgb);
+                            float2 c0 = float2(ip) + 0.5;
+                            float e0 = abs(luma(float3(src.sample(lin, (c0 + p.shiftMain.xy) / size, p.slice).rgb)) - lh);
+                            float e1 = abs(luma(float3(src.sample(lin, (c0 + p.shiftAlt.xy) / size, p.slice).rgb)) - lh);
+                            float e2 = abs(luma(float3(src.sample(lin, (c0 + p.shiftAlt.zw) / size, p.slice).rgb)) - lh);
+                            float lo = min(e0, min(e1, e2));
+                            if (lo < 0.9 * max(e0, max(e1, e2))) jvote = e0 <= lo ? 0u : (e1 <= lo ? 1u : 2u);
+                        }
                         float wgt = p.historyWeight;
                         // Disocclusion: did the previous frame see THIS surface there?
                         if (depthOn) {
@@ -643,16 +671,43 @@ final class VPKTAACore {
                     }
                 }
             }
-            histOut.write(float4(max(res, 0.0), a), uint2(ip), 0);
-            distOut.write(float4(distStore), uint2(ip), 0);
-            if (p.writeOut != 0u) outTex.write(half4(half3(enc_srgb(max(res, 0.0))), half(a)), uint2(ip), 0);
+            outPx = half4(half3(min(max(res, 0.0), 65000.0)), half(a));
+            if (owner) {
+                histOut.write(float4(max(res, 0.0), a), uint2(ip), 0);
+                distOut.write(float4(distStore), uint2(ip), 0);
+                if (p.writeOut != 0u) outTex.write(half4(half3(enc_srgb(max(res, 0.0))), half(a)), uint2(ip), 0);
+            }
+        }
+        // Fused RCAS (AMD FidelityFX CAS, robust variant) on the resolved picture; history
+        // stays unsharpened. Neighbours outside the image use the centre.
+        if (p.writeOut == 0u) {
+            rt[li] = outPx;
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+            if (owner) {
+                half3 e = max(outPx.rgb, half3(0.0h));
+                half3 b = gi.y > 0 ? rt[li - 16u].rgb : e;
+                half3 d = gi.x > 0 ? rt[li - 1u].rgb : e;
+                half3 f = gi.x + 1 < int(w) ? rt[li + 1u].rgb : e;
+                half3 hh = gi.y + 1 < int(h) ? rt[li + 16u].rgb : e;
+                float3 mn4 = float3(min(min(b, d), min(f, hh))), mx4 = float3(max(max(b, d), max(f, hh)));
+                float3 hitMin = mn4 / (4.0 * mx4 + 1e-5);
+                float3 hitMax = (1.0 - mx4) / (4.0 * mn4 - 4.0 - 1e-5);
+                float3 lobeRGB = max(-hitMin, hitMax);
+                float lobe = max(-0.1875, min(max(lobeRGB.r, max(lobeRGB.g, lobeRGB.b)), 0.0)) * p.sharpness;
+                float3 o = (lobe * float3(b + d + f + hh) + float3(e)) / (4.0 * lobe + 1.0);
+                if (any(kbad(o))) o = any(kbad(float3(e))) ? float3(0.0) : float3(e);
+                outTex.write(half4(half3(enc_srgb(max(o, 0.0))), outPx.a), gid, 0);
+            }
         }
         // Counted on 1 pixel in 64 (a 32-bit total over 30 s of full frames overflows).
-        if (!statPx) { sRej = 0; sOff = 0; sCnt = 0; sDep = 0; sDis = 0; sMov = 0; sMvSum = 0; vote = 4; }
+        if (!simd_any(statPx)) return;      // 1 pixel in 64: most simdgroups skip the sums
+        if (!statPx) { sRej = 0; sOff = 0; sCnt = 0; sDep = 0; sDis = 0; sMov = 0; sMvSum = 0; vote = 4; jvote = 3; }
         uint r0 = simd_sum(sRej), r1 = simd_sum(sOff), r2 = simd_sum(sCnt), r3 = simd_sum(sDep);
         uint r4 = simd_sum(sDis), r5 = simd_sum(sMov), r6 = simd_sum(sMvSum);
         uint v0 = simd_sum(vote == 0u ? 1u : 0u), v1 = simd_sum(vote == 1u ? 1u : 0u);
         uint v2 = simd_sum(vote == 2u ? 1u : 0u), v3 = simd_sum(vote == 3u ? 1u : 0u);
+        uint j0 = simd_sum(jvote == 0u ? 1u : 0u), j1 = simd_sum(jvote == 1u ? 1u : 0u);
+        uint j2 = simd_sum(jvote == 2u ? 1u : 0u);
         if (lane == 0u) {
             if (r0) atomic_fetch_add_explicit(&stats[0], r0, memory_order_relaxed);
             if (r1) atomic_fetch_add_explicit(&stats[1], r1, memory_order_relaxed);
@@ -665,33 +720,11 @@ final class VPKTAACore {
             if (v1) atomic_fetch_add_explicit(&stats[8], v1, memory_order_relaxed);
             if (v2) atomic_fetch_add_explicit(&stats[9], v2, memory_order_relaxed);
             if (v3) atomic_fetch_add_explicit(&stats[10], v3, memory_order_relaxed);
+            if (j0) atomic_fetch_add_explicit(&stats[11], j0, memory_order_relaxed);
+            if (j1) atomic_fetch_add_explicit(&stats[12], j1, memory_order_relaxed);
+            if (j2) atomic_fetch_add_explicit(&stats[13], j2, memory_order_relaxed);
         }
     }
 
-    // RCAS (AMD FidelityFX CAS, robust variant) on the resolved picture; history untouched.
-    kernel void vpktaa_rcas(texture2d_array<half, access::read> hist [[texture(0)]],
-                            texture2d_array<half, access::write> out [[texture(1)]],
-                            constant Params& p [[buffer(0)]],
-                            constant uint2& org [[buffer(2)]],
-                            uint2 tid [[thread_position_in_grid]]) {
-        uint2 gid = tid + org;
-        uint w = hist.get_width(), h = hist.get_height();
-        if (gid.x >= w || gid.y >= h) return;
-        int2 ip = int2(gid), mx = int2(int(w) - 1, int(h) - 1);
-        half4 e4 = hist.read(gid, 0);
-        half3 e = max(e4.rgb, half3(0.0h));
-        half3 b = max(hist.read(uint2(clamp(ip + int2(0, -1), int2(0), mx)), 0).rgb, half3(0.0h));
-        half3 d = max(hist.read(uint2(clamp(ip + int2(-1, 0), int2(0), mx)), 0).rgb, half3(0.0h));
-        half3 f = max(hist.read(uint2(clamp(ip + int2(1, 0), int2(0), mx)), 0).rgb, half3(0.0h));
-        half3 hh = max(hist.read(uint2(clamp(ip + int2(0, 1), int2(0), mx)), 0).rgb, half3(0.0h));
-        float3 mn4 = float3(min(min(b, d), min(f, hh))), mx4 = float3(max(max(b, d), max(f, hh)));
-        float3 hitMin = mn4 / (4.0 * mx4 + 1e-5);
-        float3 hitMax = (1.0 - mx4) / (4.0 * mn4 - 4.0 - 1e-5);
-        float3 lobeRGB = max(-hitMin, hitMax);
-        float lobe = max(-0.1875, min(max(lobeRGB.r, max(lobeRGB.g, lobeRGB.b)), 0.0)) * p.sharpness;
-        float3 o = (lobe * float3(b + d + f + hh) + float3(e)) / (4.0 * lobe + 1.0);
-        if (any(kbad(o))) o = any(kbad(float3(e))) ? float3(0.0) : float3(e);
-        out.write(half4(half3(enc_srgb(max(o, 0.0))), e4.a), gid, 0);
-    }
     """
 }

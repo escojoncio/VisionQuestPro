@@ -709,7 +709,12 @@ _Static_assert(sizeof(bionic_statfs) == 120, "bionic statfs is 120 bytes on LP64
 
 int klb_statfs(const char *path, void *out) {
     struct statfs d;
-    if (statfs(path, &d) != 0) return -1;
+    // Guest paths (/sdcard/Android/obb/<pkg>, /storage/emulated/0/...) do not
+    // exist on the host: map them like stat does, or every free-space check
+    // under external storage fails with ENOENT.
+    char kp[1024];
+    const char *q = kl_guest_path(path, kp, sizeof kp);
+    if (statfs(q, &d) != 0) { kl_fs_trace("statfs", path, q, 1); return -1; }
     if (!out) return 0;
     bionic_statfs *b = out;
     memset(b, 0, sizeof *b);
@@ -1830,6 +1835,16 @@ static int kl_fs_trace_mode(void) {
 static void kl_fs_trace(const char *op, const char *path, const char *extra, int failed) {
     if (!extra) extra = "";
     int mode = kl_fs_trace_mode();
+    if (!mode && failed && path && strstr(path, "/Android/obb/")) {
+        // Always on, capped: a failed query under the obb dir is how a game's
+        // "package path couldn't be set" / bank-not-found looks from here
+        // (AC Nexus log 45: Wwise base path rejected with no op in the log).
+        static int n;
+        if (n < 24) { n++;
+            fprintf(stderr, "[fs] %s(\"%s\", \"%s\") FAILED: %s (obb diag %d/24)\n",
+                    op, path, extra, strerror(errno), n); }
+        return;
+    }
     if (!mode || (mode == 1 && !failed)) return;
     if (failed) fprintf(stderr, "[fs] %s(\"%s\", \"%s\") FAILED: %s\n", op, path, extra, strerror(errno));
     else        fprintf(stderr, "[fs] %s(\"%s\", \"%s\") ok\n", op, path, extra);

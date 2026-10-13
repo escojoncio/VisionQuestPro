@@ -2,6 +2,60 @@
 
 Historial completo de sesiones anteriores: `git log -p bitacora.md` (compactada el 2026-10-12 tras el log 25).
 
+## Log 44 AoT (2026-10-13, sin build aún) — cuelgue en teardown de vídeo
+- Causa: Unity `AndroidVideoMedia` para su `VideoDecoderLooper` con `msg.getTarget().getLooper().quit()` + `Thread.join()`. `Message.getTarget()` no tenía binding (SIMULATED → null), el looper nunca salía y `join()` bloqueaba el hilo principal del guest: frames congelados en serial 506 (`stale in a row`), PCM a cero.
+- `klepton/runtime/jni/kl_jni_looper.c`: nuevos `klj_Message_getTarget` (devuelve `m->target`) y `klj_Handler_getLooper` (`h->looper` o el main looper); bindings `Message.getTarget()Landroid/os/Handler;` y `Handler.getLooper()Landroid/os/Looper;`.
+### Comprobar en el próximo log
+- Tras `Message.sendToTarget(what=0)` debe salir `HandlerThread "VideoDecoderLooper" looper exited` y no `Thread.join() ... still waiting`; serials del compositor siguen subiendo.
+
+## Logs 44–46 (2026-10-13): AC Nexus no pasa de la carga + pose EyeLevel → build siguiente
+- AC (45): entitlement OK y luego `ovr_User_GetLoggedInUser -> 0` → `E/Unity: An unknown error occurred. Request
+  failed.` → se queda en Background-Looping. La lista por target (`zix`…) nunca casaba en VisionQuestPro (target =
+  nombre de carpeta). `kl_ovrplat.c` `klplat_user_default`: también ON si el paquete empieza por `com.ubisoft.`
+  (`kl_jni_guest_package`). Idiomas: `*.lang` → AssetType `language_pack`, `GetLanguage` = la entrada, Tag = nombre
+  sin extensión, EnglishName/NativeName por tabla (`KL_PLAT_LANGPACKS=0` lo apaga).
+- AC Wwise: `Setting package path: /sdcard/Android/obb/com.Ubisoft.ACNexusVR` → `Package path couldn't be set` →
+  Init.bnk/BNK_* AK_FileNotFound, `Unable to load audio wwise package: en.lang`; `obb MISS main.207706.…obb`.
+  Causa no localizada (sin op fallida visible). `kl_libc.c`: `klb_statfs` ahora mapea la ruta (`kl_guest_path`;
+  antes statfs de /sdcard/… daba ENOENT); `kl_fs_trace` registra SIEMPRE (máx. 24) operaciones fallidas bajo
+  `/Android/obb/` (`[fs] … FAILED … (obb diag n/24)`).
+- Pose (todos los OVRPlugin): con origen EyeLevel (0) se servía la Y absoluta del visor (head Y=1.02–1.04 con
+  origin=0) cuando en Quest es ≈0 → cámara una altura de ojos por encima del rig y quads world-locked del juego (y≈0)
+  compuestos en el suelo. `kl_ovrp.c`: `kl_ovrp_guest_origin_y()` (altura medida si origin=0, cabeza publicada y ya
+  hubo lectura OVRPlugin; 0 para OpenXR); `klovrp_step_head`/`klovrp_step_hand` restan; `begin_frame_impl` registra
+  en ese espacio; RelativePose(1|2) con cur=0 → y=−altura. `kl_reproject.c` (def. débil = 0): suma el offset a la
+  posición del render pose (paralaje) y a quads no head-locked. `KL_OVRP_EYELEVEL_ZERO=0` = antiguo.
+- AC (45) habitación visible / destellos morados: `[pt] mode auto` y nunca `[pt] passthrough ON`, ojo y skybox con
+  alfa forzado 1, imágenes de capa nuevas ya se limpian (`klvk_image_clear_black`) y overlays sin escribir se saltan
+  (`kl_vulkan_layer_written`). Pero Unity/UE4 abrían el espacio en `.mixed` (`kl_app_target_wants_full` solo
+  native/GLES3JNI/SDL2) → cualquier píxel/frame no opaco enseña la habitación. `visionos/Sources/kl_app.c`: también
+  `KL_GUEST_UNITY`/`KL_GUEST_UE4` → `.full`; pasa a `.mixed` en vivo si el juego pide passthrough (`KL_FULL=0` revierte).
+  Geometría morada: único error GPU del log = `gpu.err f=845 arg_overflow=2563 skipped_draws` (L7375, frame de
+  `ShaderWarmupManager.PopulatePSOCache`) → pendiente VPEngine (desbordamiento del argument buffer); quads del juego
+  en EyeLevel ahora a la altura de ojos (antes en el suelo).
+### Comprobar en el próximo log
+- AC: `[plat] ovr_User_GetLoggedInUser -> request N` (no «-> 0»), sin «Request failed», `[plat] language pack: en.lang`,
+  líneas `[fs] … (obb diag)` alrededor de «Package path couldn't be set», y si pasa del Background-Looping.
+- Unity/UE4 en `.full`: no se ve la habitación; `[pt] immersion -> mixed` solo si el juego pide passthrough.
+- Juegos EyeLevel: quads del menú a la altura de los ojos; `GetTrackingTransformRelativePose origin=1 (cur=0)` y≈−altura.
+
+## VPKTAA: voto de jitter, RCAS fusionado, fallback sin TAA (2026-10-13, sin build)
+Log 46 (Batman): entradas OK (jitter ON, depth D24S8 live s0/s1 revZ=1, near 0.05 por defecto, sin MV), depthValid 53 %,
+disocc 0,5 %, rejected 6,5 %; pero resolves ≈30/s con juego ≈50 fps, gpu=21,6 ms/resolve (compartiendo GPU) → saltos.
+- `VPKTAACore.swift`: `VPKTAAEyeInput.jitterAlt` (offset anterior/siguiente); `Params` + `shiftMain`/`shiftAlt`
+  (304 B); voto de emparejamiento de jitter en píxeles stat (bordes, estáticos) → `stats[11..13]`,
+  `VPKTAAStats.jitterVotes`. RCAS FUSIONADO en `vpktaa_resolve` (grupo 16x16 posee 14x14, anillo de 1 px en
+  threadgroup `rt[256]`); kernel `vpktaa_rcas` eliminado; sumas de stats saltadas con `simd_any(statPx)`.
+- `KleptonTAA.swift`: `pairedJitter` deduce k Halton del registro y aplica `jitterLag`
+  (`KL_VPKTAA_JITTER_LAG`=auto|-1|0|1; auto cambia con ≥300 votos, alt ≥50 % y ≥2× usado, invalida historial);
+  `acquire(for:newestSerial:)` devuelve nil si el resolve va ≥2 frames por detrás → se muestra el frame del juego
+  sin TAA; stats: `raw-fallback=N frames`, `jitter votes (used,prev,next)=… lag=N`.
+- `KleptonCompositor.swift` `prepareTAA`: pasa `rendered.serial` a `acquire`.
+- Sin tocar: copia de depth en kl_vulkan (el guest comparte una depth entre stages; el resolve asíncrono la leería
+  ya sobrescrita). Resolución: ya resuelve a la del juego (tamaño del color), no a la del compositor.
+Pendiente: verificar en log `gpu=` ms y `resolves=` vs fps del juego, `raw-fallback`, votos de jitter; si el coste
+sigue alto con GPU compartida, valorar media cadencia del juego o bajar resolución; near real de Batman (0,1?).
+
 ## VPKTAA completo (2026-10-13, sin build aún) — profundidad universal + MV AppSW + reproyección por píxel
 Módulo reutilizable (también para el port Vulkan de Alyx): `klepton/visionos/Sources/VPKTAACore.swift` (solo
 Metal+simd). Adaptador Klepton: `KleptonTAA.swift`. API del core (doc en la cabecera del fichero):
