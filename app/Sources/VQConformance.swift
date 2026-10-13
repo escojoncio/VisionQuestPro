@@ -110,7 +110,8 @@ enum VQConformance {
                 "--deqp-shadercache-filename=\(work.appendingPathComponent("shadercache.bin").path)",
                 "--deqp-log-images=disable",
                 "--deqp-log-shader-sources=disable",
-                "--deqp-quiet",
+                "--deqp-log-decompiled-spirv=disable",
+                "--quiet",
             ]
             lines.append(args.joined(separator: "\t"))
             planned.append((b, qpa, remaining.count))
