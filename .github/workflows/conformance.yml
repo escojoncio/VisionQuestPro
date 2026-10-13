@@ -23,7 +23,7 @@ jobs:
     timeout-minutes: 330
     env:
       CTS_TAG: vulkan-cts-1.4.6.2
-      ANDROID_API: "29"
+      ANDROID_API: "30"   # memfd_create (vktMemoryMapPlacedTests) is API 30; Quest 3 runs API 32
     steps:
       - uses: actions/checkout@v4
         with:
@@ -39,7 +39,8 @@ jobs:
           echo "ANDROID_JAR=$PL/android.jar" >> "$GITHUB_ENV"
           echo "build-tools $BT, platform $PL, NDK ${ANDROID_NDK_LATEST_HOME:-$ANDROID_NDK_HOME}"
 
-      - uses: actions/cache@v4
+      # Restore/save split so a failed build still keeps the sources and the compiler cache.
+      - uses: actions/cache/restore@v4
         id: ctssrc
         with:
           path: cts
@@ -51,10 +52,16 @@ jobs:
           git clone -q --depth 1 --branch "$CTS_TAG" https://github.com/KhronosGroup/VK-GL-CTS cts
           (cd cts && python3 external/fetch_sources.py 2>&1 | tail -40) | tee fetch.log
 
+      - uses: actions/cache/save@v4
+        if: steps.ctssrc.outputs.cache-hit != 'true'
+        with:
+          path: cts
+          key: vkcts-src-${{ env.CTS_TAG }}-v1
+
       - name: Patches for the in-process executable
         run: python3 conformance/vulkan/patch_deqp.py cts
 
-      - uses: actions/cache@v4
+      - uses: actions/cache/restore@v4
         with:
           path: ~/.cache/ccache
           key: vkcts-ccache-${{ env.CTS_TAG }}-${{ github.run_id }}
@@ -77,6 +84,12 @@ jobs:
           cmake --build build --target deqp-vk deqp-vk-data -- -j"$(nproc)" -k 0 2>&1 \
             | grep -v "^\[[0-9]*/[0-9]*\] Building" | tail -400 | tee build.log
           ccache -s | tee -a build.log
+
+      - uses: actions/cache/save@v4
+        if: always()
+        with:
+          path: ~/.cache/ccache
+          key: vkcts-ccache-${{ env.CTS_TAG }}-${{ github.run_id }}
 
       - name: Package VulkanCTS.apk
         run: |
