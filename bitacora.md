@@ -2,6 +2,20 @@
 
 Historial completo de sesiones anteriores: `git log -p bitacora.md` (compactada el 2026-10-13 tras el log 49).
 
+## AC audio (Wwise) — investigación (2026-10-13)
+- Copia del usuario SIN `main.*.obb` (release VRP v207706 no lo trae); los bancos van en `Master.pck` (1,3 GB) en la carpeta obb.
+- libAkSoundEngine 2019.2.13: `CSharp_SetBasePath` (0x5dd60) → low-level IO SetBasePath (0x5c3a8) solo copia la ruta
+  (AK_InvalidParameter si >259); NO comprueba el directorio. Imports de ficheros: fopen/freopen/stat/fstat/mkdir +
+  AAssetManager_open/openDir. «Package path couldn't be set, check paths» es del C# de Ubisoft (string en
+  global-metadata), probablemente al fallar LoadFilePackage("Master.pck") o una comprobación previa; ningún fopen/stat
+  bajo /Android/obb/ falló salvo main.207706 → la ruta base no llega a usarse (Init.bnk se busca relativo en el APK).
+- Para el próximo log: ajuste «Diagnóstico de ficheros» (`vq.fsDiag` → `KL_TRACE_FS=1`, todas las operaciones) y
+  `[asset] AAssetManager_open("…") MISS` capado (kl_ndk.c).
+- Auditoría libc: sin shim (→ «unresolved import» si se llaman): fstatat(64), faccessat, open64, openat64,
+  __openat_2, freopen, readlink(at), mkdirat, rmdir, unlinkat, renameat, statfs64, statvfs64, truncate, chmod,
+  utime(s/nsat), nftw/ftw, glob, creat, remove, pathconf, __realpath_chk, __getcwd_chk, fchdir. Pendiente: shims con
+  mapeo de ruta y conversión de struct (AT_FDCWD Linux −100 vs Darwin −2; flags AT_* distintos).
+
 ## Log 53 (AC Nexus, 2026-10-13) → build siguiente
 - AA auto OK: `vk.msaa detected eye=4x`, VPKTAA off, MSAA 4x conservado; chip máx. MSAA 4x (x8 desactivado).
 - Congelado en `ShaderWarmupManager.WarmUpShaders`: f=808 `Too much geometry to support memoryless…` (16,5 s) → todos
