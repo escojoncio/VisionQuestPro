@@ -1,4 +1,4 @@
-# conformance-openxr - 2f19636499e2fa371135e4a0bbee3ac711d6c6fa - 2026-10-13T21:23:54Z
+# conformance-openxr - 3cb32a5639b08b1c001586cbcf82963df829ea61 - 2026-10-13T21:31:45Z
 
 ## build-xr.log: 36 lines
 ### errors
@@ -37,5 +37,16 @@ C/C++: /home/runner/work/VisionQuestPro/VisionQuestPro/xrcts/src/external/basis_
 C/C++: #pragma GCC diagnostic ignored "-Wclass-memaccess"            
 C/C++:                                ^
 C/C++: 5 warnings generated.
-BUILD SUCCESSFUL in 3m 38s
+BUILD SUCCESSFUL in 3m 40s
 44 actionable tasks: 44 executed
+
+## package-xr.log: 7 lines
+### errors
+### end
+xrcts/src/conformance/build/intermediates/apk/release/conformance-release-unsigned.apk
+     5992  1981-01-01 01:01   lib/arm64-v8a/libVkLayer_xr_runtime_conformance.so
+  1276040  1981-01-01 01:01   lib/arm64-v8a/libXrApiLayer_runtime_conformance.so
+  7613832  1981-01-01 01:01   lib/arm64-v8a/libconformance_test.so
+  1204576  1981-01-01 01:01   lib/arm64-v8a/libopenxr_loader.so
+     5032  1981-01-01 01:01   AndroidManifest.xml
+-rw-r--r-- 1 runner runner 40821926 Oct 13 21:31 OpenXRCTS.apk
