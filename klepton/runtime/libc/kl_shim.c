@@ -2020,8 +2020,43 @@ typedef struct { const char *name; void *fn; } kl_entry;
 #define E(n, f)   { n, (void *)(f) }
 #define KL_FWD(n) { #n, (void *)(n) },
 
+// <fenv.h>. Rounding modes and exception bits are the FPCR/FPSR bit values on both bionic and
+// Darwin arm64 (FE_TONEAREST 0, FE_UPWARD 0x400000, …; FE_INVALID 1 … FE_INEXACT 0x10), so
+// fegetround/fesetround/feraiseexcept forward as they are. The types do not match: bionic's
+// fenv_t is { uint32 control (FPCR), uint32 status (FPSR) } against Darwin's { u64 fpsr, u64 fpcr },
+// and fexcept_t is uint32 against Darwin's unsigned short — the flag calls convert. The env calls
+// (fegetenv/fesetenv/feholdexcept/feupdateenv) are klb_* in kl_libc_slink.c (FPCR/FPSR directly in
+// bionic's layout); FE_DFL_ENV is bionic's data import __fe_dfl_env, here an all-zero bionic fenv_t.
+// bionic's FE_DENORMAL (0x80) has no Darwin bit, so exception masks are cut to FE_ALL_EXCEPT.
+// The Khronos Vulkan CTS sets the rounding mode around its float tests (vktShaderExecutor).
+typedef struct { uint32_t control, status; } kl_bionic_fenv;
+static const kl_bionic_fenv kl_fe_dfl_env = { 0, 0 };
+static int kl_fegetround(void) { return fegetround(); }
+static int kl_fesetround(int r) { return fesetround(r); }
+static int kl_feraiseexcept(int e) { return feraiseexcept(e & FE_ALL_EXCEPT); }
+static int kl_fegetexceptflag(uint32_t *f, int ex) {
+    fexcept_t d = 0;
+    int r = fegetexceptflag(&d, ex & FE_ALL_EXCEPT);
+    if (!r && f) *f = (uint32_t)d;
+    return r;
+}
+static int kl_fesetexceptflag(const uint32_t *f, int ex) {
+    fexcept_t d = f ? (fexcept_t)*f : 0;
+    return fesetexceptflag(&d, ex & FE_ALL_EXCEPT);
+}
+static int kl_feenableexcept(int e) { (void)e; return -1; }   // no FP traps on Apple silicon
+static int kl_fedisableexcept(int e) { (void)e; return 0; }
+static int kl_fegetexcept(void) { return 0; }
+
 static const kl_entry g_shim[] = {
 #include "kl_libc_table.h"
+
+    // <fenv.h> (see kl_bionic_fenv)
+    E("fegetround", kl_fegetround), E("fesetround", kl_fesetround),
+    E("feraiseexcept", kl_feraiseexcept),
+    E("fegetexceptflag", kl_fegetexceptflag), E("fesetexceptflag", kl_fesetexceptflag),
+    E("feenableexcept", kl_feenableexcept), E("fedisableexcept", kl_fedisableexcept),
+    E("fegetexcept", kl_fegetexcept), E("__fe_dfl_env", &kl_fe_dfl_env),
 
     // stdio needing guest-FILE translation
     E("__sF", g_sF),

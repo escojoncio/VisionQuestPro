@@ -49,6 +49,11 @@ tarde está resumido abajo y detallado en git).
 - OpenXR CTS en la app: paquete `org.khronos.openxr.cts` se trata como Vulkan; `KL_INTENT_EXTRAS`
   graphicsPlugin=Vulkan2, args=~[interactive], xmlFilename=openxr_cts.xml (relativo a externalDataPath);
   `Intent.getBooleanExtra` ahora lee los extras de lanzamiento (true/false/1/0). Inmersivo, resultado en el log.
+- Log 56 (1ª sesión CTS): arranca y llega a main(), muere en `called unresolved import 'fesetround'` antes del primer
+  caso (0/0/0). Arreglo: kl_shim.c añade fegetround/fesetround/feraiseexcept/fe(get|set)exceptflag/
+  fe(enable|disable)except/fegetexcept y dato `__fe_dfl_env` (fegetenv/fesetenv/feholdexcept/feupdateenv ya
+  eran klb_* en kl_libc_slink.c). Escáner de APIs: leía tree/lib (VQPrepare borra los ELF) → ahora extrae los .so
+  del APK una vez y cachea `Cache/<j>/apiscan-raw.txt` (líneas L/E/I/W/C, sello tamaño+mtime del APK).
 - Pendiente: primera sesión de Vulkan CTS en el visor (sin probar nada aún en dispositivo); analizar su resumen y
   corregir por grupos; luego OpenXR CTS.
 
