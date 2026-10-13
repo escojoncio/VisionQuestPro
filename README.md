@@ -4,7 +4,7 @@ Runs Quest games on Apple Vision Pro from their own files (APK + data), without 
 
 > [!CAUTION]
 > No support is given for piracy. You are expected to use your own copies of the games, bought on
-> the Meta Quest store and taken from your own headset. Pirated copies are not supported in any
+> the Meta Quest store and taken from your own headset using one of the many tools made for that. Pirated copies are not supported in any
 > way. If you enjoy a game, please support its developers by buying it.
 
 ## No game files
