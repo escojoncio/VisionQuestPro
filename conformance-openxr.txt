@@ -1,4 +1,4 @@
-# conformance-openxr - 68da3eab4c7a58e75912ad89f29dda2edee7cb40 - 2026-10-13T21:50:21Z
+# conformance-openxr - 5183cb98ba6ee625a97a6fe3659b537f7467040c - 2026-10-13T22:01:16Z
 
 ## build-xr.log: 34 lines
 ### errors
@@ -47,4 +47,4 @@ xrcts/src/conformance/build/intermediates/apk/release/conformance-release-unsign
   7613832  1981-01-01 01:01   lib/arm64-v8a/libconformance_test.so
   1204576  1981-01-01 01:01   lib/arm64-v8a/libopenxr_loader.so
      5032  1981-01-01 01:01   AndroidManifest.xml
--rw-r--r-- 1 runner runner 40821926 Oct 13 21:50 OpenXRCTS.apk
+-rw-r--r-- 1 runner runner 40821926 Oct 13 22:01 OpenXRCTS.apk
