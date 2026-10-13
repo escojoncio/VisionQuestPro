@@ -14,6 +14,7 @@
 // dependency, not as a guest that mysteriously fails to render.
 #include <dlfcn.h>
 #include <pthread.h>
+#include <stdatomic.h>
 #include <stdint.h>
 #ifdef __APPLE__
 #include <mach/mach.h>   // vm_read_overwrite — read a guest pointer without faulting (klvk_resolve_cell)
@@ -5573,6 +5574,18 @@ static VkResult VKAPI_CALL klvk_BindImageMemory(VkDevice dev, VkImage img,
 // vkCreateImage does not enforce (a sample count, a usage, a max extent), Unity
 // decides the temp RT is invalid, never registers it, and SetRenderTarget then
 // fails "temporary render texture not found" — the menu-compositing wall.
+// The format-capability queries answer "unsupported" legitimately and often: a game asks a few
+// dozen times, the Khronos CTS asks millions of combinations (log 56: 3.2 M lines, 577 MB). The
+// first 400 refusals are logged one by one, then one line per 100 000.
+static int klvk_imgfmt_log_ok(void) {
+    static _Atomic unsigned n;
+    unsigned k = atomic_fetch_add(&n, 1) + 1;
+    if (k <= 400) return 1;
+    if (k % 100000 == 0)
+        fprintf(stderr, "[TRACE] [imgfmt] %u format queries refused or traced so far (logging 1 in 100000)\n", k);
+    return 0;
+}
+
 static VkResult VKAPI_CALL klvk_GetPhysicalDeviceImageFormatProperties(
         VkPhysicalDevice pd, VkFormat fmt, VkImageType type, VkImageTiling tiling,
         VkImageUsageFlags usage, VkImageCreateFlags flags,
@@ -5583,7 +5596,7 @@ static VkResult VKAPI_CALL klvk_GetPhysicalDeviceImageFormatProperties(
     pd = KLVK_PHYS_OR_SUB(pd, "GetPhysicalDeviceImageFormatProperties");
     VkResult r = real ? real(pd, fmt, type, tiling, usage, flags, out)
                       : VK_ERROR_FORMAT_NOT_SUPPORTED;
-    if (r != VK_SUCCESS || (klvk_trace() && (usage & 0x30u))) {
+    if ((r != VK_SUCCESS || (klvk_trace() && (usage & 0x30u))) && klvk_imgfmt_log_ok()) {
         fprintf(stderr, "[TRACE] [imgfmt] fmt %d type %d tiling %d usage %#x flags %#x -> %d%s\n",
             (int)fmt, (int)type, (int)tiling, usage, flags, (int)r,
             r != VK_SUCCESS ? "  <== UNSUPPORTED" : "");
@@ -5893,7 +5906,7 @@ static VkResult VKAPI_CALL klvk_GetPhysicalDeviceImageFormatProperties2(
             real_gipa(g_instance, "vkGetPhysicalDeviceImageFormatProperties2KHR");
     }
     VkResult r = real ? real(pd, info, props) : VK_ERROR_FORMAT_NOT_SUPPORTED;
-    if (info && (r != VK_SUCCESS || (klvk_trace() && (info->usage & 0x30u))))
+    if (info && (r != VK_SUCCESS || (klvk_trace() && (info->usage & 0x30u))) && klvk_imgfmt_log_ok())
         fprintf(stderr, "[TRACE] [imgfmt2] fmt %d type %d tiling %d usage %#x flags %#x -> %d%s\n",
             (int)info->format, (int)info->type, (int)info->tiling, info->usage,
             info->flags, (int)r, r != VK_SUCCESS ? "  <== UNSUPPORTED" : "");
