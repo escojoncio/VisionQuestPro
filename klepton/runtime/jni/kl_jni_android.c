@@ -346,13 +346,16 @@ static klj_val klj_Activity_getIntent(void *env, void *self, const klj_val *a, i
 // on the other target relies on. An empty-but-present Bundle would be a
 // different claim — "launched with arguments, none of them set" — and this
 // guest distinguishes them ("No extras bundle was present" is its own log line).
+#define KL_LAUNCH_KV_MAX 40
+static klj_kv g_launch_kv[KL_LAUNCH_KV_MAX];   // launch extras, NULL-key terminated
+
 static klj_val klj_Intent_getExtras(void *env, void *self, const klj_val *a, int n) {
     (void)env; (void)self; (void)a; (void)n;
     static void *extras;
     static int   built;
     if (!built) {
         built = 1;
-        static klj_kv kv[6];
+        klj_kv *kv = g_launch_kv;
         int k = 0;
         const struct { const char *env, *key; } want[] = {
             {"KL_SLINK_SARGS",         "sArgs"},
@@ -366,6 +369,21 @@ static klj_val klj_Intent_getExtras(void *env, void *self, const klj_val *a, int
         for (size_t i = 0; i < sizeof want / sizeof want[0]; i++) {
             const char *v = getenv(want[i].env);
             if (v && *v) { kv[k].key = want[i].key; kv[k].val = v; k++; }
+        }
+        // Generic launch extras (what `am start -e key value` would carry), one
+        // "key=value" per line: how the host hands an activity its arguments
+        // (e.g. a conformance runner's command line).
+        const char *gx = getenv("KL_INTENT_EXTRAS");
+        if (gx && *gx) {
+            char *copy = strdup(gx);
+            for (char *line = copy, *next; line && *line && k < KL_LAUNCH_KV_MAX - 2; line = next) {
+                next = strchr(line, '\n');
+                if (next) *next++ = '\0';
+                char *eq = strchr(line, '=');
+                if (!eq || eq == line) continue;
+                *eq = '\0';
+                kv[k].key = line; kv[k].val = eq + 1; k++;
+            }
         }
         // sStartInfo is not an independent value: the shell derives it from
         // sArgs and we are standing in for the shell, so deriving it here is
@@ -583,8 +601,40 @@ static klj_val klj_Intent_getBooleanExtra(void *env, void *self, const klj_val *
     (void)env; (void)self;
     return (klj_val){.j = n > 1 ? (a[1].j & 1) : 0};
 }
+// Launch extra by key (NULL when absent).
+static const char *klj_launch_extra(void *env, void *self, const char *key) {
+    (void)klj_Intent_getExtras(env, self, NULL, 0);   // builds g_launch_kv once
+    if (key)
+        for (int i = 0; i < KL_LAUNCH_KV_MAX && g_launch_kv[i].key; i++)
+            if (!strcmp(g_launch_kv[i].key, key)) return g_launch_kv[i].val;
+    return NULL;
+}
+
+// Intent.getStringArrayExtra(key): the extra's value split at TABs.
+static klj_val klj_Intent_getStringArrayExtra(void *env, void *self, const klj_val *a, int n) {
+    const char *v = klj_launch_extra(env, self, n > 0 ? klj_str(a[0].l) : NULL);
+    if (!v) return (klj_val){.l = NULL};
+    const char *items[128];
+    char *copy = strdup(v);
+    int k = 0;
+    for (char *p = copy, *next; p && k < 128; p = next) {
+        next = strchr(p, '\t');
+        if (next) *next++ = '\0';
+        if (*p) items[k++] = p;
+    }
+    void *arr = kl_jni_new_string_array(items, k);
+    free(copy);   // kl_jni_new_string_array copies each item
+    return (klj_val){.l = arr};
+}
+
+// Intent.getStringExtra(key): the same launch extras getExtras() carries.
 static klj_val klj_Intent_getStringExtra(void *env, void *self, const klj_val *a, int n) {
-    (void)env; (void)self; (void)a; (void)n;
+    (void)klj_Intent_getExtras(env, self, NULL, 0);   // builds g_launch_kv once
+    const char *key = n > 0 ? klj_str(a[0].l) : NULL;
+    if (key)
+        for (int i = 0; i < KL_LAUNCH_KV_MAX && g_launch_kv[i].key; i++)
+            if (!strcmp(g_launch_kv[i].key, key))
+                return (klj_val){.l = kl_jni_new_string(g_launch_kv[i].val)};
     return (klj_val){.l = NULL};
 }
 
@@ -1669,6 +1719,8 @@ const klj_binding klj_bind_android[] = {
      "(Ljava/lang/String;Ljava/lang/String;)Z", klj_false},
     {"android/content/Intent", "getStringExtra",  "(Ljava/lang/String;)Ljava/lang/String;",
      klj_Intent_getStringExtra},
+    {"android/content/Intent", "getStringArrayExtra", "(Ljava/lang/String;)[Ljava/lang/String;",
+     klj_Intent_getStringArrayExtra},
     {"android/content/Intent", "getComponent",    "()Landroid/content/ComponentName;",
      klj_Intent_getComponent},
     {"android/content/ComponentName", "getClassName",   "()Ljava/lang/String;",

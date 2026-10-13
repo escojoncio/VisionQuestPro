@@ -2,6 +2,18 @@
 
 Historial completo de sesiones anteriores: `git log -p bitacora.md` (compactada el 2026-10-13 tras el log 49).
 
+## Conformidad (en curso, 2026-10-13, sin build)
+- Motor por juego: `VQGames.swift` `guestKind` (unity|ue4|native) + `entryLib` (libmain / libUE4|libUnreal / `android.app.lib_name`)
+  + `nativeFuncName` (`android.app.func_name`); `VQLaunch` exporta `KL_GUEST_KIND`/`KL_GUEST_ENTRY`/`KL_GUEST_FUNC`;
+  `kl_app.c` `kl_app_configure_game` los usa (antes siempre Unity); `kl_native.c` entrada = `KL_GUEST_FUNC` o
+  `ANativeActivity_onCreate`. Quitado el bloqueo «solo Unity» (queda el de «solo Vulkan»: GLES pendiente).
+- `kl_jni_android.c`: extras genéricos `KL_INTENT_EXTRAS` ("clave=valor" por línea) en `getExtras`, `getStringExtra`
+  real y `getStringArrayExtra` (valor partido por TAB).
+- Siguiente: workflow `conformance.yml` (Linux+NDK): VK-GL-CTS `vulkan-cts-1.4.6.2` vía `scripts/android/build_apk.py`
+  (NativeActivity lib `deqp`, func `createTestActivity`, extra `cmdLine`) y OpenXR-CTS `openxr-cts-1.1.58.0` (gradle,
+  NDK 23.2, lib `conformance_test`, extras `args` array/`graphicsPlugin`/`xmlFilename`); release `conformance`.
+  Luego modo «Conformidad» en la app (descarga, lanza, resume .qpa/.xml en el log; /sdcard = carpeta de partidas del juego).
+
 ## AA automático por juego + VPKTAA pt-port v1 + SDK Quest (2026-10-13, build pendiente de log)
 - **AA por juego** (`app/Sources/VQLaunch.swift` `VQGameAA`, `VQLauncher.swift` `VQGameSettingsView`, botón «Ajustes del juego»
   en cada tarjeta; `VQGames.swift` `aaKey` = paquete o carpeta): `KL_AA_MODE` auto|vpktaa|msaa|off (def. auto), `VPVK_MSAA`

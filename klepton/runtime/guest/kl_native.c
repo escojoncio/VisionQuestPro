@@ -538,7 +538,10 @@ int kl_native_create(FILE *out) {
     // <dataDir> (kl_guest_extstorage_map), so /sdcard/files == getFilesDir ==
     // <dataDir>/files, and klb_getcwd hands the same short spelling back after the
     // game chdir's into it. Every path the game builds then stays well under 128.
-    return kl_na_create(g_img, "ANativeActivity_onCreate", "/sdcard/files", out);
+    // android.app.func_name (manifest meta-data, via the launcher) renames the
+    // entry point; default as on Android.
+    const char *fn = getenv("KL_GUEST_FUNC");
+    return kl_na_create(g_img, fn && *fn ? fn : "ANativeActivity_onCreate", "/sdcard/files", out);
 }
 
 void kl_native_start(FILE *out) { kl_na_start(out); }
