@@ -1,4 +1,4 @@
-# conformance - b5170567c25acb4a61f241bd835dccedb876c74c - 2026-10-13T21:11:26Z
+# conformance - 6dbfc44d6da383d3aeeaf835be7af4ed92e215cc - 2026-10-13T21:43:24Z
 
 ## fetch.log: 40 lines
 ### errors
@@ -80,15 +80,15 @@ CMake Deprecation Warning at external/jsoncpp/CMakeLists.txt:17 (cmake_minimum_r
 -- Performing Test HAVE_DECIMAL_POINT - Success
 -- DEQP_TARGET_NAME        = Android
 -- DEQP_SUPPORT_GLES1      = ON
--- DEQP_GLES1_LIBRARIES    = /usr/local/lib/android/sdk/ndk/30.0.16248370/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/aarch64-linux-android/29/libGLESv1_CM.so
--- DEQP_GLES2_LIBRARIES    = /usr/local/lib/android/sdk/ndk/30.0.16248370/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/aarch64-linux-android/29/libGLESv2.so
+-- DEQP_GLES1_LIBRARIES    = /usr/local/lib/android/sdk/ndk/30.0.16248370/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/aarch64-linux-android/30/libGLESv1_CM.so
+-- DEQP_GLES2_LIBRARIES    = /usr/local/lib/android/sdk/ndk/30.0.16248370/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/aarch64-linux-android/30/libGLESv2.so
 -- DEQP_GLES3_LIBRARIES    = 
 -- DEQP_GLES31_LIBRARIES   = 
 -- DEQP_GLES32_LIBRARIES   = 
 -- DEQP_SUPPORT_VG         = OFF
 -- DEQP_VG_LIBRARIES       = 
 -- DEQP_EGL_LIBRARIES      = 
--- DEQP_PLATFORM_LIBRARIES = xscore;/usr/local/lib/android/sdk/ndk/30.0.16248370/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/aarch64-linux-android/29/liblog.so;/usr/local/lib/android/sdk/ndk/30.0.16248370/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/aarch64-linux-android/29/libandroid.so
+-- DEQP_PLATFORM_LIBRARIES = xscore;/usr/local/lib/android/sdk/ndk/30.0.16248370/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/aarch64-linux-android/30/liblog.so;/usr/local/lib/android/sdk/ndk/30.0.16248370/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/aarch64-linux-android/30/libandroid.so
 -- DEQP_SUPPORT_DRM        = OFF
 -- DEQP_ANDROID_BUILD      = EXE
 -- Unsupported OS for Video Tests, supported: Windows, Unix. Disabling Video tests from the build.
@@ -104,43 +104,32 @@ This warning is for project developers.  Use -Wno-dev to suppress it.
 -- Looking for C++ include /home/runner/work/VisionQuestPro/VisionQuestPro/cts/external/renderdoc/src/renderdoc_app.h
 -- Looking for C++ include /home/runner/work/VisionQuestPro/VisionQuestPro/cts/external/renderdoc/src/renderdoc_app.h - found
 -- Vulkan Video Tests: DISABLED (tests will report NotSupported)
--- Configuring done (18.4s)
+-- Configuring done (11.5s)
 -- Generating done (0.7s)
 -- Build files have been written to: /home/runner/work/VisionQuestPro/VisionQuestPro/build
 
-## build.log: 96 lines
+## build.log: 102 lines
 ### errors
-35-[735/1424] Linking CXX static library external/vulkancts/modules/vulkan/pipeline/libdeqp-vk-pipeline-util.a
-36-[760/1424] Linking CXX static library external/vulkancts/modules/vulkan/shaderexecutor/libdeqp-vk-shaderexecutor.a
-37:FAILED: [code=1] external/vulkancts/modules/vulkan/memory/CMakeFiles/deqp-vk-memory.dir/vktMemoryMapPlacedTests.cpp.o 
-38-/usr/bin/ccache /usr/local/lib/android/sdk/ndk/30.0.16248370/toolchains/llvm/prebuilt/linux-x86_64/bin/clang++ --target=aarch64-none-linux-android29 --sysroot=/usr/local/lib/android/sdk/ndk/30.0.16248370/toolchains/llvm/prebuilt/linux-x86_64/sysroot -DCTS_USES_VULKAN -DDEQP_SUPPORT_DRM=0 -DDEQP_SUPPORT_GLES1=1 -DDEQP_TARGET_NAME=\"Android\" -DDE_ANDROID_API=29 -DDE_ASSERT_FAILURE_CALLBACK -DDE_COMPILER=DE_COMPILER_CLANG -DDE_CPU=DE_CPU_ARM_64 -DDE_FENV_ACCESS_ON="_Pragma(\"STDC FENV_ACCESS ON\")" -DDE_MINGW=0 -DDE_OS=DE_OS_ANDROID -DDE_PTR_SIZE=8 -I/home/runner/work/VisionQuestPro/VisionQuestPro/cts/framework/delibs/debase -I/home/runner/work/VisionQuestPro/VisionQuestPro/cts/framework/delibs/decpp -I/home/runner/work/VisionQuestPro/VisionQuestPro/cts/framework/delibs/depool -I/home/runner/work/VisionQuestPro/VisionQuestPro/cts/framework/delibs/dethread -I/home/runner/work/VisionQuestPro/VisionQuestPro/cts/framework/delibs/deutil -I/home/runner/work/VisionQuestPro/VisionQuestPro/cts/framework/delibs/destream -I/home/runner/work/VisionQuestPro/VisionQuestPro/cts/execserver -I/home/runner/work/VisionQuestPro/VisionQuestPro/cts/external/spirv-headers/src/include -I/home/runner/work/VisionQuestPro/VisionQuestPro/cts/external/amber -I/home/runner/work/VisionQuestPro/VisionQuestPro/cts/external/jsoncpp/src/include -I/home/runner/work/VisionQuestPro/VisionQuestPro/cts/external/renderdoc/src -I/home/runner/work/VisionQuestPro/VisionQuestPro/cts/external/libpng/src -I/home/runner/work/VisionQuestPro/VisionQuestPro/cts/framework/common -I/home/runner/work/VisionQuestPro/VisionQuestPro/cts/framework/qphelper -I/home/runner/work/VisionQuestPro/VisionQuestPro/cts/framework/opengl -I/home/runner/work/VisionQuestPro/VisionQuestPro/cts/framework/opengl/wrapper -I/home/runner/work/VisionQuestPro/VisionQuestPro/cts/framework/referencerenderer -I/home/runner/work/VisionQuestPro/VisionQuestPro/cts/framework/opengl/simplereference -I/home/runner/work/VisionQuestPro/VisionQuestPro/cts/framework/randomshaders -I/home/runner/work/VisionQuestPro/VisionQuestPro/cts/framework/egl -I/home/runner/work/VisionQuestPro/VisionQuestPro/cts/framework/egl/wrapper -I/home/runner/work/VisionQuestPro/VisionQuestPro/cts/framework/xexml -I/home/runner/work/VisionQuestPro/VisionQuestPro/cts/external/vulkancts/framework/vulkan -I/home/runner/work/VisionQuestPro/VisionQuestPro/cts/external/vulkancts/modules/vulkan/memory/.. -I/home/runner/work/VisionQuestPro/VisionQuestPro/cts/external/vulkancts/modules/vulkan/memory/../util -I/home/runner/work/VisionQuestPro/VisionQuestPro/build/external/vulkancts/framework/vulkan -I/home/runner/work/VisionQuestPro/VisionQuestPro/cts/external/glslang/src -I/home/runner/work/VisionQuestPro/VisionQuestPro/cts/external/spirv-tools/src/include -I/home/runner/work/VisionQuestPro/VisionQuestPro/cts/external/spirv-tools/src/external/include -I/home/runner/work/VisionQuestPro/VisionQuestPro/cts/external/vulkancts/framework/vulkan/generated/vulkan -I/home/runner/work/VisionQuestPro/VisionQuestPro/cts/external/glslang/src/glslang/.. -I/home/runner/work/VisionQuestPro/VisionQuestPro/build/include -I/home/runner/work/VisionQuestPro/VisionQuestPro/cts/external/glslang/src/glslang/../External -I/home/runner/work/VisionQuestPro/VisionQuestPro/cts/external/spirv-tools/../spirv-headers/src/include -I/home/runner/work/VisionQuestPro/VisionQuestPro/cts/external/glslang/src/SPIRV/.. -I/home/runner/work/VisionQuestPro/VisionQuestPro/cts/external/glslang/src/SPIRV/../External -Wall -Wextra -Wno-long-long -Wshadow -Wundef -Wconversion -Wno-sign-conversion -Wno-missing-field-initializers -g -DANDROID -fdata-sections -ffunction-sections -funwind-tables -fstack-protector-strong -no-canonical-prefixes -D_FORTIFY_SOURCE=2 -Wformat -Werror=format-security -frtti -fexceptions  -fwrapv -fvisibility=hidden -fvisibility-inlines-hidden -O3 -DNDEBUG  -std=gnu++17 -fPIC -pthread -MD -MT external/vulkancts/modules/vulkan/memory/CMakeFiles/deqp-vk-memory.dir/vktMemoryMapPlacedTests.cpp.o -MF external/vulkancts/modules/vulkan/memory/CMakeFiles/deqp-vk-memory.dir/vktMemoryMapPlacedTests.cpp.o.d -o external/vulkancts/modules/vulkan/memory/CMakeFiles/deqp-vk-memory.dir/vktMemoryMapPlacedTests.cpp.o -c /home/runner/work/VisionQuestPro/VisionQuestPro/cts/external/vulkancts/modules/vulkan/memory/vktMemoryMapPlacedTests.cpp
-39:/home/runner/work/VisionQuestPro/VisionQuestPro/cts/external/vulkancts/modules/vulkan/memory/vktMemoryMapPlacedTests.cpp:171:21: error: use of undeclared identifier 'memfd_create'
-40-  171 |         int memfd = memfd_create("mapplaced-test", MFD_CLOEXEC);
-41-      |                     ^~~~~~~~~~~~
-42-1 error generated.
-43-[944/1424] Linking CXX static library external/vulkancts/modules/vulkan/draw/libdeqp-vk-draw.a
-44-[1050/1424] Linking CXX static library external/vulkancts/modules/vulkan/synchronization/libdeqp-vk-synchronization.a
-45-[1149/1424] Linking CXX static library external/vulkancts/modules/vulkan/ycbcr/libdeqp-vk-ycbcr-util.a
 ### end
 [15/1424] Linking C static library framework/delibs/debase/libdebase.a
-[25/1424] Linking C static library framework/delibs/depool/libdepool.a
-[36/1424] Linking C static library framework/delibs/dethread/libdethread.a
-[39/1424] Generate grammar tables
+[24/1424] Linking C static library framework/delibs/depool/libdepool.a
+[37/1424] Linking C static library framework/delibs/dethread/libdethread.a
+[40/1424] Generate grammar tables
 [61/1424] Generate language specific header for DebugInfo.
 [62/1424] Generate language specific header for OpenCLDebugInfo100.
 [63/1424] Generate language specific header for NonSemanticShaderDebugInfo100.
 [64/1424] Generate tables based on the SPIR-V XML registry.
 [65/1424] Linking C static library framework/delibs/deutil/libdeutil.a
-[95/1424] Linking C static library external/libpng/libpng.a
-[96/1424] Generating qpReleaseInfo.inl
-[97/1424] Update build-version.inc in the SPIRV-Tools build directory (if necessary).
+[94/1424] Generating qpReleaseInfo.inl
+[97/1424] Linking C static library external/libpng/libpng.a
+[98/1424] Update build-version.inc in the SPIRV-Tools build directory (if necessary).
 [100/1424] Linking CXX static library framework/delibs/decpp/libdecpp.a
 [194/1424] Linking CXX static library execserver/libxscore.a
 [195/1424] Linking C static library framework/qphelper/libqphelper.a
 [249/1424] Linking CXX static library framework/xexml/libxexml.a
 [250/1424] Linking CXX static library external/spirv-tools/spirv-tools/source/libSPIRV-Tools.a
 [372/1424] Linking CXX static library framework/common/libtcutil.a
-[397/1424] Linking CXX static library framework/opengl/wrapper/libglwrapper.a
+[396/1424] Linking CXX static library framework/opengl/wrapper/libglwrapper.a
 [399/1424] Linking CXX static library external/spirv-tools/spirv-tools/source/opt/libSPIRV-Tools-opt.a
 [447/1424] Update vk-wrapper files in the build directory
 [448/1424] Linking CXX static library framework/opengl/libglutil.a
@@ -148,25 +137,19 @@ This warning is for project developers.  Use -Wno-dev to suppress it.
 [492/1424] Linking CXX static library external/glslang/src/glslang/libglslang.a
 [564/1424] Linking CXX static library external/amber/src/src/vulkan/libamberenginevulkan.a
 [565/1424] Linking CXX static library framework/referencerenderer/libreferencerenderer.a
-[570/1424] Linking CXX static library external/vulkancts/framework/vulkan/libvkutilnoshader.a
-[571/1424] Linking CXX static library external/vulkancts/framework/vulkan/libvkutil.a
-[589/1424] Running utility command for deqp-vk-amber-data
+[569/1424] Linking CXX static library external/vulkancts/framework/vulkan/libvkutilnoshader.a
+[570/1424] Linking CXX static library external/vulkancts/framework/vulkan/libvkutil.a
 [590/1424] Linking CXX static library external/amber/src/src/libamber.a
+[591/1424] Running utility command for deqp-vk-amber-data
 [631/1424] Linking CXX static library external/vulkancts/modules/vulkan/image/libdeqp-vk-image-util.a
 [653/1424] Linking CXX static library external/vulkancts/modules/vulkan/util/libdeqp-vk-util.a
 [675/1424] Linking CXX static library framework/egl/wrapper/libeglwrapper.a
 [678/1424] Running utility command for deqp-vk-data
 [735/1424] Linking CXX static library external/vulkancts/modules/vulkan/pipeline/libdeqp-vk-pipeline-util.a
 [760/1424] Linking CXX static library external/vulkancts/modules/vulkan/shaderexecutor/libdeqp-vk-shaderexecutor.a
-FAILED: [code=1] external/vulkancts/modules/vulkan/memory/CMakeFiles/deqp-vk-memory.dir/vktMemoryMapPlacedTests.cpp.o 
-/usr/bin/ccache /usr/local/lib/android/sdk/ndk/30.0.16248370/toolchains/llvm/prebuilt/linux-x86_64/bin/clang++ --target=aarch64-none-linux-android29 --sysroot=/usr/local/lib/android/sdk/ndk/30.0.16248370/toolchains/llvm/prebuilt/linux-x86_64/sysroot -DCTS_USES_VULKAN -DDEQP_SUPPORT_DRM=0 -DDEQP_SUPPORT_GLES1=1 -DDEQP_TARGET_NAME=\"Android\" -DDE_ANDROID_API=29 -DDE_ASSERT_FAILURE_CALLBACK -DDE_COMPILER=DE_COMPILER_CLANG -DDE_CPU=DE_CPU_ARM_64 -DDE_FENV_ACCESS_ON="_Pragma(\"STDC FENV_ACCESS ON\")" -DDE_MINGW=0 -DDE_OS=DE_OS_ANDROID -DDE_PTR_SIZE=8 -I/home/runner/work/VisionQuestPro/VisionQuestPro/cts/framework/delibs/debase -I/home/runner/work/VisionQuestPro/VisionQuestPro/cts/framework/delibs/decpp -I/home/runner/work/VisionQuestPro/VisionQuestPro/cts/framework/delibs/depool -I/home/runner/work/VisionQuestPro/VisionQuestPro/cts/framework/delibs/dethread -I/home/runner/work/VisionQuestPro/VisionQuestPro/cts/framework/delibs/deutil -I/home/runner/work/VisionQuestPro/VisionQuestPro/cts/framework/delibs/destream -I/home/runner/work/VisionQuestPro/VisionQuestPro/cts/execserver -I/home/runner/work/VisionQuestPro/VisionQuestPro/cts/external/spirv-headers/src/include -I/home/runner/work/VisionQuestPro/VisionQuestPro/cts/external/amber -I/home/runner/work/VisionQuestPro/VisionQuestPro/cts/external/jsoncpp/src/include -I/home/runner/work/VisionQuestPro/VisionQuestPro/cts/external/renderdoc/src -I/home/runner/work/VisionQuestPro/VisionQuestPro/cts/external/libpng/src -I/home/runner/work/VisionQuestPro/VisionQuestPro/cts/framework/common -I/home/runner/work/VisionQuestPro/VisionQuestPro/cts/framework/qphelper -I/home/runner/work/VisionQuestPro/VisionQuestPro/cts/framework/opengl -I/home/runner/work/VisionQuestPro/VisionQuestPro/cts/framework/opengl/wrapper -I/home/runner/work/VisionQuestPro/VisionQuestPro/cts/framework/referencerenderer -I/home/runner/work/VisionQuestPro/VisionQuestPro/cts/framework/opengl/simplereference -I/home/runner/work/VisionQuestPro/VisionQuestPro/cts/framework/randomshaders -I/home/runner/work/VisionQuestPro/VisionQuestPro/cts/framework/egl -I/home/runner/work/VisionQuestPro/VisionQuestPro/cts/framework/egl/wrapper -I/home/runner/work/VisionQuestPro/VisionQuestPro/cts/framework/xexml -I/home/runner/work/VisionQuestPro/VisionQuestPro/cts/external/vulkancts/framework/vulkan -I/home/runner/work/VisionQuestPro/VisionQuestPro/cts/external/vulkancts/modules/vulkan/memory/.. -I/home/runner/work/VisionQuestPro/VisionQuestPro/cts/external/vulkancts/modules/vulkan/memory/../util -I/home/runner/work/VisionQuestPro/VisionQuestPro/build/external/vulkancts/framework/vulkan -I/home/runner/work/VisionQuestPro/VisionQuestPro/cts/external/glslang/src -I/home/runner/work/VisionQuestPro/VisionQuestPro/cts/external/spirv-tools/src/include -I/home/runner/work/VisionQuestPro/VisionQuestPro/cts/external/spirv-tools/src/external/include -I/home/runner/work/VisionQuestPro/VisionQuestPro/cts/external/vulkancts/framework/vulkan/generated/vulkan -I/home/runner/work/VisionQuestPro/VisionQuestPro/cts/external/glslang/src/glslang/.. -I/home/runner/work/VisionQuestPro/VisionQuestPro/build/include -I/home/runner/work/VisionQuestPro/VisionQuestPro/cts/external/glslang/src/glslang/../External -I/home/runner/work/VisionQuestPro/VisionQuestPro/cts/external/spirv-tools/../spirv-headers/src/include -I/home/runner/work/VisionQuestPro/VisionQuestPro/cts/external/glslang/src/SPIRV/.. -I/home/runner/work/VisionQuestPro/VisionQuestPro/cts/external/glslang/src/SPIRV/../External -Wall -Wextra -Wno-long-long -Wshadow -Wundef -Wconversion -Wno-sign-conversion -Wno-missing-field-initializers -g -DANDROID -fdata-sections -ffunction-sections -funwind-tables -fstack-protector-strong -no-canonical-prefixes -D_FORTIFY_SOURCE=2 -Wformat -Werror=format-security -frtti -fexceptions  -fwrapv -fvisibility=hidden -fvisibility-inlines-hidden -O3 -DNDEBUG  -std=gnu++17 -fPIC -pthread -MD -MT external/vulkancts/modules/vulkan/memory/CMakeFiles/deqp-vk-memory.dir/vktMemoryMapPlacedTests.cpp.o -MF external/vulkancts/modules/vulkan/memory/CMakeFiles/deqp-vk-memory.dir/vktMemoryMapPlacedTests.cpp.o.d -o external/vulkancts/modules/vulkan/memory/CMakeFiles/deqp-vk-memory.dir/vktMemoryMapPlacedTests.cpp.o -c /home/runner/work/VisionQuestPro/VisionQuestPro/cts/external/vulkancts/modules/vulkan/memory/vktMemoryMapPlacedTests.cpp
-/home/runner/work/VisionQuestPro/VisionQuestPro/cts/external/vulkancts/modules/vulkan/memory/vktMemoryMapPlacedTests.cpp:171:21: error: use of undeclared identifier 'memfd_create'
-  171 |         int memfd = memfd_create("mapplaced-test", MFD_CLOEXEC);
-      |                     ^~~~~~~~~~~~
-1 error generated.
 [944/1424] Linking CXX static library external/vulkancts/modules/vulkan/draw/libdeqp-vk-draw.a
 [1050/1424] Linking CXX static library external/vulkancts/modules/vulkan/synchronization/libdeqp-vk-synchronization.a
-[1149/1424] Linking CXX static library external/vulkancts/modules/vulkan/ycbcr/libdeqp-vk-ycbcr-util.a
+[1150/1424] Linking CXX static library external/vulkancts/modules/vulkan/ycbcr/libdeqp-vk-ycbcr-util.a
 [1192/1424] Linking CXX static library external/vulkancts/modules/vulkan/amber/libdeqp-vk-amber.a
 [1352/1424] Linking CXX static library framework/egl/libeglutil.a
 [1369/1424] Linking CXX static library external/vulkancts/modules/vulkan/api/libdeqp-vk-api.a
@@ -174,47 +157,65 @@ FAILED: [code=1] external/vulkancts/modules/vulkan/memory/CMakeFiles/deqp-vk-mem
 [1371/1424] Linking CXX static library external/vulkancts/modules/vulkan/binding_model/libdeqp-vk-binding-model.a
 [1372/1424] Linking CXX static library external/vulkancts/modules/vulkan/spirv_assembly/libdeqp-vk-spirv-assembly.a
 [1373/1424] Linking CXX static library external/vulkancts/modules/vulkan/shaderrender/libdeqp-vk-shaderrender.a
-[1374/1424] Linking CXX static library external/vulkancts/modules/vulkan/ubo/libdeqp-vk-ubo.a
-[1375/1424] Linking CXX static library external/vulkancts/modules/vulkan/dynamic_state/libdeqp-vk-dynamic-state.a
-[1376/1424] Linking CXX static library external/vulkancts/modules/vulkan/ssbo/libdeqp-vk-ssbo.a
-[1377/1424] Linking CXX static library external/vulkancts/modules/vulkan/query_pool/libdeqp-vk-query-pool.a
-[1378/1424] Linking CXX static library external/vulkancts/modules/vulkan/conditional_rendering/libdeqp-vk-conditional-rendering.a
-[1379/1424] Linking CXX static library external/vulkancts/modules/vulkan/device_group/libdeqp-vk-device-group.a
-[1380/1424] Linking CXX static library external/vulkancts/modules/vulkan/compute/libdeqp-vk-compute.a
-[1381/1424] Linking CXX static library external/vulkancts/modules/vulkan/image/libdeqp-vk-image.a
-[1382/1424] Linking CXX static library external/vulkancts/modules/vulkan/image_processing/libdeqp-vk-image-processing.a
-[1383/1424] Linking CXX static library external/vulkancts/modules/vulkan/wsi/libdeqp-vk-wsi.a
-[1384/1424] Linking CXX static library external/vulkancts/modules/vulkan/sparse_resources/libdeqp-vk-sparse-resources.a
-[1385/1424] Linking CXX static library external/vulkancts/modules/vulkan/tessellation/libdeqp-vk-tessellation.a
-[1386/1424] Linking CXX static library external/vulkancts/modules/vulkan/rasterization/libdeqp-vk-rasterization.a
-[1387/1424] Linking CXX static library external/vulkancts/modules/vulkan/clipping/libdeqp-vk-clipping.a
-[1388/1424] Linking CXX static library external/vulkancts/modules/vulkan/fragment_ops/libdeqp-vk-fragment-ops.a
-[1389/1424] Linking CXX static library external/vulkancts/modules/vulkan/geometry/libdeqp-vk-geometry.a
-[1390/1424] Linking CXX static library external/vulkancts/modules/vulkan/texture/libdeqp-vk-texture.a
-[1391/1424] Linking CXX static library external/vulkancts/modules/vulkan/robustness/libdeqp-vk-robustness.a
-[1392/1424] Linking CXX static library external/vulkancts/modules/vulkan/renderpass/libdeqp-vk-render-pass.a
-[1393/1424] Linking CXX static library external/vulkancts/modules/vulkan/multiview/libdeqp-vk-multiview.a
-[1394/1424] Linking CXX static library external/vulkancts/modules/vulkan/subgroups/libdeqp-vk-subgroups.a
-[1395/1424] Linking CXX static library external/vulkancts/modules/vulkan/ycbcr/libdeqp-vk-ycbcr.a
-[1396/1424] Linking CXX static library external/vulkancts/modules/vulkan/protected_memory/libdeqp-vk-protected-memory.a
-[1397/1424] Linking CXX static library external/vulkancts/modules/vulkan/memory_model/libdeqp-vk-memory-model.a
-[1398/1424] Linking CXX static library external/vulkancts/modules/vulkan/transform_feedback/libdeqp-vk-transform-feedback.a
-[1399/1424] Linking CXX static library external/vulkancts/modules/vulkan/imageless_framebuffer/libdeqp-vk-imageless-framebuffer.a
-[1400/1424] Linking CXX static library external/vulkancts/modules/vulkan/descriptor_indexing/libdeqp-vk-descriptor-indexing.a
-[1401/1424] Linking CXX static library external/vulkancts/modules/vulkan/fragment_shader_interlock/libdeqp-vk-fragment-shader-interlock.a
-[1402/1424] Linking CXX static library external/vulkancts/modules/vulkan/modifiers/libdeqp-vk-modifiers.a
-[1403/1424] Linking CXX static library external/vulkancts/modules/vulkan/ray_tracing/libdeqp-vk-ray-tracing.a
-[1404/1424] Linking CXX static library external/vulkancts/modules/vulkan/ray_query/libdeqp-vk-ray-query.a
-[1405/1424] Linking CXX static library external/vulkancts/modules/vulkan/postmortem/libdeqp-vk-postmortem.a
-[1406/1424] Linking CXX static library external/vulkancts/modules/vulkan/fragment_shading_rate/libdeqp-vk-fragment-shading-rate.a
-[1407/1424] Linking CXX static library external/vulkancts/modules/vulkan/reconvergence/libdeqp-vk-reconvergence.a
-[1408/1424] Linking CXX static library external/vulkancts/modules/vulkan/mesh_shader/libdeqp-vk-mesh-shader.a
-[1409/1424] Linking CXX static library external/vulkancts/modules/vulkan/fragment_shading_barycentric/libdeqp-vk-fragment-shading-barycentric.a
-[1410/1424] Linking CXX static library external/vulkancts/modules/vulkan/video/libdeqp-vk-video.a
-[1411/1424] Linking CXX static library external/vulkancts/modules/vulkan/shader_object/libdeqp-vk-shader-object.a
-[1412/1424] Linking CXX static library external/vulkancts/modules/vulkan/device_generated_commands/libdeqp-vk-dgc.a
-[1413/1424] Linking CXX static library external/vulkancts/modules/vulkan/cooperative_vector/libdeqp-vk-cooperative_vector.a
-[1414/1424] Linking CXX static library external/vulkancts/modules/vulkan/tensor/libdeqp-vk-tensor.a
-[1416/1424] Linking CXX static library external/vulkancts/modules/vulkan/data_graph/libdeqp-vk-data-graph.a
+[1374/1424] Linking CXX static library external/vulkancts/modules/vulkan/memory/libdeqp-vk-memory.a
+[1375/1424] Linking CXX static library external/vulkancts/modules/vulkan/ubo/libdeqp-vk-ubo.a
+[1376/1424] Linking CXX static library external/vulkancts/modules/vulkan/dynamic_state/libdeqp-vk-dynamic-state.a
+[1377/1424] Linking CXX static library external/vulkancts/modules/vulkan/ssbo/libdeqp-vk-ssbo.a
+[1378/1424] Linking CXX static library external/vulkancts/modules/vulkan/query_pool/libdeqp-vk-query-pool.a
+[1379/1424] Linking CXX static library external/vulkancts/modules/vulkan/conditional_rendering/libdeqp-vk-conditional-rendering.a
+[1380/1424] Linking CXX static library external/vulkancts/modules/vulkan/device_group/libdeqp-vk-device-group.a
+[1381/1424] Linking CXX static library external/vulkancts/modules/vulkan/compute/libdeqp-vk-compute.a
+[1382/1424] Linking CXX static library external/vulkancts/modules/vulkan/image/libdeqp-vk-image.a
+[1383/1424] Linking CXX static library external/vulkancts/modules/vulkan/image_processing/libdeqp-vk-image-processing.a
+[1384/1424] Linking CXX static library external/vulkancts/modules/vulkan/wsi/libdeqp-vk-wsi.a
+[1385/1424] Linking CXX static library external/vulkancts/modules/vulkan/sparse_resources/libdeqp-vk-sparse-resources.a
+[1386/1424] Linking CXX static library external/vulkancts/modules/vulkan/tessellation/libdeqp-vk-tessellation.a
+[1387/1424] Linking CXX static library external/vulkancts/modules/vulkan/rasterization/libdeqp-vk-rasterization.a
+[1388/1424] Linking CXX static library external/vulkancts/modules/vulkan/clipping/libdeqp-vk-clipping.a
+[1389/1424] Linking CXX static library external/vulkancts/modules/vulkan/fragment_ops/libdeqp-vk-fragment-ops.a
+[1390/1424] Linking CXX static library external/vulkancts/modules/vulkan/geometry/libdeqp-vk-geometry.a
+[1391/1424] Linking CXX static library external/vulkancts/modules/vulkan/texture/libdeqp-vk-texture.a
+[1392/1424] Linking CXX static library external/vulkancts/modules/vulkan/robustness/libdeqp-vk-robustness.a
+[1393/1424] Linking CXX static library external/vulkancts/modules/vulkan/renderpass/libdeqp-vk-render-pass.a
+[1394/1424] Linking CXX static library external/vulkancts/modules/vulkan/multiview/libdeqp-vk-multiview.a
+[1395/1424] Linking CXX static library external/vulkancts/modules/vulkan/subgroups/libdeqp-vk-subgroups.a
+[1396/1424] Linking CXX static library external/vulkancts/modules/vulkan/ycbcr/libdeqp-vk-ycbcr.a
+[1397/1424] Linking CXX static library external/vulkancts/modules/vulkan/protected_memory/libdeqp-vk-protected-memory.a
+[1398/1424] Linking CXX static library external/vulkancts/modules/vulkan/memory_model/libdeqp-vk-memory-model.a
+[1399/1424] Linking CXX static library external/vulkancts/modules/vulkan/transform_feedback/libdeqp-vk-transform-feedback.a
+[1400/1424] Linking CXX static library external/vulkancts/modules/vulkan/imageless_framebuffer/libdeqp-vk-imageless-framebuffer.a
+[1401/1424] Linking CXX static library external/vulkancts/modules/vulkan/descriptor_indexing/libdeqp-vk-descriptor-indexing.a
+[1402/1424] Linking CXX static library external/vulkancts/modules/vulkan/fragment_shader_interlock/libdeqp-vk-fragment-shader-interlock.a
+[1403/1424] Linking CXX static library external/vulkancts/modules/vulkan/modifiers/libdeqp-vk-modifiers.a
+[1404/1424] Linking CXX static library external/vulkancts/modules/vulkan/ray_tracing/libdeqp-vk-ray-tracing.a
+[1405/1424] Linking CXX static library external/vulkancts/modules/vulkan/ray_query/libdeqp-vk-ray-query.a
+[1406/1424] Linking CXX static library external/vulkancts/modules/vulkan/postmortem/libdeqp-vk-postmortem.a
+[1407/1424] Linking CXX static library external/vulkancts/modules/vulkan/fragment_shading_rate/libdeqp-vk-fragment-shading-rate.a
+[1408/1424] Linking CXX static library external/vulkancts/modules/vulkan/reconvergence/libdeqp-vk-reconvergence.a
+[1410/1424] Linking CXX static library external/vulkancts/modules/vulkan/fragment_shading_barycentric/libdeqp-vk-fragment-shading-barycentric.a
+[1411/1424] Linking CXX static library external/vulkancts/modules/vulkan/mesh_shader/libdeqp-vk-mesh-shader.a
+[1412/1424] Linking CXX static library external/vulkancts/modules/vulkan/video/libdeqp-vk-video.a
+[1413/1424] Linking CXX static library external/vulkancts/modules/vulkan/shader_object/libdeqp-vk-shader-object.a
+[1414/1424] Linking CXX static library external/vulkancts/modules/vulkan/cooperative_vector/libdeqp-vk-cooperative_vector.a
+[1415/1424] Linking CXX static library external/vulkancts/modules/vulkan/tensor/libdeqp-vk-tensor.a
+[1416/1424] Linking CXX static library external/vulkancts/modules/vulkan/device_generated_commands/libdeqp-vk-dgc.a
 [1417/1424] Linking CXX static library framework/platform/libtcutil-platform.a
-ninja: build stopped: cannot make progress due to previous errors.
+[1418/1424] Linking CXX static library external/vulkancts/modules/vulkan/data_graph/libdeqp-vk-data-graph.a
+[1423/1424] Linking CXX static library external/vulkancts/modules/vulkan/libdeqp-vk-package.a
+[1424/1424] Linking CXX executable external/vulkancts/modules/vulkan/deqp-vk
+Cacheable calls:   1283 / 1332 (96.32%)
+  Hits:               4 / 1283 ( 0.31%)
+    Direct:           2 /    4 (50.00%)
+    Preprocessed:     2 /    4 (50.00%)
+  Misses:          1279 / 1283 (99.69%)
+Uncacheable calls:   49 / 1332 ( 3.68%)
+Local storage:
+  Cache size (GB):  0.4 /  3.0 (12.49%)
+  Hits:               4 / 1283 ( 0.31%)
+  Misses:          1279 / 1283 (99.69%)
+
+## package.log: 2 lines
+### errors
+### end
+  Type:                              DYN (Shared object file)
+  Machine:                           AArch64
