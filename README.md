@@ -1,21 +1,20 @@
 # VisionQuestPro
 
-Ejecuta juegos de Quest en Apple Vision Pro a partir de sus propios ficheros (APK + datos), sin
-necesitar un Quest.
+Runs Quest games on Apple Vision Pro from their own files (APK + data), without needing a Quest.
 
-## Atribución obligatoria
+## Attribution required
 
-Si usas, copias, adaptas o redistribuyes cualquier parte de este proyecto (código, herramientas o
-documentación) en otro proyecto, app, vídeo o publicación, debes:
+If you use, copy, adapt or redistribute any part of this project (code, tools or documentation) in
+another project, app, video or publication, you must:
 
-- Acreditarlo de forma visible con el nombre **VisionQuestPro** y un enlace a este repositorio.
-- Indicar si has hecho cambios.
+- Credit it visibly as **VisionQuestPro by 256k**, with a link to this repository.
+- State whether you made changes.
 
-Las partes de terceros incluidas mantienen sus propias licencias y avisos (ver
+Third-party parts included here keep their own licenses and notices (see
 [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md)).
 
-## Créditos
+## Credits
 
-Escrito por Claude sobre el gran trabajo de los proyectos acreditados en
-[THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md); el propietario del repositorio solo aportó ideas
-sobre cómo adaptar algunas cosas.
+Written by Claude, building on the great work of the projects credited in
+[THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md); 256k contributed ideas on how some things could
+be adapted.
