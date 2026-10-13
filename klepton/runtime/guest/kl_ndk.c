@@ -384,7 +384,13 @@ static void *kl_AAssetManager_open(void *mgr, const char *fname, int mode) {
     snprintf(path, sizeof path, "%s/%s", g_asset_root, fname);
     FILE *f = fopen(path, "rb");
     if (!f) f = kl_obbmap_fopen(path, "rb");   // audio banks live only in the OBB
-    if (!f) return NULL;
+    if (!f) {
+        // Always on, capped: an asset the guest asks for and the APK lacks is how
+        // "file not found" from a middleware (Wwise, FMOD) looks from here.
+        static int n;
+        if (n < 32) { n++; fprintf(stderr, "[asset] AAssetManager_open(\"%s\") MISS (%d/32)\n", fname ? fname : "(null)", n); }
+        return NULL;
+    }
     kl_asset *a = calloc(1, sizeof *a);
     if (!a) { fclose(f); return NULL; }
     fseeko(f, 0, SEEK_END);
