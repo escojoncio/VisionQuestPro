@@ -108,6 +108,7 @@ enum VQConformance {
                 "--deqp-log-filename=\(qpa.path)",
                 "--deqp-archive-dir=\(tree.appendingPathComponent("assets").path)",
                 "--deqp-shadercache-filename=\(work.appendingPathComponent("shadercache.bin").path)",
+                "--deqp-log-flush=enable",
                 "--deqp-log-images=disable",
                 "--deqp-log-shader-sources=disable",
                 "--deqp-log-decompiled-spirv=disable",
@@ -166,7 +167,14 @@ enum VQConformance {
         let p = plannedBatches[i]
         l.batchName = p.batch.group
         l.casesInBatch = p.cases
-        let results = parse(p.qpa, assumeRunning: true)
+        // This launch's part of the batch and any part a crash recovery started after it
+        // (<part>.r<k>.qpa, written by Klepton's exe runner).
+        let base = p.qpa.deletingPathExtension().lastPathComponent
+        var results: [String: Outcome] = [:]
+        for f in qpaFiles(batch: p.batch, in: p.qpa.deletingLastPathComponent())
+        where f.lastPathComponent.hasPrefix(base + ".") || f == p.qpa {
+            for (k, v) in parse(f, assumeRunning: true) { results[k] = v }
+        }
         l.doneInBatch = results.count
         for (_, o) in results { l.counts[o.status, default: 0] += 1 }
         return l

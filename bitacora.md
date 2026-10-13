@@ -58,6 +58,16 @@ tarde está resumido abajo y detallado en git).
   VPKEngine (ver su bitácora 2026-10-14). Log de 577 MB por `[imgfmt]` → limitado a 400 líneas + 1/100000
   (`klvk_imgfmt_log_ok`, kl_vulkan.c). Varias tandas terminan en 0,1 s con main()=1: revisar el resumen que imprime
   la siguiente sesión al arrancar.
+- Log 58 (3ª sesión): 6551 casos, 96,9 % de los soportados (2617 ok, 3851 no soportados, 81 Fail, 2 Crash); lista
+  en Registros/conformidad-vulkan.txt del usuario: buffer_view texel buffers (sint/snorm/16-bit), fragment_shader_output
+  sint/uint/snorm, blits 1D y astc→e5b9g9r9, device_init unsupported features (multiview/shader_draw_parameters),
+  format_properties (A1R5G5B5, A8B8G8R8_SNORM, R32G32B32 vertex), protected memory props, image_format_properties
+  sampleCounts!=1 para formatos no-color-attachment, submit_wait_many_semaphores. Aborto: ETC2 3D → VPKEngine.
+- Recuperación de crashes por caso (solo guest exe): `kl_fault_set_recovery`/`kl_fault_try_recover` (kl_fault.c,
+  globales + hilo, sin TLS), también desde `kl_fatal_prepare`; kl_exe.c sigsetjmp por main(), cierra el caso abierto
+  con `#terminateTestCaseResult Crash`, reanuda con `<log>.r<k>.txt/.qpa`, máx. 50 (`KL_EXE_MAX_RECOVERIES`),
+  respeta presupuesto/memoria, vigilante: sin progreso 240 s tras recuperar → `_exit(0)` (`KL_EXE_STALL_S`).
+- README: sección «Atribución obligatoria» (petición del usuario) + créditos.
 - Pendiente: primera sesión de Vulkan CTS en el visor (sin probar nada aún en dispositivo); analizar su resumen y
   corregir por grupos; luego OpenXR CTS.
 

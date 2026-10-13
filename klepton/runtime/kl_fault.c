@@ -4,6 +4,7 @@
 // exists twice gets fixed once.
 #include <dlfcn.h>
 #include <pthread.h>
+#include <setjmp.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -121,6 +122,29 @@ static int klf_readable(const void *p, size_t n) {
 // This has to survive being called in a broken process, so it uses write(2)
 // rather than stdio and does not attempt a symbolised backtrace.
 static volatile unsigned long g_x18_recoveries;
+
+// Globals, not TLS: a Darwin __thread is allocated on first touch, and the first touch must not
+// happen inside a signal handler on a thread that crashed in malloc. One recovery thread at a time.
+static sigjmp_buf *volatile g_rec_jb;
+static volatile pthread_t g_rec_th;
+static volatile int g_rec_sig;
+void kl_fault_set_recovery(void *jb) {
+    g_rec_th = pthread_self();
+    g_rec_jb = (sigjmp_buf *)jb;
+}
+int kl_fault_recovered_signal(void) { return g_rec_sig; }
+void kl_fault_try_recover(int sig) {
+    sigjmp_buf *jb = g_rec_jb;
+    if (!jb || !pthread_equal(pthread_self(), g_rec_th)) return;
+    g_rec_jb = NULL;    // one jump per point: a fault while unwinding must not loop
+    g_rec_sig = sig ? sig : SIGABRT;
+    if (g_crash_fd >= 0) fsync(g_crash_fd);   // stays open: later reports append
+    char m[160];
+    int n = snprintf(m, sizeof m, "[klepton] recovering: signal %d on a thread with a recovery point; "
+                                  "unwinding to it instead of ending the process\n", sig);
+    if (n > 0) klf_emit(m, (size_t)n);
+    siglongjmp(*jb, 1);
+}
 
 static void report_fault(int sig, siginfo_t *si, void *uctx) {
     // Our own handler, so this is a Darwin ucontext_t and reading it is safe.
@@ -462,6 +486,12 @@ static void report_fault(int sig, siginfo_t *si, void *uctx) {
         if (next <= fp) break;                  // stacks grow down; anything else is junk
         fp = next;
     }
+
+    // A thread that can abandon its unit of work (the executable door's test runner) goes back
+    // to its recovery point now that the report is written; the process lives on.
+    if (sig == SIGABRT || sig == SIGSEGV || sig == SIGBUS || sig == SIGTRAP || sig == SIGILL ||
+        sig == SIGFPE)
+        kl_fault_try_recover(sig);
 
     // SIGABRT here is usually the *guest* dying, not us — Unity's audio thread
     // aborts outright when FMOD cannot open an output device. Those paths never
