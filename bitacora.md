@@ -28,6 +28,15 @@ Inline funciona como diseño (100 % frames resueltos, jitter exacto mixed=0, sin
   a una 2.ª carga; sesión de 26 s); Wwise sigue sin bancos (`main.207706…obb` ausente, en.lang no buscado en obb).
 - Comunes: `gpu.shader.lib hit=0` (0 % caché MSL → tirones 1–1,7 s), ASW apagado (26 fps sin reproyección
   posicional), memoria 5921/6144 MiB en AC (imágenes viejas de ojo/MV/depth no liberadas).
+### Decisión clave: portar el VPKTAA de PTVisionPro
+`VPKTAACore.swift` es una reimplementación propia, NO el `vpktaa.frag` de PTVisionPro (afinado en 50 builds:
+`patches/0001-visionos-menus.patch` → `shaders/vpktaa.frag`: reconstrucción 3x3 que ya afila (sharpness 0–1, usuario 1.0),
+KEEP_STILL 0.93 / KEEP_MOVING 0.80 por velocidad, SIGMA_FLAT 1.25 / SIGMA_EDGE 0.85 (caja más estrecha en bordes),
+Compress/Expand reversible por brillo, historial CR 5 taps con distancia en alfa (sin textura dist), DISOCCLUSION 0.05,
+capa de partículas). En PT corre dentro del render del juego (HDR, antes de post/UI, matriz de la cámara del motor,
+sustituye al resolve de upscale, imagen 50 % + foveado). Aquí: imagen final LDR con UI, cámara deducida, 9–19 Mpx sin
+foveado, sharp 0.4. Paso 0 del plan: portar su algoritmo y constantes a VPKTAACore (MSL compute), resolver solo la
+zona nítida del foveado, capturar la view/proyección que el juego pide a OVRPlugin/OpenXR.
 ### Plan (orden)
 1. Quitar la serialización: sin `QueueWaitIdle` por frame; serial publicado al completar en GPU (MTLSharedEvent /
    completion del tail de encodeNative), 2 frames en vuelo.
