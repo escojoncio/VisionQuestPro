@@ -43,4 +43,14 @@ void kl_fault_print_frames(FILE *f, void *fp);
 // still goes to fd 2 either way.
 void kl_fault_set_crash_path(const char *path);
 
+// Per-thread recovery point (a sigjmp_buf *, or NULL to clear). While set, a fatal signal or a
+// Klepton fatal path (kl_fatal_prepare) on THIS thread writes its crash report and then
+// siglongjmps there (value = the signal) instead of ending the process. For runners that can
+// abandon one unit of work and go on — the executable door's per-test recovery — never for games.
+void kl_fault_set_recovery(void *sigjmp_buf_ptr);
+// Jumps to this thread's recovery point if it has one (returns only when it has none).
+void kl_fault_try_recover(int sig);
+// The signal of the last recovery (valid after a sigsetjmp that returned 1).
+int  kl_fault_recovered_signal(void);
+
 #endif

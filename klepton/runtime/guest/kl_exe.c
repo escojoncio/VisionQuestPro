@@ -20,12 +20,14 @@
 #include "kl_exe.h"
 
 #include <errno.h>
+#include <setjmp.h>
 #include <stdarg.h>
 #include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <sys/stat.h>
 #include <unistd.h>
 #ifdef __APPLE__
 #include <mach/mach.h>
@@ -33,6 +35,7 @@
 
 #include "klepton.h"
 #include "kl_native.h"
+#include "kl_fault.h"
 
 typedef int (*exe_main_fn)(int, char **);
 
@@ -97,8 +100,111 @@ static const char *should_stop(void) {
 }
 
 // Runs main() for one TAB-separated command line. The line is modified in place.
+// ---- per-test crash recovery -------------------------------------------------------------
+// A test that crashes (a Metal assertion, a guest fault, a Klepton fatal path) would end the whole
+// session. The runner thread holds a recovery point instead (kl_fault_set_recovery): the crash
+// report is written, the thread unwinds back here, the case that was running is closed in its
+// .qpa as "#terminateTestCaseResult Crash", and main() runs again on the rest of the case list,
+// with the results in a new part file (<log>.r<k>.qpa). What the crashed main() held is leaked;
+// the memory limit between command lines still applies. KL_EXE_RECOVER=0 turns it off.
+
+static char *slurp(const char *path, size_t *len) {
+    FILE *f = fopen(path, "rb");
+    if (!f) return NULL;
+    fseek(f, 0, SEEK_END);
+    long n = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    char *b = malloc(n > 0 ? (size_t)n + 1 : 1);
+    size_t got = b && n > 0 ? fread(b, 1, (size_t)n, f) : 0;
+    fclose(f);
+    if (b) b[got] = '\0';
+    if (len) *len = got;
+    return b;
+}
+
+static int arg_index(char **argv, int argc, const char *prefix) {
+    size_t n = strlen(prefix);
+    for (int i = 1; i < argc; i++) if (!strncmp(argv[i], prefix, n)) return i;
+    return -1;
+}
+
+// After a crash: closes the open case in the .qpa and points argv at the rest of the list.
+// 1 = run again, 0 = nothing left / cannot tell where it stopped.
+static int prepare_resume(char **argv, int argc, int k) {
+    int il = arg_index(argv, argc, "--deqp-caselist-file="), iq = arg_index(argv, argc, "--deqp-log-filename=");
+    if (il < 0 || iq < 0) return 0;
+    const char *list = argv[il] + strlen("--deqp-caselist-file=");
+    const char *qpa = argv[iq] + strlen("--deqp-log-filename=");
+    char *log = slurp(qpa, NULL);
+    // The last case the log mentions, and whether it was left open.
+    char last[512] = "";
+    int open = 0;
+    for (char *p = log; p && *p; ) {
+        char *nl = strchr(p, '\n');
+        if (nl) *nl = '\0';
+        if (!strncmp(p, "#beginTestCaseResult ", 21)) {
+            snprintf(last, sizeof last, "%s", p + 21);
+            size_t L = strlen(last);
+            while (L && (last[L - 1] == '\r' || last[L - 1] == ' ')) last[--L] = '\0';
+            open = 1;
+        } else if (!strncmp(p, "#endTestCaseResult", 18) || !strncmp(p, "#terminateTestCaseResult", 24)) {
+            open = 0;
+        }
+        p = nl ? nl + 1 : NULL;
+    }
+    free(log);
+    if (!last[0]) {
+        fprintf(stderr, "[exe] crash before the first case of this list: not resumable\n");
+        return 0;
+    }
+    if (open) {
+        FILE *f = fopen(qpa, "a");
+        if (f) { fputs("\n#terminateTestCaseResult Crash\n", f); fclose(f); }
+        fprintf(stderr, "[exe] case %s crashed: recorded as Crash\n", last);
+    }
+    // The rest of the list after `last`.
+    char *cases = slurp(list, NULL);
+    if (!cases) return 0;
+    char *after = NULL;
+    for (char *p = cases; p && *p; ) {
+        char *nl = strchr(p, '\n');
+        size_t L = nl ? (size_t)(nl - p) : strlen(p);
+        while (L && (p[L - 1] == '\r' || p[L - 1] == ' ')) L--;
+        if (L == strlen(last) && !strncmp(p, last, L)) { after = nl ? nl + 1 : p + strlen(p); break; }
+        p = nl ? nl + 1 : NULL;
+    }
+    if (!after || !*after) { free(cases); return 0; }
+    char base[1400];
+    snprintf(base, sizeof base, "%s", qpa);
+    size_t bl = strlen(base);
+    if (bl > 4 && !strcmp(base + bl - 4, ".qpa")) base[bl - 4] = '\0';
+    char nlist[1500], nqpa[1500];
+    snprintf(nlist, sizeof nlist, "%s.r%d.txt", base, k);
+    snprintf(nqpa, sizeof nqpa, "%s.r%d.qpa", base, k);
+    FILE *f = fopen(nlist, "w");
+    if (!f) { free(cases); return 0; }
+    fputs(after, f);
+    fclose(f);
+    free(cases);
+    char a1[1600], a2[1600];
+    snprintf(a1, sizeof a1, "--deqp-caselist-file=%s", nlist);
+    snprintf(a2, sizeof a2, "--deqp-log-filename=%s", nqpa);
+    argv[il] = strdup(a1);   // leaked on purpose: a handful per session
+    argv[iq] = strdup(a2);
+    return 1;
+}
+
+static int g_recoveries;
+static volatile double g_last_recovery_t;
+static char g_cur_qpa[1500];   // the log the running main() writes (for the post-crash watchdog)
+
+static void note_current_log(char **argv, int argc) {
+    int iq = arg_index(argv, argc, "--deqp-log-filename=");
+    snprintf(g_cur_qpa, sizeof g_cur_qpa, "%s", iq >= 0 ? argv[iq] + strlen("--deqp-log-filename=") : "");
+}
+
 static int run_line(char *line, int index) {
-    char *argv[512];
+    static char *argv[512];
     int argc = 0;
     argv[argc++] = g_name;
     for (char *p = line, *next; p && *p && argc < 511; p = next) {
@@ -113,7 +219,42 @@ static int run_line(char *line, int index) {
     fflush(NULL);
     progress("%d running\n", index);
     double t = now_s();
-    int rc = g_main(argc, argv);
+    const int recover = kl_env_on("KL_EXE_RECOVER", 1);
+    const unsigned max_rec = kl_env_uint("KL_EXE_MAX_RECOVERIES", 50);
+    static sigjmp_buf jb;
+    static volatile int rc;
+    rc = 0;
+    note_current_log(argv, argc);
+    for (;;) {
+        if (sigsetjmp(jb, 1) == 0) {
+            if (recover) kl_fault_set_recovery(&jb);
+            rc = g_main(argc, argv);
+            kl_fault_set_recovery(NULL);
+            break;
+        }
+        // Back from a crash inside main().
+        kl_fault_set_recovery(NULL);
+        const int sig = kl_fault_recovered_signal();
+        g_recoveries++;
+        g_last_recovery_t = now_s();
+        fprintf(stderr, "[exe] command line %d: crash (signal %d) after %.1f s, recovery %d of %u "
+                        "(footprint %u MB)\n", index + 1, sig, now_s() - t, g_recoveries, max_rec,
+                footprint_mb());
+        rc = 128 + sig;
+        if ((unsigned)g_recoveries > max_rec) {
+            fprintf(stderr, "[exe] too many crashes this session: stopping here\n");
+            break;
+        }
+        const char *why = should_stop();
+        if (why) {
+            if (why != g_stop_reason) snprintf(g_stop_reason, sizeof g_stop_reason, "%s", why);
+            fprintf(stderr, "[exe] not resuming after the crash: %s\n", g_stop_reason);
+            break;
+        }
+        if (!prepare_resume(argv, argc, g_recoveries)) break;
+        note_current_log(argv, argc);
+        progress("%d running\n", index);
+    }
     fflush(NULL);
     fprintf(stderr, "[exe] command line %d finished: main() returned %d after %.1f s "
                     "(footprint %u MB)\n", index + 1, rc, now_s() - t, footprint_mb());
@@ -218,6 +359,28 @@ double kl_exe_pump(double seconds, const volatile int *quit) {
            && (seconds < 0 || el < seconds)) {
         usleep(100 * 1000);
         el = now_s() - t0;
+        // After a recovered crash the abandoned main() may have left a lock held (malloc, stdio,
+        // a guest mutex) and the next one can hang on it. If nothing reaches the log for
+        // KL_EXE_STALL_S seconds (240) after a recovery, end the process: the next session
+        // resumes from the open case, which it records as a crash.
+        if (g_recoveries > 0) {
+            double quiet = now_s() - g_last_recovery_t;          // since the last recovery
+            struct stat st;
+            if (g_cur_qpa[0] && stat(g_cur_qpa, &st) == 0) {     // ...or the log's last write, if later
+                struct timespec wall;
+                clock_gettime(CLOCK_REALTIME, &wall);
+                double age = (double)wall.tv_sec - (double)st.st_mtime;
+                if (age < quiet) quiet = age;
+            }
+            if (quiet > (double)kl_env_uint("KL_EXE_STALL_S", 240)) {
+                // write(2), not stdio: a lock held by the abandoned main() may be stdio's own.
+                char m[160];
+                int n = snprintf(m, sizeof m, "[exe] no progress for %.0f s after a recovered crash: "
+                                 "ending the session (the next one resumes)\n", quiet);
+                if (n > 0) { ssize_t w = write(2, m, (size_t)n); (void)w; }
+                _exit(0);
+            }
+        }
     }
     if (atomic_load(&g_done)) pthread_join(g_thread, NULL);
     return now_s() - t0;

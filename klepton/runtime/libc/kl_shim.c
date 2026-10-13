@@ -77,6 +77,7 @@ int getentropy(void *buffer, size_t size);
 #define KL_HAVE_UDPSTAT 1
 #endif
 #include "klepton.h"
+#include "kl_fault.h"
 #include "kl_env.h"
 #include "../guest/kl_obbmap.h"
 #include "kl_va.h"
@@ -106,6 +107,8 @@ void kl_thread_init(void) {
 // reports actually terminate the process. Without this every diagnostic below
 // turns into a 20-minute mystery hang.
 void kl_fatal_prepare(void) {
+    // A thread with a recovery point (kl_fault_set_recovery) unwinds to it instead of dying.
+    kl_fault_try_recover(SIGABRT);
     // Whatever we are dying of, the graphics surface is context — and unlike the
     // JNI report, plenty of fatal paths (a failed sem_wait, an unresolved
     // import) have no reason to know EGL exists. Idempotent, so paths that
