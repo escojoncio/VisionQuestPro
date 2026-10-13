@@ -151,6 +151,12 @@ enum VQGames {
             if g == "exe" { game.engine = VQL("Tests Khronos", "Khronos tests") }
         }
         var vulkan = m.contains("android.hardware.vulkan.version") || m.contains("android.hardware.vulkan.level")
+        // The Khronos OpenXR CTS: a NativeActivity whose graphics plugin is chosen at launch
+        // (VQConformance passes Vulkan2), so its GLES-only manifest does not decide anything.
+        if game.package == VQConformance.openXRPackage {
+            vulkan = true
+            game.engine = VQL("Tests Khronos (OpenXR)", "Khronos tests (OpenXR)")
+        }
         if let devices = metaData(m, "com.oculus.supportedDevices") {
             game.quest3 = devices.lowercased().contains("quest3")
         }
