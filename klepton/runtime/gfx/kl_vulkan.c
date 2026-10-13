@@ -2703,8 +2703,42 @@ static void klvk_eye_shadow_copy(klvk_device *d, int stage) {
     }
 }
 
+// Diagnostic (AoT log 40): which eye stages the guest has ever bound as a
+// framebuffer attachment. A swapchain stage the guest submits but never renders
+// into is shown by the compositor as whatever the image last held (black at
+// first) — one such stage out of three is a 1-in-3 flicker. Set in
+// klvk_CreateFramebuffer, reported once per stage here. Imageless framebuffers
+// and copy-only writes are not seen, so this only ever WARNS.
+static unsigned g_eye_fb_bound;   // bit per stage
+static void klvk_eye_fb_note(VkImage img, uint32_t w, uint32_t h) {
+    if (!img) return;
+    for (int st = 0; st < KLVK_EYE_STAGES; st++)
+        for (int e = 0; e < 2; e++)
+            if (g_eye[st][e].img == img) {
+                unsigned bit = 1u << st;
+                if (!(__atomic_fetch_or(&g_eye_fb_bound, bit, __ATOMIC_RELAXED) & bit))
+                    VKI("eye image stage %d %#llx bound as a render target by the guest "
+                        "(framebuffer %ux%u)\n", st, (unsigned long long)(uintptr_t)img, w, h);
+                return;
+            }
+}
+
 void kl_vulkan_frame_done(int stage) {
     if (!kl_vulkan_guest_active()) return;
+    {
+        static unsigned frames, warned;
+        unsigned f = frames++;
+        if (f >= 30 && stage >= 0 && stage < KLVK_EYE_STAGES && g_eye[stage][0].img &&
+            !(__atomic_load_n(&g_eye_fb_bound, __ATOMIC_RELAXED) & (1u << stage)) &&
+            !(warned & (1u << stage))) {
+            warned |= 1u << stage;
+            VKI("WARNING: frame %u submits eye stage %d (VkImage %#llx), which the guest has "
+                "never bound as a render target (stages bound so far: mask %#x) — the "
+                "compositor shows a never-rendered image for this stage (flicker)\n",
+                f, stage, (unsigned long long)(uintptr_t)g_eye[stage][0].img,
+                __atomic_load_n(&g_eye_fb_bound, __ATOMIC_RELAXED));
+        }
+    }
     klvk_device *d = g_devs[0];
     static int eye_shadow = -1;
     // Default OFF. Tested ON for olar: the trailing (rain + menu) and grayscale
@@ -3578,8 +3612,11 @@ static VkResult VKAPI_CALL klvk_CreateFramebuffer(VkDevice dev,
         VkImage img0 = VK_NULL_HANDLE;
         if (ci->attachmentCount && ci->pAttachments) img0 = klvk_view_image(ci->pAttachments[0]);
         // A layer image bound as a colour attachment is one the guest renders into.
-        for (uint32_t k = 0; ci->pAttachments && k < ci->attachmentCount && k < 8; k++)
-            klvk_layer_mark_written(k == 0 ? img0 : klvk_view_image(ci->pAttachments[k]));
+        for (uint32_t k = 0; ci->pAttachments && k < ci->attachmentCount && k < 8; k++) {
+            VkImage ak = k == 0 ? img0 : klvk_view_image(ci->pAttachments[k]);
+            klvk_layer_mark_written(ak);
+            klvk_eye_fb_note(ak, ci->width, ci->height);   // diagnostic, see kl_vulkan_frame_done
+        }
         klvk_asw_fb_add(*out, ci);
         pthread_mutex_lock(&g_fb_map_lock);
         if (g_fb_map_n < KLVK_FB_MAP_MAX) {

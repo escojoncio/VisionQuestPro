@@ -8,6 +8,7 @@
 #include <ctype.h>
 #include <errno.h>
 #include <stdarg.h>
+#include <stdatomic.h>
 #include <pthread.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -432,12 +433,18 @@ void *kl_jni_class(const char *name) { return klj_FindClass(NULL, name); }
     (void)env;
     klj_object *o = klj_as_object(obj);
     if (!o) {
-        KLJ_LOG("GetObjectClass on an untagged pointer %p — every jobject the guest "
-                "holds should have come from us", obj);
+        // Named with its frames the first few times only: a guest that keeps
+        // its NULL handle (UbiServices re-runs the same check from its
+        // scheduler) would otherwise print a backtrace per call.
+        static _Atomic unsigned n_null;
+        unsigned nth = atomic_fetch_add(&n_null, 1);
+        if (nth < 8)
+            KLJ_LOG("GetObjectClass on an untagged pointer %p — every jobject the guest "
+                    "holds should have come from us (#%u)", obj, nth + 1);
         // The pointer says nothing; the caller says everything. A jobject that
         // did not come from us is almost always a return value of OURS that the
         // guest did not expect to be NULL, and the frame above names which one.
-        kl_fault_print_frames(stderr, NULL);
+        if (nth < 8) kl_fault_print_frames(stderr, NULL);
         // Scouting: the frame names the CALLER, and the call that follows this
         // one names the OBJECT — libunity's generic "resolve a method on a
         // cached handle" helper does GetObjectClass then GetMethodID, so
@@ -455,20 +462,26 @@ void *kl_jni_class(const char *name) { return klj_FindClass(NULL, name); }
         // (its UbiServices SDK hits GetObjectClass(NULL) on every boot, and the
         // knob had to be remembered by hand on every run; one forgotten run
         // read as a fresh crash). KL_JNI_SOFT_NULLCLASS=0 still turns it off.
-        int soft_default = 0;
-        {
-            const char *t = kl_driver_target_name();
-            if (t && strcmp(t, "acnexusvr") == 0) soft_default = 1;
-            // hl2's libsourcevr does GetObjectClass on an untagged pointer while
-            // reading a saved setting (getSharedPreferences -> getInt) in the menu
-            // — the same shape as AC Nexus's UbiServices check. Answering Object
-            // lets it past (or the next call names what it wanted) instead of
-            // aborting the whole run on one menu preference read.
-            if (t && strcmp(t, "hl2") == 0) soft_default = 1;
-        }
+        // hl2's libsourcevr does GetObjectClass on an untagged pointer while
+        // reading a saved setting (getSharedPreferences -> getInt) in the menu
+        // — the same shape as AC Nexus's UbiServices check. Answering Object
+        // lets it past (or the next call names what it wanted) instead of
+        // aborting the whole run on one menu preference read.
+        //
+        // GENERIC default ON (was keyed on the desktop target names "acnexusvr"
+        // and "hl2", which a run-time-configured VisionQuestPro game never
+        // carries: its target name is the game folder's, so AC Nexus log 39
+        // aborted here, in libubiservices right after the entitlement check,
+        // although the java/lang/Object bindings that answer the follow-up
+        // calls (getApplication, getSharedPreferences) were already in place).
+        // The alternative is a certain abort; a follow-up call nobody binds
+        // still aborts with its method named. KL_JNI_SOFT_NULLCLASS=0 restores
+        // the abort here.
+        int soft_default = 1;
         if (kl_permissive() || kl_env_on("KL_JNI_SOFT_NULLCLASS", soft_default)) {
-            KLJ_LOG("soft null-class: answering java/lang/Object so the NEXT call "
-                    "names what the guest wanted from it");
+            if (nth < 8)
+                KLJ_LOG("soft null-class: answering java/lang/Object so the NEXT call "
+                        "names what the guest wanted from it");
             pthread_mutex_lock(&g_lock);
             void *c = klj_intern_class_locked("java/lang/Object")->as_object;
             pthread_mutex_unlock(&g_lock);
@@ -1245,6 +1258,31 @@ static klj_val klj_call_common(void *env, void *self, void *mid, char want,
                 w->cls, w->name, w->sig, want, have);
 
     const klj_binding *b = klj_resolve_binding(w->cls, w->name, w->sig);
+    // The soft null-class answer (klj_GetObjectClass) hands java/lang/Object out
+    // for a NULL jobject; the guest then asks Object for a method Object does
+    // not have and calls it on NULL. On every case seen (UbiServices, Source
+    // VR) that NULL is the Activity/Context a dex-side bridge would have handed
+    // the native library — so resolve it as the Activity we present, with that
+    // Activity as receiver, instead of aborting. Named once per method.
+    if (!b && !self && strcmp(w->cls, "java/lang/Object") == 0) {
+        const klj_binding *ab = klj_resolve_binding("android/app/Activity", w->name, w->sig);
+        if (ab && ab->fn) {
+            static pthread_mutex_t nl = PTHREAD_MUTEX_INITIALIZER;
+            static const klj_wanted *seen[64];
+            static unsigned nseen;
+            int first = 0;
+            pthread_mutex_lock(&nl);
+            unsigned i = 0;
+            for (; i < nseen; i++) if (seen[i] == w) break;
+            if (i == nseen && nseen < 64) { seen[nseen++] = w; first = 1; }
+            pthread_mutex_unlock(&nl);
+            if (first)
+                KLJ_LOG("null receiver: Object.%s%s answered as android/app/Activity "
+                        "on the presented Activity (soft null-class)", w->name, w->sig);
+            b = ab;
+            self = kl_jni_activity();
+        }
+    }
     if (b) {
         klj_val argv[KLJ_MAX_ARGS];
         int argc = va ? klj_decode_args(w->sig, va, argv)

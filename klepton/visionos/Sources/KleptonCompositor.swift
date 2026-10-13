@@ -2373,6 +2373,7 @@ final class KleptonCompositor {
         if kl_loadingvideo_active() == 0 {
             if loadingVideo != nil {
                 loadingVideo?.stop(); loadingVideo = nil; loadingVideoTried = false
+                loadingVideoRequested = nil   // only a NEW request replays the game's video
             }
         } else if let tex = loadingVideoTexture() {
             drawLoadingSkybox(enc, viewIndices: viewIndices, drawable: drawable,
@@ -3339,6 +3340,9 @@ final class KleptonCompositor {
     private var loadingVideo: LoadingVideoPlayer?
     private var loadingVideoTried = false
     private var loadingSkyboxDraws = 0
+    // kl_loadingvideo_request_gen() last acted on, and the file it named.
+    private var loadingVideoReqGen: UInt32 = 0
+    private var loadingVideoRequested: String?
 
     /// The current video frame as an MTLTexture, creating the player on first
     /// use. The loading videos are staged beside the rest of the asset tree, so
@@ -3354,15 +3358,47 @@ final class KleptonCompositor {
                 return Unmanaged<MTLTexture>.fromOpaque(t).takeUnretainedValue()
             }
         }
+        // The file the GAME asked its (absent) Java loading screen to play.
+        // That screen plays it through a MediaPlayer, so with its sound: AC
+        // Nexus's "Ubisoft-Logo-With-Sound.mp4" is the only audio before its
+        // sound engine starts. A new request replaces the current video; a
+        // name that is not in the assets keeps whatever is playing.
+        let reqGen = kl_loadingvideo_request_gen()
+        if reqGen != loadingVideoReqGen {
+            var buf = [CChar](repeating: 0, count: 512)
+            // The generation that goes with THIS name (a request between the two
+            // reads would otherwise pair the old generation with the new name).
+            loadingVideoReqGen = kl_loadingvideo_request_name(&buf, Int32(buf.count))
+            let name = buf.withUnsafeBufferPointer { String(cString: $0.baseAddress!) }
+            if !name.isEmpty, let dir = kl_app_assets_dir() {
+                let base = String(cString: dir)
+                let path = base + "/" + name
+                if FileManager.default.fileExists(atPath: path),
+                   let lv = LoadingVideoPlayer(device: device, url: URL(fileURLWithPath: path),
+                                               muted: false,
+                                               looping: name.contains("Loop")) {
+                    loadingVideo?.stop()
+                    NSLog("[cp] loading skybox: the game asked for \(name) — playing it with sound (loop \(name.contains("Loop")))")
+                    lv.start()
+                    loadingVideo = lv
+                    loadingVideoTried = true
+                    loadingVideoRequested = name
+                } else {
+                    NSLog("[cp] loading skybox: the game asked for \(name), not found under \(base) — keeping the current video")
+                }
+            }
+        }
         if loadingVideo == nil {
             if loadingVideoTried { return nil }
             loadingVideoTried = true
             guard let dir = kl_app_assets_dir() else { return nil }
             let base = String(cString: dir)
-            // The init loop is the long warmup environment; fall back to the
-            // shorter background loop if the build ships only that.
-            let candidates = ["Background-with-Initialisation-Loop.mp4",
+            // The game's last request first (the skybox was torn down and is
+            // live again); otherwise the init loop is the long warmup
+            // environment, with the shorter background loop as fallback.
+            var candidates = ["Background-with-Initialisation-Loop.mp4",
                               "Background-Looping.mp4"]
+            if let req = loadingVideoRequested { candidates.insert(req, at: 0) }
             var found: URL? = nil
             for c in candidates {
                 let path = base + "/" + c
@@ -3370,12 +3406,19 @@ final class KleptonCompositor {
                     found = URL(fileURLWithPath: path); break
                 }
             }
+            // Muted only when the host picked the file itself; a file the game
+            // named plays as its MediaPlayer would, with sound.
+            var byGame = false
+            if let f = found, let req = loadingVideoRequested {
+                byGame = f.lastPathComponent == URL(fileURLWithPath: req).lastPathComponent
+            }
             guard let url = found,
-                  let lv = LoadingVideoPlayer(device: device, url: url) else {
+                  let lv = LoadingVideoPlayer(device: device, url: url, muted: !byGame,
+                                              looping: !byGame || url.lastPathComponent.contains("Loop")) else {
                 NSLog("[cp] loading skybox: no playable loading video under \(base)")
                 return nil
             }
-            NSLog("[cp] loading skybox: playing \(url.lastPathComponent)")
+            NSLog("[cp] loading skybox: playing \(url.lastPathComponent)\(byGame ? " (asked by the game, with sound)" : " (muted)")")
             lv.start()
             loadingVideo = lv
         }
@@ -4446,9 +4489,19 @@ final class LoadingVideoPlayer {
     private var retained: CVMetalTexture?
     private var current: MTLTexture?
     private var endObserver: NSObjectProtocol?
+    // The last few frames' CVMetalTextures, not only the newest: up to three
+    // composite command buffers are in flight, and releasing the CVPixelBuffer
+    // behind a texture a queued pass still samples hands it back to
+    // AVFoundation's pool, which decodes the next frame INTO it mid-read
+    // (torn / flickering skybox).
+    private var retainedRing: [CVMetalTexture] = []
+    private let muted: Bool
+    private let looping: Bool
 
-    init?(device: MTLDevice, url: URL) {
+    init?(device: MTLDevice, url: URL, muted: Bool = true, looping: Bool = true) {
         self.url = url
+        self.muted = muted
+        self.looping = looping
         var c: CVMetalTextureCache?
         guard CVMetalTextureCacheCreate(kCFAllocatorDefault, nil, device, nil, &c)
                 == kCVReturnSuccess, let c else { return nil }
@@ -4466,12 +4519,16 @@ final class LoadingVideoPlayer {
         item.add(out)
         output = out
         let p = AVPlayer(playerItem: item)
-        p.isMuted = true
+        p.isMuted = muted
         p.actionAtItemEnd = .none
-        endObserver = NotificationCenter.default.addObserver(
-            forName: .AVPlayerItemDidPlayToEndTime, object: item, queue: .main) { [weak p] _ in
-            p?.seek(to: .zero)
-            p?.play()
+        // Not looping (a logo): stays on its last frame, as the Java screen's
+        // MediaPlayer does at completion, until the game asks for the next file.
+        if looping {
+            endObserver = NotificationCenter.default.addObserver(
+                forName: .AVPlayerItemDidPlayToEndTime, object: item, queue: .main) { [weak p] _ in
+                p?.seek(to: .zero)
+                p?.play()
+            }
         }
         player = p
         p.play()
@@ -4492,6 +4549,8 @@ final class LoadingVideoPlayer {
             kCFAllocatorDefault, cache, pb, nil, .bgra8Unorm, w, h, 0, &cvtex)
         if r == kCVReturnSuccess, let cvtex, let mtl = CVMetalTextureGetTexture(cvtex) {
             retained = cvtex
+            retainedRing.append(cvtex)
+            if retainedRing.count > 4 { retainedRing.removeFirst() }
             current = mtl
         }
         return current
@@ -4503,6 +4562,7 @@ final class LoadingVideoPlayer {
         output = nil
         current = nil
         retained = nil
+        retainedRing.removeAll()
         if let endObserver { NotificationCenter.default.removeObserver(endObserver) }
         endObserver = nil
         if let cache { CVMetalTextureCacheFlush(cache, 0) }
