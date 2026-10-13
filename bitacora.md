@@ -31,6 +31,7 @@ tarde está resumido abajo y detallado en git).
   AndroidManifest.xml`, meta-data `com.visionquestpro.guest=exe`, lib `libdeqp-vk.so` = el ejecutable, assets
   `vulkan/` + `caselists/`). Release `conformance`.
 - Klepton: guest kind `KL_GUEST_EXE` (`runtime/guest/kl_exe.c`): carga como NativeActivity (`kl_native_load`), luego
+  (entrada `vq_exe_main` exportada por el parche de deqp, o `main`)
   `main()` en hilo guest de 64 MB (`kl_guest_thread_create` en kl_pthread.c) una vez por línea de
   `KL_EXE_ARGS_FILE` (args separados por TAB); para entre líneas por `KL_EXE_BUDGET` s, `KL_EXE_MEM_MB`,
   `KL_EXE_STOP_FILE`; progreso en `KL_EXE_PROGRESS` ("i running" / "i done rc" / "N finished").

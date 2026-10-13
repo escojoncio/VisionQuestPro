@@ -186,10 +186,14 @@ static void *exe_thread(void *arg) {
 int kl_exe_begin(FILE *out) {
     kl_image *img = kl_native_image();
     if (!img) { snprintf(g_err, sizeof g_err, "the executable is not mapped"); return 1; }
-    g_main = (exe_main_fn)kl_sym(img, "main");
+    // vq_exe_main: the exported C entry the conformance build wraps main's body in
+    // (conformance/vulkan/patch_deqp.py); a plain `main` exported with
+    // -Wl,--export-dynamic-symbol=main works too.
+    g_main = (exe_main_fn)kl_sym(img, "vq_exe_main");
+    if (!g_main) g_main = (exe_main_fn)kl_sym(img, "main");
     if (!g_main) {
-        snprintf(g_err, sizeof g_err, "the executable exports no main() (link it with "
-                 "-Wl,--export-dynamic-symbol=main)");
+        snprintf(g_err, sizeof g_err, "the executable exports neither vq_exe_main nor main() "
+                 "(link it with -Wl,--export-dynamic-symbol=main)");
         return 1;
     }
     const char *entry = getenv("KL_GUEST_ENTRY");
