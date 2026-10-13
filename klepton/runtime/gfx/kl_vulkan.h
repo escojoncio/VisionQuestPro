@@ -167,6 +167,57 @@ void *kl_vulkan_spacewarp_mtl(int eye, int stage, int kind,
 // stage", which is what kl_ovrp files into the frame record.
 unsigned kl_vulkan_spacewarp_writes(int stage, int kind);
 
+// ---------------------------------------------------------------------------
+// VPKTAA eye depth (universal, every Vulkan guest; only with KL_VPKTAA=1 and
+// KL_VPKTAA_DEPTH != 0).
+//
+// Per guest frame kl_vulkan watches the render passes / dynamic rendering the
+// guest RECORDS and picks the depth attachment that belongs to the eye picture:
+//   1 "eye pass"   the depth attachment of a pass that also has the eye image
+//                  as an attachment (colour or resolve target) — preferred:
+//                  full resolution, same layout as the colour;
+//   2 "spacewarp"  the AppSW depth image (kl_vulkan_spacewarp_image) when the
+//                  guest wrote it this frame;
+//   3 "size match" the depth attachment of the LAST pass whose depth image has
+//                  the eye image's size (URP final-blit pattern: the scene pass
+//                  has no eye attachment).
+// To make that depth readable at all, eye-sized depth images are created with
+// SAMPLED usage and without TRANSIENT (VPEngine would keep them on tile), and
+// every depth attachment's storeOp is forced to STORE (DONT_CARE discards it
+// on Metal). At kl_vulkan_frame_done(stage) the pick is filed for the stage;
+// a depth image the guest shares between stages is first COPIED (on the
+// guest's queue, before the frame-end idle wait) into a per-stage snapshot,
+// so the asynchronous VPKTAA never reads a depth the next frame is drawing.
+// kl_ovrp tags the record with the frame-record serial (kl_vulkan_eye_depth_tag)
+// so a consumer can tell "this depth belongs to frame N" from a stale one.
+//
+// Depth convention (Vulkan clip z in [0,1]): reversed_z = 1 when the eye pass
+// cleared depth to 0.0 (Unity/Unreal on Vulkan), else from the census of
+// pipeline depthCompareOps (GREATER* = reversed).
+typedef struct {
+    void *mtl;              // MTLTexture (borrowed): the depth (or depth/stencil) texture
+    int   w, h, layers;     // of that texture
+    int   slice;            // the array layer holding the requested eye
+    int   vk_format;        // VkFormat of the guest's image
+    int   samples;          // 1 unless the guest kept MSAA (then not usable)
+    int   reversed_z;       // 1 reversed (far = 0), 0 standard, -1 unknown
+    float clear_depth;      // depth clear value seen on the eye pass, -1 if none
+    int   source;           // 1 eye pass, 2 spacewarp depth, 3 size match
+    int   snapshot;         // 1 = our per-stage copy, 0 = the guest's live image
+    unsigned long long tag; // kl_ovrp frame-record serial (0 = not tagged yet)
+    unsigned long long vk_serial; // kl_vulkan_frame_serial() after that frame
+} kl_vulkan_eye_depth;
+// The record filed for `stage`, for `eye`. When `want_tag` is non-zero and the
+// stage's record carries another tag, every stage is searched for want_tag.
+// Returns 1 when *out is filled with a usable record.
+int  kl_vulkan_eye_depth_get(int stage, int eye, unsigned long long want_tag,
+                             kl_vulkan_eye_depth *out);
+// The short form: the MTLTexture of `stage`'s eye depth (NULL = none filed).
+void *kl_vulkan_eye_depth_mtl(int stage, int *w, int *h, int *layers, int *fmt);
+// Called by kl_ovrp right after kl_vulkan_frame_done(stage) with the serial of
+// the frame record it filed for that frame.
+void kl_vulkan_eye_depth_tag(int stage, unsigned long long serial);
+
 // Write both eyes of a stage out as PNGs. Called at frame submission, which on
 // this path is ovrp_EndFrame4 — the guest's own assertion that it has finished
 // drawing them.

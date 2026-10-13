@@ -721,6 +721,11 @@ static const struct { const char *cls, *super; } g_supers[] = {
     // objects actually are — which is also what makes IsInstanceOf answer
     // correctly for a guest that checks.
     {"java/security/cert/X509Certificate",     "java/security/cert/Certificate"},
+    // A HandlerThread IS a Thread: Unity resolves start()/isAlive()/join() on
+    // java/lang/Thread and passes the HandlerThread (AoT log 42); a guest that
+    // resolves them on HandlerThread itself reaches the same bindings through
+    // this edge, and IsInstanceOf(ht, Thread) answers true.
+    {"android/os/HandlerThread",               "java/lang/Thread"},
     // The throwables klj_throw_new raises, so IsInstanceOf(e, IOException) and
     // the Throwable bindings (getMessage/toString) reach them.
     {"java/io/FileNotFoundException",          "java/io/IOException"},
@@ -1297,6 +1302,24 @@ static klj_val klj_call_common(void *env, void *self, void *mid, char want,
     if (klj_game_void_noop(w, have))
         return zero;
 
+    // Permissive (the default since 2026-10-13, KL_PERMISSIVE=0 / KL_JNI_STRICT=1
+    // restore the abort): simulate the method — 0 / false / null — and name it
+    // once, so one missing Android API is a logged default instead of a dead game.
+    if (g_permissive) {
+        static pthread_mutex_t plock = PTHREAD_MUTEX_INITIALIZER;
+        static const klj_wanted *pseen[4096];
+        static unsigned npseen;
+        int first = 1;
+        pthread_mutex_lock(&plock);
+        for (unsigned i = 0; i < npseen; i++) if (pseen[i] == w) { first = 0; break; }
+        if (first && npseen < sizeof pseen / sizeof pseen[0]) pseen[npseen++] = w;
+        else if (first) first = 0;
+        pthread_mutex_unlock(&plock);
+        if (first)
+            KLJ_LOG("no host implementation for %s.%s%s — SIMULATED (returns 0/false/null)",
+                    w->cls, w->name, w->sig);
+        return zero;
+    }
     KLJ_LOG("no host implementation for %s.%s%s", w->cls, w->name, w->sig);
     if (!g_permissive) {
         fprintf(stderr, "[jni] this is a work item — add it to the family table in runtime/jni/.\n");

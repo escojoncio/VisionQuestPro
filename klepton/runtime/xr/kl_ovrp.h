@@ -320,6 +320,10 @@ typedef struct {
     int      asw;
     // The eye layer's ovrpLayerSubmit.LayerSubmitFlags (+0x44) this frame, raw.
     int      asw_submit_flags;
+    // Near/far of the guest's projection for this frame when it could be read
+    // from the eye submit (KL_VPKTAA_NEARFAR_OFF = byte offset of NearZ, FarZ
+    // follows), else 0 — VPKTAA then uses KL_VPKTAA_NEAR / KL_VPKTAA_FAR.
+    float    depth_near, depth_far;
 } kl_ovrp_render_pose;
 
 #define KL_OVRP_ASW_STORAGE 1
@@ -405,9 +409,10 @@ typedef struct {
 int kl_ovrp_overlay_count(void);
 int kl_ovrp_overlay_get(int i, kl_ovrp_overlay *out);
 
-// 1 while the guest has a live Equirect loading layer (AC Nexus's video
-// skybox). The compositor plays the loading mp4 onto the equirect while this is
-// set, and shows the guest's eye picture once it clears. See kl_ovrp.c.
+// 1 while the guest keeps SUBMITTING an Equirect video layer (desc flag
+// AndroidSurfaceSwapChain; AC Nexus's loading/menu backdrop). The compositor
+// plays the loading mp4 onto the sphere while this is set, and shows the
+// guest's eye picture once it clears. See kl_loadvid_recount in kl_ovrp.c.
 int kl_loadingvideo_active(void);
 // The guest's LoadingScreen.stopUpdatingLoadingScreen() hook - hide the skybox.
 void kl_loadingvideo_stop(void);
@@ -843,5 +848,12 @@ void kl_ovrp_haptics_stop(int hand);
 
 // Compositor → shim: 1 while the VPKTAA resolve runs (gates projection jitter).
 void kl_ovrp_set_taa_active(int on);
+
+// VPKTAA per-pixel reprojection: the eye's pose RELATIVE TO THE HEAD exactly as
+// the guest was told it (ovrp_GetNodePoseState nodes 0/1): `off` = head-local
+// offset in metres (KL_OVRP_IPD honoured), `rot` = the eye's own rotation xyzw
+// (identity unless KL_OVRP_EYE_CANT=1). Eye pose in tracking space =
+// head * (rot, off): position = head.p + head.q * off, orientation = head.q * rot.
+void kl_ovrp_eye_local(int eye, float off[3], float rot[4]);
 
 #endif

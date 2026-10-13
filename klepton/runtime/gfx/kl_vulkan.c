@@ -87,6 +87,13 @@ void *kl_vulkan_spacewarp_mtl(int e, int s, int k, int *w, int *h, int *sl) {
     if (w) *w = 0; if (h) *h = 0; if (sl) *sl = 0; return NULL;
 }
 unsigned kl_vulkan_spacewarp_writes(int s, int k) { (void)s; (void)k; return 0; }
+int  kl_vulkan_eye_depth_get(int s, int e, unsigned long long t, kl_vulkan_eye_depth *o) {
+    (void)s; (void)e; (void)t; if (o) memset(o, 0, sizeof *o); return 0;
+}
+void *kl_vulkan_eye_depth_mtl(int s, int *w, int *h, int *l, int *f) {
+    (void)s; if (w) *w = 0; if (h) *h = 0; if (l) *l = 0; if (f) *f = 0; return NULL;
+}
+void kl_vulkan_eye_depth_tag(int s, unsigned long long t) { (void)s; (void)t; }
 void  kl_vulkan_capture_eyes(unsigned f, int s) { (void)f; (void)s; }
 void  kl_vulkan_frame_done(int s) { (void)s; }
 unsigned long long kl_vulkan_frame_serial(void) { return 0; }
@@ -1457,20 +1464,28 @@ int kl_vulkan_layer_written(int key) {
     return 0;
 }
 // view -> image, so a framebuffer's attachment views resolve to their images.
-#define KLVK_VIEW_MAP_MAX 8192
+#define KLVK_VIEW_MAP_MAX 16384
 static struct { VkImageView view; VkImage img; } g_view_map[KLVK_VIEW_MAP_MAX];
 static int g_view_map_n;
 static pthread_mutex_t g_view_map_lock = PTHREAD_MUTEX_INITIALIZER;
 static void klvk_view_map_add(VkImageView v, VkImage img) {
     if (!v) return;
     pthread_mutex_lock(&g_view_map_lock);
-    if (g_view_map_n<KLVK_VIEW_MAP_MAX){ g_view_map[g_view_map_n].view=v; g_view_map[g_view_map_n].img=img; g_view_map_n++; }
+    // A ring (newest wins): it used to stop recording at 8192 views, after which every new
+    // view (a guest re-creating its render targets) resolved to no image at all.
+    { unsigned slot = (unsigned)g_view_map_n % KLVK_VIEW_MAP_MAX;
+      g_view_map[slot].view=v; g_view_map[slot].img=img;
+      if (g_view_map_n < 0x7fffffff) g_view_map_n++; else g_view_map_n = KLVK_VIEW_MAP_MAX; }
     pthread_mutex_unlock(&g_view_map_lock);
 }
 static VkImage klvk_view_image(VkImageView v) {
     VkImage img=VK_NULL_HANDLE;
     pthread_mutex_lock(&g_view_map_lock);
-    for (int i=g_view_map_n-1;i>=0;i--) if (g_view_map[i].view==v){ img=g_view_map[i].img; break; }
+    int n = g_view_map_n < KLVK_VIEW_MAP_MAX ? g_view_map_n : KLVK_VIEW_MAP_MAX;
+    for (int k=0;k<n;k++) {
+        int i = (int)(((unsigned)g_view_map_n - 1u - (unsigned)k) % KLVK_VIEW_MAP_MAX);
+        if (g_view_map[i].view==v){ img=g_view_map[i].img; break; }
+    }
     pthread_mutex_unlock(&g_view_map_lock);
     return img;
 }
@@ -2002,6 +2017,457 @@ void *kl_vulkan_spacewarp_mtl(int eye, int stage, int kind,
 unsigned kl_vulkan_spacewarp_writes(int stage, int kind) {
     if (stage < 0 || stage >= KLVK_EYE_STAGES || (kind != 0 && kind != 1)) return 0;
     return __atomic_load_n(&g_asw_writes[stage][kind], __ATOMIC_RELAXED);
+}
+
+// ---------------------------------------------------------------------------
+// VPKTAA eye depth — the contract is in kl_vulkan.h. Four small tables (depth
+// images, render passes, framebuffers, the current frame's pick) and the per
+// stage record. Everything is inert unless KL_VPKTAA=1 (KL_VPKTAA_DEPTH=0 turns
+// just this off): no usage/storeOp rewrite, no tracking, no copy.
+// ---------------------------------------------------------------------------
+static int klvk_taa_depth_on(void) {
+    static int v = -1;
+    if (v < 0) v = kl_env_on("KL_VPKTAA", 0) && kl_env_on("KL_VPKTAA_DEPTH", 1);
+    return v;
+}
+static int klvk_is_depth_format(VkFormat f) {
+    return f == VK_FORMAT_D16_UNORM || f == VK_FORMAT_X8_D24_UNORM_PACK32 ||
+           f == VK_FORMAT_D32_SFLOAT || f == VK_FORMAT_D16_UNORM_S8_UINT ||
+           f == VK_FORMAT_D24_UNORM_S8_UINT || f == VK_FORMAT_D32_SFLOAT_S8_UINT;
+}
+// Which eye image (any stage) `img` is: 1 and *eye = 0/1, or *eye = -1 when the
+// image holds both eyes as array layers (multiview). 0 when it is none.
+static int klvk_eye_image_which(VkImage img, int *eye) {
+    if (!img) return 0;
+    for (int st = 0; st < KLVK_EYE_STAGES; st++)
+        for (int e = 0; e < 2; e++)
+            if (g_eye[st][e].img == img) {
+                if (eye) *eye = g_eye[st][e].layers > 1 ? -1 : e;
+                return 1;
+            }
+    return 0;
+}
+// Is (w, h) the size of an eye image? Decides which depth images are worth
+// making readable (KLVK: SAMPLED, not TRANSIENT) and the "size match" pick.
+static int klvk_eye_size_match(uint32_t w, uint32_t h) {
+    for (int st = 0; st < KLVK_EYE_STAGES; st++)
+        for (int e = 0; e < 2; e++)
+            if (g_eye[st][e].img && g_eye[st][e].w == w && g_eye[st][e].h == h) return 1;
+    return 0;
+}
+
+#define KLVK_DEPTH_INFO_MAX 512
+static struct { VkImage img; VkFormat fmt; uint32_t w, h, layers, samples; }
+    g_depth_info[KLVK_DEPTH_INFO_MAX];
+static unsigned g_depth_info_n;          // total ever added; slot = n % MAX
+static pthread_mutex_t g_depth_info_lock = PTHREAD_MUTEX_INITIALIZER;
+static void klvk_depth_info_add(VkImage img, VkFormat fmt, uint32_t w, uint32_t h,
+                                uint32_t layers, uint32_t samples) {
+    if (!img) return;
+    pthread_mutex_lock(&g_depth_info_lock);
+    unsigned slot = g_depth_info_n++ % KLVK_DEPTH_INFO_MAX;
+    g_depth_info[slot].img = img; g_depth_info[slot].fmt = fmt;
+    g_depth_info[slot].w = w; g_depth_info[slot].h = h;
+    g_depth_info[slot].layers = layers ? layers : 1;
+    g_depth_info[slot].samples = samples ? samples : 1;
+    pthread_mutex_unlock(&g_depth_info_lock);
+}
+static int klvk_depth_info_get(VkImage img, VkFormat *fmt, uint32_t *w, uint32_t *h,
+                               uint32_t *layers, uint32_t *samples) {
+    if (!img) return 0;
+    int ok = 0;
+    pthread_mutex_lock(&g_depth_info_lock);
+    unsigned n = g_depth_info_n < KLVK_DEPTH_INFO_MAX ? g_depth_info_n : KLVK_DEPTH_INFO_MAX;
+    for (unsigned i = 0; i < n && !ok; i++) {          // newest first: handles get reused
+        unsigned slot = (g_depth_info_n - 1 - i) % KLVK_DEPTH_INFO_MAX;
+        if (g_depth_info[slot].img != img) continue;
+        if (fmt) *fmt = g_depth_info[slot].fmt;
+        if (w) *w = g_depth_info[slot].w;
+        if (h) *h = g_depth_info[slot].h;
+        if (layers) *layers = g_depth_info[slot].layers;
+        if (samples) *samples = g_depth_info[slot].samples;
+        ok = 1;
+    }
+    pthread_mutex_unlock(&g_depth_info_lock);
+    return ok;
+}
+static void klvk_depth_info_del(VkImage img) {
+    if (!img) return;
+    pthread_mutex_lock(&g_depth_info_lock);
+    for (unsigned i = 0; i < KLVK_DEPTH_INFO_MAX; i++)
+        if (g_depth_info[i].img == img) g_depth_info[i].img = VK_NULL_HANDLE;
+    pthread_mutex_unlock(&g_depth_info_lock);
+}
+
+// Render passes: which attachment is the depth one, and whether it is CLEARed.
+#define KLVK_RPD_MAX 512
+static struct { VkRenderPass rp; int depth_att; int clears; } g_rpd[KLVK_RPD_MAX];
+static unsigned g_rpd_n;
+static pthread_mutex_t g_rpd_lock = PTHREAD_MUTEX_INITIALIZER;
+static void klvk_rpd_add(VkRenderPass rp, int depth_att, int clears) {
+    if (!rp || depth_att < 0) return;
+    pthread_mutex_lock(&g_rpd_lock);
+    unsigned slot = g_rpd_n++ % KLVK_RPD_MAX;
+    g_rpd[slot].rp = rp; g_rpd[slot].depth_att = depth_att; g_rpd[slot].clears = clears;
+    pthread_mutex_unlock(&g_rpd_lock);
+}
+static int klvk_rpd_get(VkRenderPass rp, int *depth_att, int *clears) {
+    if (!rp) return 0;
+    int ok = 0;
+    pthread_mutex_lock(&g_rpd_lock);
+    unsigned n = g_rpd_n < KLVK_RPD_MAX ? g_rpd_n : KLVK_RPD_MAX;
+    for (unsigned i = 0; i < n && !ok; i++) {
+        unsigned slot = (g_rpd_n - 1 - i) % KLVK_RPD_MAX;
+        if (g_rpd[slot].rp != rp) continue;
+        *depth_att = g_rpd[slot].depth_att; *clears = g_rpd[slot].clears;
+        ok = 1;
+    }
+    pthread_mutex_unlock(&g_rpd_lock);
+    return ok;
+}
+
+// Framebuffers: their attachment images (up to 8).
+#define KLVK_FBD_MAX 512
+static struct { VkFramebuffer fb; VkImage img[8]; uint32_t n; } g_fbd[KLVK_FBD_MAX];
+static unsigned g_fbd_n;
+static pthread_mutex_t g_fbd_lock = PTHREAD_MUTEX_INITIALIZER;
+static void klvk_fbd_add(VkFramebuffer fb, const VkFramebufferCreateInfo *ci) {
+    if (!fb || !ci) return;
+    VkImage im[8] = { 0 };
+    uint32_t n = 0;
+    // Imageless framebuffers (no pAttachments) are resolved at begin time.
+    for (uint32_t k = 0; ci->pAttachments && k < ci->attachmentCount && k < 8; k++)
+        im[n++] = klvk_view_image(ci->pAttachments[k]);
+    pthread_mutex_lock(&g_fbd_lock);
+    unsigned slot = g_fbd_n++ % KLVK_FBD_MAX;
+    g_fbd[slot].fb = fb; memcpy(g_fbd[slot].img, im, sizeof im); g_fbd[slot].n = n;
+    pthread_mutex_unlock(&g_fbd_lock);
+}
+static uint32_t klvk_fbd_get(VkFramebuffer fb, VkImage out[8]) {
+    uint32_t got = 0;
+    if (!fb) return 0;
+    pthread_mutex_lock(&g_fbd_lock);
+    unsigned n = g_fbd_n < KLVK_FBD_MAX ? g_fbd_n : KLVK_FBD_MAX;
+    for (unsigned i = 0; i < n; i++) {
+        unsigned slot = (g_fbd_n - 1 - i) % KLVK_FBD_MAX;
+        if (g_fbd[slot].fb != fb) continue;
+        memcpy(out, g_fbd[slot].img, sizeof g_fbd[slot].img);
+        got = g_fbd[slot].n;
+        break;
+    }
+    pthread_mutex_unlock(&g_fbd_lock);
+    return got;
+}
+
+// Pipeline depthCompareOp census: GREATER/GREATER_OR_EQUAL = reversed-Z.
+static unsigned g_zcmp_greater, g_zcmp_less;
+static void klvk_zcmp_census(uint32_t n, const VkGraphicsPipelineCreateInfo *ci) {
+    if (!klvk_taa_depth_on() || !ci) return;
+    for (uint32_t i = 0; i < n; i++) {
+        const VkPipelineDepthStencilStateCreateInfo *ds = ci[i].pDepthStencilState;
+        if (!ds || !ds->depthTestEnable) continue;
+        if (ds->depthCompareOp == VK_COMPARE_OP_GREATER ||
+            ds->depthCompareOp == VK_COMPARE_OP_GREATER_OR_EQUAL)
+            __atomic_add_fetch(&g_zcmp_greater, 1, __ATOMIC_RELAXED);
+        else if (ds->depthCompareOp == VK_COMPARE_OP_LESS ||
+                 ds->depthCompareOp == VK_COMPARE_OP_LESS_OR_EQUAL)
+            __atomic_add_fetch(&g_zcmp_less, 1, __ATOMIC_RELAXED);
+    }
+}
+
+// The current frame's pick, per eye (a multiview depth answers both).
+typedef struct { VkImage img; int kind; int cleared; float clear; } klvk_ed_pick;
+static klvk_ed_pick g_ed_cur[2];
+static unsigned g_ed_eye_passes;     // passes this frame that had the eye image attached
+static pthread_mutex_t g_ed_mu = PTHREAD_MUTEX_INITIALIZER;
+
+static void klvk_ed_candidate(VkImage depth, int eye_hit, int eye, int clears, float clear) {
+    VkFormat fmt; uint32_t w, h, layers, samples;
+    if (!depth || !klvk_depth_info_get(depth, &fmt, &w, &h, &layers, &samples)) return;
+    int kind = eye_hit ? 1 : (klvk_eye_size_match(w, h) ? 3 : 0);
+    if (!kind) return;
+    pthread_mutex_lock(&g_ed_mu);
+    for (int e = 0; e < 2; e++) {
+        if (eye_hit && eye >= 0 && eye != e) continue;
+        klvk_ed_pick *p = &g_ed_cur[e];
+        if (kind == 1 || p->kind != 1) {     // eye pass beats size match; last of a kind wins
+            if (p->img != depth) p->cleared = 0;
+            p->img = depth; p->kind = kind;
+        }
+        if (p->img == depth && clears) { p->cleared = 1; p->clear = clear; }
+    }
+    if (eye_hit) g_ed_eye_passes++;
+    pthread_mutex_unlock(&g_ed_mu);
+}
+
+// vkCmdBeginRenderPass(2): the pass's depth attachment, if any, is a candidate.
+static void klvk_ed_note_pass(const VkRenderPassBeginInfo *bi) {
+    if (!bi || !klvk_taa_depth_on()) return;
+    int datt = -1, clears = 0;
+    if (!klvk_rpd_get(bi->renderPass, &datt, &clears) || datt < 0) return;
+    VkImage im[8] = { 0 };
+    uint32_t n = 0;
+    for (const VkBaseInStructure *p = bi->pNext; p; p = p->pNext) {
+        if (p->sType != VK_STRUCTURE_TYPE_RENDER_PASS_ATTACHMENT_BEGIN_INFO) continue;
+        const VkRenderPassAttachmentBeginInfo *ab = (const VkRenderPassAttachmentBeginInfo *)p;
+        for (uint32_t k = 0; ab->pAttachments && k < ab->attachmentCount && k < 8; k++)
+            im[n++] = klvk_view_image(ab->pAttachments[k]);
+    }
+    if (!n) n = klvk_fbd_get(bi->framebuffer, im);
+    if ((uint32_t)datt >= n || !im[datt]) return;
+    int eye_hit = 0, eye = -1;
+    for (uint32_t k = 0; k < n && !eye_hit; k++)
+        if ((int)k != datt && klvk_eye_image_which(im[k], &eye)) eye_hit = 1;
+    float cv = 0.0f;
+    int cl = clears && bi->pClearValues && bi->clearValueCount > (uint32_t)datt;
+    if (cl) cv = bi->pClearValues[datt].depthStencil.depth;
+    klvk_ed_candidate(im[datt], eye_hit, eye, cl, cv);
+}
+
+// Per stage and eye: what VPKTAA reads. `live` is the guest image picked for
+// the stage (shared-depth detection), `snap*` our copy when it is shared.
+static struct {
+    int valid;
+    kl_vulkan_eye_depth info;
+    VkImage live;
+    VkImage snap; VkDeviceMemory snap_mem; void *snap_mtl;
+    VkFormat snap_fmt; uint32_t snap_w, snap_h, snap_layers;
+} g_ed[KLVK_EYE_STAGES][2];
+static pthread_mutex_t g_ed_rec_mu = PTHREAD_MUTEX_INITIALIZER;
+
+// Copy `src` into the stage/eye snapshot on the guest's queue, after its work.
+static int klvk_ed_snapshot(klvk_device *d, int stage, int eye, VkImage src, VkFormat fmt,
+                            uint32_t w, uint32_t h, uint32_t layers) {
+    static PFN_vkCmdCopyImage real_copy;
+    static VkCommandPool pool;
+    static VkCommandBuffer cmd;
+    static VkFence fence;
+    static int broken;
+    if (broken || !d || !d->queue) return 0;
+    if (!real_copy) real_copy = (PFN_vkCmdCopyImage)mvk_sym("vkCmdCopyImage");
+    if (!real_copy) { broken = 1; return 0; }
+    if (!pool) {
+        VkCommandPoolCreateInfo pi = {
+            .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
+            .flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT,
+            .queueFamilyIndex = d->queue_family,
+        };
+        if (d->CreateCommandPool(d->dev, &pi, NULL, &pool) != VK_SUCCESS) { pool = VK_NULL_HANDLE; broken = 1; return 0; }
+        VkCommandBufferAllocateInfo ai = {
+            .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+            .commandPool = pool,
+            .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+            .commandBufferCount = 1,
+        };
+        VkFenceCreateInfo fi = { .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO };
+        if (d->AllocateCommandBuffers(d->dev, &ai, &cmd) != VK_SUCCESS ||
+            d->CreateFence(d->dev, &fi, NULL, &fence) != VK_SUCCESS) { broken = 1; return 0; }
+    }
+    pthread_mutex_lock(&g_ed_rec_mu);
+    VkImage dst = g_ed[stage][eye].snap;
+    int remake = !dst || g_ed[stage][eye].snap_fmt != fmt || g_ed[stage][eye].snap_w != w ||
+                 g_ed[stage][eye].snap_h != h || g_ed[stage][eye].snap_layers != layers;
+    pthread_mutex_unlock(&g_ed_rec_mu);
+    if (remake) {
+        // The old one is kept, not freed: VPKTAA may be sampling it on its queue.
+        VkDeviceMemory mem = VK_NULL_HANDLE;
+        dst = klvk_image_alloc(d, fmt, w, h, layers, 1,
+                               VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+                               VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT, &mem);
+        if (!dst) { broken = 1; VKI("[taa-depth] snapshot image %ux%u fmt %d failed — depth copies off\n", w, h, (int)fmt); return 0; }
+        void *mtl = eye_mtl_texture(d, dst);
+        pthread_mutex_lock(&g_ed_rec_mu);
+        g_ed[stage][eye].snap = dst; g_ed[stage][eye].snap_mem = mem; g_ed[stage][eye].snap_mtl = mtl;
+        g_ed[stage][eye].snap_fmt = fmt; g_ed[stage][eye].snap_w = w;
+        g_ed[stage][eye].snap_h = h; g_ed[stage][eye].snap_layers = layers;
+        pthread_mutex_unlock(&g_ed_rec_mu);
+        VKI("[taa-depth] stage %d eye %d: snapshot %ux%u fmt %d %u layer(s) = VkImage %p MTLTexture %p "
+            "(the guest shares its depth between stages)\n", stage, eye, w, h, (int)fmt, layers,
+            (void *)dst, mtl);
+    }
+    d->ResetCommandBuffer(cmd, 0);
+    VkCommandBufferBeginInfo bi = {
+        .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+        .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
+    };
+    if (d->BeginCommandBuffer(cmd, &bi) != VK_SUCCESS) return 0;
+    VkImageCopy rc = {
+        .srcSubresource = { VK_IMAGE_ASPECT_DEPTH_BIT, 0, 0, layers },
+        .dstSubresource = { VK_IMAGE_ASPECT_DEPTH_BIT, 0, 0, layers },
+        .extent = { w, h, 1 },
+    };
+    real_copy(cmd, src, VK_IMAGE_LAYOUT_GENERAL, dst, VK_IMAGE_LAYOUT_GENERAL, 1, &rc);
+    if (d->EndCommandBuffer(cmd) != VK_SUCCESS) return 0;
+    VkSubmitInfo si = { .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+                        .commandBufferCount = 1, .pCommandBuffers = &cmd };
+    d->ResetFences(d->dev, 1, &fence);
+    if (d->QueueSubmit(d->queue, 1, &si, fence) != VK_SUCCESS) return 0;
+    if (d->WaitForFences(d->dev, 1, &fence, VK_TRUE, 2000000000ull) != VK_SUCCESS) {
+        broken = 1;     // still pending: never reset this command buffer again
+        VKI("[taa-depth] depth snapshot copy timed out — copies off for this run\n");
+        return 0;
+    }
+    return 1;
+}
+
+// At the guest's frame end for `stage`, before the idle wait: file the pick.
+static void klvk_ed_frame_done(klvk_device *d, int stage) {
+    if (!klvk_taa_depth_on() || stage < 0 || stage >= KLVK_EYE_STAGES) return;
+    klvk_ed_pick cur[2];
+    pthread_mutex_lock(&g_ed_mu);
+    memcpy(cur, g_ed_cur, sizeof cur);
+    memset(g_ed_cur, 0, sizeof g_ed_cur);
+    unsigned eye_passes = g_ed_eye_passes; g_ed_eye_passes = 0;
+    pthread_mutex_unlock(&g_ed_mu);
+
+    static unsigned asw_last[KLVK_EYE_STAGES];
+    unsigned aw = __atomic_load_n(&g_asw_writes[stage][KLVK_ASW_DEPTH], __ATOMIC_RELAXED);
+    int asw_new = aw != asw_last[stage];
+    asw_last[stage] = aw;
+
+    unsigned g = __atomic_load_n(&g_zcmp_greater, __ATOMIC_RELAXED);
+    unsigned l = __atomic_load_n(&g_zcmp_less, __ATOMIC_RELAXED);
+    int census = g > l ? 1 : (l > g ? 0 : -1);
+    static unsigned frames, said_kind[4], said_none;
+    unsigned f = frames++;
+
+    for (int e = 0; e < 2; e++) {
+        VkImage img = VK_NULL_HANDLE;
+        int kind = 0, cleared = 0;
+        float clear = -1.0f;
+        VkFormat fmt = VK_FORMAT_UNDEFINED;
+        uint32_t w = 0, h = 0, layers = 1, samples = 1;
+        if (cur[e].kind == 1 &&
+            klvk_depth_info_get(cur[e].img, &fmt, &w, &h, &layers, &samples)) {
+            img = cur[e].img; kind = 1;
+        } else if (asw_new) {
+            pthread_mutex_lock(&g_asw_mu);
+            klvk_img_slot s = g_asw[stage][e][KLVK_ASW_DEPTH];
+            if (!s.img && e == 1) s = g_asw[stage][0][KLVK_ASW_DEPTH];
+            pthread_mutex_unlock(&g_asw_mu);
+            if (s.img) { img = s.img; kind = 2; fmt = s.fmt; w = s.w; h = s.h; layers = s.layers; samples = 1; }
+        }
+        if (!img && cur[e].kind == 3 &&
+            klvk_depth_info_get(cur[e].img, &fmt, &w, &h, &layers, &samples)) {
+            img = cur[e].img; kind = 3;
+        }
+        if (kind == 1 || kind == 3) { cleared = cur[e].cleared; clear = cleared ? cur[e].clear : -1.0f; }
+        if (!img) {
+            pthread_mutex_lock(&g_ed_rec_mu);
+            g_ed[stage][e].valid = 0;
+            pthread_mutex_unlock(&g_ed_rec_mu);
+            if (e == 0 && f >= 60 && said_none < 3 && (f % 600 == 60 || said_none == 0)) {
+                said_none++;
+                VKI("[taa-depth] frame %u stage %d: no eye depth found (%u pass(es) with the eye "
+                    "image attached, none with a depth of the eye's size) — VPKTAA rotation-only\n",
+                    f, stage, eye_passes);
+            }
+            continue;
+        }
+        // A depth the guest uses for more than one stage is overwritten by the
+        // next frame while VPKTAA (asynchronous) may still read it: copy it.
+        // Unknown (another stage not filed yet) counts as shared.
+        int shared = 0;
+        if (kind != 2) {
+            pthread_mutex_lock(&g_ed_rec_mu);
+            for (int o = 0; o < KLVK_EYE_STAGES; o++) {
+                if (o == stage || !g_eye[o][0].img) continue;
+                if (!g_ed[o][e].live || g_ed[o][e].live == img) shared = 1;
+            }
+            g_ed[stage][e].live = img;
+            pthread_mutex_unlock(&g_ed_rec_mu);
+        }
+        void *mtl = NULL;
+        int snap = 0;
+        if (samples > 1) {
+            mtl = NULL;              // a multisampled depth: VPKTAA cannot use it (logged there)
+        } else if (shared && kl_env_on("KL_VPKTAA_DEPTH_COPY", 1)) {
+            // Both eyes of a multiview depth are one image: copy once, from eye 0.
+            void *eye0 = NULL;
+            if (e == 1 && layers > 1) {
+                pthread_mutex_lock(&g_ed_rec_mu);
+                if (g_ed[stage][0].valid && g_ed[stage][0].info.snapshot &&
+                    g_ed[stage][0].live == img)
+                    eye0 = g_ed[stage][0].snap_mtl;
+                pthread_mutex_unlock(&g_ed_rec_mu);
+            }
+            if (eye0) {
+                mtl = eye0;
+                snap = 1;
+            } else if (klvk_ed_snapshot(d, stage, e, img, fmt, w, h, layers)) {
+                pthread_mutex_lock(&g_ed_rec_mu);
+                mtl = g_ed[stage][e].snap_mtl;
+                pthread_mutex_unlock(&g_ed_rec_mu);
+                snap = 1;
+            }
+        } else {
+            mtl = eye_mtl_texture(d, img);
+        }
+        kl_vulkan_eye_depth info;
+        memset(&info, 0, sizeof info);
+        info.mtl = mtl;
+        info.w = (int)w; info.h = (int)h; info.layers = (int)layers;
+        info.slice = layers > 1 ? e : 0;
+        info.vk_format = (int)fmt;
+        info.samples = (int)samples;
+        info.reversed_z = cleared ? (clear < 0.5f ? 1 : 0) : census;
+        info.clear_depth = clear;
+        info.source = kind;
+        info.snapshot = snap;
+        info.tag = 0;
+        info.vk_serial = kl_vulkan_frame_serial() + 1;   // the serial this frame_done publishes
+        pthread_mutex_lock(&g_ed_rec_mu);
+        g_ed[stage][e].info = info;
+        g_ed[stage][e].valid = mtl != NULL || samples > 1;
+        pthread_mutex_unlock(&g_ed_rec_mu);
+        if (e == 0 && said_kind[kind] < 2) {
+            said_kind[kind]++;
+            VKI("[taa-depth] frame %u stage %d: eye depth = %s VkImage %p (%ux%u fmt %d, %u layer(s), "
+                "%ux) %s, clear %s%.3f, compare census greater=%u less=%u -> reversedZ=%d, "
+                "MTLTexture %p\n", f, stage,
+                kind == 1 ? "eye-pass" : kind == 2 ? "spacewarp" : "size-match",
+                (void *)img, w, h, (int)fmt, layers, samples,
+                snap ? "copied (shared between stages)" : "live (per-stage image)",
+                cleared ? "" : "none ", (double)(cleared ? clear : 0.0f), g, l,
+                info.reversed_z, mtl);
+        }
+    }
+}
+
+int kl_vulkan_eye_depth_get(int stage, int eye, unsigned long long want_tag,
+                            kl_vulkan_eye_depth *out) {
+    if (out) memset(out, 0, sizeof *out);
+    if (!out || eye < 0 || eye > 1 || !klvk_taa_depth_on()) return 0;
+    int ok = 0;
+    pthread_mutex_lock(&g_ed_rec_mu);
+    if (stage >= 0 && stage < KLVK_EYE_STAGES && g_ed[stage][eye].valid &&
+        (!want_tag || g_ed[stage][eye].info.tag == want_tag)) {
+        *out = g_ed[stage][eye].info; ok = 1;
+    } else if (want_tag) {
+        for (int s = 0; s < KLVK_EYE_STAGES && !ok; s++)
+            if (g_ed[s][eye].valid && g_ed[s][eye].info.tag == want_tag) {
+                *out = g_ed[s][eye].info; ok = 1;
+            }
+    }
+    pthread_mutex_unlock(&g_ed_rec_mu);
+    return ok;
+}
+
+void *kl_vulkan_eye_depth_mtl(int stage, int *w, int *h, int *layers, int *fmt) {
+    kl_vulkan_eye_depth i;
+    int ok = kl_vulkan_eye_depth_get(stage, 0, 0, &i);
+    if (w) *w = ok ? i.w : 0;
+    if (h) *h = ok ? i.h : 0;
+    if (layers) *layers = ok ? i.layers : 0;
+    if (fmt) *fmt = ok ? i.vk_format : 0;
+    return ok ? i.mtl : NULL;
+}
+
+void kl_vulkan_eye_depth_tag(int stage, unsigned long long serial) {
+    if (stage < 0 || stage >= KLVK_EYE_STAGES) return;
+    pthread_mutex_lock(&g_ed_rec_mu);
+    for (int e = 0; e < 2; e++) g_ed[stage][e].info.tag = serial;
+    pthread_mutex_unlock(&g_ed_rec_mu);
 }
 
 // Diagnostic/bridge: the MTLTexture behind the wild-handle scratch — the single
@@ -2749,6 +3215,9 @@ void kl_vulkan_frame_done(int stage) {
     // was originally built for.
     if (eye_shadow < 0) eye_shadow = kl_env_on("KL_EYE_SHADOW", 0);
     if (eye_shadow) klvk_eye_shadow_copy(d, stage);
+    // VPKTAA eye depth: file this frame's pick (and copy a shared depth) on the
+    // guest's queue BEFORE the idle wait below, which then also covers the copy.
+    klvk_ed_frame_done(d, stage);
     if (kl_env_on("KL_VK_FRAME_SYNC", 1) && d && d->queue) {
         VkResult r = d->QueueWaitIdle ? d->QueueWaitIdle(d->queue)
                    : d->DeviceWaitIdle ? d->DeviceWaitIdle(d->dev)
@@ -3182,6 +3651,27 @@ static VkResult VKAPI_CALL klvk_CreateImage(VkDevice dev, const VkImageCreateInf
                 "garbled colour; world colourful => gray was ASTC decode\n",
                 ci->extent.width, ci->extent.height); }
     }
+    // VPKTAA eye depth (kl_vulkan.h): an eye-sized depth attachment must be
+    // readable afterwards — SAMPLED (else VPEngine makes it render-target only)
+    // and not TRANSIENT (else it never leaves tile memory). Only eye-sized,
+    // single-sample (or forced-1x) depth images; everything else untouched.
+    if (ci && klvk_taa_depth_on() && ci->imageType == VK_IMAGE_TYPE_2D &&
+        klvk_is_depth_format(ci->format) &&
+        (ci->usage & VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT) &&
+        klvk_eye_size_match(ci->extent.width, ci->extent.height) &&
+        (ci->samples == VK_SAMPLE_COUNT_1_BIT || kl_env_on("VPVK_FORCE_1X", 0))) {
+        VkImageUsageFlags want = (ci->usage | VK_IMAGE_USAGE_SAMPLED_BIT) &
+                                 ~(VkImageUsageFlags)VK_IMAGE_USAGE_TRANSIENT_ATTACHMENT_BIT;
+        if (want != ci->usage) {
+            if (ci != &mod) { mod = *ci; ci = &mod; }
+            static int said; if (said < 6) { said++;
+                VKI("[taa-depth] eye-sized depth image %ux%u fmt %d samples %d layers %u: usage "
+                    "%#x -> %#x (sampled, not transient) so VPKTAA can read it\n",
+                    ci->extent.width, ci->extent.height, (int)ci->format, (int)ci->samples,
+                    ci->arrayLayers, ci->usage, want); }
+            mod.usage = want;
+        }
+    }
     VkResult r = real(dev, ci, alloc, out);
     // MoltenVK rejects some formats outright (Wanderer: VK_FORMAT_ASTC_8x8_UNORM/
     // SRGB come back VK_ERROR_FEATURE_NOT_PRESENT) and leaves *out NULL. A null
@@ -3225,6 +3715,15 @@ static VkResult VKAPI_CALL klvk_CreateImage(VkDevice dev, const VkImageCreateInf
     if (r == VK_SUCCESS && out && ci)
         klvk_img_info_add(*out, ci->format, ci->extent.width, ci->extent.height);
     if (r == VK_SUCCESS && out && *out && did_astc_sub) klvk_astc_sub_add(*out);
+    if (r == VK_SUCCESS && out && *out && ci && klvk_taa_depth_on() &&
+        klvk_is_depth_format(ci->format) &&
+        (ci->usage & VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT)) {
+        // VPEngine creates a forced-1x MSAA image single-sampled: record what it IS.
+        uint32_t smp = (uint32_t)ci->samples;
+        if (smp > 1 && kl_env_on("VPVK_FORCE_1X", 0)) smp = 1;
+        klvk_depth_info_add(*out, ci->format, ci->extent.width, ci->extent.height,
+                            ci->arrayLayers, smp);
+    }
     if (klvk_trace() && ci && (ci->extent.width >= 480 || ci->extent.height >= 480)
         && (ci->usage & 0x30u))   // colour or depth attachment == a render target
         fprintf(stderr, "[TRACE] [thr] createRT %#llx %ux%u fmt %d usage %#x tid=%u\n",
@@ -3316,6 +3815,7 @@ static void VKAPI_CALL klvk_DestroyImage(VkDevice dev, VkImage img,
     if (!real && real_gdpa) real = (PFN_vkDestroyImage)real_gdpa(dev, "vkDestroyImage");
     klvk_img_reg_del(img);
     klvk_img_info_del(img);
+    klvk_depth_info_del(img);
     klvk_shadow_forget(img);
     if (real) real(dev, img, alloc);
 }
@@ -3437,6 +3937,7 @@ static VkResult VKAPI_CALL klvk_CreateGraphicsPipelines(VkDevice dev,
     static PFN_vkCreateGraphicsPipelines real;
     if (!real && real_gdpa)
         real = (PFN_vkCreateGraphicsPipelines)real_gdpa(dev, "vkCreateGraphicsPipelines");
+    klvk_zcmp_census(n, ci);   // VPKTAA: reversed-Z vote (GREATER vs LESS depth tests)
 
     // KL_VK_FIX_PRIMRESTART (default ON): Metal cannot DISABLE primitive restart
     // for strip/fan topologies, so MoltenVK rejects a strip pipeline that sets
@@ -3618,6 +4119,7 @@ static VkResult VKAPI_CALL klvk_CreateFramebuffer(VkDevice dev,
             klvk_eye_fb_note(ak, ci->width, ci->height);   // diagnostic, see kl_vulkan_frame_done
         }
         klvk_asw_fb_add(*out, ci);
+        if (klvk_taa_depth_on()) klvk_fbd_add(*out, ci);
         pthread_mutex_lock(&g_fb_map_lock);
         if (g_fb_map_n < KLVK_FB_MAP_MAX) {
             g_fb_map[g_fb_map_n].fb = *out; g_fb_map[g_fb_map_n].img0 = img0;
@@ -3726,6 +4228,7 @@ static void VKAPI_CALL klvk_CmdBeginRenderPass(VkCommandBuffer cb,
             bi->renderArea.extent.width, bi->renderArea.extent.height);
     }
     klvk_asw_note_pass(bi, "render pass");
+    klvk_ed_note_pass(bi);
     VkRenderPassBeginInfo tmp; VkClearValue *inj = klvk_probe_inject_clears(bi, &tmp);
     if (real) real(cb, inj ? &tmp : bi, c);
     free(inj);
@@ -3743,6 +4246,7 @@ static void VKAPI_CALL klvk_CmdBeginRenderPass2(VkCommandBuffer cb,
             bi->renderArea.extent.width, bi->renderArea.extent.height);
     }
     klvk_asw_note_pass(bi, "render pass 2");
+    klvk_ed_note_pass(bi);
     VkRenderPassBeginInfo tmp; VkClearValue *inj = klvk_probe_inject_clears(bi, &tmp);
     if (real) real(cb, inj ? &tmp : bi, sbi);
     free(inj);
@@ -3759,7 +4263,29 @@ static VkResult VKAPI_CALL klvk_CreateRenderPass(VkDevice dev,
         VkRenderPass *out) {
     static PFN_vkCreateRenderPass real;
     if (!real && real_gdpa) real = (PFN_vkCreateRenderPass)real_gdpa(dev, "vkCreateRenderPass");
+    // VPKTAA eye depth: remember the depth attachment, and STORE it (DONT_CARE
+    // would discard it on Metal before VPKTAA can read it).
+    int ed_att = -1, ed_clear = 0;
+    VkAttachmentDescription *ed_atts = NULL;
+    VkRenderPassCreateInfo ed_ci;
+    if (ci && klvk_taa_depth_on() && ci->pAttachments) {
+        for (uint32_t sp = 0; sp < ci->subpassCount && ed_att < 0; sp++) {
+            const VkAttachmentReference *ds = ci->pSubpasses[sp].pDepthStencilAttachment;
+            if (ds && ds->attachment != VK_ATTACHMENT_UNUSED && ds->attachment < ci->attachmentCount)
+                ed_att = (int)ds->attachment;
+        }
+        if (ed_att >= 0 && klvk_is_depth_format(ci->pAttachments[ed_att].format)) {
+            ed_clear = ci->pAttachments[ed_att].loadOp == VK_ATTACHMENT_LOAD_OP_CLEAR;
+            if (ci->pAttachments[ed_att].storeOp == VK_ATTACHMENT_STORE_OP_DONT_CARE &&
+                (ed_atts = malloc(ci->attachmentCount * sizeof *ed_atts))) {
+                memcpy(ed_atts, ci->pAttachments, ci->attachmentCount * sizeof *ed_atts);
+                ed_atts[ed_att].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+                ed_ci = *ci; ed_ci.pAttachments = ed_atts; ci = &ed_ci;
+            }
+        } else ed_att = -1;
+    }
     VkResult r = real ? real(dev, ci, a, out) : VK_ERROR_INITIALIZATION_FAILED;
+    if (r == VK_SUCCESS && out && ed_att >= 0) klvk_rpd_add(*out, ed_att, ed_clear);
     if (ci && (r != VK_SUCCESS || klvk_trace())) {
         unsigned inputs = 0;
         for (uint32_t i = 0; i < ci->subpassCount; i++)
@@ -3781,6 +4307,7 @@ static VkResult VKAPI_CALL klvk_CreateRenderPass(VkDevice dev,
                     k, d->pInputAttachments[k].attachment, (int)d->pInputAttachments[k].layout);
         }
     }
+    free(ed_atts);
     return r;
 }
 static VkResult VKAPI_CALL klvk_CreateRenderPass2(VkDevice dev,
@@ -3800,6 +4327,28 @@ static VkResult VKAPI_CALL klvk_CreateRenderPass2(VkDevice dev,
     // other titles: a resolve target you keep is exactly one you meant to store, so
     // this only ever costs a writeback that was already intended. KL_VK_RESOLVE_STORE=0
     // opts out. Modifies a COPY; the guest's arrays stay untouched.
+    // VPKTAA eye depth: same as klvk_CreateRenderPass (depth attachment noted,
+    // DONT_CARE store forced to STORE). Applied first; the rewrites below copy
+    // from whatever `ci` points at.
+    int ed_att = -1, ed_clear = 0;
+    VkAttachmentDescription2 *ed_atts = NULL;
+    VkRenderPassCreateInfo2 ed_ci;
+    if (ci && klvk_taa_depth_on() && ci->pAttachments) {
+        for (uint32_t sp = 0; sp < ci->subpassCount && ed_att < 0; sp++) {
+            const VkAttachmentReference2 *ds = ci->pSubpasses[sp].pDepthStencilAttachment;
+            if (ds && ds->attachment != VK_ATTACHMENT_UNUSED && ds->attachment < ci->attachmentCount)
+                ed_att = (int)ds->attachment;
+        }
+        if (ed_att >= 0 && klvk_is_depth_format(ci->pAttachments[ed_att].format)) {
+            ed_clear = ci->pAttachments[ed_att].loadOp == VK_ATTACHMENT_LOAD_OP_CLEAR;
+            if (ci->pAttachments[ed_att].storeOp == VK_ATTACHMENT_STORE_OP_DONT_CARE &&
+                (ed_atts = malloc(ci->attachmentCount * sizeof *ed_atts))) {
+                memcpy(ed_atts, ci->pAttachments, ci->attachmentCount * sizeof *ed_atts);
+                ed_atts[ed_att].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+                ed_ci = *ci; ed_ci.pAttachments = ed_atts; ci = &ed_ci;
+            }
+        } else ed_att = -1;
+    }
     VkAttachmentDescription2 *atts = NULL;
     VkRenderPassCreateInfo2 ci2;
     int probe = klvk_eye_probe_on();
@@ -3846,6 +4395,7 @@ static VkResult VKAPI_CALL klvk_CreateRenderPass2(VkDevice dev,
         }
     }
     VkResult r = real ? real(dev, ci, a, out) : VK_ERROR_INITIALIZATION_FAILED;
+    if (r == VK_SUCCESS && out && ed_att >= 0) klvk_rpd_add(*out, ed_att, ed_clear);
     if (r == VK_SUCCESS && out && probe_att != VK_ATTACHMENT_UNUSED)
         klvk_clearpass_add(*out, probe_att);
     if (ci && (r != VK_SUCCESS || klvk_trace())) {
@@ -3877,6 +4427,7 @@ static VkResult VKAPI_CALL klvk_CreateRenderPass2(VkDevice dev,
         }
     }
     free(atts);
+    free(ed_atts);
     return r;
 }
 // KL_TRACE: dynamic-rendering census (vkCmdBeginRendering). If the guest renders
@@ -3909,6 +4460,29 @@ static void VKAPI_CALL klvk_CmdBeginRendering(VkCommandBuffer cb,
         if (ri->pDepthAttachment && ri->pDepthAttachment->imageView)
             klvk_asw_note_write(klvk_view_image(ri->pDepthAttachment->imageView),
                                 "dynamic rendering");
+    }
+    // VPKTAA eye depth: the depth attachment is a candidate (eye pass when a
+    // colour/resolve attachment is the eye image), and it must be STOREd.
+    VkRenderingInfo ed_ri;
+    VkRenderingAttachmentInfo ed_da;
+    if (ri && klvk_taa_depth_on() && ri->pDepthAttachment && ri->pDepthAttachment->imageView) {
+        const VkRenderingAttachmentInfo *da = ri->pDepthAttachment;
+        int eye_hit = 0, eye = -1;
+        for (uint32_t i = 0; i < ri->colorAttachmentCount && ri->pColorAttachments && !eye_hit; i++) {
+            if (klvk_eye_image_which(klvk_view_image(ri->pColorAttachments[i].imageView), &eye) ||
+                klvk_eye_image_which(klvk_view_image(ri->pColorAttachments[i].resolveImageView), &eye))
+                eye_hit = 1;
+        }
+        int cl = da->loadOp == VK_ATTACHMENT_LOAD_OP_CLEAR;
+        klvk_ed_candidate(klvk_view_image(da->imageView), eye_hit, eye, cl,
+                          cl ? da->clearValue.depthStencil.depth : 0.0f);
+        if (da->storeOp == VK_ATTACHMENT_STORE_OP_DONT_CARE) {
+            ed_da = *da; ed_da.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+            ed_ri = *ri; ed_ri.pDepthAttachment = &ed_da;
+            // VkRenderingInfo may name the same view as its stencil attachment;
+            // that one keeps its own storeOp (only the depth plane is read).
+            ri = &ed_ri;
+        }
     }
     if (real) real(cb, ri);
 }

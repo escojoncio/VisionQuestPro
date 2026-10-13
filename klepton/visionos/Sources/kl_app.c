@@ -741,7 +741,7 @@ int kl_app_boot(void) {
     // Strict: an unimplemented *call* is fatal, so the run stops exactly where
     // the surface genuinely ends. Lookups are not — the guest resolves plenty
     // it never calls.
-    kl_jni_set_permissive(kl_env_on("KL_PERMISSIVE", 0));
+    kl_jni_set_permissive(kl_env_on("KL_PERMISSIVE", 1) && !kl_env_on("KL_JNI_STRICT", 0));  // simulate missing Java APIs by default
     kl_egl_dump_textures(kl_env_str("KL_DUMP_TEXTURES", NULL));
 
     printf("=== Klepton on visionOS ===\n");

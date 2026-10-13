@@ -2,6 +2,89 @@
 
 Historial completo de sesiones anteriores: `git log -p bitacora.md` (compactada el 2026-10-12 tras el log 25).
 
+## VPKTAA completo (2026-10-13, sin build aún) — profundidad universal + MV AppSW + reproyección por píxel
+Módulo reutilizable (también para el port Vulkan de Alyx): `klepton/visionos/Sources/VPKTAACore.swift` (solo
+Metal+simd). Adaptador Klepton: `KleptonTAA.swift`. API del core (doc en la cabecera del fichero):
+`VPKTAAEyeInput{color(2DArray), slice, flipY, tangents l r t b SIN jitter, jitter (tangentes), crop/cropOff,
+orientation+position (cámara del ojo, mundo, m), depth: VPKTAADepthInput?{texture, slice, reversedZ, near, far(0=∞),
+mapsCrop}, motion: VPKTAAMotionInput?{texture, slice, scale (texel→Δcrop-uv, cur−prev, signo incluido), mapsCrop}}`;
+`encode(cmd:eye:input:output:)` (output = vista rgba8Unorm de la salida sRGB), `takeStats(eye:)`, `invalidate()`.
+- Shader (`vpktaa_resolve`, tg 16x16): tile 18x18 half en threadgroup (1 lectura por texel); pesos 3x3 de
+  reconstrucción calculados en CPU (el desplazamiento del jitter es constante por frame: `shiftInt` + fracción);
+  profundidad: la más cercana de centro+4 diagonales → distancia lineal (reversed: `n·f/(n+d(f−n))`, f=0 → `n/d`;
+  estándar análogo; d=0 rev / d=1 std = cielo) → P=dir·dist → vista previa (`rot`=Rprev⁻¹Rcur, `trans`=Rprev⁻¹(Tcur−Tprev),
+  ojo = cabeza·`kl_ovrp_eye_local`) → uv previa; MV de objeto aplicado antes (cuv − mv·scale, muestreado en el texel de
+  profundidad más cercana); sin profundidad/cielo = solo rotación. Historial CR 5 taps rgba16f + distancia previa r16f
+  (gather 2x2; desoclusión si ninguno a < `KL_VPKTAA_DISOCC`=0.1 relativo → peso 0); clip YCoCg (γ 1,25 jitter /1,0);
+  −25 % de historial a ≥32 px/frame; Karis; RCAS aparte (o escritura sRGB directa si nitidez 0). Votación de signo MV
+  (4 variantes ±x±y en píxeles de estadística que se mueven).
+- `kl_vulkan.c/.h` (solo con `KL_VPKTAA=1`, `KL_VPKTAA_DEPTH=0` lo apaga): tablas depth-images (`klvk_depth_info_*`,
+  vkCreateImage), render passes (`klvk_rpd_*`: índice depth + loadOp CLEAR), framebuffers (`klvk_fbd_*`); en
+  vkCreateImage las depth del tamaño del ojo (1x o forzadas 1x por `VPVK_FORCE_1X`) ganan SAMPLED y pierden TRANSIENT;
+  storeOp depth DONT_CARE→STORE en vkCreateRenderPass/2 y vkCmdBeginRendering; `klvk_ed_note_pass`/`klvk_ed_candidate`
+  en cada begin: 1 = pase con la imagen ojo adjunta, 3 = depth de tamaño ojo (último gana); 2 = depth SpaceWarp si se
+  escribió ese frame. Prioridad 1 > 2 > 3 (1 es resolución completa y mismo layout). `klvk_ed_frame_done` (en
+  `kl_vulkan_frame_done`, ANTES del QueueWaitIdle): registra por stage/ojo; si la depth es compartida entre stages la
+  copia (`klvk_ed_snapshot`, vkCmdCopyImage aspecto DEPTH en la cola del juego) a una imagen propia por stage.
+  Reversed-Z: clear del pase ojo (0.0 → reversed) o censo de depthCompareOp en vkCreateGraphicsPipelines.
+  API: `kl_vulkan_eye_depth_get(stage, eye, want_tag, &kl_vulkan_eye_depth)`, `kl_vulkan_eye_depth_mtl(...)`,
+  `kl_vulkan_eye_depth_tag(stage, serial)`. Mapa vista→imagen ahora en anillo (antes dejaba de registrar a las 8192).
+- `kl_ovrp.c/.h`: EndFrame4 etiqueta la depth con el serial del registro archivado (0 si se descartó);
+  `kl_ovrp_eye_local(eye, off, rot)`; `kl_ovrp_render_pose.depth_near/depth_far` (desde el submit si
+  `KL_VPKTAA_NEARFAR_OFF=0x…`); volcado `[asw]` ampliado a +0x128 y cada 1800 frames. En el volcado del log 43:
+  Fov[2] (Up Down Left Right) en +0x104..+0x123; +0x124 = 1e7 (¿FarZ?); near no localizado → default.
+- `KleptonTAA.submit(newest:wait:sources:)`: elige el registro más nuevo cuya depth ya está etiquetada (tras el idle
+  del juego ⇒ el ojo también está completo); si ninguno en `KL_VPKTAA_DEPTH_WAIT_MS`=25 ms, el más nuevo sin depth
+  (`depth-late`). MV si `rendered.asw & KL_OVRP_ASW_MV`. Mapeo depth/MV: textura del tamaño del color = su layout; otro
+  tamaño = cubre el rect crop del ojo (MV AppSW 1549x1243 para crop 3029x2485 de 3840x2485). Rechaza MV si el aspecto
+  difiere > 5 %.
+- Env: `KL_VPKTAA_NEAR`=0.05, `KL_VPKTAA_FAR`=0 (∞), `KL_VPKTAA_REVZ`=0/1 (forzar), `KL_VPKTAA_MV`=0 (sin MV),
+  `KL_VPKTAA_MV_SCALE`=0.5, `KL_VPKTAA_MV_SIGN`=auto|1|-1 (auto: empieza +x+y y cambia si un signo gana ≥55 % de ≥200
+  votos), `KL_VPKTAA_MV_YFLIP=1`, `KL_VPKTAA_MV_MAP`/`KL_VPKTAA_DEPTH_MAP`=full|crop, `KL_VPKTAA_DISOCC`,
+  `KL_VPKTAA_DEPTH_COPY=0`, `KL_VPKTAA_DEPTH_WAIT_MS`.
+- Supuestos: Unity/Unreal Vulkan = reversed-Z; near 0,05 m (para la prueba de desoclusión relativa el near se cancela;
+  solo afecta al paralaje de la traslación); MV AppSW = solo objetos, NDC cur−prev (signo verificable con los votos).
+### Comprobar en el próximo log
+- `[taa-depth] eye-sized depth image … usage` y `[taa-depth] frame N stage S: eye depth = eye-pass … live|copied …
+  reversedZ=1`; si sale `no eye depth found`, mirar cuántos pases tenían la imagen ojo.
+- `[taa] inputs … eye0 depth=eye-pass live D24S8 … revZ=1(clear 0.000) near=0.050(default) far=inf mv=live …`
+  (o `REFUSED: …`). `[taa] stats`: gpu ms (objetivo ≤3), depthValid %, disocc %, depth-late, mean|mv|, votos MV.
+- AC: volcado `[asw] … +0x128` cada 1800 frames para localizar NearZ/FarZ.
+- Limitaciones: locomoción artificial (el rig se mueve, la pose de tracking no) → la reproyección por cámara falla y lo
+  absorben desoclusión + clip; MSAA del juego activo (sin forzar 1x) → depth multisample no usable (se registra);
+  OpenXR XR_FB_space_warp / GLES sin depth; RCAS sigue en un segundo dispatch.
+
+## Log 43 AC Nexus (2026-10-13, VPKTAA on) → build siguiente
+- Vídeos: el juego los pone en una capa Equirect con Surface Android (desc flag 0x80, texL=0, capas 4/23/31/38/40)
+  y declara la matriz de rect: ojo L `src=[0 0 0.5 1] sb=[1 1 -0.25 0]` → SBS, destino u 0.25..0.75 = 180° delante.
+  Ficheros: Ubisoft-Logo 5760x2880, Background-with-Initialisation-Loop 2880x2880, Background-Looping 1920x1920
+  (todos SBS 180). El skybox los pintaba mono con `hscale=2` (frame entero en 180° → imagen doble, sin estéreo).
+  `KleptonCompositor.swift`: `SkyboxLayout`, `skyboxLayoutFromLayer` (d=(src−b)/s → hspan/vspan, rect por ojo
+  pasado a origen arriba-izq., yaw del centro + pose de la capa), `skyboxLayoutFromFrame` (nombre _LR/_SBS/_TB/_OU/
+  180/360, si no aspecto vía `HostVideoPlayer.layout`), `drawLoadingSkybox` en modo angular por ojo
+  (`KL_EQ_LEGACY=1` = antiguo). `encodeHostVideo` usa también el rect de la capa Equirect. Log
+  `[cp] loading skybox layout: … from layer N: L=[…] R=[…] span 180x180 deg`.
+- Ojo nunca compuesto en todo el log (skybox ON desde el frame 0, nunca OFF): el disparador era «Equirect vivo» y AC
+  casi no destruye capas. `kl_ovrp.c` `kl_loadvid_recount`: solo Equirect de vídeo (flag 0x80 o
+  `GetLayerAndroidSurfaceObject` pedido) ENVIADO en los últimos `KL_LOADVID_GRACE`=45 EndFrame4 (setup cuenta);
+  `kl_loadvid_tick` en EndFrame4; `submit_tick` en EnqueueSubmitLayer2 y en la lista de EndFrame4.
+  `KL_LOADVID_ANY_EQ=1` = regla antigua. Log `[ovrp] loading-video skybox ON/OFF (…)`.
+- Proyección simétrica (Quest 3): viewport ojo0 `0,0 2347x1912`, ojo1 `629,0` de 2976 (78,9 %). El composite ya
+  recorta por ojo, pero VPKTAA solo usaba el tamaño → ojo derecho resuelto con 629 px de desfase (historial mal
+  reproyectado, franja derecha sin TAA). `KleptonTAA.swift`: `Params.cropOff`, `cuv=(uv−off)/crop`, muestreo
+  fuente/historial con offset, reset al cambiar el rect, crop solo si `viewport_of` = textura; dispatch limitado al
+  rect (+1 texel de margen, buffer(2) `org`) → ~21 % menos coste (TAA estaba en 20,3 ms/frame a 3840x2485).
+- Diagnóstico: `klovrp_enq_census` (`[ovrp] overlay set (N): #id Forma WxH@(x y z) f… notex rect;` al cambiar el
+  conjunto, máx. 40). Capas 6/9/10/16 de AC se componían en ~(0,0,0) m: comprobar con el censo.
+- Sin fallos de traductor VPEngine en este log (sin `internal error`, arg_overflow ni draws saltados; solo
+  `missing_pipelines=4487` en el frame de warmup f=846 y `archive_save` partido OK). MV depth de SpaceWarp: en la
+  1.ª capa ojo Unity crea vistas D24S8 sobre el handle salvaje 0x1041bf078 (scratch), «0 with depth written».
+### Comprobar en el próximo log
+- `[cp] loading skybox layout` con `from layer`, span 180x180, L/R mitades; vídeo en estéreo delante.
+- `[ovrp] loading-video skybox OFF` al pasar a partida y `[cp] first render viewport read`; `[taa] eye 1 renders
+  into an offset rect` y `[taa] stats` gpu < 20 ms. Pendiente si en el menú faltan punteros/manos: el ojo no se
+  dibuja sobre el skybox (haría falta mezcla alfa tipo underlay; mirar captura del ojo con «Capturas»).
+
 ## Logs 39–41 (2026-10-13) → build siguiente
 - SpaceWarp: AC y AoT llevan `flags 0x300` = bit 8 SpaceWarpDataAllocation + bit 9 SpaceWarpDedicatedDepth y SÍ llaman
   `GetLayerTextureSpaceWarp`; Batman (0x1000) no lo usa (SetSpaceWarp forzado sin efecto, inocuo). La fase 1 servía MV

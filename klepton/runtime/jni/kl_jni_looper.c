@@ -8,11 +8,13 @@
 #include <errno.h>
 #include <stdarg.h>
 #include <pthread.h>
+#include <sched.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
+#include <time.h>
 #include <unistd.h>
 #include <dirent.h>
 #include <sys/stat.h>
@@ -239,14 +241,51 @@ static klj_val klj_Handler_post(void *env, void *self, const klj_val *a, int n) 
 // keeps the host-driven drain, because there genuinely is no thread of ours
 // running it.
 #define KLJ_MAX_LOOPER_MSGS 64
+
+// java.lang.Thread lifecycle state (AoT log 42: Unity's AndroidVideoMedia asked
+// `Thread.isAlive()` on its HandlerThread while tearing a decoder down, and the
+// call had no binding -> abort). Shared by every Thread-shaped object we hand
+// out: a HandlerThread embeds one (its klj_looper carries it, so the Looper
+// objects that share the klj_looper see the same thread), a plain
+// java/lang/Thread made by NewObject owns one, and Thread.currentThread() makes
+// one per host thread. `done` is broadcast when the thread's body returns, which
+// is what join() and isAlive() answer from.
+typedef struct klj_jthread {
+    pthread_mutex_t mu;
+    pthread_cond_t  done;
+    pthread_t       thread;
+    int             started, finished, is_current, interrupted, daemon, priority;
+    uint64_t        tid;            // pthread_threadid_np of the running thread
+    void           *runnable;       // java/lang/Thread(Runnable): pinned while held
+    void           *self_obj;       // the Thread object, pinned while it runs
+    char            name[64];
+} klj_jthread;
+
 typedef struct {
     pthread_mutex_t lock;
     pthread_cond_t  wake;
     pthread_t       thread;
     int             running, started;
+    int             drain_on_quit;  // quitSafely(): deliver what is queued, then stop
     void           *q[KLJ_MAX_LOOPER_MSGS];
     unsigned        head, tail, count;
+    klj_jthread     th;             // the HandlerThread's Thread half
 } klj_looper;
+
+static void klj_jthread_init(klj_jthread *t, const char *name) {
+    pthread_mutex_init(&t->mu, NULL);
+    pthread_cond_init(&t->done, NULL);
+    t->priority = 5;                // Thread.NORM_PRIORITY
+    if (name) snprintf(t->name, sizeof t->name, "%s", name);
+}
+
+// Mark the thread's body as returned and wake every joiner.
+static void klj_jthread_finish(klj_jthread *t) {
+    pthread_mutex_lock(&t->mu);
+    t->finished = 1;
+    pthread_cond_broadcast(&t->done);
+    pthread_mutex_unlock(&t->mu);
+}
 
 
 // Guest code runs on this thread, so kl_thread_init() before the first delivery is
@@ -255,8 +294,16 @@ typedef struct {
 static void *klj_looper_thread(void *arg) {
     klj_looper *lp = arg;
     kl_thread_init();
+    {
+        uint64_t tid = 0; pthread_threadid_np(NULL, &tid);
+        pthread_mutex_lock(&lp->th.mu); lp->th.tid = tid; pthread_mutex_unlock(&lp->th.mu);
+        if (lp->th.name[0]) pthread_setname_np(lp->th.name);
+    }
     pthread_mutex_lock(&lp->lock);
-    while (lp->running) {
+    for (;;) {
+        // quit() stops at once and drops what is queued; quitSafely() delivers
+        // what is already queued first (Android: messages already due).
+        if (!lp->running && !(lp->drain_on_quit && lp->count)) break;
         if (!lp->count) { pthread_cond_wait(&lp->wake, &lp->lock); continue; }
         void *msg = lp->q[lp->head];
         lp->head  = (lp->head + 1) % KLJ_MAX_LOOPER_MSGS;
@@ -266,6 +313,11 @@ static void *klj_looper_thread(void *arg) {
         pthread_mutex_lock(&lp->lock);
     }
     pthread_mutex_unlock(&lp->lock);
+    // The HandlerThread's run() has returned: isAlive() is now false and any
+    // join() returns. Without this a guest that quits and joins (the standard
+    // teardown) would block forever.
+    klj_jthread_finish(&lp->th);
+    KLJ_LOG("HandlerThread \"%s\" looper exited", lp->th.name[0] ? lp->th.name : "?");
     return NULL;
 }
 
@@ -293,6 +345,13 @@ static klj_looper *klj_looper_of(void *looper_obj) {
 // there is nothing to stop, because our main "loop" is the host's pump and it
 // ends when the run does.
 static void klj_mq_quit(void);
+static void klj_looper_stop(klj_looper *lp, int safely) {
+    pthread_mutex_lock(&lp->lock);
+    lp->running = 0;
+    lp->drain_on_quit = safely;
+    pthread_cond_broadcast(&lp->wake);
+    pthread_mutex_unlock(&lp->lock);
+}
 static klj_val klj_Looper_quit(void *env, void *self, const klj_val *a, int n) {
     (void)env; (void)a; (void)n;
     klj_looper *lp = klj_looper_of(self);
@@ -302,10 +361,15 @@ static klj_val klj_Looper_quit(void *env, void *self, const klj_val *a, int n) {
         klj_mq_quit();
         return (klj_val){0};
     }
-    pthread_mutex_lock(&lp->lock);
-    lp->running = 0;
-    pthread_cond_broadcast(&lp->wake);
-    pthread_mutex_unlock(&lp->lock);
+    klj_looper_stop(lp, 0);
+    return (klj_val){0};
+}
+// Looper.quitSafely() — same, but what is already queued is delivered first.
+static klj_val klj_Looper_quitSafely(void *env, void *self, const klj_val *a, int n) {
+    (void)env; (void)a; (void)n;
+    klj_looper *lp = klj_looper_of(self);
+    if (!lp) { klj_mq_quit(); return (klj_val){0}; }
+    klj_looper_stop(lp, 1);
     return (klj_val){0};
 }
 
@@ -447,7 +511,12 @@ static klj_val klj_Message_sendToTarget(void *env, void *self, const klj_val *a,
     }
     klj_handler *h  = klj_as_handler(m->target);
     klj_looper  *lp = h ? klj_looper_of(h->looper) : NULL;
-    if (lp && lp->started) {
+    if (lp && lp->started && !lp->running) {
+        // Android: sending to a quit looper fails (the message is dropped and
+        // sendMessage returns false). Queuing it would park it forever.
+        KLJ_LOG("Message.sendToTarget(what=%d) -> HandlerThread looper has quit — dropped",
+                m->what);
+    } else if (lp && lp->started) {
         KLJ_LOG("Message.sendToTarget(what=%d) -> HandlerThread looper", m->what);
         klj_looper_post(lp, self);
     } else {
@@ -459,13 +528,17 @@ static klj_val klj_Message_sendToTarget(void *env, void *self, const klj_val *a,
 // ---- android.os.HandlerThread ----
 // The thread is not started here — Android requires an explicit start() — so the
 // looper exists but nothing delivers on it until then.
+// <init>(String name) and <init>(String name, int priority). The name is kept:
+// getName() reads it back and the host thread is labelled with it.
 static klj_val klj_HandlerThread_init(void *env, void *clazz, const klj_val *a, int n) {
-    (void)env; (void)a; (void)n;
+    (void)env;
     void *obj = kl_jni_new_object(klj_class_name(clazz));
     klj_looper *lp = calloc(1, sizeof *lp);
     if (lp) {
         pthread_mutex_init(&lp->lock, NULL);
         pthread_cond_init(&lp->wake, NULL);
+        klj_jthread_init(&lp->th, n > 0 ? klj_str(a[0].l) : NULL);
+        if (n > 1) lp->th.priority = (int)(int32_t)a[1].j;
     }
     klj_as_object(obj)->data = lp;
     return (klj_val){.l = obj};
@@ -491,10 +564,38 @@ static klj_val klj_HandlerThread_getLooper(void *env, void *self, const klj_val 
     }
     if (!lp->started) {
         lp->started = lp->running = 1;
-        pthread_create(&lp->thread, NULL, klj_looper_thread, lp);
+        pthread_mutex_lock(&lp->th.mu);
+        lp->th.started = 1;
+        pthread_mutex_unlock(&lp->th.mu);
+        if (pthread_create(&lp->thread, NULL, klj_looper_thread, lp) == 0) {
+            pthread_detach(lp->thread);     // join() waits on th.done, not pthread_join
+            lp->th.thread = lp->thread;
+        } else {
+            klj_jthread_finish(&lp->th);    // never ran: report it dead, not hung
+        }
         KLJ_LOG("HandlerThread.start() — looper thread running");
     }
     return (klj_val){.j = 0};
+}
+
+// HandlerThread.quit() / quitSafely() -> boolean: false if the looper never ran
+// (Android: getLooper() is null before start), true otherwise.
+static klj_val klj_HandlerThread_quit_common(void *self, int safely) {
+    klj_object *o  = klj_as_object(self);
+    klj_looper *lp = o ? o->data : NULL;
+    if (!lp || !lp->started) return (klj_val){.j = 0};
+    KLJ_LOG("HandlerThread.%s() \"%s\"", safely ? "quitSafely" : "quit",
+            lp->th.name[0] ? lp->th.name : "?");
+    klj_looper_stop(lp, safely);
+    return (klj_val){.j = 1};
+}
+static klj_val klj_HandlerThread_quit(void *env, void *self, const klj_val *a, int n) {
+    (void)env; (void)a; (void)n;
+    return klj_HandlerThread_quit_common(self, 0);
+}
+static klj_val klj_HandlerThread_quitSafely(void *env, void *self, const klj_val *a, int n) {
+    (void)env; (void)a; (void)n;
+    return klj_HandlerThread_quit_common(self, 1);
 }
 
 // ---- android.view.Choreographer ----
@@ -680,6 +781,384 @@ static klj_val klj_Process_myTid(void *env, void *self, const klj_val *a, int n)
     return (klj_val){.j = (uint32_t)tid};
 }
 
+// ---- java.lang.Thread ----------------------------------------------------
+//
+// AoT log 42: the run aborted on `java/lang/Thread.isAlive()Z` — Unity's
+// AndroidVideoMedia tears its decoder down by checking (and then quitting and
+// joining) the HandlerThread it started for SurfaceTexture callbacks. Thread had
+// only start/currentThread/setName, so the whole lifecycle is served here, for
+// every Thread-shaped object we hand out (klj_thread_of below):
+//
+//   * android/os/HandlerThread — a real host thread running the looper above;
+//     alive from start() until its loop exits after quit()/quitSafely().
+//   * java/lang/Thread made by NewObject — Thread(Runnable[, name]) gets a real
+//     host thread on start() that runs the guest Runnable's run() through the
+//     JNIBridge proxy (a guest cannot subclass Thread without dex, so a Runnable
+//     is the only body it can have); alive until run() returns.
+//   * Thread.currentThread() — the calling host thread, one object per thread,
+//     pinned (it is cached across frames), always alive.
+//
+// These used to live in kl_jni_net.c (start/currentThread/setName); they moved
+// here so the one struct that knows a thread's state answers every question
+// about it.
+
+static uint64_t klj_thread_self_tid(void) {
+    uint64_t tid = 0;
+    pthread_threadid_np(NULL, &tid);
+    return tid;
+}
+
+static klj_jthread *klj_thread_of(void *obj) {
+    klj_object *o = klj_as_object(obj);
+    if (!o) return NULL;
+    if (strcmp(o->cls, "android/os/HandlerThread") == 0) {
+        klj_looper *lp = o->data;
+        return lp ? &lp->th : NULL;
+    }
+    if (strcmp(o->cls, "java/lang/Thread") == 0) {
+        // A Thread object some other path made without a payload (AllocObject):
+        // give it one, unstarted, so the questions below have an answer.
+        if (!o->data) {
+            klj_jthread *t = calloc(1, sizeof *t);
+            if (!t) return NULL;
+            klj_jthread_init(t, NULL);
+            o->data = t;
+        }
+        return o->data;
+    }
+    return NULL;
+}
+
+static int klj_is_handler_thread(void *obj) {
+    klj_object *o = klj_as_object(obj);
+    return o && strcmp(o->cls, "android/os/HandlerThread") == 0;
+}
+
+// Thread() / Thread(Runnable) / Thread(Runnable, String) / Thread(String) /
+// Thread(ThreadGroup, Runnable, String, long). The Runnable is pinned while the
+// Thread holds it: the guest made it in a local frame that will pop long before
+// start() runs it on another thread.
+static klj_val klj_thread_new(void *clazz, void *runnable, const char *name) {
+    (void)clazz;   // only java/lang/Thread itself: a guest cannot subclass it without dex
+    klj_jthread *t = calloc(1, sizeof *t);
+    if (!t) return (klj_val){.l = NULL};
+    klj_jthread_init(t, name);
+    if (runnable) { t->runnable = runnable; kl_jni_pin_object(runnable); }
+    // Payload deliberately has no destructor: the object can be retired while
+    // its thread still runs (the guest dropped its last ref after start()), and
+    // the body reads `t` until it finishes. A few dozen bytes per Thread.
+    void *obj = klj_new_object_data("java/lang/Thread", t);
+    KLJ_LOG("new Thread(%s%s%s)", runnable ? "Runnable" : "",
+            runnable && name ? ", " : "", name ? name : "");
+    return (klj_val){.l = obj};
+}
+static klj_val klj_Thread_init0(void *env, void *clazz, const klj_val *a, int n) {
+    (void)env; (void)a; (void)n;
+    return klj_thread_new(clazz, NULL, NULL);
+}
+static klj_val klj_Thread_init_r(void *env, void *clazz, const klj_val *a, int n) {
+    (void)env;
+    return klj_thread_new(clazz, n > 0 ? a[0].l : NULL, NULL);
+}
+static klj_val klj_Thread_init_rs(void *env, void *clazz, const klj_val *a, int n) {
+    (void)env;
+    return klj_thread_new(clazz, n > 0 ? a[0].l : NULL, n > 1 ? klj_str(a[1].l) : NULL);
+}
+static klj_val klj_Thread_init_s(void *env, void *clazz, const klj_val *a, int n) {
+    (void)env;
+    return klj_thread_new(clazz, NULL, n > 0 ? klj_str(a[0].l) : NULL);
+}
+static klj_val klj_Thread_init_grsj(void *env, void *clazz, const klj_val *a, int n) {
+    (void)env;   // (ThreadGroup group, Runnable target, String name, long stackSize)
+    return klj_thread_new(clazz, n > 1 ? a[1].l : NULL, n > 2 ? klj_str(a[2].l) : NULL);
+}
+
+// The body of a started java/lang/Thread: run the guest Runnable on this host
+// thread. kl_jni_env() gives the thread its JNIEnv and kl_thread_init (guest code
+// runs here, so the stack-protector TSD slot must be set before the first call).
+static void *klj_thread_main(void *arg) {
+    klj_jthread *t = arg;
+    kl_jni_env();
+    pthread_mutex_lock(&t->mu);
+    t->tid = klj_thread_self_tid();
+    pthread_mutex_unlock(&t->mu);
+    if (t->name[0]) pthread_setname_np(t->name);
+    if (t->runnable)
+        klj_proxy_invoke(t->runnable, "java/lang/Runnable", "run", "()V", NULL);
+    void *runnable = t->runnable, *self = t->self_obj;
+    klj_jthread_finish(t);
+    KLJ_LOG("Thread \"%s\" run() returned", t->name[0] ? t->name : "?");
+    if (runnable) kl_jni_unpin_object(runnable);
+    if (self) kl_jni_unpin_object(self);
+    return NULL;
+}
+
+// Thread.start(). A HandlerThread starts its looper (the guest resolves start()
+// on java/lang/Thread and calls it on the HandlerThread). A Thread(Runnable) gets
+// a host thread that runs the Runnable. A Thread with no Runnable has an empty
+// run() — it starts and finishes at once, which is what Java does.
+static klj_val klj_Thread_start(void *env, void *self, const klj_val *a, int n) {
+    if (klj_is_handler_thread(self))
+        return klj_HandlerThread_start(env, self, a, n);
+    klj_jthread *t = klj_thread_of(self);
+    if (!t) {
+        klj_object *o = klj_as_object(self);
+        KLJ_LOG("Thread.start() on %s — not a thread we model; NOT started",
+                o ? o->cls : "(not one of our objects)");
+        return (klj_val){.j = 0};
+    }
+    pthread_mutex_lock(&t->mu);
+    if (t->started || t->is_current) {
+        pthread_mutex_unlock(&t->mu);
+        KLJ_LOG("Thread.start() on a thread already started (IllegalThreadStateException "
+                "on Android) — ignored");
+        return (klj_val){.j = 0};
+    }
+    t->started = 1;
+    pthread_mutex_unlock(&t->mu);
+    if (!t->runnable) {
+        KLJ_LOG("Thread.start() with no Runnable — run() is empty, finished at once");
+        klj_jthread_finish(t);
+        return (klj_val){.j = 0};
+    }
+    t->self_obj = self;
+    kl_jni_pin_object(self);            // alive while its body runs
+    pthread_attr_t attr;
+    pthread_attr_init(&attr);
+    pthread_attr_setstacksize(&attr, 1024 * 1024);   // Android's Java default
+    pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+    int rc = pthread_create(&t->thread, &attr, klj_thread_main, t);
+    pthread_attr_destroy(&attr);
+    if (rc != 0) {
+        KLJ_LOG("Thread.start(): pthread_create failed (%d) — reporting it finished", rc);
+        kl_jni_unpin_object(self);
+        t->self_obj = NULL;
+        klj_jthread_finish(t);
+    } else {
+        KLJ_LOG("Thread.start() \"%s\" — host thread running the guest Runnable",
+                t->name[0] ? t->name : "?");
+    }
+    return (klj_val){.j = 0};
+}
+
+// Thread.run() called directly: Java runs the Runnable on the CALLER's thread.
+static klj_val klj_Thread_run(void *env, void *self, const klj_val *a, int n) {
+    (void)env; (void)a; (void)n;
+    if (klj_is_handler_thread(self)) {
+        KLJ_LOG("HandlerThread.run() called directly — the looper runs on its own "
+                "thread after start(); ignored");
+        return (klj_val){.j = 0};
+    }
+    klj_jthread *t = klj_thread_of(self);
+    if (t && t->runnable)
+        klj_proxy_invoke(t->runnable, "java/lang/Runnable", "run", "()V", NULL);
+    return (klj_val){.j = 0};
+}
+
+// Thread.currentThread() — one object per host thread, pinned (the cache below
+// outlives every local frame; unpinned it was retired at the first pop and the
+// cached pointer went stale), carrying this thread's identity.
+static klj_val klj_Thread_currentThread(void *env, void *self, const klj_val *a, int n) {
+    (void)env; (void)self; (void)a; (void)n;
+    static _Thread_local void *me;
+    if (!me || !klj_as_object(me)) {
+        klj_jthread *t = calloc(1, sizeof *t);
+        if (!t) return (klj_val){.l = NULL};
+        char nm[64] = {0};
+        pthread_getname_np(pthread_self(), nm, sizeof nm);
+        klj_jthread_init(t, nm[0] ? nm : NULL);
+        t->is_current = t->started = 1;
+        t->thread = pthread_self();
+        t->tid = klj_thread_self_tid();
+        me = klj_new_object_data("java/lang/Thread", t);
+        kl_jni_pin_object(me);
+    }
+    return (klj_val){.l = me};
+}
+
+// isAlive(): started and its body has not returned. The current thread is
+// alive by definition.
+static klj_val klj_Thread_isAlive(void *env, void *self, const klj_val *a, int n) {
+    (void)env; (void)a; (void)n;
+    klj_jthread *t = klj_thread_of(self);
+    if (!t) return (klj_val){.j = 0};
+    pthread_mutex_lock(&t->mu);
+    int alive = t->is_current || (t->started && !t->finished);
+    pthread_mutex_unlock(&t->mu);
+    static int said;
+    if (said++ < 8)
+        KLJ_LOG("Thread.isAlive() \"%s\" -> %s", t->name[0] ? t->name : "?",
+                alive ? "true" : "false");
+    return (klj_val){.j = (uint64_t)alive};
+}
+
+// join() / join(millis) / join(millis, nanos). Returns when the body has
+// returned, or the timeout passed (0 = forever, as in Java). Joining yourself
+// would block forever on Android; here it returns at once and says so. A join
+// on a HandlerThread nobody quit really would never return — that is Android's
+// behaviour too, so it is kept, with a line every 5 s naming the wait.
+static void klj_thread_join(klj_jthread *t, int64_t millis) {
+    if (!t) return;
+    pthread_mutex_lock(&t->mu);
+    if (!t->started || t->is_current ||
+        (t->thread && pthread_equal(t->thread, pthread_self()))) {
+        if (t->started && !t->finished)
+            KLJ_LOG("Thread.join() on the calling thread itself — returning");
+        pthread_mutex_unlock(&t->mu);
+        return;
+    }
+    uint64_t start = clock_gettime_nsec_np(CLOCK_MONOTONIC);
+    unsigned waits = 0;
+    while (!t->finished) {
+        int64_t slice_ms = 5000;
+        if (millis > 0) {
+            int64_t left = millis - (int64_t)((clock_gettime_nsec_np(CLOCK_MONOTONIC) - start) / 1000000ull);
+            if (left <= 0) break;
+            if (left < slice_ms) slice_ms = left;
+        }
+        struct timespec ts;
+        clock_gettime(CLOCK_REALTIME, &ts);
+        ts.tv_sec  += (time_t)(slice_ms / 1000);
+        ts.tv_nsec += (long)(slice_ms % 1000) * 1000000L;
+        if (ts.tv_nsec >= 1000000000L) { ts.tv_sec++; ts.tv_nsec -= 1000000000L; }
+        pthread_cond_timedwait(&t->done, &t->mu, &ts);
+        if (!t->finished && millis <= 0 && ++waits <= 6)
+            KLJ_LOG("Thread.join() \"%s\" still waiting (%u x 5 s) — the thread has not "
+                    "finished (a HandlerThread needs quit() first)",
+                    t->name[0] ? t->name : "?", waits);
+    }
+    pthread_mutex_unlock(&t->mu);
+}
+static klj_val klj_Thread_join(void *env, void *self, const klj_val *a, int n) {
+    (void)env;
+    klj_thread_join(klj_thread_of(self), n > 0 ? (int64_t)a[0].j : 0);
+    return (klj_val){.j = 0};
+}
+
+static klj_val klj_Thread_interrupt(void *env, void *self, const klj_val *a, int n) {
+    (void)env; (void)a; (void)n;
+    klj_jthread *t = klj_thread_of(self);
+    if (t) { pthread_mutex_lock(&t->mu); t->interrupted = 1; pthread_mutex_unlock(&t->mu); }
+    return (klj_val){.j = 0};
+}
+static klj_val klj_Thread_isInterrupted(void *env, void *self, const klj_val *a, int n) {
+    (void)env; (void)a; (void)n;
+    klj_jthread *t = klj_thread_of(self);
+    return (klj_val){.j = (uint64_t)(t ? t->interrupted : 0)};
+}
+// static Thread.interrupted(): test-and-clear the CALLING thread's flag.
+static klj_val klj_Thread_interrupted(void *env, void *self, const klj_val *a, int n) {
+    klj_jthread *t = klj_thread_of(klj_Thread_currentThread(env, self, a, n).l);
+    if (!t) return (klj_val){.j = 0};
+    pthread_mutex_lock(&t->mu);
+    int was = t->interrupted; t->interrupted = 0;
+    pthread_mutex_unlock(&t->mu);
+    return (klj_val){.j = (uint64_t)was};
+}
+
+static klj_val klj_Thread_getName(void *env, void *self, const klj_val *a, int n) {
+    (void)env; (void)a; (void)n;
+    klj_jthread *t = klj_thread_of(self);
+    char buf[80];
+    if (t && t->name[0]) snprintf(buf, sizeof buf, "%s", t->name);
+    else snprintf(buf, sizeof buf, "Thread-%llu", (unsigned long long)(t ? t->tid : 0));
+    return (klj_val){.l = kl_jni_new_string(buf)};
+}
+
+// setName is APPLIED to the host thread when the object names the calling
+// thread (UE4 labels its own pthreads this way, which is what makes `sample`
+// and fault reports readable); for any other thread it is recorded and applied
+// when that thread starts. Darwin caps names at 64 bytes, so it is truncated.
+static klj_val klj_Thread_setName(void *env, void *self, const klj_val *a, int n) {
+    (void)env;
+    const char *name = (n >= 1) ? klj_str(a[0].l) : NULL;
+    if (!name || !*name) return (klj_val){.j = 0};
+    klj_jthread *t = klj_thread_of(self);
+    if (t) {
+        pthread_mutex_lock(&t->mu);
+        snprintf(t->name, sizeof t->name, "%s", name);
+        pthread_mutex_unlock(&t->mu);
+    }
+    if (!t || t->is_current) {
+        char buf[64];
+        snprintf(buf, sizeof buf, "%s", name);
+        pthread_setname_np(buf);
+    }
+    return (klj_val){.j = 0};
+}
+
+static klj_val klj_Thread_getId(void *env, void *self, const klj_val *a, int n) {
+    (void)env; (void)a; (void)n;
+    klj_jthread *t = klj_thread_of(self);
+    // Unstarted threads have no host tid yet; Java ids are unique and stable,
+    // so the object's own address stands in.
+    uint64_t id = t ? (t->tid ? t->tid : (uint64_t)(uintptr_t)t) : 1;
+    return (klj_val){.j = id};
+}
+// HandlerThread.getThreadId() -> int: the tid, or -1 before the looper runs.
+static klj_val klj_HandlerThread_getThreadId(void *env, void *self, const klj_val *a, int n) {
+    (void)env; (void)a; (void)n;
+    klj_jthread *t = klj_thread_of(self);
+    int32_t id = (t && t->tid) ? (int32_t)t->tid : -1;
+    return (klj_val){.j = (uint64_t)(int64_t)id};
+}
+
+// Priority and daemon status are recorded and read back; Darwin schedules by
+// QoS, and an Android nice level has no faithful mapping (see Process below).
+static klj_val klj_Thread_setPriority(void *env, void *self, const klj_val *a, int n) {
+    (void)env;
+    klj_jthread *t = klj_thread_of(self);
+    if (t && n > 0) t->priority = (int)(int32_t)a[0].j;
+    return (klj_val){.j = 0};
+}
+static klj_val klj_Thread_getPriority(void *env, void *self, const klj_val *a, int n) {
+    (void)env; (void)a; (void)n;
+    klj_jthread *t = klj_thread_of(self);
+    return (klj_val){.j = (uint64_t)(int64_t)(t ? t->priority : 5)};
+}
+static klj_val klj_Thread_setDaemon(void *env, void *self, const klj_val *a, int n) {
+    (void)env;
+    klj_jthread *t = klj_thread_of(self);
+    if (t && n > 0) t->daemon = a[0].j ? 1 : 0;
+    return (klj_val){.j = 0};
+}
+static klj_val klj_Thread_isDaemon(void *env, void *self, const klj_val *a, int n) {
+    (void)env; (void)a; (void)n;
+    klj_jthread *t = klj_thread_of(self);
+    return (klj_val){.j = (uint64_t)(t ? t->daemon : 0)};
+}
+
+// static sleep(millis[, nanos]) and yield().
+static klj_val klj_Thread_sleep(void *env, void *self, const klj_val *a, int n) {
+    (void)env; (void)self;
+    int64_t ms = n > 0 ? (int64_t)a[0].j : 0;
+    int64_t ns = n > 1 ? (int64_t)(int32_t)a[1].j : 0;
+    if (ms < 0) ms = 0;
+    struct timespec ts = { (time_t)(ms / 1000), (long)(ms % 1000) * 1000000L + (long)ns };
+    while (ts.tv_nsec >= 1000000000L) { ts.tv_sec++; ts.tv_nsec -= 1000000000L; }
+    nanosleep(&ts, NULL);
+    return (klj_val){.j = 0};
+}
+static klj_val klj_Thread_yield(void *env, void *self, const klj_val *a, int n) {
+    (void)env; (void)self; (void)a; (void)n;
+    sched_yield();
+    return (klj_val){.j = 0};
+}
+
+// getStackTrace(): an empty StackTraceElement[] — there is no Java stack here,
+// and an empty trace is a legal answer callers iterate over without error.
+static klj_val klj_Thread_getStackTrace(void *env, void *self, const klj_val *a, int n) {
+    (void)env; (void)self; (void)a; (void)n;
+    return (klj_val){.l = klj_new_array('L', "java/lang/StackTraceElement", 0)};
+}
+
+// setUncaughtExceptionHandler / setDefaultUncaughtExceptionHandler: no Java
+// code runs here, so nothing can throw uncaught through it. Recorded-as-nothing.
+static klj_val klj_Thread_void(void *env, void *self, const klj_val *a, int n) {
+    (void)env; (void)self; (void)a; (void)n;
+    return (klj_val){.j = 0};
+}
+
 const klj_binding klj_bind_looper[] = {
     {"android/app/Activity",   "runOnUiThread", "(Ljava/lang/Runnable;)V", klj_Activity_runOnUiThread},
 
@@ -708,6 +1187,47 @@ const klj_binding klj_bind_looper[] = {
     {"android/os/HandlerThread", "<init>", "(Ljava/lang/String;)V", klj_HandlerThread_init},
     {"android/os/HandlerThread", "start", "()V", klj_HandlerThread_start},
     {"android/os/HandlerThread", "getLooper", "()Landroid/os/Looper;", klj_HandlerThread_getLooper},
+    {"android/os/HandlerThread", "<init>", "(Ljava/lang/String;I)V", klj_HandlerThread_init},
+    {"android/os/HandlerThread", "quit",        "()Z", klj_HandlerThread_quit},
+    {"android/os/HandlerThread", "quitSafely",  "()Z", klj_HandlerThread_quitSafely},
+    {"android/os/HandlerThread", "getThreadId", "()I", klj_HandlerThread_getThreadId},
+    {"android/os/Looper",        "quitSafely",  "()V", klj_Looper_quitSafely},
+
+    // java.lang.Thread — the whole lifecycle (see the Thread section above).
+    // Bound on java/lang/Thread; HandlerThread reaches these through the
+    // HandlerThread -> Thread edge in kl_jni.c's g_supers as well as directly
+    // (the guest resolves them on java/lang/Thread and passes the HandlerThread).
+    {"java/lang/Thread", "<init>", "()V",                                       klj_Thread_init0},
+    {"java/lang/Thread", "<init>", "(Ljava/lang/Runnable;)V",                   klj_Thread_init_r},
+    {"java/lang/Thread", "<init>", "(Ljava/lang/Runnable;Ljava/lang/String;)V", klj_Thread_init_rs},
+    {"java/lang/Thread", "<init>", "(Ljava/lang/String;)V",                     klj_Thread_init_s},
+    {"java/lang/Thread", "<init>", "(Ljava/lang/ThreadGroup;Ljava/lang/Runnable;Ljava/lang/String;J)V",
+     klj_Thread_init_grsj},
+    {"java/lang/Thread", "start",          "()V",                  klj_Thread_start},
+    {"java/lang/Thread", "run",            "()V",                  klj_Thread_run},
+    {"java/lang/Thread", "currentThread",  "()Ljava/lang/Thread;", klj_Thread_currentThread},
+    {"java/lang/Thread", "isAlive",        "()Z",                  klj_Thread_isAlive},
+    {"java/lang/Thread", "join",           "()V",                  klj_Thread_join},
+    {"java/lang/Thread", "join",           "(J)V",                 klj_Thread_join},
+    {"java/lang/Thread", "join",           "(JI)V",                klj_Thread_join},
+    {"java/lang/Thread", "interrupt",      "()V",                  klj_Thread_interrupt},
+    {"java/lang/Thread", "isInterrupted",  "()Z",                  klj_Thread_isInterrupted},
+    {"java/lang/Thread", "interrupted",    "()Z",                  klj_Thread_interrupted},
+    {"java/lang/Thread", "getName",        "()Ljava/lang/String;", klj_Thread_getName},
+    {"java/lang/Thread", "setName",        "(Ljava/lang/String;)V", klj_Thread_setName},
+    {"java/lang/Thread", "getId",          "()J",                  klj_Thread_getId},
+    {"java/lang/Thread", "setPriority",    "(I)V",                 klj_Thread_setPriority},
+    {"java/lang/Thread", "getPriority",    "()I",                  klj_Thread_getPriority},
+    {"java/lang/Thread", "setDaemon",      "(Z)V",                 klj_Thread_setDaemon},
+    {"java/lang/Thread", "isDaemon",       "()Z",                  klj_Thread_isDaemon},
+    {"java/lang/Thread", "sleep",          "(J)V",                 klj_Thread_sleep},
+    {"java/lang/Thread", "sleep",          "(JI)V",                klj_Thread_sleep},
+    {"java/lang/Thread", "yield",          "()V",                  klj_Thread_yield},
+    {"java/lang/Thread", "getStackTrace",  "()[Ljava/lang/StackTraceElement;", klj_Thread_getStackTrace},
+    {"java/lang/Thread", "setUncaughtExceptionHandler",
+     "(Ljava/lang/Thread$UncaughtExceptionHandler;)V", klj_Thread_void},
+    {"java/lang/Thread", "setDefaultUncaughtExceptionHandler",
+     "(Ljava/lang/Thread$UncaughtExceptionHandler;)V", klj_Thread_void},
     {"android/os/Handler", "<init>", "()V",                        klj_Handler_init},
     {"android/os/Handler", "<init>", "(Landroid/os/Looper;)V",     klj_Handler_init},
     // The Callback form. The callback handles Messages sent through this Handler,
