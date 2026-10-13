@@ -24,14 +24,21 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/types.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "klepton.h"
+#include "kl_env.h"
 #include "kl_ndk.h"
 #include "kl_vtdec.h"
 #include "kl_avdec.h"
 
 void kl_unresolved_named(const char *name);     // kl_shim.c
+static int64_t klm_now_us(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (int64_t)ts.tv_sec * 1000000 + ts.tv_nsec / 1000;
+}
 
 // ---------------------------------------------------------------------------
 // The ABI's own numbers. Transcribed from <media/NdkMediaError.h>,
@@ -156,6 +163,22 @@ static bool klm_AMediaFormat_getFloat(void *fmt, const char *key, float *out) {
     int32_t v;
     if (!out || !klm_AMediaFormat_getInt32(fmt, key, &v)) return false;
     *out = (float)v;
+    return true;
+}
+// "crop" (API 28) is a rect; it is stored as the four crop-* ints, the same keys
+// MediaCodec puts in an output format on older releases.
+static bool klm_AMediaFormat_getRect(void *fmt, const char *key, int32_t *l, int32_t *t,
+                                     int32_t *r, int32_t *b) {
+    if (!key || strcmp(key, "crop")) return false;
+    int32_t v[4];
+    if (!klm_AMediaFormat_getInt32(fmt, "crop-left", &v[0]) ||
+        !klm_AMediaFormat_getInt32(fmt, "crop-top", &v[1]) ||
+        !klm_AMediaFormat_getInt32(fmt, "crop-right", &v[2]) ||
+        !klm_AMediaFormat_getInt32(fmt, "crop-bottom", &v[3])) return false;
+    if (l) *l = v[0];
+    if (t) *t = v[1];
+    if (r) *r = v[2];
+    if (b) *b = v[3];
     return true;
 }
 static bool klm_AMediaFormat_getString(void *fmt, const char *key, const char **out) {
@@ -413,6 +436,7 @@ typedef struct {
 // CoreVideo through function pointers would be silly here; kl_vtdec.h already
 // pulls CoreVideo in, and this file is Darwin-only for the same reason it is.
 #include <CoreVideo/CoreVideo.h>
+#include <VideoToolbox/VideoToolbox.h>   // VTPixelTransferSession (CPU output path)
 
 static klm_hwbuf *klm_hwbuf_new(CVPixelBufferRef pb) {
     klm_hwbuf *h = calloc(1, sizeof *h);
@@ -760,6 +784,32 @@ typedef struct {
     int      out_w, out_h;
 
     unsigned n_in, n_out, n_rendered;
+
+    // ByteBuffer mode: configured WITHOUT a surface (Unity's VideoPlayer for its
+    // cutscenes: AoT). Android then hands the decoded frame out as a linear
+    // YUV 4:2:0 buffer the guest reads (getOutputBuffer + the stride/slice-height/
+    // color-format of getOutputFormat). See klm_cpu_* below.
+    int      bytebuf;
+    int      cpu_fmt;           // 21 = YUV420SemiPlanar (NV12), 19 = YUV420Planar (I420)
+    int      cpu_full_range;    // the decoded frame's range (color-range key)
+    int      fmt_w, fmt_h;      // size the last INFO_OUTPUT_FORMAT_CHANGED announced
+    int      cpu_stride, cpu_slice;
+    size_t   cpu_bytes;         // bytes of one frame at that layout
+    void    *held_pb;           // frame dequeued behind an OUTPUT_FORMAT_CHANGED
+    int64_t  held_pts;
+    struct { uint8_t *data; size_t cap; size_t size; } cpu[KLM_OUT_SLOTS];
+    void    *xfer;              // VTPixelTransferSessionRef (non-NV12 native frames)
+    void    *xfer_dst;          // CVPixelBufferRef NV12 target of the transfer
+    pthread_mutex_t conv_lock;  // xfer/xfer_dst
+    unsigned n_cpu, n_cpu_fail, n_fmt_changed;
+
+    // END_OF_STREAM queued by the guest: once the decoder has nothing left the
+    // next dequeue returns an empty buffer flagged EOS (Unity's VideoPlayer ends
+    // a clip, or loops it, only on that flag).
+    int      eos_in;
+    int64_t  eos_quiet_us;      // monotonic time of EOS / of the last frame after it
+    int      eos_sent;
+    int64_t  last_pts;
 } klm_codec;
 
 #define KLM_CODEC_MAGIC 0x4b4c4344u    /* 'KLCD' */
@@ -773,6 +823,7 @@ static void *klm_AMediaCodec_createDecoderByType(const char *mime) {
     c->magic = KLM_CODEC_MAGIC;
     snprintf(c->mime, sizeof c->mime, "%s", mime ? mime : "");
     pthread_mutex_init(&c->lock, NULL);
+    pthread_mutex_init(&c->conv_lock, NULL);
     c->dec = kl_vtdec_create(mime);
     if (!c->dec) {
         // Not an abort. "No decoder for this type" is a state MediaCodec has,
@@ -780,6 +831,7 @@ static void *klm_AMediaCodec_createDecoderByType(const char *mime) {
         fprintf(stderr, "  [media] AMediaCodec_createDecoderByType(\"%s\"): "
                         "no host decoder for that type\n", mime ? mime : "(null)");
         pthread_mutex_destroy(&c->lock);
+        pthread_mutex_destroy(&c->conv_lock);
         free(c);
         return NULL;
     }
@@ -807,8 +859,17 @@ static int klm_AMediaCodec_configure(void *codec, const void *format,
     // the two objects back up.
     klm_reader *r = kl_ndk_window_owner(window);
     c->surface = r;
-    fprintf(stderr, "  [media] AMediaCodec_configure: mime=%s surface=%p flags=0x%x\n",
-            mime ? mime : "(unset)", window, flags);
+    // No surface at all: ByteBuffer output, as on Android. KL_MEDIA_CPU_OUT=0
+    // restores the old behaviour (NULL output buffers, frames dropped).
+    c->bytebuf = !window && kl_env_on("KL_MEDIA_CPU_OUT", 1);
+    // 21 (NV12) by default: what Qualcomm decoders hand out and what every
+    // YUV reader handles; KL_MEDIA_CPU_FMT=19 gives planar I420 instead.
+    c->cpu_fmt = kl_env_int("KL_MEDIA_CPU_FMT", 21) == 19 ? 19 : 21;
+    fprintf(stderr, "  [media] AMediaCodec_configure: mime=%s surface=%p flags=0x%x%s\n",
+            mime ? mime : "(unset)", window, flags,
+            c->bytebuf ? (c->cpu_fmt == 19 ? " -> no surface: CPU output buffers, YUV420Planar (19)"
+                                           : " -> no surface: CPU output buffers, YUV420SemiPlanar/NV12 (21)")
+                       : "");
     if (window && !r)
         fprintf(stderr, "  [media]   ...that window is not an AImageReader's; "
                         "rendered frames will have nowhere to go\n");
@@ -832,10 +893,11 @@ static int klm_AMediaCodec_stop(void *codec) {
 static void klm_codec_drop_outputs(klm_codec *c) {
     for (int i = 0; i < KLM_OUT_SLOTS; i++)
         if (c->out[i].in_use) {
-            CVPixelBufferRelease((CVPixelBufferRef)c->out[i].pb);
+            if (c->out[i].pb) CVPixelBufferRelease((CVPixelBufferRef)c->out[i].pb);
             c->out[i].pb = NULL;
             c->out[i].in_use = 0;
         }
+    if (c->held_pb) { CVPixelBufferRelease((CVPixelBufferRef)c->held_pb); c->held_pb = NULL; }
 }
 
 static int klm_AMediaCodec_flush(void *codec) {
@@ -844,6 +906,7 @@ static int klm_AMediaCodec_flush(void *codec) {
     pthread_mutex_lock(&c->lock);
     klm_codec_drop_outputs(c);
     for (int i = 0; i < KLM_IN_BUFFERS; i++) c->in[i].in_use = 0;
+    c->eos_in = 0; c->eos_sent = 0; c->eos_quiet_us = 0;
     pthread_mutex_unlock(&c->lock);
     kl_vtdec_flush(c->dec);
     return AMEDIA_OK;
@@ -855,8 +918,21 @@ static int klm_AMediaCodec_delete(void *codec) {
     pthread_mutex_lock(&c->lock);
     klm_codec_drop_outputs(c);
     for (int i = 0; i < KLM_IN_BUFFERS; i++) free(c->in[i].data);
+    for (int i = 0; i < KLM_OUT_SLOTS; i++) free(c->cpu[i].data);
     pthread_mutex_unlock(&c->lock);
     kl_vtdec_destroy(c->dec);
+    pthread_mutex_lock(&c->conv_lock);
+    if (c->xfer) {
+        VTPixelTransferSessionInvalidate((VTPixelTransferSessionRef)c->xfer);
+        CFRelease(c->xfer);
+        c->xfer = NULL;
+    }
+    if (c->xfer_dst) { CVPixelBufferRelease((CVPixelBufferRef)c->xfer_dst); c->xfer_dst = NULL; }
+    pthread_mutex_unlock(&c->conv_lock);
+    if (c->bytebuf)
+        fprintf(stderr, "  [media] codec deleted: %u CPU frames copied out, %u failed, %u format change(s)\n",
+                c->n_cpu, c->n_cpu_fail, c->n_fmt_changed);
+    pthread_mutex_destroy(&c->conv_lock);
     pthread_mutex_destroy(&c->lock);
     g_life_in += c->n_in; g_life_out += c->n_out; g_life_rendered += c->n_rendered;
     if (g_codec == c) g_codec = NULL;
@@ -909,11 +985,27 @@ static uint8_t *klm_AMediaCodec_getInputBuffer(void *codec, size_t idx,
 // here is the AImageReader above. That is Android's own answer for the same
 // configuration, not a gap: a guest that gets NULL here is being told to read
 // the surface, which is exactly what Unity does.
+//
+// ...unless the codec was configured WITHOUT a surface (c->bytebuf): then the
+// output buffer is real, a linear YUV 4:2:0 copy of the decoded frame made at
+// dequeue time (klm_cpu_copy), laid out as getOutputFormat describes.
 static uint8_t *klm_AMediaCodec_getOutputBuffer(void *codec, size_t idx, size_t *out_size) {
     klm_codec *c = codec;
-    (void)idx;
     if (out_size) *out_size = 0;
     if (!c || c->magic != KLM_CODEC_MAGIC) return NULL;
+    if (c->bytebuf) {
+        if (idx >= KLM_OUT_SLOTS) return NULL;
+        pthread_mutex_lock(&c->lock);
+        // out_size is the buffer's CAPACITY, as on Android; the valid bytes
+        // are the BufferInfo's offset/size from dequeueOutputBuffer.
+        uint8_t *p = c->out[idx].in_use ? c->cpu[idx].data : NULL;
+        size_t n = p ? c->cpu[idx].cap : 0, valid = p ? c->cpu[idx].size : 0;
+        pthread_mutex_unlock(&c->lock);
+        if (out_size) *out_size = n;
+        KLM_FIRST(said_cpubuf, "first getOutputBuffer on a surfaceless codec: slot %zu, %zu bytes "
+                               "valid of %zu (CPU copy)\n", idx, valid, n);
+        return p;
+    }
     KLM_FIRST(said_outbuf, "AMediaCodec_getOutputBuffer on a surface-configured "
                            "codec — NULL, as on Android; the frames are on the "
                            "reader\n");
@@ -940,9 +1032,31 @@ static void *klm_AMediaCodec_getOutputFormat(void *codec) {
         klm_AMediaFormat_setInt32(f, g_key_width,  w);
         klm_AMediaFormat_setInt32(f, g_key_height, h);
     }
-    // Not the stride: the frames never pass through a linear buffer here (see
-    // getOutputBuffer), so there is no row pitch to report and reporting one
-    // would describe memory the guest cannot reach.
+    // Surface mode: not the stride — the frames never pass through a linear
+    // buffer (see getOutputBuffer), so there is no row pitch to report.
+    // ByteBuffer mode: the layout of the CPU copy, as a Qualcomm decoder
+    // reports it (color-format, stride, slice-height, crop, range).
+    if (c->bytebuf) {
+        pthread_mutex_lock(&c->lock);
+        int fw = c->fmt_w, fh = c->fmt_h, st = c->cpu_stride, sl = c->cpu_slice;
+        int full = c->cpu_full_range, cf = c->cpu_fmt;
+        pthread_mutex_unlock(&c->lock);
+        if (fw && fh) {
+            klm_AMediaFormat_setInt32(f, g_key_width,  fw);
+            klm_AMediaFormat_setInt32(f, g_key_height, fh);
+            klm_AMediaFormat_setInt32(f, g_key_color_format, cf);
+            klm_AMediaFormat_setInt32(f, g_key_stride, st);
+            klm_AMediaFormat_setInt32(f, g_key_slice_height, sl);
+            klm_AMediaFormat_setInt32(f, "crop-left", 0);
+            klm_AMediaFormat_setInt32(f, "crop-top", 0);
+            klm_AMediaFormat_setInt32(f, "crop-right", fw - 1);
+            klm_AMediaFormat_setInt32(f, "crop-bottom", fh - 1);
+            klm_AMediaFormat_setInt32(f, g_key_color_range, full ? 1 : 2);  // FULL=1, LIMITED=2
+        }
+        KLM_FIRST(said_cpufmt, "getOutputFormat (surfaceless): %dx%d color-format %d stride %d "
+                               "slice-height %d range %s\n", fw, fh, cf, st, sl,
+                  full ? "full" : "limited");
+    }
     return f;
 }
 
@@ -962,7 +1076,16 @@ static int klm_AMediaCodec_queueInputBuffer(void *codec, size_t idx, off_t offse
               size, (unsigned long long)time_us, flags);
     if (offset < 0 || size > KLM_IN_CAP || (size_t)offset > KLM_IN_CAP - size)
         return AMEDIA_ERROR_INVALID_PARAMETER;
-    if (flags & AMEDIACODEC_BUFFER_FLAG_END_OF_STREAM) return AMEDIA_OK;
+    if (flags & AMEDIACODEC_BUFFER_FLAG_END_OF_STREAM) {
+        // The access unit riding with the flag (if any) is still decoded.
+        if (size && kl_vtdec_submit(c->dec, p + offset, size, (int64_t)time_us) != 0)
+            fprintf(stderr, "  [media] EOS access unit: submit failed\n");
+        pthread_mutex_lock(&c->lock);
+        c->eos_in = 1; c->eos_quiet_us = klm_now_us(); c->eos_sent = 0;
+        pthread_mutex_unlock(&c->lock);
+        KLM_FIRST(said_eos_in, "END_OF_STREAM queued by the guest\n");
+        return AMEDIA_OK;
+    }
     // A codec-config buffer is parameter sets and nothing else, which is
     // exactly what kl_vtdec absorbs without producing a frame. No special case
     // is needed here; the flag is checked only so an empty one is not an error.
@@ -970,6 +1093,150 @@ static int klm_AMediaCodec_queueInputBuffer(void *codec, size_t idx, off_t offse
                                                                     : AMEDIA_ERROR_INVALID_PARAMETER;
     return kl_vtdec_submit(c->dec, p + offset, size, (int64_t)time_us) == 0
              ? AMEDIA_OK : AMEDIA_ERROR_UNKNOWN;
+}
+
+// ---------------------------------------------------------------------------
+// ByteBuffer output: the decoded CVPixelBuffer copied into the slot's linear
+// buffer. The decoder's native frame is normally biplanar 8-bit 4:2:0 ('420v'/
+// '420f'), copied plane by plane; anything else (10-bit, Apple's lossless
+// compressed layouts) goes through a VTPixelTransferSession to '420v' first.
+
+static int klm_even(int v) { return (v + 1) & ~1; }
+
+static int klm_pb_is_nv12(CVPixelBufferRef pb) {
+    OSType t = CVPixelBufferGetPixelFormatType(pb);
+    return t == kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange ||
+           t == kCVPixelFormatType_420YpCbCr8BiPlanarFullRange;
+}
+
+// Returns a retained NV12 frame with the same picture as pb (pb itself, or the
+// transfer target, which is reused frame to frame), NULL on failure.
+static CVPixelBufferRef klm_cpu_nv12(klm_codec *c, CVPixelBufferRef pb) {
+    if (klm_pb_is_nv12(pb)) return CVPixelBufferRetain(pb);
+    size_t w = CVPixelBufferGetWidth(pb), h = CVPixelBufferGetHeight(pb);
+    pthread_mutex_lock(&c->conv_lock);
+    CVPixelBufferRef dst = c->xfer_dst;
+    if (dst && (CVPixelBufferGetWidth(dst) != w || CVPixelBufferGetHeight(dst) != h)) {
+        CVPixelBufferRelease(dst);
+        dst = c->xfer_dst = NULL;
+    }
+    if (!dst) {
+        CVPixelBufferRef nb = NULL;
+        if (CVPixelBufferCreate(kCFAllocatorDefault, w, h,
+                                kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
+                                NULL, &nb) == kCVReturnSuccess)
+            dst = c->xfer_dst = nb;
+    }
+    if (!c->xfer) {
+        VTPixelTransferSessionRef s = NULL;
+        if (VTPixelTransferSessionCreate(kCFAllocatorDefault, &s) == noErr) c->xfer = (void *)s;
+    }
+    OSStatus st = -1;
+    if (dst && c->xfer)
+        st = VTPixelTransferSessionTransferImage((VTPixelTransferSessionRef)c->xfer, pb, dst);
+    CVPixelBufferRef out = (st == noErr && dst) ? CVPixelBufferRetain(dst) : NULL;
+    pthread_mutex_unlock(&c->conv_lock);
+    OSType t = CVPixelBufferGetPixelFormatType(pb);
+    KLM_FIRST(said_xfer, "CPU output: native frame format '%c%c%c%c' is not NV12 -> "
+                         "VTPixelTransfer to 420v: %s (OSStatus %d)\n",
+              (char)(t >> 24), (char)(t >> 16), (char)(t >> 8), (char)t,
+              out ? "ok" : "FAILED", (int)st);
+    return out;
+}
+
+// Copies the frame into c->cpu[slot] with the layout announced in the format
+// (stride/slice/color-format). The slot is the caller's (in_use, not yet
+// returned to the guest). Returns the bytes written, 0 on failure.
+static size_t klm_cpu_copy(klm_codec *c, CVPixelBufferRef src, int slot) {
+    pthread_mutex_lock(&c->lock);
+    int stride = c->cpu_stride, slice = c->cpu_slice, fw = c->fmt_w, fh = c->fmt_h;
+    int planar = c->cpu_fmt == 19;
+    size_t bytes = c->cpu_bytes;
+    pthread_mutex_unlock(&c->lock);
+    if (!bytes || stride <= 0 || slice <= 0) return 0;
+    if (c->cpu[slot].cap < bytes) {
+        uint8_t *n = realloc(c->cpu[slot].data, bytes);
+        if (!n) return 0;
+        c->cpu[slot].data = n;
+        c->cpu[slot].cap = bytes;
+    }
+    uint8_t *dst = c->cpu[slot].data;
+    CVPixelBufferRef pb = klm_cpu_nv12(c, src);
+    if (!pb) return 0;
+    size_t done = 0;
+    if (CVPixelBufferLockBaseAddress(pb, kCVPixelBufferLock_ReadOnly) == kCVReturnSuccess) {
+        if (CVPixelBufferIsPlanar(pb) && CVPixelBufferGetPlaneCount(pb) >= 2) {
+            const uint8_t *y = CVPixelBufferGetBaseAddressOfPlane(pb, 0);
+            const uint8_t *uv = CVPixelBufferGetBaseAddressOfPlane(pb, 1);
+            size_t ys = CVPixelBufferGetBytesPerRowOfPlane(pb, 0);
+            size_t uvs = CVPixelBufferGetBytesPerRowOfPlane(pb, 1);
+            int pw = (int)CVPixelBufferGetWidth(pb), ph = (int)CVPixelBufferGetHeight(pb);
+            int cw = pw < fw ? pw : fw, ch = ph < fh ? ph : fh;   // copy what both have
+            if (cw > stride) cw = stride;
+            if (ch > slice) ch = slice;
+            int cch = (ch + 1) / 2, ccw = (cw + 1) / 2;           // chroma rows / samples
+            int pch = (int)CVPixelBufferGetHeightOfPlane(pb, 1);
+            if (cch > pch) cch = pch;
+            if (y && uv) {
+                // Pad (frame smaller than announced) as black in limited range.
+                if (cw < fw || ch < fh) {
+                    memset(dst, 16, (size_t)stride * slice);
+                    memset(dst + (size_t)stride * slice, 128, bytes - (size_t)stride * slice);
+                }
+                for (int r = 0; r < ch; r++)
+                    memcpy(dst + (size_t)r * stride, y + (size_t)r * ys, (size_t)cw);
+                uint8_t *c0 = dst + (size_t)stride * slice;
+                if (!planar) {
+                    for (int r = 0; r < cch; r++)
+                        memcpy(c0 + (size_t)r * stride, uv + (size_t)r * uvs, (size_t)ccw * 2);
+                } else {
+                    size_t cst = (size_t)stride / 2;
+                    uint8_t *u = c0, *v = c0 + cst * (size_t)(slice / 2);
+                    for (int r = 0; r < cch; r++) {
+                        const uint8_t *s = uv + (size_t)r * uvs;
+                        uint8_t *ur = u + (size_t)r * cst, *vr = v + (size_t)r * cst;
+                        for (int k = 0; k < ccw; k++) { ur[k] = s[2 * k]; vr[k] = s[2 * k + 1]; }
+                    }
+                }
+                done = bytes;
+            }
+        }
+        CVPixelBufferUnlockBaseAddress(pb, kCVPixelBufferLock_ReadOnly);
+    }
+    CVPixelBufferRelease(pb);
+    c->cpu[slot].size = done;
+    if (done) c->n_cpu++; else c->n_cpu_fail++;
+    if (!done) KLM_FIRST(said_cpufail, "CPU output: could not read the decoded frame "
+                                       "(not planar / lock failed) — the guest gets an empty buffer\n");
+    return done;
+}
+
+// A frame whose size differs from the announced format: hold it and tell the
+// guest INFO_OUTPUT_FORMAT_CHANGED first, as Android does before the first
+// ByteBuffer frame. The next dequeue hands the held frame out.
+static int klm_cpu_announce(klm_codec *c, CVPixelBufferRef pb, int64_t pts) {
+    int w = klm_even((int)CVPixelBufferGetWidth(pb));
+    int h = klm_even((int)CVPixelBufferGetHeight(pb));
+    pthread_mutex_lock(&c->lock);
+    if (w == c->fmt_w && h == c->fmt_h) { pthread_mutex_unlock(&c->lock); return 0; }
+    if (c->held_pb) CVPixelBufferRelease((CVPixelBufferRef)c->held_pb);
+    c->held_pb = (void *)pb;           // takes the caller's reference
+    c->held_pts = pts;
+    c->fmt_w = w; c->fmt_h = h;
+    c->out_w = (int)CVPixelBufferGetWidth(pb);
+    c->out_h = (int)CVPixelBufferGetHeight(pb);
+    c->cpu_stride = w;
+    c->cpu_slice = h;
+    c->cpu_bytes = (size_t)w * (size_t)h * 3 / 2;
+    c->cpu_full_range = CVPixelBufferGetPixelFormatType(pb) == kCVPixelFormatType_420YpCbCr8BiPlanarFullRange;
+    c->n_fmt_changed++;
+    unsigned n = c->n_fmt_changed;
+    pthread_mutex_unlock(&c->lock);
+    if (n <= 4)
+        fprintf(stderr, "  [media] surfaceless codec: INFO_OUTPUT_FORMAT_CHANGED -> %dx%d, "
+                        "color-format %d, stride %d, slice-height %d, %zu bytes/frame\n",
+                w, h, c->cpu_fmt, w, h, (size_t)w * (size_t)h * 3 / 2);
+    return 1;
 }
 
 static ssize_t klm_AMediaCodec_dequeueOutputBuffer(void *codec,
@@ -980,28 +1247,47 @@ static ssize_t klm_AMediaCodec_dequeueOutputBuffer(void *codec,
     int64_t waited = 0;
     for (;;) {
         int64_t pts = 0;
-        CVPixelBufferRef pb = kl_vtdec_pull(c->dec, &pts);
+        CVPixelBufferRef pb = NULL;
+        if (c->bytebuf) {
+            pthread_mutex_lock(&c->lock);
+            pb = (CVPixelBufferRef)c->held_pb;
+            pts = c->held_pts;
+            c->held_pb = NULL;
+            pthread_mutex_unlock(&c->lock);
+        }
+        if (!pb) pb = kl_vtdec_pull(c->dec, &pts);
+        if (pb && c->eos_in) { pthread_mutex_lock(&c->lock); c->eos_quiet_us = klm_now_us(); pthread_mutex_unlock(&c->lock); }
+        if (pb && c->bytebuf && klm_cpu_announce(c, pb, pts))
+            return AMEDIACODEC_INFO_OUTPUT_FORMAT_CHANGED;   // pb is held, not lost
         if (pb) {
             pthread_mutex_lock(&c->lock);
             for (int i = 0; i < KLM_OUT_SLOTS; i++)
                 if (!c->out[i].in_use) {
                     c->out[i].in_use = 1;
-                    c->out[i].pb = (void *)pb;
+                    // ByteBuffer mode keeps no frame in the slot: it is copied
+                    // out below and released, the buffer is the picture.
+                    c->out[i].pb = c->bytebuf ? NULL : (void *)pb;
                     c->out[i].pts_us = pts;
+                    c->last_pts = pts;
                     c->out_w = (int)CVPixelBufferGetWidth(pb);
                     c->out_h = (int)CVPixelBufferGetHeight(pb);
                     c->n_out++;
+                    if (c->bytebuf) c->cpu[i].size = 0;
                     pthread_mutex_unlock(&c->lock);
                     KLM_FIRST(said_out, "first decoded frame dequeued (slot %d, "
                                         "pts %lld us)\n", i, (long long)pts);
+                    size_t size = 0;
+                    if (c->bytebuf) {
+                        size = klm_cpu_copy(c, pb, i);
+                        CVPixelBufferRelease(pb);
+                    }
                     if (info) {
                         info->offset = 0;
-                        // Zero, and deliberately: this codec renders to a
-                        // surface, so there is no CPU-visible output buffer and
-                        // Android reports 0 too. A guest that memcpy'd `size`
-                        // bytes out of it would be reading a buffer that does
-                        // not exist on Android either.
-                        info->size = 0;
+                        // Surface mode: zero, and deliberately — the frame is
+                        // on the surface, there is no CPU-visible output buffer
+                        // and Android reports 0 too. ByteBuffer mode: the CPU
+                        // copy's size.
+                        info->size = (int32_t)size;
                         info->presentationTimeUs = pts;
                         info->flags = 0;
                     }
@@ -1010,9 +1296,46 @@ static ssize_t klm_AMediaCodec_dequeueOutputBuffer(void *codec,
             // Every slot outstanding: the guest is not releasing. Put it back
             // rather than dropping it, and tell the guest to come back.
             pthread_mutex_unlock(&c->lock);
-            CVPixelBufferRelease(pb);
+            if (c->bytebuf) {
+                pthread_mutex_lock(&c->lock);
+                if (!c->held_pb) { c->held_pb = (void *)pb; c->held_pts = pts; pb = NULL; }
+                pthread_mutex_unlock(&c->lock);
+            }
+            if (pb) CVPixelBufferRelease(pb);
             return AMEDIACODEC_INFO_TRY_AGAIN_LATER;
         }
+        // EOS: after 150 ms (of dequeue polling) with no new frame, the decoder
+        // is drained; hand out one empty buffer carrying the flag.
+        pthread_mutex_lock(&c->lock);
+        if (c->eos_in && !c->eos_sent && !c->held_pb) {
+            if (klm_now_us() - c->eos_quiet_us >= 150000) {
+                for (int i = 0; i < KLM_OUT_SLOTS; i++)
+                    if (!c->out[i].in_use) {
+                        c->out[i].in_use = 1;
+                        c->out[i].pb = NULL;
+                        c->out[i].pts_us = c->last_pts;
+                        c->cpu[i].size = 0;
+                        // A real (empty) buffer, as on Android: a guest may
+                        // test the pointer before it looks at the flag.
+                        if (c->bytebuf && !c->cpu[i].data) {
+                            c->cpu[i].data = malloc(64);
+                            c->cpu[i].cap = c->cpu[i].data ? 64 : 0;
+                        }
+                        c->eos_sent = 1;
+                        pthread_mutex_unlock(&c->lock);
+                        if (info) {
+                            info->offset = 0;
+                            info->size = 0;
+                            info->presentationTimeUs = c->last_pts;
+                            info->flags = AMEDIACODEC_BUFFER_FLAG_END_OF_STREAM;
+                        }
+                        fprintf(stderr, "  [media] END_OF_STREAM output buffer (slot %d) after %u frames\n",
+                                i, c->n_out);
+                        return i;
+                    }
+            }
+        }
+        pthread_mutex_unlock(&c->lock);
         if (timeoutUs == 0 || (timeoutUs > 0 && waited >= timeoutUs))
             return AMEDIACODEC_INFO_TRY_AGAIN_LATER;
         usleep(1000);
@@ -1035,10 +1358,11 @@ static int klm_AMediaCodec_releaseOutputBuffer(void *codec, size_t idx, bool ren
     pthread_mutex_unlock(&c->lock);
 
     if (render) KLM_FIRST(said_rel, "first releaseOutputBuffer(render=true)%s\n",
-                          r ? "" : " — but the codec has no output surface, "
-                                   "so the frame goes nowhere");
-    if (render && r) klm_reader_publish(r, pb, pts);
-    CVPixelBufferRelease(pb);
+                          r ? "" : c->bytebuf ? " (surfaceless: the guest read the CPU buffer)"
+                              : " — but the codec has no output surface, "
+                                "so the frame goes nowhere");
+    if (render && r && pb) klm_reader_publish(r, pb, pts);
+    if (pb) CVPixelBufferRelease(pb);
     return AMEDIA_OK;
 }
 
@@ -1075,6 +1399,9 @@ void kl_mediandk_report(FILE *f) {
     fprintf(f, "  codec \"%s\": %u buffers queued, %u frames dequeued, %u rendered%s\n",
             g_codec ? g_codec->mime : "video/hevc", in, out, rendered,
             g_codec ? "" : "  (codec deleted; totals are for the whole run)");
+    if (g_codec && g_codec->bytebuf)
+        fprintf(f, "  surfaceless (ByteBuffer) output: %u CPU frames, %u failed, %dx%d color-format %d\n",
+                g_codec->n_cpu, g_codec->n_cpu_fail, g_codec->fmt_w, g_codec->fmt_h, g_codec->cpu_fmt);
     fprintf(f, "  reader: %u published, %u acquired, %u dropped as stale, %d held\n",
             published, acquired, g_reader ? g_reader->n_dropped : 0,
             g_reader ? g_reader->count : 0);
@@ -1094,6 +1421,7 @@ static const struct { const char *name; void *fn; } g_media[] = {
     M("AMediaFormat_getInt64",  klm_AMediaFormat_getInt64),
     M("AMediaFormat_getFloat",  klm_AMediaFormat_getFloat),
     M("AMediaFormat_getString", klm_AMediaFormat_getString),
+    M("AMediaFormat_getRect",   klm_AMediaFormat_getRect),
 
     // Data symbols, not functions — see the note by the definitions.
     M("AMEDIAFORMAT_KEY_MIME",           &g_key_mime),

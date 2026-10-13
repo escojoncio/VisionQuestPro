@@ -17,6 +17,7 @@ typedef struct vq_gfx_config {
     int32_t quest3_profile;
     int32_t anisotropy;       // 0 = game's own; 16 = force 16x on mipmapped linear samplers
     int32_t force_single_sample; // 1 = render the game's MSAA targets at 1x (VPKTAA does the AA)
+    int32_t msaa_override;    // 0 = the game's own sample count; 2/4/8 where the game asked for MSAA
 } vq_gfx_config;
 
 // Stores the config and pushes it to VPVulkan if loaded (returns 1 if forwarded).

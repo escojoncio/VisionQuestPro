@@ -2,6 +2,7 @@
 // progress, settings (certificate, options) and the logs to share. Once a game is prepared and
 // started, the window becomes Klepton's BootView, which boots it and opens the immersive space.
 
+import Metal
 import SwiftUI
 import UniformTypeIdentifiers
 
@@ -148,6 +149,7 @@ struct VQLauncherView: View {
 struct VQGameCard: View {
     let game: VQGame
     @ObservedObject private var model = VQModel.shared
+    @State private var showGameSettings = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -167,19 +169,29 @@ struct VQGameCard: View {
             if model.busy == game.id {
                 ProgressView(value: model.progress) { Text(model.progressText).font(.caption) }
             } else {
-                Button {
-                    model.play(game)
-                } label: {
-                    Label(VQPrepare.isPrepared(game) ? VQL("Jugar", "Play") : VQL("Preparar y jugar", "Prepare and play"),
-                          systemImage: "play.fill")
+                HStack(spacing: 12) {
+                    Button {
+                        model.play(game)
+                    } label: {
+                        Label(VQPrepare.isPrepared(game) ? VQL("Jugar", "Play") : VQL("Preparar y jugar", "Prepare and play"),
+                              systemImage: "play.fill")
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(!game.compatible || model.busy != nil)
+                    Button {
+                        showGameSettings = true
+                    } label: {
+                        Label(VQL("Ajustes del juego", "Game settings"), systemImage: "slider.horizontal.3")
+                    }
+                    .buttonStyle(.bordered)
+                    .disabled(model.busy != nil)
                 }
-                .buttonStyle(.borderedProminent)
-                .disabled(!game.compatible || model.busy != nil)
             }
         }
         .padding(20)
         .frame(maxWidth: .infinity, alignment: .leading)
         .glassBackgroundEffect()
+        .sheet(isPresented: $showGameSettings) { VQGameSettingsView(game: game) }
     }
 
     private func tag(_ text: String, _ symbol: String) -> some View {
@@ -247,26 +259,10 @@ struct VQSettingsView: View {
                         Stepper(VQL("Altura: \(Int(settings.fovHeight * 100)) %", "Height: \(Int(settings.fovHeight * 100)) %"),
                                 value: $settings.fovHeight, in: -0.5...0.5, step: 0.05)
                     }
-                    Toggle(VQL("MSAA del juego", "Game's MSAA"), isOn: $settings.gameMSAA)
-                    Text(VQL("El antialiasing original del juego. Recomendado activado.",
-                             "The game's own antialiasing. Recommended on."))
+                    Text(VQL("Antialiasing: se elige por juego (botón «Ajustes del juego» de su tarjeta). Por defecto automático: VPKTAA en juegos sin MSAA y el MSAA del propio juego en los que lo usan. Aquí, el ajuste fino de VPKTAA para todos.",
+                             "Antialiasing: chosen per game (the “Game settings” button on its card). Automatic by default: VPKTAA for games without MSAA, the game's own MSAA for those that use it. Here, VPKTAA's fine tuning for all of them."))
                         .font(.caption)
-                    Toggle(VQL("VPKTAA (experimental)", "VPKTAA (experimental)"), isOn: $settings.vpktaa)
-                    Text(VQL("Antialiasing temporal propio sobre la imagen final del juego. Sin vectores de movimiento del juego puede verse más borroso y con estelas; junto con el MSAA del juego cuesta más GPU.",
-                             "Our own temporal antialiasing on the game's final picture. Without the game's motion vectors it can look blurrier and trail; together with the game's MSAA it costs more GPU."))
-                        .font(.caption)
-                    if settings.vpktaa {
-                        Stepper(VQL("Intensidad del suavizado: \(Int(settings.vpktaaPercent)) %", "Smoothing strength: \(Int(settings.vpktaaPercent)) %"),
-                                value: $settings.vpktaaPercent, in: 0...100, step: 5)
-                        Text(VQL("Cuánto se mezcla cada frame con los anteriores. Más: bordes más limpios y menos parpadeo; también más estela al girar rápido o en objetos que se mueven. Recomendado 60–80 %.",
-                                 "How much each frame is blended with the previous ones. Higher: cleaner edges and less shimmer, but more trailing on fast turns and moving objects. Recommended 60–80 %."))
-                            .font(.caption)
-                        Stepper(VQL("Nitidez: \(Int(settings.vpktaaSharpness * 100)) %", "Sharpness: \(Int(settings.vpktaaSharpness * 100)) %"),
-                                value: $settings.vpktaaSharpness, in: 0...1, step: 0.1)
-                        Text(VQL("Enfoque aplicado después del suavizado, para recuperar el detalle que el TAA difumina. Demasiado alto: halos y bordes que parpadean. Recomendado 20–30 %; 0 % lo desactiva.",
-                                 "Sharpening applied after the smoothing, to recover the detail TAA blurs. Too high: halos and flickering edges. Recommended 20–30 %; 0 % turns it off."))
-                            .font(.caption)
-                    }
+                    VQVPKTAATuning(settings: settings)
                     Toggle(VQL("Idioma del sistema si el juego lo incluye (si no, inglés)", "System language if the game ships it (else English)"), isOn: $settings.systemLanguage)
                     Picker(VQL("Postura", "Posture"), selection: $settings.posture) {
                         Text(VQL("Automática", "Automatic")).tag("auto")
@@ -439,5 +435,156 @@ struct VQEndedView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .padding(32)
+    }
+}
+
+/// VPKTAA's two knobs (global, shared by every game that uses VPKTAA).
+struct VQVPKTAATuning: View {
+    @ObservedObject var settings: VQSettings
+
+    var body: some View {
+        Stepper(VQL("Intensidad del suavizado VPKTAA: \(Int(settings.vpktaaPercent)) %", "VPKTAA smoothing strength: \(Int(settings.vpktaaPercent)) %"),
+                value: $settings.vpktaaPercent, in: 0...100, step: 5)
+        Text(VQL("Cuánto se mezcla cada frame con los anteriores. Más: bordes más limpios y menos parpadeo; también más estela al girar rápido o en objetos que se mueven. Recomendado 60–80 %.",
+                 "How much each frame is blended with the previous ones. Higher: cleaner edges and less shimmer, but more trailing on fast turns and moving objects. Recommended 60–80 %."))
+            .font(.caption)
+        Stepper(VQL("Nitidez VPKTAA: \(Int(settings.vpktaaSharpness * 100)) %", "VPKTAA sharpness: \(Int(settings.vpktaaSharpness * 100)) %"),
+                value: $settings.vpktaaSharpness, in: 0...1, step: 0.1)
+        Text(VQL("Enfoque aplicado después del suavizado, para recuperar el detalle que el TAA difumina. Demasiado alto: halos y bordes que parpadean. Recomendado 20–30 %; 0 % lo desactiva.",
+                 "Sharpening applied after the smoothing, to recover the detail TAA blurs. Too high: halos and flickering edges. Recommended 20–30 %; 0 % turns it off."))
+            .font(.caption)
+    }
+}
+
+/// Per-game settings sheet (from the game card). Today: antialiasing. Saved at once
+/// (UserDefaults, by VQGame.aaKey); applied when the game launches.
+struct VQGameSettingsView: View {
+    let game: VQGame
+    @ObservedObject private var settings = VQSettings.shared
+    @Environment(\.dismiss) private var dismiss
+    @State private var aa: VQGameAA
+
+    init(game: VQGame) {
+        self.game = game
+        _aa = State(initialValue: VQGameAA.load(key: game.aaKey))
+    }
+
+    /// The game's own eye-pass sample count seen on an earlier run (nil: not yet).
+    private var detected: Int? { VQGameAA.detected(key: game.aaKey) }
+
+    /// Most samples this chip supports: stored by the runtime (vq.msaaDeviceMax), else asked here.
+    private static let deviceMax: Int = {
+        if let n = UserDefaults.standard.object(forKey: "vq.msaaDeviceMax") as? Int, n >= 1 { return n }
+        guard let dev = MTLCreateSystemDefaultDevice() else { return 4 }
+        return [8, 4, 2].first { dev.supportsTextureSampleCount($0) } ?? 1
+    }()
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section(VQL("Antialiasing", "Antialiasing")) {
+                    detectionRow
+                    Picker(VQL("Modo", "Mode"), selection: $aa.mode) {
+                        Text(VQL("Automático", "Automatic")).tag(VQGameAA.Mode.auto)
+                        Text("VPKTAA").tag(VQGameAA.Mode.vpktaa)
+                        Text(VQL("MSAA del juego", "Game's MSAA")).tag(VQGameAA.Mode.msaa)
+                        Text(VQL("Sin AA", "No AA")).tag(VQGameAA.Mode.off)
+                    }
+                    .pickerStyle(.segmented)
+                    Text(modeHelp).font(.caption)
+                    if showsMSAALevel { msaaLevel }
+                    if showsVPKTAATuning { VQVPKTAATuning(settings: settings) }
+                }
+            }
+            .navigationTitle(game.name)
+            .toolbar { Button(VQL("Hecho", "Done")) { dismiss() } }
+            .onChange(of: aa) { _, new in
+                var v = new
+                v.stored = true
+                v.save(key: game.aaKey)
+                VQLog.log("Ajustes del juego \(game.aaKey): AA modo \(v.mode.rawValue), MSAA \(v.msaa)")
+            }
+        }
+        .frame(minWidth: 560, minHeight: 480)
+    }
+
+    @ViewBuilder private var detectionRow: some View {
+        switch detected {
+        case nil:
+            Label(VQL("Automático: se detecta en el primer arranque", "Automatic: detected on the first launch"),
+                  systemImage: "sparkle.magnifyingglass")
+        case 1?:
+            Label(VQL("Sin MSAA → VPKTAA automático", "No MSAA → VPKTAA automatically"),
+                  systemImage: "wand.and.stars")
+        case let n?:
+            Label(VQL("MSAA del juego: \(n)x", "Game's MSAA: \(n)x"), systemImage: "square.grid.3x3")
+        }
+    }
+
+    private var modeHelp: String {
+        switch aa.mode {
+        case .auto:
+            return VQL("VPKTAA si el juego no trae MSAA; si lo trae, se usa su MSAA (con el nivel elegido) y VPKTAA queda apagado.",
+                       "VPKTAA if the game has no MSAA; if it has, its MSAA is used (at the chosen level) and VPKTAA stays off.")
+        case .vpktaa:
+            return VQL("Quita el MSAA del juego (render a 1x) y aplica VPKTAA. Más nítido en movimiento lento; cuesta GPU.",
+                       "Removes the game's MSAA (renders at 1x) and applies VPKTAA. Costs GPU.")
+        case .msaa:
+            return VQL("Solo el MSAA del juego; VPKTAA nunca se aplica. En juegos sin MSAA no habrá antialiasing.",
+                       "Only the game's MSAA; VPKTAA is never applied. Games without MSAA get no antialiasing.")
+        case .off:
+            return VQL("Sin VPKTAA y sin cambiar el MSAA del juego.", "No VPKTAA and the game's MSAA left as it is.")
+        }
+    }
+
+    /// The level selector: for a game known to use MSAA (auto/msaa modes), or in MSAA mode
+    /// before the first launch has told us.
+    private var showsMSAALevel: Bool {
+        guard aa.mode == .auto || aa.mode == .msaa else { return false }
+        if let d = detected { return d > 1 }
+        return aa.mode == .msaa
+    }
+
+    private var showsVPKTAATuning: Bool {
+        aa.mode == .vpktaa || (aa.mode == .auto && detected == 1)
+    }
+
+    private func levelTitle(_ n: Int) -> String {
+        if n != 0 { return "x\(n)" }
+        var t = VQL("Original", "Original")
+        if let d = detected, d > 1 { t += " (\(d)x)" }
+        return t
+    }
+
+    @ViewBuilder private var msaaLevel: some View {
+        // Buttons rather than a segmented Picker: a level the chip cannot do must be
+        // visibly disabled, which a segmented picker does not honour per item.
+        HStack(spacing: 10) {
+            Text(VQL("Nivel de MSAA", "MSAA level"))
+            Spacer()
+            ForEach([0, 2, 4, 8], id: \.self) { n in
+                let title = levelTitle(n)
+                if aa.msaa == n {
+                    Button(title) { aa.msaa = n }.buttonStyle(.borderedProminent)
+                        .disabled(n > Self.deviceMax)
+                } else {
+                    Button(title) { aa.msaa = n }.buttonStyle(.bordered)
+                        .disabled(n > Self.deviceMax)
+                }
+            }
+        }
+        if Self.deviceMax < 8 {
+            Text(VQL("x\(Self.deviceMax * 2) o más: no admitido por este chip.",
+                     "x\(Self.deviceMax * 2) or more: not supported by this chip."))
+                .font(.caption).foregroundStyle(.secondary)
+        }
+        if aa.msaa > Self.deviceMax {
+            Text(VQL("x\(aa.msaa) no admitido por este chip: se usará x\(Self.deviceMax).",
+                     "x\(aa.msaa) is not supported by this chip: x\(Self.deviceMax) will be used."))
+                .font(.caption).foregroundStyle(.orange)
+        }
+        Text(VQL("Sustituye el número de muestras que pidió el juego (solo donde ya usaba MSAA). Más muestras: bordes más limpios, más GPU.",
+                 "Replaces the sample count the game asked for (only where it already used MSAA). More samples: cleaner edges, more GPU."))
+            .font(.caption)
     }
 }

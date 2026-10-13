@@ -2,6 +2,45 @@
 
 Historial completo de sesiones anteriores: `git log -p bitacora.md` (compactada el 2026-10-13 tras el log 49).
 
+## AA automático por juego + VPKTAA pt-port v1 + SDK Quest (2026-10-13, build pendiente de log)
+- **AA por juego** (`app/Sources/VQLaunch.swift` `VQGameAA`, `VQLauncher.swift` `VQGameSettingsView`, botón «Ajustes del juego»
+  en cada tarjeta; `VQGames.swift` `aaKey` = paquete o carpeta): `KL_AA_MODE` auto|vpktaa|msaa|off (def. auto), `VPVK_MSAA`
+  0/2/4/8 (solo donde el juego pidió >1, clamp al máximo del chip), `VQ_GAME_KEY`. Detección guardada en UserDefaults
+  `vq.aaDetected.<key>` / `vq.msaaDeviceMax` (la escribe KleptonTAA). Globales `vpktaa`/`gameMSAA` eliminados.
+  `VPVK_FORCE_1X=1` solo en modo vpktaa. `vq_config.c` reenvía `vpvk_config_set_msaa_override` (dlsym).
+- **Gate** `kl_vulkan.c` `kl_vulkan_aa_gate()`: auto → VPKTAA inline solo si `vpvk_msaa_detected()==1`; sin símbolo
+  (MoltenVK) cerrado. Log `[aa] mode auto: …`, `[aa] detected eye MSAA Nx -> mode …`.
+- **Inline sin serializar**: gancho `int (*)(int stage, unsigned long long vk_serial, void*)`; sin `QueueWaitIdle` si se
+  encola el resolve; serial lo avanza `kl_vulkan_taa_frame_complete()` desde el completion del CB. KleptonTAA: anillo de
+  5 salidas, ≤2 en vuelo (espera máx. 250 ms en hilo del juego), `acquireInline()`, inline fijo una vez confirmado,
+  `coreLock`. `KL_VPKTAA_NOWAIT=0` = espera antigua (si parpadean overlays con VPKTAA).
+- **VPKTAACore pt-port v1**: algoritmo de PT (`vpktaa.frag`): tile 18x18 YCoCg comprimido, reconstrucción 3x3 que afila
+  (sin RCAS), KEEP 0.93/0.80, SIGMA 1.25/0.85, CR 5 taps, distancia en alfa del historial rgba16Float (sin texturas
+  dist 5/6), depth 1 gather 2x2, `sharpRect` opcional (no conectado aún al foveado). Defaults: sharp 1.0 (`vq.vpktaaSharp3`),
+  disocc 0.05. Historial siempre rgba16Float (escritura rg11b10 desde compute no garantizada).
+- **SpaceWarp depth**: `klvk_resolve_cell()` trata handles no registrados como celda `VkImage*` (log `[asw] handle …`).
+- **Memoria**: imágenes viejas de ojo/MV/depth retiradas a los 5 s + 8 frames (`KL_VK_FREE_OLD=0` las mantiene; log `[mem]`).
+- **Near** por defecto = el de `ovrp_GetNodeFrustum2` (`kl_ovrp_frustum_near`).
+- **Vídeo sin surface** `kl_mediandk.c`: salida a buffer CPU NV12 (21; `KL_MEDIA_CPU_FMT=19` I420) con stride/slice/crop,
+  INFO_OUTPUT_FORMAT_CHANGED, EOS tras 150 ms sin tramas. `KL_MEDIA_CPU_OUT=0` lo apaga.
+- **Overlays sin escribir** `KleptonCompositor.swift` `ownLayerFallback`: limpieza única a transparente
+  (`KL_OVERLAY_UNWRITTEN=clear|skip|show`).
+- **Platform SDK** `kl_ovrplat.c`: peticiones sin datos → mensaje de error «offline» con su tipo (135 tipos), cola 256,
+  `ovr_Message_GetError`/`ovr_Error_*`. `KL_PLAT_OFFLINE_ERRORS=0` revierte.
+- **OVRPlugin** `kl_ovrp.c`: 485 `ovrp_*` explícitos; desconocidos: predicado → 0, resto −1004, nunca abort. Boundary
+  virtual 3x3 m (límite de inmersión de visionOS, centrado en el origen, suelo con altura medida; `KL_OVRP_BOUNDARY_SIZE`,
+  `KL_OVRP_BOUNDARY=0`). Refresh común (panel; `KL_OVRP_LOWER_HZ=1` añade 72–96). Batería float 0..1/°C.
+- **OpenXR** `kl_openxr.c`: 105 funciones de extensión implementadas, núcleo 1.1 (`xrLocateSpaces`, LOCAL_FLOOR), log
+  `[xr] extensions: N advertised, M checked, K missing`; llamada no implementada → `XR_ERROR_FUNCTION_UNSUPPORTED`
+  (`KL_XR_STRICT=1` aborta). Anuncia `XR_FB_foveation` (siempre apagado) y hand tracking (no soportado; `KL_XR_HAND_EXT=0`).
+- **Caché de shaders**: sello de primera ejecución = `firstrun.v2.<fingerprint del traductor>` (`vpmsl_translator_fingerprint`).
+- Inventario NDK vs Klepton: `docs/android-ndk-inventario.md` (solo referencia; sin implementación).
+### Comprobar en el próximo log
+- Batman (MSAA 2x): `vk.msaa detected eye=2x`, `[aa] … -> mode auto: VPKTAA off`, sin `forced 1x`. Probar override x4.
+- Juego sin MSAA: `[taa-inline] frame-end hook path confirmed`, `[taa] stats` gpu= ms (objetivo ≤3), fps vs off.
+- `gpu.shader.lib hit=` > 0 en el 2.º arranque (y `gpu.shader.key` coherentes); sin `vk.err … internal error: vector`.
+- AC: `[plat] … OFFLINE error completion queued`, sin rosa, `[mem] freed old eye image`; AoT: cinemáticas (`[media] … CPU output`).
+
 ## Renombrado VPEngine → VPKEngine (2026-10-13)
 - Todas las menciones, rutas e identificadores pasan a VPKEngine (repo `escojoncio/VPKEngine`, checkout `vpkengine/`).
   Datos antiguos del visor (carpetas VPEngine, ajustes, certificado, packs `vpengine.vpgame`) se traspasan solos

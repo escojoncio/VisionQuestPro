@@ -534,6 +534,7 @@ enum {
     KLXR_ERROR_PATH_INVALID             = -19,
     KLXR_ERROR_PATH_COUNT_EXCEEDED      = -20,
     KLXR_ERROR_PATH_FORMAT_INVALID      = -21,
+    KLXR_ERROR_PATH_UNSUPPORTED         = -22,
     KLXR_ERROR_SWAPCHAIN_FORMAT_UNSUPPORTED = -26,
     KLXR_ERROR_SESSION_NOT_READY        = -28,
     KLXR_ERROR_SESSION_NOT_STOPPING     = -29,
@@ -642,7 +643,25 @@ enum { KLXR_VIEW_CONFIG_PRIMARY_STEREO = 2 };
     X(xrCreatePassthroughLayerFB) X(xrDestroyPassthroughLayerFB)               \
     X(xrPassthroughLayerPauseFB) X(xrPassthroughLayerResumeFB)                 \
     X(xrPassthroughLayerSetStyleFB)                                          \
-    X(xrCreateSwapchainAndroidSurfaceKHR)
+    X(xrCreateGeometryInstanceFB) X(xrDestroyGeometryInstanceFB)              \
+    X(xrGeometryInstanceSetTransformFB)                                       \
+    X(xrCreateSwapchainAndroidSurfaceKHR)                                     \
+    /* OpenXR 1.1 core (and XR_KHR_locate_spaces) */                          \
+    X(xrLocateSpaces) X(xrLocateSpacesKHR)                                    \
+    /* XR_FB_swapchain_update_state */                                        \
+    X(xrGetSwapchainStateFB)                                                  \
+    /* XR_META_performance_metrics */                                         \
+    X(xrEnumeratePerformanceMetricsCounterPathsMETA)                          \
+    X(xrSetPerformanceMetricsStateMETA) X(xrGetPerformanceMetricsStateMETA)   \
+    X(xrQueryPerformanceMetricsCounterMETA)                                   \
+    /* XR_KHR_visibility_mask */                                              \
+    X(xrGetVisibilityMaskKHR)                                                 \
+    /* XR_EXT_hand_tracking + XR_FB_hand_tracking_mesh */                     \
+    X(xrCreateHandTrackerEXT) X(xrDestroyHandTrackerEXT)                      \
+    X(xrLocateHandJointsEXT) X(xrGetHandMeshFB)                               \
+    /* XR_FB_render_model */                                                  \
+    X(xrEnumerateRenderModelPathsFB) X(xrGetRenderModelPropertiesFB)          \
+    X(xrLoadRenderModelFB)
 
 // ------------------------------------------------------------------ bookkeeping
 // One row per entry point: resolved counts lookups, called counts calls. The
@@ -661,6 +680,13 @@ static klxr_row g_xr[] = {
 #undef X
 };
 #define KLXR_COUNT ((int)(sizeof g_xr / sizeof g_xr[0]))
+// The refusal each row starts with, in the same order: a row whose fn is still
+// this after klxr_install is an entry point nothing implements.
+static void *const g_xr_stub_fn[] = {
+#define X(n) (void *)klxr_stub_##n,
+    KL_XR_ENTRY_POINTS(X)
+#undef X
+};
 
 static klxr_row *klxr_row_for(const char *name) {
     for (int i = 0; i < KLXR_COUNT; i++)
@@ -725,13 +751,24 @@ void kl_openxr_report(FILE *f) {
 // value the guest is entitled to handle, and XrAppManager does: it takes an
 // error path, lands somewhere plausible, and the log shows a tidy shutdown
 // naming nothing that was missing.
+// VisionQuestPro: no longer fatal by default. Every name in the table is now
+// implemented (klxr_ext_selfcheck says so at startup if one is not), and a
+// guest of a commercial title has no "next work item" to name — it must keep
+// running. The refusal is XR_ERROR_FUNCTION_UNSUPPORTED, logged once per name.
+// KL_XR_STRICT=1 restores the abort for scouting.
 static int klxr_unimplemented(klxr_row *row) {
     row->called++;
-    fprintf(stderr, "\n[klepton] fatal: guest called unimplemented OpenXR entry "
-                    "point '%s'\n", row->name);
-    kl_openxr_report(stderr);
-    kl_fatal_prepare();
-    abort();
+    if (kl_env_on("KL_XR_STRICT", 0)) {
+        fprintf(stderr, "\n[klepton] fatal: guest called unimplemented OpenXR entry "
+                        "point '%s'\n", row->name);
+        kl_openxr_report(stderr);
+        kl_fatal_prepare();
+        abort();
+    }
+    if (row->called == 1)
+        fprintf(stderr, "  [xr] WARN unimplemented OpenXR entry point '%s' -> "
+                        "XR_ERROR_FUNCTION_UNSUPPORTED (logged once)\n", row->name);
+    return KLXR_ERROR_FUNCTION_UNSUPPORTED;
 }
 
 // The stubs themselves. Declared int(void) and called through whatever pointer
@@ -831,6 +868,8 @@ typedef struct {
     int       ext_opengl_es;      // did it enable XR_KHR_opengl_es_enable?
     int       gl_requirements_queried;   // ...and did it then ask for the range?
     int       ext_vulkan;         // ...or XR_KHR_vulkan_enable? (Open Brush)
+    int       ext_sysprops;       // enabled an extension whose system-properties
+                                  // struct we write (hand tracking, render model)
     int       vk_requirements_queried;   // its own gate, separate from GLES's:
                                          // the spec's requirements-call check is
                                          // per graphics API, and one flag for
@@ -870,7 +909,9 @@ enum { KLXR_GATE_ALWAYS = 0,      // unconditional
        KLXR_GATE_REFRESH = 1,     // ...unless KL_XR_REFRESH_EXT=0
        KLXR_GATE_VULKAN = 2,      // ...only when MoltenVK is actually reachable
        KLXR_GATE_USER_PRESENCE = 3,    // ...missioniss only (see below)
-       KLXR_GATE_COLOR_BIAS = 4 };     // ...unless KL_XR_COLOR_BIAS=0
+       KLXR_GATE_COLOR_BIAS = 4,       // ...unless KL_XR_COLOR_BIAS=0
+       KLXR_GATE_HANDS = 5,            // ...unless KL_XR_HAND_EXT=0
+       KLXR_GATE_SPACEWARP = 6 };      // ...only with KL_XR_SPACEWARP=1
 
 static const struct { const char *name; uint32_t version; int gate; } g_extensions[] = {
     { "XR_KHR_opengl_es_enable",       10, KLXR_GATE_ALWAYS },
@@ -972,6 +1013,92 @@ static const struct { const char *name; uint32_t version; int gate; } g_extensio
     { "XR_FB_passthrough",                    1, KLXR_GATE_ALWAYS },
     { "XR_META_performance_metrics",          2, KLXR_GATE_ALWAYS },
     { "XR_EXT_user_presence",                 1, KLXR_GATE_USER_PRESENCE },
+    // ---- VisionQuestPro: the rest of what Quest titles ask for -------------
+    // Each one is either struct-only (chained data the compositor ignores and
+    // the spec lets it ignore) or has every entry point served below; the
+    // startup self-check (klxr_ext_selfcheck) names any that is not.
+    //
+    // Struct-only, ignored by the compositor: depth info for reprojection,
+    // per-layer blend factors, secure content, layer depth test, local dimming.
+    { "XR_KHR_composition_layer_depth",       6, KLXR_GATE_ALWAYS },
+    { "XR_FB_composition_layer_alpha_blend",  3, KLXR_GATE_ALWAYS },
+    { "XR_FB_composition_layer_secure_content", 1, KLXR_GATE_ALWAYS },
+    { "XR_FB_composition_layer_depth_test",   1, KLXR_GATE_ALWAYS },
+    { "XR_META_local_dimming",                1, KLXR_GATE_ALWAYS },
+    // Quest foveation: ADVERTISED so titles that require it start, ALWAYS OFF
+    // (project rule): profiles are dummies, xrUpdateSwapchainFB attaches
+    // nothing, xrGetSwapchainStateFB reports no profile. XR_FB_foveation_vulkan
+    // is NOT advertised: it promises fragment-density-map images, and the FDM
+    // device extension is hidden from the guest's Vulkan.
+    { "XR_FB_foveation",                      1, KLXR_GATE_ALWAYS },
+    { "XR_FB_foveation_configuration",        1, KLXR_GATE_ALWAYS },
+    { "XR_FB_swapchain_update_state",         3, KLXR_GATE_ALWAYS },
+    { "XR_FB_swapchain_update_state_opengl_es", 1, KLXR_GATE_ALWAYS },
+    { "XR_FB_swapchain_update_state_vulkan",  1, KLXR_GATE_ALWAYS },
+    // An EMPTY hidden-area mesh: the guest draws every pixel, which is correct.
+    { "XR_KHR_visibility_mask",               2, KLXR_GATE_ALWAYS },
+    // LOCAL_FLOOR (= STAGE placement here) and the batched locate of 1.1.
+    { "XR_EXT_local_floor",                   1, KLXR_GATE_ALWAYS },
+    { "XR_KHR_locate_spaces",                 1, KLXR_GATE_ALWAYS },
+    // Hand tracking: the extension exists, the SYSTEM does not support it
+    // (XrSystemHandTrackingPropertiesEXT is left false; trackers are
+    // XR_ERROR_FEATURE_UNSUPPORTED). Hands on this host are the PSVR2
+    // controllers. Titles that require the extension now start.
+    { "XR_EXT_hand_tracking",                 4, KLXR_GATE_HANDS },
+    { "XR_FB_hand_tracking_aim",              2, KLXR_GATE_HANDS },
+    { "XR_FB_hand_tracking_capsules",         3, KLXR_GATE_HANDS },
+    { "XR_FB_hand_tracking_mesh",             3, KLXR_GATE_HANDS },
+    // Controller render models: none available (0 paths), the title falls
+    // back to its own meshes.
+    { "XR_FB_render_model",                   4, KLXR_GATE_ALWAYS },
+    // Application SpaceWarp: struct-only, but XrSystemSpaceWarpPropertiesFB
+    // (the motion-vector size) is a chained output this runtime does not write,
+    // so it stays opt-in (KL_XR_SPACEWARP=1) until it does.
+    { "XR_FB_space_warp",                     2, KLXR_GATE_SPACEWARP },
+};
+
+// Every advertised extension's entry points, for the startup self-check: an
+// advertised extension whose function is not served is a NULL proc address
+// the guest will call. Struct-only extensions have no row.
+static const struct { const char *ext; const char *fn[5]; } g_ext_fns[] = {
+    { "XR_KHR_opengl_es_enable", { "xrGetOpenGLESGraphicsRequirementsKHR" } },
+    { "XR_KHR_convert_timespec_time", { "xrConvertTimespecTimeToTimeKHR",
+                                        "xrConvertTimeToTimespecTimeKHR" } },
+    { "XR_FB_display_refresh_rate", { "xrEnumerateDisplayRefreshRatesFB",
+                                      "xrGetDisplayRefreshRateFB",
+                                      "xrRequestDisplayRefreshRateFB" } },
+    { "XR_KHR_vulkan_enable", { "xrGetVulkanGraphicsRequirementsKHR",
+                                "xrGetVulkanInstanceExtensionsKHR",
+                                "xrGetVulkanDeviceExtensionsKHR",
+                                "xrGetVulkanGraphicsDeviceKHR" } },
+    { "XR_KHR_vulkan_enable2", { "xrCreateVulkanInstanceKHR", "xrCreateVulkanDeviceKHR",
+                                 "xrGetVulkanGraphicsDevice2KHR",
+                                 "xrGetVulkanGraphicsRequirements2KHR" } },
+    { "XR_EXT_performance_settings", { "xrPerfSettingsSetPerformanceLevelEXT" } },
+    { "XR_KHR_android_thread_settings", { "xrSetAndroidApplicationThreadKHR" } },
+    { "XR_FB_color_space", { "xrEnumerateColorSpacesFB", "xrSetColorSpaceFB" } },
+    { "XR_KHR_android_surface_swapchain", { "xrCreateSwapchainAndroidSurfaceKHR" } },
+    { "XR_FB_passthrough", { "xrCreatePassthroughFB", "xrDestroyPassthroughFB",
+                             "xrPassthroughStartFB", "xrPassthroughPauseFB",
+                             "xrCreatePassthroughLayerFB" } },
+    { "XR_FB_passthrough", { "xrDestroyPassthroughLayerFB", "xrPassthroughLayerPauseFB",
+                             "xrPassthroughLayerResumeFB", "xrPassthroughLayerSetStyleFB",
+                             "xrCreateGeometryInstanceFB" } },
+    { "XR_FB_passthrough", { "xrDestroyGeometryInstanceFB",
+                             "xrGeometryInstanceSetTransformFB" } },
+    { "XR_META_performance_metrics", { "xrEnumeratePerformanceMetricsCounterPathsMETA",
+                                       "xrSetPerformanceMetricsStateMETA",
+                                       "xrGetPerformanceMetricsStateMETA",
+                                       "xrQueryPerformanceMetricsCounterMETA" } },
+    { "XR_FB_foveation", { "xrCreateFoveationProfileFB", "xrDestroyFoveationProfileFB" } },
+    { "XR_FB_swapchain_update_state", { "xrUpdateSwapchainFB", "xrGetSwapchainStateFB" } },
+    { "XR_KHR_visibility_mask", { "xrGetVisibilityMaskKHR" } },
+    { "XR_KHR_locate_spaces", { "xrLocateSpacesKHR" } },
+    { "XR_EXT_hand_tracking", { "xrCreateHandTrackerEXT", "xrDestroyHandTrackerEXT",
+                                "xrLocateHandJointsEXT" } },
+    { "XR_FB_hand_tracking_mesh", { "xrGetHandMeshFB" } },
+    { "XR_FB_render_model", { "xrEnumerateRenderModelPathsFB",
+                              "xrGetRenderModelPropertiesFB", "xrLoadRenderModelFB" } },
 };
 #define KLXR_EXT_ALL ((uint32_t)(sizeof g_extensions / sizeof g_extensions[0]))
 
@@ -1050,11 +1177,16 @@ static int klxr_ext_gate_open(int gate) {
     }
     case KLXR_GATE_COLOR_BIAS:
         return klxr_color_bias_on();
+    case KLXR_GATE_HANDS:
+        return kl_env_on("KL_XR_HAND_EXT", 1);
+    case KLXR_GATE_SPACEWARP:
+        return kl_env_on("KL_XR_SPACEWARP", 0);
     default:
         return 1;
     }
 }
 
+static void klxr_ext_selfcheck(void);
 static void klxr_ext_resolve(void) {
     static int done;
     if (done) return;
@@ -1074,6 +1206,7 @@ static void klxr_ext_resolve(void) {
         g_ext_live[g_ext_nlive].version = g_ext_extra[i].version;
         g_ext_nlive++;
     }
+    klxr_ext_selfcheck();
 }
 
 static uint32_t klxr_ext_count(void) {
@@ -1363,6 +1496,8 @@ static XrResult klxr_CreateInstance(const XrInstanceCreateInfo *info, void **ins
         if (!known) { g_instance.magic = 0; KLXR_RET(KLXR_ERROR_EXTENSION_NOT_PRESENT); }
         if (strcmp(name, "XR_KHR_opengl_es_enable") == 0) g_instance.ext_opengl_es = 1;
         if (strcmp(name, "XR_KHR_vulkan_enable") == 0)    g_instance.ext_vulkan = 1;
+        if (strcmp(name, "XR_EXT_hand_tracking") == 0 ||
+            strcmp(name, "XR_FB_render_model") == 0)       g_instance.ext_sysprops = 1;
     }
 
     *instance = &g_instance;
@@ -1382,7 +1517,13 @@ static XrResult klxr_GetInstanceProperties(void *instance, XrInstanceProperties 
     if (!props) KLXR_RET(KLXR_ERROR_VALIDATION_FAILURE);
     klxr_log_chain("xrGetInstanceProperties", props->next);
     props->type = XR_TYPE_INSTANCE_PROPERTIES;
-    props->runtimeVersion = XR_MAKE_VERSION(1, 0, 0);
+    // 1.1 when the app asked for 1.1 (its one new core entry point,
+    // xrLocateSpaces, and LOCAL_FLOOR are served); 1.0 otherwise.
+    {
+        XrVersion want = g_instance.api_version;
+        int minor11 = ((want >> 48) & 0xffff) == 1 && ((want >> 32) & 0xffff) >= 1;
+        props->runtimeVersion = minor11 ? XR_MAKE_VERSION(1, 1, 0) : XR_MAKE_VERSION(1, 0, 0);
+    }
     // **Oculus, not Klepton.** See klxr_system_name below: an OpenXR guest has
     // only these strings to identify the device by, and a guest that cannot
     // identify it falls back to a default controller — which is what JKXR and
@@ -1458,6 +1599,20 @@ static XrResult klxr_GetSystemProperties(void *instance, XrSystemId system_id,
     props->graphicsProperties.maxLayerCount = 16;
     props->trackingProperties.orientationTracking = 1;
     props->trackingProperties.positionTracking = 1;
+    // VisionQuestPro: the capability structs of extensions we advertise but
+    // whose feature this host lacks are written FALSE — only when the app
+    // enabled one of them, i.e. when its chain is intentional (see
+    // klxr_log_chain on garbage `next` pointers from apps that did not).
+    //   XrSystemHandTrackingPropertiesEXT  1000051000: supportsHandTracking @16
+    //   XrSystemRenderModelPropertiesFB    1000119004: supportsRenderModelLoading @16
+    if (g_instance.ext_sysprops) {
+        void *n = props->next;
+        for (int depth = 0; n && depth < 8; depth++) {
+            int32_t t = *(int32_t *)n;
+            if (t == 1000051000 || t == 1000119004) *(XrBool32 *)((char *)n + 16) = 0;
+            n = *(void **)((char *)n + 8);
+        }
+    }
     return KLXR_SUCCESS;
 }
 
@@ -1864,18 +2019,10 @@ enum { KLXR_ERROR_DISPLAY_REFRESH_RATE_UNSUPPORTED_FB = -1000101000 };
 // below it; the compositor still PRESENTS at the real rate and reprojects the
 // guest's slower frames (the ordinary guest-slower-than-panel path). Never offer a
 // rate ABOVE the panel — that would promise frames the display cannot show.
+// VisionQuestPro: one list for both XR APIs (kl_ovrp_display_frequencies:
+// panel rate, then 96/90/80/72 below it).
 static int klxr_refresh_list(float *out, int cap) {
-    float real = kl_ovrp_display_frequency();
-    if (real <= 0) real = 90.0f;
-    const float cand[] = { real, 90.0f, 72.0f };
-    int n = 0;
-    for (unsigned i = 0; i < sizeof cand / sizeof cand[0] && n < cap; i++) {
-        if (cand[i] <= 0.0f || cand[i] > real + 0.5f) continue;
-        int dup = 0;
-        for (int j = 0; j < n; j++) if (fabsf(out[j] - cand[i]) < 0.5f) dup = 1;
-        if (!dup) out[n++] = cand[i];
-    }
-    return n;
+    return kl_ovrp_display_frequencies(out, cap);
 }
 
 // The rate the guest last asked us to run at, or 0 for "the panel's own". Reported
@@ -1899,7 +2046,7 @@ static XrResult klxr_GetDisplayRefreshRateFB(void *session, float *rate) {
     if (!klxr_sess(session)) KLXR_RET(KLXR_ERROR_HANDLE_INVALID);
     if (!rate) KLXR_RET(KLXR_ERROR_VALIDATION_FAILURE);
     *rate = g_xr_refresh_requested > 0.0f ? g_xr_refresh_requested
-                                          : kl_ovrp_display_frequency();
+                                          : kl_ovrp_guest_display_frequency();
     return KLXR_SUCCESS;
 }
 
@@ -1910,6 +2057,7 @@ static XrResult klxr_RequestDisplayRefreshRateFB(void *session, float rate) {
     if (!klxr_sess(session)) KLXR_RET(KLXR_ERROR_HANDLE_INVALID);
     if (rate == 0.0f) {                              // 0 = "runtime's own default"
         g_xr_refresh_requested = 0.0f;
+        kl_ovrp_request_display_frequency(0.0f);
         return KLXR_SUCCESS;
     }
     float list[8];
@@ -1917,6 +2065,7 @@ static XrResult klxr_RequestDisplayRefreshRateFB(void *session, float rate) {
     for (int i = 0; i < n; i++)
         if (fabsf(list[i] - rate) < 0.5f) {
             g_xr_refresh_requested = rate;
+            kl_ovrp_request_display_frequency(rate);   // one record for both APIs
             fprintf(stderr, "  [xr] xrRequestDisplayRefreshRateFB(%.1f) accepted; the "
                             "panel still runs at %.1f and the compositor reprojects\n",
                     (double)rate, (double)kl_ovrp_display_frequency());
@@ -2336,6 +2485,11 @@ static XrResult klxr_PollEvent(void *instance, XrEventDataBuffer *data) {
 enum { KLXR_MAGIC_SPACE = 0x584b4c50 /* 'XKLP' */, KLXR_SPACE_MAX = 32 };
 
 enum { KLXR_REF_SPACE_VIEW = 1, KLXR_REF_SPACE_LOCAL = 2, KLXR_REF_SPACE_STAGE = 3 };
+// LOCAL_FLOOR (OpenXR 1.1 core / XR_EXT_local_floor): LOCAL's x/z and yaw with
+// y = 0 on the floor. Our LOCAL and STAGE share their origin and yaw (both are
+// the recentred tracking space; LOCAL only lifts y to eye height), so
+// LOCAL_FLOOR is placed exactly as STAGE is.
+enum { KLXR_REF_SPACE_LOCAL_FLOOR = 1000426000 };
 
 typedef struct {
     uint32_t magic;
@@ -2368,6 +2522,7 @@ static const char *klxr_ref_space_name(int t) {
         case KLXR_REF_SPACE_VIEW:  return "VIEW";
         case KLXR_REF_SPACE_LOCAL: return "LOCAL";
         case KLXR_REF_SPACE_STAGE: return "STAGE";
+        case KLXR_REF_SPACE_LOCAL_FLOOR: return "LOCAL_FLOOR";
         default:                   return "?";
     }
 }
@@ -2936,7 +3091,7 @@ static XrResult klxr_EnumerateReferenceSpaces(void *session, uint32_t capacity,
                                               uint32_t *count_out, int32_t *spaces) {
     if (!klxr_sess(session)) KLXR_RET(KLXR_ERROR_HANDLE_INVALID);
     static const int32_t have[] = { KLXR_REF_SPACE_VIEW, KLXR_REF_SPACE_LOCAL,
-                                    KLXR_REF_SPACE_STAGE };
+                                    KLXR_REF_SPACE_STAGE, KLXR_REF_SPACE_LOCAL_FLOOR };
     const uint32_t n = sizeof have / sizeof have[0];
     XrResult r = klxr_two_call(capacity, count_out, n);
     if (r != KLXR_SUCCESS || capacity == 0) return r;
@@ -2961,7 +3116,8 @@ static XrResult klxr_CreateReferenceSpace(void *session,
     // refusing by name here is what makes a guest that wanted one say so.
     if (info->referenceSpaceType != KLXR_REF_SPACE_VIEW &&
         info->referenceSpaceType != KLXR_REF_SPACE_LOCAL &&
-        info->referenceSpaceType != KLXR_REF_SPACE_STAGE) {
+        info->referenceSpaceType != KLXR_REF_SPACE_STAGE &&
+        info->referenceSpaceType != KLXR_REF_SPACE_LOCAL_FLOOR) {
         fprintf(stderr, "  [xr] xrCreateReferenceSpace: type %d unsupported\n",
                 info->referenceSpaceType);
         KLXR_RET(KLXR_ERROR_REFERENCE_SPACE_UNSUPPORTED);
@@ -2995,7 +3151,15 @@ static XrResult klxr_GetReferenceSpaceBoundsRect(void *session, int32_t ref_type
                                                  XrExtent2Df *bounds) {
     if (!klxr_sess(session)) KLXR_RET(KLXR_ERROR_HANDLE_INVALID);
     if (!bounds) KLXR_RET(KLXR_ERROR_VALIDATION_FAILURE);
-    (void)ref_type;
+    // VisionQuestPro: STAGE has the same play area OVRPlugin's boundary
+    // reports (kl_ovrp_boundary — visionOS's immersive-space limit), so the two
+    // XR APIs describe one room. Other spaces, or KL_OVRP_BOUNDARY=0: none.
+    float w = 0.0f, d = 0.0f;
+    if (ref_type == KLXR_REF_SPACE_STAGE && kl_ovrp_boundary(&w, &d)) {
+        bounds->width = w;
+        bounds->height = d;
+        return KLXR_SUCCESS;
+    }
     bounds->width = bounds->height = 0.0f;
     return KLXR_SPACE_BOUNDS_UNAVAILABLE;
 }
@@ -6534,7 +6698,8 @@ static XrResult klxr_LocateSpace(void *space, void *base_space, int64_t time,
     // alternative is an unfilled struct becoming the client's basis for pose
     // prediction.
     int base_static = bs->reference_type == KLXR_REF_SPACE_LOCAL ||
-                      bs->reference_type == KLXR_REF_SPACE_STAGE;
+                      bs->reference_type == KLXR_REF_SPACE_STAGE ||
+                      bs->reference_type == KLXR_REF_SPACE_LOCAL_FLOOR;
     // ...and only if it is a measurement. Without this the derived-velocity
     // seam would report zeros as valid for exactly the samples that have no
     // basis, which is the lie this whole path exists to avoid.
@@ -6579,6 +6744,7 @@ static XrResult klxr_ResultToString(void *instance, XrResult value, char *buffer
         // costs a lookup in the middle of reading a trace — which it did.
         case KLXR_SPACE_BOUNDS_UNAVAILABLE:      name = "XR_SPACE_BOUNDS_UNAVAILABLE"; break;
         case KLXR_ERROR_FEATURE_UNSUPPORTED:     name = "XR_ERROR_FEATURE_UNSUPPORTED"; break;
+        case KLXR_ERROR_PATH_UNSUPPORTED:        name = "XR_ERROR_PATH_UNSUPPORTED"; break;
         case KLXR_ERROR_EXTENSION_NOT_PRESENT:   name = "XR_ERROR_EXTENSION_NOT_PRESENT"; break;
         case KLXR_ERROR_LIMIT_REACHED:           name = "XR_ERROR_LIMIT_REACHED"; break;
         case KLXR_ERROR_SESSION_RUNNING:         name = "XR_ERROR_SESSION_RUNNING"; break;
@@ -6691,6 +6857,250 @@ static XrResult klxr_UpdateSwapchainFB(void *sc, const void *state) {
     static unsigned n;
     if (n++ < 4) fprintf(stderr, "vq.fov xrUpdateSwapchainFB ignored (foveation off)\n");
     return KLXR_SUCCESS;
+}
+
+// ===================================================== VisionQuestPro coverage
+// Entry points of the extensions advertised above that had no body, plus the
+// 1.1 core xrLocateSpaces. Each one is either a real answer from data this
+// runtime has, or the spec's own "nothing here" (empty list, unsupported
+// feature) — never a NULL proc address for an advertised extension.
+
+// One log line per entry point, the first time it is reached.
+static void klxr_cov_note(const char *fn, const char *what) {
+    static const char *seen[48];
+    static int n;
+    for (int i = 0; i < n; i++) if (seen[i] == fn) return;
+    if (n < 48) seen[n++] = fn;
+    fprintf(stderr, "  [xr] %s -> %s (logged once)\n", fn, what);
+}
+
+// ---- XR_FB_swapchain_update_state: xrGetSwapchainStateFB ----
+// The state struct chain the guest asks for is left as it sent it, except a
+// foveation state (XR_TYPE_SWAPCHAIN_STATE_FOVEATION_FB 1000114001), whose
+// profile is reported as XR_NULL_HANDLE: foveation is always off here.
+#define KLXR_TYPE_SWAPCHAIN_STATE_FOVEATION_FB 1000114001
+static XrResult klxr_GetSwapchainStateFB(void *swapchain, void *state) {
+    if (!klxr_swapchain_of(swapchain)) KLXR_RET(KLXR_ERROR_HANDLE_INVALID);
+    if (!state) KLXR_RET(KLXR_ERROR_VALIDATION_FAILURE);
+    struct { int32_t type; void *next; uint64_t flags; void *profile; } *fs = state;
+    if (fs->type == KLXR_TYPE_SWAPCHAIN_STATE_FOVEATION_FB) {
+        fs->flags = 0;
+        fs->profile = NULL;
+    }
+    klxr_cov_note("xrGetSwapchainStateFB", "no foveation profile (foveation off)");
+    return KLXR_SUCCESS;
+}
+
+// ---- XR_META_performance_metrics ----
+// Counters the compositor can actually state: the display rate. Everything
+// else (CPU/GPU frame time, utilisation) is reported as present-but-invalid
+// (counterFlags 0), which the spec defines as "no value this frame".
+static const char *const g_perf_paths[] = {
+    "/perfmetrics_meta/app/cpu_frametime",
+    "/perfmetrics_meta/app/gpu_frametime",
+    "/perfmetrics_meta/compositor/cpu_frametime",
+    "/perfmetrics_meta/compositor/gpu_frametime",
+    "/perfmetrics_meta/compositor/dropped_frame_count",
+    "/perfmetrics_meta/compositor/spacewarp_mode",
+    "/perfmetrics_meta/device/cpu_utilization_average",
+    "/perfmetrics_meta/device/cpu_utilization_worst",
+    "/perfmetrics_meta/device/gpu_utilization",
+};
+#define KLXR_PERF_N ((uint32_t)(sizeof g_perf_paths / sizeof g_perf_paths[0]))
+static int g_perf_enabled;
+static XrResult klxr_EnumeratePerformanceMetricsCounterPathsMETA(void *instance,
+        uint32_t capacity, uint32_t *count_out, XrPath *paths) {
+    if (!klxr_inst(instance)) KLXR_RET(KLXR_ERROR_HANDLE_INVALID);
+    XrResult r = klxr_two_call(capacity, count_out, KLXR_PERF_N);
+    if (r != KLXR_SUCCESS || capacity == 0) return r;
+    if (!paths) KLXR_RET(KLXR_ERROR_VALIDATION_FAILURE);
+    for (uint32_t i = 0; i < KLXR_PERF_N; i++) {
+        XrPath p = 0;
+        klxr_StringToPath(instance, g_perf_paths[i], &p);
+        paths[i] = p;
+    }
+    klxr_cov_note("xrEnumeratePerformanceMetricsCounterPathsMETA", "9 counter paths");
+    return KLXR_SUCCESS;
+}
+typedef struct { int32_t type; const void *next; XrBool32 enabled; } klxr_perf_state;
+static XrResult klxr_SetPerformanceMetricsStateMETA(void *session, const klxr_perf_state *st) {
+    if (!klxr_sess(session)) KLXR_RET(KLXR_ERROR_HANDLE_INVALID);
+    if (!st) KLXR_RET(KLXR_ERROR_VALIDATION_FAILURE);
+    g_perf_enabled = st->enabled != 0;
+    klxr_cov_note("xrSetPerformanceMetricsStateMETA", "recorded");
+    return KLXR_SUCCESS;
+}
+static XrResult klxr_GetPerformanceMetricsStateMETA(void *session, klxr_perf_state *st) {
+    if (!klxr_sess(session)) KLXR_RET(KLXR_ERROR_HANDLE_INVALID);
+    if (!st) KLXR_RET(KLXR_ERROR_VALIDATION_FAILURE);
+    st->enabled = (XrBool32)g_perf_enabled;
+    return KLXR_SUCCESS;
+}
+// XrPerformanceMetricsCounterMETA: type, next, counterFlags (u64), counterUnit
+// (i32), uintValue (u32), floatValue (f32).
+typedef struct { int32_t type; void *next; uint64_t counterFlags; int32_t counterUnit;
+                 uint32_t uintValue; float floatValue; } klxr_perf_counter;
+static XrResult klxr_QueryPerformanceMetricsCounterMETA(void *session, XrPath path,
+                                                        klxr_perf_counter *c) {
+    if (!klxr_sess(session)) KLXR_RET(KLXR_ERROR_HANDLE_INVALID);
+    if (!c) KLXR_RET(KLXR_ERROR_VALIDATION_FAILURE);
+    // Answered whether or not collection was enabled: "no value" is true
+    // either way, and an error here is a per-frame log line in some titles.
+    c->counterFlags = 0;          // ANY_VALUE_VALID / UINT / FLOAT all clear
+    c->counterUnit = 0;           // GENERIC
+    c->uintValue = 0;
+    c->floatValue = 0.0f;
+    (void)path;
+    klxr_cov_note("xrQueryPerformanceMetricsCounterMETA", "no value (flags 0)");
+    return KLXR_SUCCESS;
+}
+
+// ---- XR_KHR_visibility_mask: an empty mesh — every pixel is visible ----
+// XrVisibilityMaskKHR: type, next, vertexCapacityInput, vertexCountOutput,
+// vertices, indexCapacityInput, indexCountOutput, indices.
+typedef struct { int32_t type; void *next;
+                 uint32_t vertexCapacityInput, vertexCountOutput; void *vertices;
+                 uint32_t indexCapacityInput, indexCountOutput; void *indices;
+               } klxr_vis_mask;
+static XrResult klxr_GetVisibilityMaskKHR(void *session, int32_t view_config, uint32_t view,
+                                          int32_t mask_type, klxr_vis_mask *mask) {
+    if (!klxr_sess(session)) KLXR_RET(KLXR_ERROR_HANDLE_INVALID);
+    if (!mask) KLXR_RET(KLXR_ERROR_VALIDATION_FAILURE);
+    if (view_config != KLXR_VIEW_CONFIG_PRIMARY_STEREO)
+        KLXR_RET(KLXR_ERROR_VIEW_CONFIGURATION_TYPE_UNSUPPORTED);
+    if (view > 1) KLXR_RET(KLXR_ERROR_VALIDATION_FAILURE);
+    (void)mask_type;
+    mask->vertexCountOutput = 0;
+    mask->indexCountOutput = 0;
+    klxr_cov_note("xrGetVisibilityMaskKHR", "empty mask (whole eye visible)");
+    return KLXR_SUCCESS;
+}
+
+// ---- OpenXR 1.1 xrLocateSpaces / XR_KHR_locate_spaces ----
+// XrSpacesLocateInfo: type, next, baseSpace, time, spaceCount, spaces.
+// XrSpaceLocations: type, next, locationCount, locations[] of
+// XrSpaceLocationData { u64 locationFlags; XrPosef pose; } (36 -> 40 bytes).
+typedef struct { int32_t type; const void *next; void *baseSpace; int64_t time;
+                 uint32_t spaceCount; void *const *spaces; } klxr_spaces_locate_info;
+typedef struct { uint64_t locationFlags; XrPosef pose; } klxr_space_location_data;
+typedef struct { int32_t type; void *next; uint32_t locationCount;
+                 klxr_space_location_data *locations; } klxr_space_locations;
+static XrResult klxr_LocateSpaces(void *session, const klxr_spaces_locate_info *info,
+                                  klxr_space_locations *out) {
+    if (!klxr_sess(session)) KLXR_RET(KLXR_ERROR_HANDLE_INVALID);
+    if (!info || !out || !out->locations) KLXR_RET(KLXR_ERROR_VALIDATION_FAILURE);
+    if (info->spaceCount != out->locationCount || (info->spaceCount && !info->spaces))
+        KLXR_RET(KLXR_ERROR_VALIDATION_FAILURE);
+    // A chained XrSpaceVelocities (XR_TYPE_SPACE_VELOCITIES 1000471002) is an
+    // output the app sized to spaceCount: {type, next, velocityCount,
+    // XrSpaceVelocityData *} with 32-byte entries {u64 flags; vec3 lin; vec3 ang}.
+    // Each entry is filled from the same per-space locate (XrSpaceVelocity).
+    struct klxr_vels { int32_t type; void *next; uint32_t count; uint8_t *data; } *vels = NULL;
+    for (void *n = out->next; n && !vels; n = *(void **)((char *)n + 8))
+        if (*(int32_t *)n == 1000471002) vels = n;
+    if (vels && (vels->count != info->spaceCount || !vels->data)) vels = NULL;
+    for (uint32_t i = 0; i < info->spaceCount; i++) {
+        XrSpaceLocation loc;
+        struct { int32_t type; void *next; uint64_t flags; float lin[3], ang[3]; } v;
+        memset(&loc, 0, sizeof loc);
+        memset(&v, 0, sizeof v);
+        loc.type = XR_TYPE_SPACE_LOCATION;
+        v.type = KLXR_TYPE_SPACE_VELOCITY;
+        loc.next = vels ? (void *)&v : NULL;
+        XrResult r = klxr_LocateSpace(info->spaces[i], info->baseSpace, info->time, &loc);
+        if (r < 0) return r;
+        out->locations[i].locationFlags = loc.locationFlags;
+        out->locations[i].pose = loc.pose;
+        if (vels) {
+            uint8_t *e = vels->data + (size_t)i * 32;
+            memcpy(e, &v.flags, 8);
+            memcpy(e + 8, v.lin, 12);
+            memcpy(e + 20, v.ang, 12);
+        }
+    }
+    klxr_cov_note("xrLocateSpaces", "per-space xrLocateSpace");
+    return KLXR_SUCCESS;
+}
+
+// ---- XR_FB_passthrough geometry instances (projected passthrough) ----
+// Accepted with a dummy handle; the system passthrough is shown as is.
+static XrResult klxr_CreateGeometryInstanceFB(void *session, const void *info, void **out) {
+    if (!klxr_sess(session)) KLXR_RET(KLXR_ERROR_HANDLE_INVALID);
+    if (!info || !out) KLXR_RET(KLXR_ERROR_VALIDATION_FAILURE);
+    static int dummy;
+    *out = &dummy;
+    klxr_cov_note("xrCreateGeometryInstanceFB", "dummy (projected passthrough not drawn)");
+    return KLXR_SUCCESS;
+}
+static XrResult klxr_DestroyGeometryInstanceFB(void *g) { (void)g; return KLXR_SUCCESS; }
+static XrResult klxr_GeometryInstanceSetTransformFB(void *g, const void *t) {
+    (void)g; (void)t; return KLXR_SUCCESS;
+}
+
+// ---- XR_EXT_hand_tracking / XR_FB_hand_tracking_mesh ----
+// The extension is present, the system capability is not: the guest finds
+// XrSystemHandTrackingPropertiesEXT.supportsHandTracking false (it zeroes the
+// chained struct and we leave it), and a tracker it creates anyway is refused
+// with XR_ERROR_FEATURE_UNSUPPORTED, the spec's answer for exactly this.
+static XrResult klxr_CreateHandTrackerEXT(void *session, const void *info, void **out) {
+    if (!klxr_sess(session)) KLXR_RET(KLXR_ERROR_HANDLE_INVALID);
+    (void)info;
+    if (out) *out = NULL;
+    klxr_cov_note("xrCreateHandTrackerEXT", "XR_ERROR_FEATURE_UNSUPPORTED (no hand tracking)");
+    return KLXR_ERROR_FEATURE_UNSUPPORTED;
+}
+static XrResult klxr_DestroyHandTrackerEXT(void *t) { (void)t; return KLXR_SUCCESS; }
+// XrHandJointLocationsEXT: type, next, isActive, jointCount, jointLocations.
+static XrResult klxr_LocateHandJointsEXT(void *tracker, const void *info, void *locs) {
+    (void)tracker; (void)info;
+    if (!locs) KLXR_RET(KLXR_ERROR_VALIDATION_FAILURE);
+    struct { int32_t type; void *next; XrBool32 isActive; } *l = locs;
+    l->isActive = 0;
+    return KLXR_ERROR_HANDLE_INVALID;   // no tracker can exist
+}
+static XrResult klxr_GetHandMeshFB(void *tracker, void *mesh) {
+    (void)tracker; (void)mesh;
+    return KLXR_ERROR_HANDLE_INVALID;
+}
+
+// ---- XR_FB_render_model: no controller models on this host ----
+static XrResult klxr_EnumerateRenderModelPathsFB(void *session, uint32_t capacity,
+                                                 uint32_t *count_out, void *paths) {
+    if (!klxr_sess(session)) KLXR_RET(KLXR_ERROR_HANDLE_INVALID);
+    (void)paths;
+    klxr_cov_note("xrEnumerateRenderModelPathsFB", "0 models");
+    return klxr_two_call(capacity, count_out, 0);
+}
+static XrResult klxr_GetRenderModelPropertiesFB(void *session, XrPath path, void *props) {
+    if (!klxr_sess(session)) KLXR_RET(KLXR_ERROR_HANDLE_INVALID);
+    (void)path; (void)props;
+    return KLXR_ERROR_PATH_UNSUPPORTED;
+}
+static XrResult klxr_LoadRenderModelFB(void *session, const void *info, void *buffer) {
+    if (!klxr_sess(session)) KLXR_RET(KLXR_ERROR_HANDLE_INVALID);
+    (void)info; (void)buffer;
+    return KLXR_ERROR_PATH_UNSUPPORTED;
+}
+
+// ---- startup self-check: no advertised extension may hand out NULL ----
+static void klxr_install(void);
+static void klxr_ext_selfcheck(void) {
+    klxr_install();
+    unsigned bad = 0, total = 0;
+    for (size_t e = 0; e < sizeof g_ext_fns / sizeof g_ext_fns[0]; e++) {
+        if (!klxr_ext_advertised(g_ext_fns[e].ext)) continue;
+        for (int k = 0; k < 5 && g_ext_fns[e].fn[k]; k++) {
+            total++;
+            klxr_row *r = klxr_row_for(g_ext_fns[e].fn[k]);
+            if (!r || r->fn == g_xr_stub_fn[r - g_xr]) {
+                bad++;
+                fprintf(stderr, "  [xr] SELFCHECK %s advertised but %s is not served\n",
+                        g_ext_fns[e].ext, g_ext_fns[e].fn[k]);
+            }
+        }
+    }
+    fprintf(stderr, "  [xr] extensions: %u advertised, %u extension entry points checked, "
+                    "%u missing\n", g_ext_nlive, total, bad);
 }
 
 // ---------------------------------------------------------------- dispatch
@@ -6823,6 +7233,27 @@ static void klxr_install(void) {
         {"xrEndFrame",             (void *)klxr_EndFrame},
         {"xrLocateViews",          (void *)klxr_LocateViews},
         {"xrLocateSpace",          (void *)klxr_LocateSpace},
+        // VisionQuestPro coverage (see the block above klxr_ext_selfcheck)
+        {"xrLocateSpaces",         (void *)klxr_LocateSpaces},
+        {"xrLocateSpacesKHR",      (void *)klxr_LocateSpaces},
+        {"xrGetSwapchainStateFB",  (void *)klxr_GetSwapchainStateFB},
+        {"xrEnumeratePerformanceMetricsCounterPathsMETA",
+                                   (void *)klxr_EnumeratePerformanceMetricsCounterPathsMETA},
+        {"xrSetPerformanceMetricsStateMETA", (void *)klxr_SetPerformanceMetricsStateMETA},
+        {"xrGetPerformanceMetricsStateMETA", (void *)klxr_GetPerformanceMetricsStateMETA},
+        {"xrQueryPerformanceMetricsCounterMETA",
+                                   (void *)klxr_QueryPerformanceMetricsCounterMETA},
+        {"xrGetVisibilityMaskKHR", (void *)klxr_GetVisibilityMaskKHR},
+        {"xrCreateGeometryInstanceFB", (void *)klxr_CreateGeometryInstanceFB},
+        {"xrDestroyGeometryInstanceFB", (void *)klxr_DestroyGeometryInstanceFB},
+        {"xrGeometryInstanceSetTransformFB", (void *)klxr_GeometryInstanceSetTransformFB},
+        {"xrCreateHandTrackerEXT", (void *)klxr_CreateHandTrackerEXT},
+        {"xrDestroyHandTrackerEXT",(void *)klxr_DestroyHandTrackerEXT},
+        {"xrLocateHandJointsEXT",  (void *)klxr_LocateHandJointsEXT},
+        {"xrGetHandMeshFB",        (void *)klxr_GetHandMeshFB},
+        {"xrEnumerateRenderModelPathsFB", (void *)klxr_EnumerateRenderModelPathsFB},
+        {"xrGetRenderModelPropertiesFB",  (void *)klxr_GetRenderModelPropertiesFB},
+        {"xrLoadRenderModelFB",    (void *)klxr_LoadRenderModelFB},
     };
     for (size_t i = 0; i < sizeof impl / sizeof impl[0]; i++) {
         klxr_row *r = klxr_row_for(impl[i].name);

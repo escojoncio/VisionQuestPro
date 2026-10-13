@@ -11,6 +11,7 @@
 //   klovrp_GetNodePoseState_impl(step=w0, nodeId=w1, out=x2)
 //   klovrp_GetControllerState2_impl(mask=w0, out=x1)
 //   klovrp_GetControllerHapticsDesc_impl(mask=w0, out=x1)
+//   klovrp_TestBoundaryNode_impl / klovrp_TestBoundaryPoint_impl (end of file)
 
     .text
     .globl  _klovrp_GetNodePoseState_entry
@@ -32,3 +33,17 @@ _klovrp_GetControllerHapticsDesc_entry:
 _klovrp_GetControllerState_entry:
     mov     x1, x8
     b       _klovrp_GetControllerState_impl
+
+// VisionQuestPro: the boundary tests return ovrpBoundaryTestResult (32 bytes)
+// by value, so through x8 as well.
+//   klovrp_TestBoundaryNode_impl(node=w0, type=w1, out=x2)
+//   klovrp_TestBoundaryPoint_impl(type=w0, out=x1)  — the point is in s0..s2
+    .globl  _klovrp_TestBoundaryNode_entry
+_klovrp_TestBoundaryNode_entry:
+    mov     x2, x8
+    b       _klovrp_TestBoundaryNode_impl
+
+    .globl  _klovrp_TestBoundaryPoint_entry
+_klovrp_TestBoundaryPoint_entry:
+    mov     x1, x8
+    b       _klovrp_TestBoundaryPoint_impl
