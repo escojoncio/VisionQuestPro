@@ -54,6 +54,10 @@ tarde está resumido abajo y detallado en git).
   fe(enable|disable)except/fegetexcept y dato `__fe_dfl_env` (fegetenv/fesetenv/feholdexcept/feupdateenv ya
   eran klb_* en kl_libc_slink.c). Escáner de APIs: leía tree/lib (VQPrepare borra los ELF) → ahora extrae los .so
   del APK una vez y cachea `Cache/<j>/apiscan-raw.txt` (líneas L/E/I/W/C, sello tamaño+mtime del APK).
+- Log 57 (2ª sesión): 18 tandas ejecutadas; aborto por Metal en `vkBindImageMemory` (1D comprimida) → arreglado en
+  VPKEngine (ver su bitácora 2026-10-14). Log de 577 MB por `[imgfmt]` → limitado a 400 líneas + 1/100000
+  (`klvk_imgfmt_log_ok`, kl_vulkan.c). Varias tandas terminan en 0,1 s con main()=1: revisar el resumen que imprime
+  la siguiente sesión al arrancar.
 - Pendiente: primera sesión de Vulkan CTS en el visor (sin probar nada aún en dispositivo); analizar su resumen y
   corregir por grupos; luego OpenXR CTS.
 
