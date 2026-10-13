@@ -1,0 +1,41 @@
+# conformance-openxr - 2f19636499e2fa371135e4a0bbee3ac711d6c6fa - 2026-10-13T21:23:54Z
+
+## build-xr.log: 36 lines
+### errors
+### end
+Downloading https://services.gradle.org/distributions/gradle-8.5-bin.zip
+............10%.............20%............30%.............40%.............50%............60%.............70%.............80%............90%.............100%
+Welcome to Gradle 8.5!
+Here are the highlights of this release:
+ - Support for running on Java 21
+ - Faster first use with Kotlin DSL
+ - Improved error and warning messages
+For more details see https://docs.gradle.org/8.5/release-notes.html
+To honour the JVM settings for this build a single-use Daemon process will be forked. For more on this, please refer to https://docs.gradle.org/8.5/userguide/gradle_daemon.html#sec:disabling_the_daemon in the Gradle documentation.
+Daemon will be stopped at the end of the build 
+C/C++: ninja: Entering directory `/home/runner/work/VisionQuestPro/VisionQuestPro/xrcts/src/conformance/.cxx/RelWithDebInfo/1vu84m32/arm64-v8a'
+C/C++: In file included from /home/runner/work/VisionQuestPro/VisionQuestPro/xrcts/src/external/basis_universal/transcoder/basisu_transcoder.cpp:16:
+C/C++: In file included from /home/runner/work/VisionQuestPro/VisionQuestPro/xrcts/src/external/basis_universal/transcoder/basisu_transcoder.h:36:
+C/C++: In file included from /home/runner/work/VisionQuestPro/VisionQuestPro/xrcts/src/external/basis_universal/transcoder/basisu_transcoder_internal.h:33:
+C/C++: In file included from /home/runner/work/VisionQuestPro/VisionQuestPro/xrcts/src/external/basis_universal/transcoder/basisu.h:70:
+C/C++: /home/runner/work/VisionQuestPro/VisionQuestPro/xrcts/src/external/basis_universal/transcoder/basisu_containers.h:293:32: warning: unknown warning group '-Wclass-memaccess', ignored [-Wunknown-warning-option]
+C/C++: #pragma GCC diagnostic ignored "-Wclass-memaccess"            
+C/C++:                                ^
+C/C++: /home/runner/work/VisionQuestPro/VisionQuestPro/xrcts/src/external/basis_universal/transcoder/basisu_containers.h:348:32: warning: unknown warning group '-Wclass-memaccess', ignored [-Wunknown-warning-option]
+C/C++: #pragma GCC diagnostic ignored "-Wclass-memaccess"            
+C/C++:                                ^
+C/C++: /home/runner/work/VisionQuestPro/VisionQuestPro/xrcts/src/external/basis_universal/transcoder/basisu_containers.h:781:32: warning: unknown warning group '-Wclass-memaccess', ignored [-Wunknown-warning-option]
+C/C++: #pragma GCC diagnostic ignored "-Wclass-memaccess"            
+C/C++:                                ^
+C/C++: /home/runner/work/VisionQuestPro/VisionQuestPro/xrcts/src/external/basis_universal/transcoder/basisu_containers.h:1048:32: warning: unknown warning group '-Wclass-memaccess', ignored [-Wunknown-warning-option]
+C/C++: #pragma GCC diagnostic ignored "-Wclass-memaccess"            
+C/C++:                                ^
+C/C++: In file included from /home/runner/work/VisionQuestPro/VisionQuestPro/xrcts/src/external/basis_universal/transcoder/basisu_transcoder.cpp:16:
+C/C++: In file included from /home/runner/work/VisionQuestPro/VisionQuestPro/xrcts/src/external/basis_universal/transcoder/basisu_transcoder.h:36:
+C/C++: In file included from /home/runner/work/VisionQuestPro/VisionQuestPro/xrcts/src/external/basis_universal/transcoder/basisu_transcoder_internal.h:33:
+C/C++: /home/runner/work/VisionQuestPro/VisionQuestPro/xrcts/src/external/basis_universal/transcoder/basisu.h:128:32: warning: unknown warning group '-Wclass-memaccess', ignored [-Wunknown-warning-option]
+C/C++: #pragma GCC diagnostic ignored "-Wclass-memaccess"            
+C/C++:                                ^
+C/C++: 5 warnings generated.
+BUILD SUCCESSFUL in 3m 38s
+44 actionable tasks: 44 executed
