@@ -2,6 +2,21 @@
 
 Historial completo de sesiones anteriores: `git log -p bitacora.md` (compactada el 2026-10-12 tras el log 25).
 
+## Logs 36–38 (2026-10-13) → build siguiente
+- AoT (36) y AC (37) abortaban: tras `throw FileNotFoundException(patch obb)` Unity llama `Object.toString()` →
+  «no host implementation». `kl_jni_android.c`: `klj_Object_toString` (String → sí mismo; throwable →
+  "pkg.Clase: msg"; resto "pkg.Clase@hash"), `klj_Object_hashCode` (String: polinomio 31 de Java; resto puntero),
+  `klj_Object_equals` (identidad). Fallback global vía `klj_find_binding("java/lang/Object", …)`.
+- AC (37): índice OK: `<juego>/com.Ubisoft.ACNexusVR/` con start0/1/2, en.lang, *.climb, bundles → obb dir correcto.
+- Batman (38, VPKTAA on, force_1x=1): `[asw]` desc con MotionVectorTextureSize 1192x956 pero
+  `GetLayerTextureSpaceWarp` nunca llamado; submit flags 0x24 siempre; bits=0 en 2400 frames. Cadencia: 3 frames
+  tarde en todo el log. TAA gpu 12.7 ms/frame (cola compartida con el juego), rejected 18 %.
+  `kl_ovrp.c` `klovrp_asw_frame`: con VPKTAA y flag 0x1000, desde el frame 90 llama una vez a la export del guest
+  `SetSpaceWarp`/`SetAppSpaceWarp`(1) (`KL_VPKTAA_FORCE_SW=0` lo evita). Sin limitar a media cadencia.
+### Comprobar en el próximo log
+- `[asw] guest export …` y si aparecen `GetLayerTextureSpaceWarp #n`, escrituras MV/depth y flags de submit nuevos.
+- AC: pasa de la carga; AoT: `[sl]` volume, sin fault CRI, `[snap]` si se cierra el display.
+
 ## Logs 33–35 (2026-10-13): AoT crash, AC carga infinita, VPKTAA → build siguiente
 - Batman (35): compositor 100 Hz sin fallos (TAA asíncrono OK), 1 sola gpu.hold (108 ms). VPKTAA ciego (sin MV/depth):
   rejected 10–30 %, borroso; juego GPU 14 ms (~50 fps). Usuario prefiere MSAA del juego.

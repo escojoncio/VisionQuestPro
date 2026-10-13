@@ -860,6 +860,40 @@ static klj_val klj_Object_getClass(void *env, void *self, const klj_val *a, int 
     return (klj_val){.l = klj_GetObjectClass(env, self)};
 }
 
+// java.lang.Object's own toString/hashCode/equals, reached through a method ID
+// taken on java/lang/Object (Unity logs a caught exception with
+// Object.toString() — AC Nexus / AoT after the patch-OBB FileNotFoundException).
+// String -> itself; a throwable we made -> "pkg.Class: message"; else
+// "pkg.Class@hash", as Java prints it.
+static klj_val klj_Object_toString(void *env, void *self, const klj_val *a, int n) {
+    (void)env; (void)a; (void)n;
+    klj_object *o = klj_as_object(self);
+    if (!o) return (klj_val){.l = kl_jni_new_string("null")};
+    if (o->cls && strcmp(o->cls, KLJ_CLASS_STRING) == 0) return (klj_val){.l = self};
+    char cls[256], buf[1600];
+    snprintf(cls, sizeof cls, "%s", o->cls ? o->cls : "java/lang/Object");
+    for (char *c = cls; *c; c++) if (*c == '/') *c = '.';
+    const char *m = klj_throwable_message(self);
+    if (m) snprintf(buf, sizeof buf, "%s: %s", cls, m);
+    else   snprintf(buf, sizeof buf, "%s@%x", cls, (unsigned)((uintptr_t)self >> 4));
+    return (klj_val){.l = kl_jni_new_string(buf)};
+}
+static klj_val klj_Object_hashCode(void *env, void *self, const klj_val *a, int n) {
+    (void)env; (void)a; (void)n;
+    klj_object *o = klj_as_object(self);
+    if (o && o->cls && strcmp(o->cls, KLJ_CLASS_STRING) == 0) {   // Java's s[0]*31^(n-1)+...
+        const char *str = (const char *)o->data;
+        uint32_t h = 0;
+        for (; str && *str; str++) h = h * 31u + (uint8_t)*str;
+        return (klj_val){.j = h};
+    }
+    return (klj_val){.j = (uint32_t)((uintptr_t)self >> 4)};
+}
+static klj_val klj_Object_equals(void *env, void *self, const klj_val *a, int n) {
+    (void)env;
+    return (klj_val){.j = (n > 0 && a[0].l == self) ? 1 : 0};
+}
+
 // A constructor whose only job is to produce an identity. `self` is the jclass
 // NewObject was given, so this stays correct for any class that needs no state —
 // unlike the hardcoded class name a per-type <init> would use.
@@ -1707,6 +1741,9 @@ const klj_binding klj_bind_android[] = {
      "(Landroid/content/Intent;I)Ljava/util/List;", klj_PM_queryIntentActivities},
     {"java/lang/Object", "<init>",   "()V",                   klj_generic_init},
     {"java/lang/Object", "getClass", "()Ljava/lang/Class;", klj_Object_getClass},
+    {"java/lang/Object", "toString", "()Ljava/lang/String;", klj_Object_toString},
+    {"java/lang/Object", "hashCode", "()I",                  klj_Object_hashCode},
+    {"java/lang/Object", "equals",   "(Ljava/lang/Object;)Z", klj_Object_equals},
     {"java/lang/String", "equals", "(Ljava/lang/Object;)Z", klj_String_equals},
     {"java/lang/String", "length", "()I",                   klj_String_length},
     // Standalone-launched (UnityPlayerActivity is the LAUNCHER in this
