@@ -2286,9 +2286,15 @@ final class KleptonCompositor {
             taa.invalidate(); return
         }
         if haveRendered {
-            var srcs: [(MTLTexture, Int, Bool)] = []
-            for eye in 0..<2 { if let a = eyeSource(eye, stage) { srcs.append((a.texture, a.slice, a.flipY)) } }
-            if srcs.count == 2 { taa.submit(sources: srcs, rendered: rendered, wait: taaWait) }
+            // VPKTAA picks the frame record itself (newest one whose eye depth is filed, see
+            // KleptonTAA.submit) and asks for that stage's eye textures.
+            taa.submit(newest: rendered, wait: taaWait) { st in
+                var srcs: [(MTLTexture, Int, Bool)] = []
+                for eye in 0..<2 {
+                    if let a = self.eyeSource(eye, st) { srcs.append((a.texture, a.slice, a.flipY)) }
+                }
+                return srcs.count == 2 ? srcs : nil
+            }
         }
         if let p = taa.acquire(for: cmd) {
             taaOut[0] = p.out[0]; taaOut[1] = p.out[1]
@@ -2373,6 +2379,7 @@ final class KleptonCompositor {
         if kl_loadingvideo_active() == 0 {
             if loadingVideo != nil {
                 loadingVideo?.stop(); loadingVideo = nil; loadingVideoTried = false
+                skyboxLayerLayout = nil
                 loadingVideoRequested = nil   // only a NEW request replays the game's video
             }
         } else if let tex = loadingVideoTexture() {
@@ -3273,6 +3280,17 @@ final class KleptonCompositor {
             enc.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
             return true
         }
+        // An Equirect layer that states its own per-eye rects (OVROverlay's
+        // texture-rect matrix) is taken at its word, as the loading skybox is.
+        if ov.shape == 5, let lay = Self.skyboxLayoutFromLayer(ov) {
+            let ok = encodeHostVideoPanorama(enc, texture: hv.texture, rects: lay.rects,
+                                             hspan: lay.hspan, vspan: lay.vspan,
+                                             layerRot: lay.layerFromOrigin.transpose,
+                                             viewIndices: viewIndices, drawable: drawable,
+                                             originFromHead: originFromHead)
+            if writeDepth, let depthState { enc.setDepthStencilState(depthState) }
+            return ok
+        }
         let q = simd_quatf(ix: ov.pose.0, iy: ov.pose.1, iz: ov.pose.2, r: ov.pose.3)
         let layerRot = simd_length(q.vector) > 0.5 ? simd_float4x4(simd_normalize(q))
                                                    : matrix_identity_float4x4
@@ -3425,6 +3443,111 @@ final class KleptonCompositor {
         return loadingVideo?.latestTexture()
     }
 
+    /// How a (stereo) panorama video maps onto the sphere: per-eye source rect
+    /// in the frame (top-left origin, fractions), the angular span that rect
+    /// covers, and the rotation from tracking space into the panorama's frame.
+    fileprivate struct SkyboxLayout {
+        var rects: [SIMD4<Float>]
+        var hspan: Float
+        var vspan: Float
+        var layerFromOrigin: simd_float4x4
+        var src: String
+    }
+    private static let eqLegacy = klEnvOn("KL_EQ_LEGACY", default: false)
+    /// Last layout read from a guest Equirect layer: the layer comes and goes
+    /// (AC Nexus re-creates it per loading phase) while the video keeps playing.
+    private var skyboxLayerLayout: SkyboxLayout?
+    private var skyboxLayoutLogged = ""
+
+    /// OVROverlay's texture-rect matrix for an Equirect layer, read as the
+    /// Meta compositor does: per eye, `rect` is the SOURCE rect in the texture
+    /// and `scale_bias` maps the layer's sphere uv onto it (tex = d * s + b),
+    /// both bottom-left. The destination rect on the sphere is therefore
+    /// d = (src - b) / s: its width x 360 deg and height x 180 deg are the
+    /// coverage (OVROverlay's 180-degree stereo video: src = left/right half,
+    /// dest x 0.25..0.75 = the hemisphere in front), its centre the yaw.
+    private static func skyboxLayoutFromLayer(_ ov: kl_ovrp_overlay) -> SkyboxLayout? {
+        guard ov.shape == 5, ov.rect_on != 0 else { return nil }
+        let r = [ov.rect.0, ov.rect.1]
+        let sb = [ov.scale_bias.0, ov.scale_bias.1]
+        var rects: [SIMD4<Float>] = []
+        var hspan: Float = 0, vspan: Float = 0, yaw: Float = 0
+        for e in 0..<2 {
+            let (x, y, w, h) = r[e]
+            let (sx, sy, bx, _) = sb[e]
+            guard w > 0.01, h > 0.01, w <= 1.001, h <= 1.001,
+                  abs(sx) > 1e-3, abs(sy) > 1e-3 else { return nil }
+            let dw = w / abs(sx), dh = h / abs(sy)
+            let dx = (x - bx) / sx
+            guard dw > 0.01, dh > 0.01 else { return nil }
+            // Bottom-left (Unity) -> top-left rows (the decoded video frame).
+            rects.append(SIMD4<Float>(x, 1 - y - h, w, h))
+            if e == 0 {
+                hspan = min(dw, 1) * 2 * Float.pi
+                vspan = min(dh, 1) * Float.pi
+                yaw = (dx + dw * 0.5 - 0.5) * 2 * Float.pi
+            }
+        }
+        // Layer orientation (tracking space), then the rect's yaw offset: a
+        // rotation of the ray by +yaw about Y lowers its longitude by yaw.
+        let q = simd_quatf(ix: ov.pose.0, iy: ov.pose.1, iz: ov.pose.2, r: ov.pose.3)
+        let layerRot = simd_length(q.vector) > 0.5 ? simd_float4x4(simd_normalize(q))
+                                                   : matrix_identity_float4x4
+        let yawRot = simd_float4x4(simd_quatf(angle: yaw, axis: SIMD3<Float>(0, 1, 0)))
+        return SkyboxLayout(rects: rects, hspan: hspan, vspan: vspan,
+                            layerFromOrigin: yawRot * layerRot.transpose,
+                            src: "layer \(ov.layer_id)")
+    }
+
+    /// No layer description: the file name (_LR/_SBS, _TB/_OU, 180/360), else
+    /// the frame aspect through the same guess the host video player uses.
+    private func skyboxLayoutFromFrame(texture: MTLTexture, name: String) -> SkyboxLayout {
+        let n = name.lowercased()
+        var stereo = HostVideoPlayer.layout(w: texture.width, h: texture.height)
+        if ["_lr", "_sbs", "sidebyside", "side-by-side", "_3dh"].contains(where: { n.contains($0) }) {
+            stereo = Int32(KL_HV_LEFT_RIGHT)
+        } else if ["_tb", "_ou", "topbottom", "top-bottom", "overunder", "_3dv"].contains(where: { n.contains($0) }) {
+            stereo = Int32(KL_HV_TOP_BOTTOM)
+        }
+        let f = HostVideoFrame(layer: -1, texture: texture, width: texture.width,
+                               height: texture.height, stereo: stereo)
+        let base = Self.hostVideoRects(f, ov: nil)
+        let rects = base.rects
+        var hspan = base.hspan, vspan = base.vspan
+        if n.contains("360") { hspan = 2 * Float.pi; vspan = Float.pi }
+        else if n.contains("180") { hspan = Float.pi; vspan = Float.pi }
+        return SkyboxLayout(rects: rects, hspan: hspan, vspan: vspan,
+                            layerFromOrigin: matrix_identity_float4x4,
+                            src: "frame (stereo \(stereo))")
+    }
+
+    private func skyboxLayout(texture: MTLTexture, name: String) -> SkyboxLayout {
+        // The guest's video layer: an Equirect with a texture-rect override,
+        // preferring the one with no texture of its own (the Android Surface
+        // the video was meant to decode into).
+        let n = Int(kl_ovrp_overlay_count())
+        var best: SkyboxLayout? = nil
+        for i in 0..<n {
+            var ov = kl_ovrp_overlay()
+            guard kl_ovrp_overlay_get(Int32(i), &ov) != 0,
+                  let l = Self.skyboxLayoutFromLayer(ov) else { continue }
+            if best == nil || ov.tex == 0 { best = l }
+            if ov.tex == 0 { break }
+        }
+        if let best { skyboxLayerLayout = best }
+        let lay = skyboxLayerLayout ?? skyboxLayoutFromFrame(texture: texture, name: name)
+        let key = "\(name)/\(texture.width)x\(texture.height)/\(lay.src)"
+        if key != skyboxLayoutLogged {
+            skyboxLayoutLogged = key
+            let fmt: (SIMD4<Float>) -> String = { r in
+                String(format: "[%.3f %.3f %.3f %.3f]", r.x, r.y, r.z, r.w) }
+            NSLog("[cp] loading skybox layout: \(name) \(texture.width)x\(texture.height) from \(lay.src): "
+                  + "L=\(fmt(lay.rects[0])) R=\(fmt(lay.rects[1])) span "
+                  + "\(Int((lay.hspan * 180 / Float.pi).rounded()))x\(Int((lay.vspan * 180 / Float.pi).rounded())) deg")
+        }
+        return lay
+    }
+
     /// Draw a video frame as a 360 equirect environment filling every view -
     /// the same fullscreen-triangle equirect pass the guest-overlay path uses,
     /// but sourced from our own player instead of a (missing) guest texture.
@@ -3448,6 +3571,12 @@ final class KleptonCompositor {
             }
             enc.setVertexAmplificationCount(viewIndices.count, viewMappings: &mappings)
         }
+        // Stereo layout: per-eye source rect + angular coverage. From the
+        // guest's own Equirect layer (OVROverlay texture-rect matrix) when it
+        // states one, else from the file name / frame aspect. KL_EQ_LEGACY=1
+        // restores the old mono drawing (whole frame over KL_EQ_HSCALE).
+        let lay: SkyboxLayout? = Self.eqLegacy ? nil
+            : skyboxLayout(texture: texture, name: loadingVideo?.name ?? "")
         var uniforms: [KLEqUniform] = []
         for vi in viewIndices {
             let proj = drawable.computeProjection(viewIndex: vi)
@@ -3462,6 +3591,14 @@ final class KleptonCompositor {
             u.visible = 1
             u.test = Self.eqTest
             u.hscale = Self.eqHScale
+            if let lay {
+                // Angular mode: the eye's rect spans hspan x vspan centred on
+                // the layer's forward (plus the rect's own yaw offset).
+                u.worldRot = lay.layerFromOrigin * u.worldRot
+                u.hspan = lay.hspan
+                u.vspan = lay.vspan
+                u.uvRect = lay.rects[vi == 0 ? 0 : 1]
+            }
             uniforms.append(u)
         }
         enc.setRenderPipelineState(pipe)
@@ -4497,6 +4634,9 @@ final class LoadingVideoPlayer {
     private var retainedRing: [CVMetalTexture] = []
     private let muted: Bool
     private let looping: Bool
+
+    /// The file name, for the stereo-layout hints of the skybox (drawLoadingSkybox).
+    var name: String { url.lastPathComponent }
 
     init?(device: MTLDevice, url: URL, muted: Bool = true, looping: Bool = true) {
         self.url = url

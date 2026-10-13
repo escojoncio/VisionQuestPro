@@ -343,70 +343,10 @@ static klj_val klj_Settings_Secure_getString(void *env, void *self, const klj_va
     return (klj_val){.l = NULL};
 }
 
-// Thread.start(). This one is deliberately not a plain no-op, because a no-op
-// here is the one shape that lies: if the thread carried a guest Runnable, doing
-// nothing means its run() never happens and the guest waits forever for work that
-// was never started — a hang with no cause anywhere near it.
-//
-// What we can serve is the case where the "thread" is one of ours: a HandlerThread
-// whose work drains through kl_jni_drain_ui_tasks anyway, so there is genuinely
-// nothing to start. So the receiver's class is logged every time, and anything
-// that is not a HandlerThread is called out as unhandled rather than swallowed.
-static klj_val klj_Thread_start(void *env, void *self, const klj_val *a, int n) {
-    klj_object *o = klj_as_object(self);
-    // Reached through the superclass walk when the guest looks start() up on
-    // java/lang/Thread but the receiver is really a HandlerThread — which does
-    // have something to start, and the first version of this wrongly said it did
-    // not. That produced a guest blocked forever on a message no thread would
-    // ever deliver.
-    if (o && strcmp(o->cls, "android/os/HandlerThread") == 0)
-        return klj_HandlerThread_start(env, self, a, n);
-
-    (void)a; (void)n;
-    KLJ_LOG("Thread.start() on %s — NOT started. If this carried a Runnable, its "
-            "run() will never execute; that would show up as a wait with no cause. "
-            "Implement it here if so.", o ? o->cls : "(not one of our objects)");
-    return (klj_val){.j = 0};
-}
-
-// Thread.currentThread() / Thread.setName(String) — UE4 resolves the pair in
-// one block and uses them for exactly one thing: naming its own threads. The
-// engine spawns its game, render and audio threads with pthread_create and then
-// calls up into Java to label them, because on Android that is what shows up in
-// a trace.
-//
-// The object is per-thread and it MUST be, because that is the whole meaning of
-// the call: a single shared "the current thread" object would let one thread's
-// setName land on another's. It is a plain klj_object with no state of its own
-// — the identity is what carries the meaning, and the only thing ever done with
-// it here is setName below.
-static klj_val klj_Thread_currentThread(void *env, void *self, const klj_val *a, int n) {
-    (void)env; (void)self; (void)a; (void)n;
-    static _Thread_local void *me;
-    if (!me) me = klj_new_object_data("java/lang/Thread", NULL);
-    return (klj_val){.l = me};
-}
-
-// ...and the name is APPLIED, not recorded. pthread_setname_np on Darwin names
-// the CALLING thread, which is the same thread Java's setName would be naming
-// here, so the labels reach `sample` and the debugger — and a 172 MB engine
-// with a dozen threads is exactly the case where a stack of "Thread 7" is the
-// difference between a readable fault report and an unreadable one.
-//
-// Darwin caps the name at 64 bytes including the terminator and fails the whole
-// call if it is longer, where Java simply keeps a long string. Truncating is
-// the behaviour that preserves the guest's intent; refusing would drop the
-// label entirely for the threads with the most descriptive names.
-static klj_val klj_Thread_setName(void *env, void *self, const klj_val *a, int n) {
-    (void)env; (void)self;
-    const char *name = (n >= 1) ? klj_str(a[0].l) : NULL;
-    if (name && *name) {
-        char buf[64];
-        snprintf(buf, sizeof buf, "%s", name);
-        pthread_setname_np(buf);
-    }
-    return (klj_val){.j = 0};
-}
+// java.lang.Thread (start / currentThread / setName and the rest of the
+// lifecycle) moved to kl_jni_looper.c, beside HandlerThread, so the one struct
+// that knows a thread's state answers every question about it (AoT log 42:
+// Thread.isAlive() aborted the run).
 
 // A void method whose effect is on state we do not model. Shared, but only ever
 // bound to methods that genuinely return void — the arguments are ignored, so
@@ -549,10 +489,7 @@ const klj_binding klj_bind_net[] = {
     {"android/media/AudioDeviceInfo", "getProductName",   "()Ljava/lang/CharSequence;", klj_ADI_name},
     {"android/media/AudioDeviceInfo", "getAddress",       "()Ljava/lang/String;", klj_ADI_addr},
     {"android/media/MediaRouter", "getSelectedRoute", "(I)Landroid/media/MediaRouter$RouteInfo;", klj_MediaRouter_getSelectedRoute},
-    {"java/lang/Thread", "start", "()V", klj_Thread_start},
-    // UE4 names its own threads through Java — see klj_Thread_currentThread.
-    {"java/lang/Thread", "currentThread", "()Ljava/lang/Thread;", klj_Thread_currentThread},
-    {"java/lang/Thread", "setName", "(Ljava/lang/String;)V", klj_Thread_setName},
+    // java/lang/Thread rows: see klj_bind_looper (kl_jni_looper.c).
     {"android/webkit/WebView", "setBackgroundColor", "(I)V", klj_void_noop},
     {"android/webkit/WebView", "setLayerType", "(ILandroid/graphics/Paint;)V", klj_void_noop},
     {"android/webkit/WebView", "measure", "(II)V", klj_void_noop},

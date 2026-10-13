@@ -85,11 +85,40 @@ static int src_slot(const void *key) {
 static unsigned         g_latency_override_ms;
 void kl_audio_set_latency_ms(unsigned ms) { g_latency_override_ms = ms; }
 
-// Resampler state, producer-side only.
-static double g_pos;                     // position in the input stream
-static float  g_prev[KL_AUDIO_MAX_CH];   // last input frame of the last chunk
-static float *g_scratch;                 // converted+resampled staging
-static size_t g_scratch_frames;
+// Resampler + staging state, PER SOURCE (AoT log 42 fix). It used to be one
+// global set (g_pos/g_prev/g_scratch), which forced kl_audio_write_src to hold
+// g_wlock for its WHOLE body — including the "ring is full, nap 2 ms" wait.
+// With three OpenSL players (Unity's own silent output + CRI ADX2's two), the
+// source that was at its fill target slept holding the lock for up to a full
+// device period (10 ms), the other two could not write, fell behind the reader
+// and were resynced forward: a gap in exactly the audio the game was making —
+// the stutter. Per-source state lets the lock cover only the ring copy/mix.
+// `mu` serialises writers that share a slot (the NULL key and the overflow
+// fold both land on slot 0); it is never taken while holding g_wlock.
+typedef struct {
+    pthread_mutex_t mu;
+    double   pos;                         // position in this source's input stream
+    float    prev[KL_AUDIO_MAX_CH];       // last input frame of its last chunk
+    float   *scratch;                     // converted+resampled staging
+    size_t   scratch_frames;
+    unsigned long resyncs;                // times it fell behind the reader (mixing)
+    double   late_ms;                     // worst lateness seen at a resync
+} kl_au_src;
+static kl_au_src g_src[KL_AU_MAX_SRC] = {
+    { .mu = PTHREAD_MUTEX_INITIALIZER }, { .mu = PTHREAD_MUTEX_INITIALIZER },
+    { .mu = PTHREAD_MUTEX_INITIALIZER }, { .mu = PTHREAD_MUTEX_INITIALIZER },
+};
+_Static_assert(KL_AU_MAX_SRC == 4, "g_src initialiser lists 4 slots");
+
+// Reset every source's resampler (open / flush / restart). Racy against a writer
+// converting at that instant in the same way the old globals were: a torn double
+// is one chunk resampled from a slightly wrong phase, never a crash.
+static void src_reset_resamplers(void) {
+    for (int i = 0; i < KL_AU_MAX_SRC; i++) {
+        g_src[i].pos = 0.0;
+        memset(g_src[i].prev, 0, sizeof g_src[i].prev);
+    }
+}
 
 // Counters, for the report and for the watchdog.
 static _Atomic uint64_t g_last_render_ns;
@@ -414,15 +443,14 @@ int kl_audio_open(unsigned rate, unsigned channels, unsigned bits) {
     free(g_ring);
     g_cap = (size_t)g_out_rate + 1;
     g_ring = calloc(g_cap * g_out_ch, sizeof(float));
-    free(g_scratch);
-    g_scratch_frames = 0;
-    g_scratch = NULL;
+    // Per-source staging keeps its allocation, but its frame capacity is
+    // forgotten: g_out_ch may have changed, and the capacity is counted in frames.
+    for (int i = 0; i < KL_AU_MAX_SRC; i++) g_src[i].scratch_frames = 0;
     if (!g_ring) { unit_destroy(); pthread_mutex_unlock(&g_lock); return -1; }
 
     g_target = (size_t)(g_out_rate * lat_ms / 1000.0);
     atomic_store(&g_w, 0); atomic_store(&g_r, 0);
-    g_pos = 0.0;
-    memset(g_prev, 0, sizeof g_prev);
+    src_reset_resamplers();
     g_open = 1;
     g_interrupted = 0;
     // Once per process, not once per open: FMOD destroys and re-creates the
@@ -464,8 +492,15 @@ void kl_audio_close(void) {
     // so closing here ended the capture 0.12 s into a 12.8 s run. The capture is
     // per-process and the report closes it.
     g_open = 0;
+    // Under g_wlock too: a writer copies into the ring holding only g_wlock
+    // (lock order g_lock -> g_wlock, see kl_audio_restart), and re-checks
+    // g_ring under it, so it sees NULL instead of copying into freed memory.
+    pthread_mutex_lock(&g_wlock);
     free(g_ring);   g_ring = NULL;   g_cap = 0;
-    free(g_scratch); g_scratch = NULL; g_scratch_frames = 0;
+    pthread_mutex_unlock(&g_wlock);
+    // Per-source staging (g_src[].scratch) is NOT freed here: a feeder of
+    // another API (AAudio) may still be inside kl_audio_write_src, and freeing
+    // under it is a use-after-free for a few KB of savings.
     atomic_store(&g_w, 0); atomic_store(&g_r, 0);
     pthread_mutex_unlock(&g_lock);
 }
@@ -494,8 +529,7 @@ void kl_audio_flush(void) {
     int was = g_running;
     if (was && g_unit) { AudioOutputUnitStop(g_unit); g_running = 0; }
     atomic_store(&g_r, atomic_load(&g_w));
-    g_pos = 0.0;
-    memset(g_prev, 0, sizeof g_prev);
+    src_reset_resamplers();
     if (was) unit_start();
     pthread_mutex_unlock(&g_lock);
 }
@@ -528,6 +562,11 @@ int kl_audio_restart(void) {
     if (rc == 0) {
         // A rate change means the ring's contents are at the wrong rate; drop
         // them rather than play them slow. Latency target scales with the rate.
+        // g_wlock around the swap: writers now copy into the ring under g_wlock
+        // only (never while waiting), so this cannot stall behind a wait, and a
+        // writer can no longer be mid-memcpy into the ring being freed. Lock
+        // order is g_lock -> g_wlock; no writer takes g_lock while holding g_wlock.
+        pthread_mutex_lock(&g_wlock);
         if (g_cap != (size_t)g_out_rate + 1) {
             size_t frames = (size_t)g_out_rate + 1;
             float *nr = calloc(frames * g_out_ch, sizeof(float));
@@ -538,8 +577,8 @@ int kl_audio_restart(void) {
             }
         }
         atomic_store(&g_r, atomic_load(&g_w));
-        g_pos = 0.0;
-        memset(g_prev, 0, sizeof g_prev);
+        pthread_mutex_unlock(&g_wlock);
+        src_reset_resamplers();
         unit_start();
     }
     pthread_mutex_unlock(&g_lock);
@@ -564,20 +603,22 @@ void kl_audio_session_ready(double sample_rate) {
 // int16 interleaved at the guest rate -> float32 interleaved at the device
 // rate, with linear interpolation across the chunk boundary. The virtual input
 // stream is v[-1] = the last frame of the previous chunk, v[0..n-1] = this one,
-// so g_pos carries fractional position between calls and a rate ratio of
+// so the source's pos carries fractional position between calls and a rate ratio of
 // exactly 1.0 degenerates to a straight copy.
-static size_t convert(const int16_t *src, size_t n, float **out) {
+// Per source (st): the caller holds st->mu, so this source's staging and
+// resampler phase are its own and no global lock is needed here.
+static size_t convert(kl_au_src *st, const int16_t *src, size_t n, float **out) {
     double ratio = (double)g_in_rate / g_out_rate;
     size_t max_out = (size_t)((double)(n + 2) / ratio) + 2;
-    if (max_out > g_scratch_frames) {
-        float *p = realloc(g_scratch, max_out * g_out_ch * sizeof(float));
+    if (max_out > st->scratch_frames) {
+        float *p = realloc(st->scratch, max_out * g_out_ch * sizeof(float));
         if (!p) return 0;
-        g_scratch = p;
-        g_scratch_frames = max_out;
+        st->scratch = p;
+        st->scratch_frames = max_out;
     }
-    float *dst = g_scratch;
+    float *dst = st->scratch;
     unsigned ich = g_in_ch, och = g_out_ch;
-    double pos = g_pos;
+    double pos = st->pos;
     size_t produced = 0;
 
     // The frame fetch folds channel mapping in: mono fans out, anything wider
@@ -589,7 +630,7 @@ static size_t convert(const int16_t *src, size_t n, float **out) {
     // interpolation weight there is 0, so the value is discarded — but the read
     // is not, and it is two bytes past the guest's buffer.
     #define FETCH(idx, ch) \
-        ((idx) < 0 ? g_prev[ch] \
+        ((idx) < 0 ? st->prev[ch] \
                    : (float)src[(size_t)((idx) < (long)n ? (idx) : (long)n - 1) * ich \
                                 + ((ch) < ich ? (ch) : 0)] * (1.0f / 32768.0f))
 
@@ -607,10 +648,10 @@ static size_t convert(const int16_t *src, size_t n, float **out) {
 
     if (n > 0) {
         for (unsigned c = 0; c < och; c++)
-            g_prev[c] = (float)src[(n - 1) * ich + (c < ich ? c : 0)] * (1.0f / 32768.0f);
+            st->prev[c] = (float)src[(n - 1) * ich + (c < ich ? c : 0)] * (1.0f / 32768.0f);
     }
-    g_pos = pos - (double)n;
-    if (g_pos < -1.0) g_pos = -1.0;
+    st->pos = pos - (double)n;
+    if (st->pos < -1.0) st->pos = -1.0;
     *out = dst;
     return produced;
 }
@@ -760,18 +801,27 @@ size_t kl_audio_write_src(const void *src, const void *pcm, size_t bytes) {
         int v = s16[i] < 0 ? -s16[i] : s16[i];
         if (v > peak) peak = v;
     }
-    if (peak > g_peak) g_peak = peak;
-    if (!peak) g_silent_buffers++;
 
-    // The convert()/scratch state and the mix cursors are shared, so the whole
-    // body is serialised: two feeder threads (Steam Link's two output streams)
-    // reach here at once. The reader never takes this lock.
+    // Locking (AoT log 42): g_wlock covers ONLY bookkeeping and the ring
+    // copy/mix itself, never the wait for room — see kl_au_src above for why a
+    // lock held across the wait starved every other source. This source's own
+    // conversion runs under its slot mutex, outside g_wlock. The reader never
+    // takes either lock.
     pthread_mutex_lock(&g_wlock);
+    int slot = src_slot(src);
+    pthread_mutex_unlock(&g_wlock);
+    kl_au_src *st = &g_src[slot];
+    pthread_mutex_lock(&st->mu);
 
     float *conv = NULL;
-    size_t frames = convert((const int16_t *)pcm, n, &conv);
-    if (!frames) { pthread_mutex_unlock(&g_wlock); return 0; }
+    size_t frames = convert(st, (const int16_t *)pcm, n, &conv);
+    if (!frames) { pthread_mutex_unlock(&st->mu); return 0; }
+
+    pthread_mutex_lock(&g_wlock);
+    if (peak > g_peak) g_peak = peak;
+    if (!peak) g_silent_buffers++;
     g_writes++;
+    unsigned long wno = g_writes;
 
     // The target has to be able to hold at least two of these, or the wait
     // below can never be satisfied and every write times out.
@@ -780,16 +830,14 @@ size_t kl_audio_write_src(const void *src, const void *pcm, size_t bytes) {
         if (g_target > g_cap - 1) g_target = g_cap - 1;
     }
 
-    int slot = src_slot(src);
     // **One source takes the shared write cursor, and that is the whole of the
     // single-producer path.** The per-source cursor and the mix exist for a
-    // guest with TWO output streams (Steam Link opens a float one and an int16
-    // one); every other guest has exactly one, and for it `g_w` IS that
-    // source's position by definition. Deriving it from a second cursor instead
-    // was measured to starve the producer outright: Beat Saber went from 13692
-    // writes with 0 underruns to 78 writes with 8599, i.e. the guest's mixer —
-    // which is paced by this call — stalled. The equivalence was argued rather
-    // than constructed; this constructs it.
+    // guest with TWO OR MORE output streams (Steam Link's float + int16 pair;
+    // AoT's Unity output + two CRI ADX2 players); every other guest has exactly
+    // one, and for it `g_w` IS that source's position by definition. Deriving
+    // it from a second cursor instead was measured to starve the producer
+    // outright: Beat Saber went from 13692 writes with 0 underruns to 78 writes
+    // with 8599, i.e. the guest's mixer — which is paced by this call — stalled.
     int mixing = g_src_n > 1;
     uint64_t r0 = atomic_load_explicit(&g_r, memory_order_acquire);
     uint64_t pos;
@@ -801,17 +849,34 @@ size_t kl_audio_write_src(const void *src, const void *pcm, size_t bytes) {
         // reader, so its samples mix with the others in step — not in the past
         // (already played as silence) nor so far ahead the ring wraps under it.
         if (pos < r0 || pos > r0 + g_cap) {
+            // A source that had a cursor (pos != 0) and fell BEHIND the reader is
+            // an audible gap in its stream: its next samples jump forward. That
+            // is the stutter this file can see but the underrun counter cannot
+            // (another source kept the ring non-empty), so it is counted and the
+            // first few are named.
+            if (pos && pos < r0) {
+                double late = 1000.0 * (double)(r0 - pos) / g_out_rate;
+                st->resyncs++;
+                if (late > st->late_ms) st->late_ms = late;
+                if (st->resyncs <= 5 || (st->resyncs % 500) == 0)
+                    fprintf(stderr, "  [au] src%d fell %.1f ms behind the device — "
+                                    "resynced (#%lu; a gap in that stream)\n",
+                            slot, late, st->resyncs);
+            }
             uint64_t back = g_target > frames ? g_target - frames : 0;
             pos = r0 + back;
         }
     }
+    pthread_mutex_unlock(&g_wlock);
 
     // Block until this source is no more than the latency target ahead of the
     // reader — THIS is the clock, exactly as the single-source path was, and it
-    // paces both streams to the device rate.
+    // paces every stream to the device rate. The wait happens WITHOUT g_wlock.
     uint64_t deadline = now_ns() + 2000ull * 1000000ull;
     size_t written = 0;
     while (written < frames) {
+        pthread_mutex_lock(&g_wlock);
+        if (!g_ring || !g_cap) { pthread_mutex_unlock(&g_wlock); break; }   // closed
         uint64_t r = atomic_load_explicit(&g_r, memory_order_acquire);
         uint64_t here = pos + written;
         if (here < r) here = r;                       // never write in the past
@@ -849,16 +914,23 @@ size_t kl_audio_write_src(const void *src, const void *pcm, size_t bytes) {
             if (nf < r) nf = r;
             uint64_t curw = atomic_load_explicit(&g_w, memory_order_relaxed);
             if (nf > curw) atomic_store_explicit(&g_w, nf, memory_order_release);
+            pthread_mutex_unlock(&g_wlock);
             continue;
         }
+        pthread_mutex_unlock(&g_wlock);
 
         // Full. A stop / interruption / lost device must break the loop, or the
         // feeder wedges holding nothing and the guest's mixer stalls behind it.
         if (!g_playing || g_interrupted) break;
-        watchdog();
-        if (now_ns() > deadline) { g_short_writes++; break; }
-        nap_ms(2);
+        watchdog();                         // may restart: takes g_lock -> g_wlock
+        if (now_ns() > deadline) {
+            pthread_mutex_lock(&g_wlock); g_short_writes++; pthread_mutex_unlock(&g_wlock);
+            break;
+        }
+        nap_ms(1);
     }
+
+    pthread_mutex_lock(&g_wlock);
     g_src_pos[slot] = pos + written < r0 ? r0 : pos + written;
     // A source that appears LATE must not inherit a cursor from the
     // single-source era: the moment a second one registers, both are resynced
@@ -867,26 +939,27 @@ size_t kl_audio_write_src(const void *src, const void *pcm, size_t bytes) {
 
     dump_write(conv, written);
 
-    if (g_trace && (g_writes % 200) == 1) {
+    if (g_trace && (wno % 200) == 1) {
         size_t fill = atomic_load(&g_w) - atomic_load(&g_r);
         fprintf(stderr, "  [au] write #%lu src%d: %zu in -> %zu out, fill %zu/%zu "
-                        "(%.1f ms), %d src(s), underruns %u\n",
-                g_writes, slot, n, frames, fill, g_target,
+                        "(%.1f ms), %d src(s), underruns %u, resyncs %lu\n",
+                wno, slot, n, frames, fill, g_target,
                 1000.0 * (double)fill / g_out_rate, g_src_n,
-                atomic_load(&g_underruns));
+                atomic_load(&g_underruns), st->resyncs);
     }
 
     // Periodic peak verdict, WITHOUT the trace flag: "can I hear anything?" is a
     // question a normal run has to be able to answer. A peak of 0 across hundreds
     // of buffers means the guest's mixer is running but producing silence (banks
     // not loaded, no events) — a different bug from an output that never opened.
-    if ((g_writes % 1000) == 1) {
+    if ((wno % 1000) == 1) {
         fprintf(stderr, "  [au] guest PCM so far: peak %d/32767, %lu of %lu "
                         "buffers all-zero — %s\n",
-                g_peak, g_silent_buffers, g_writes,
+                g_peak, g_silent_buffers, wno,
                 g_peak ? "producing audio" : "ONLY SILENCE so far");
     }
     pthread_mutex_unlock(&g_wlock);
+    pthread_mutex_unlock(&st->mu);
     return written == frames ? bytes : written * in_frame;
 }
 
@@ -906,6 +979,15 @@ void kl_audio_report(FILE *f) {
             g_peak, g_peak ? 20.0 * log10((double)g_peak / 32767.0) : -1e9,
             g_silent_buffers, g_writes,
             g_peak ? "the guest produced audio" : "THE GUEST PRODUCED ONLY SILENCE");
+    // Mixing-mode gaps per source (see the resync ladder in kl_audio_write_src):
+    // the underrun count above stays 0 while ANY source keeps the ring fed, so a
+    // stuttering secondary stream only shows here.
+    if (g_src_n > 1) {
+        fprintf(f, "  sources mixed: %d —", g_src_n);
+        for (int i = 0; i < g_src_n; i++)
+            fprintf(f, " src%d %lu resync(s) (worst %.1f ms late)%s", i,
+                    g_src[i].resyncs, g_src[i].late_ms, i + 1 < g_src_n ? ";" : "\n");
+    }
     // The capture twin of the line above: it ran only if a guest opened an input
     // stream with the mic toggle on, so it is silent (no line) on the common
     // playback-only run.

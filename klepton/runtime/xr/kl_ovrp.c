@@ -2345,6 +2345,17 @@ void kl_ovrp_eye_view(int eye, float *px, float *py, float *pz,
     if (tangents) memcpy(tangents, klovrp_eye_tan(eye), sizeof g_eye_tan[eye]);
 }
 
+void kl_ovrp_eye_local(int eye, float off[3], float rot[4]) {
+    if ((unsigned)eye > 1) eye = 0;
+    float dx = 0, dy = 0, dz = 0;
+    klovrp_eye_offset(eye, &dx, &dy, &dz);
+    if (off) { off[0] = dx; off[1] = dy; off[2] = dz; }
+    if (rot) {
+        if (klovrp_eye_cant()) memcpy(rot, g_eye_rot[eye], sizeof g_eye_rot[eye]);
+        else { rot[0] = 0; rot[1] = 0; rot[2] = 0; rot[3] = 1; }
+    }
+}
+
 // The guest's head — the latched one. See the header for why this is a
 // different function from kl_ovrp_get_head_pose rather than a parameter on it.
 void kl_ovrp_get_guest_head_pose(float *px, float *py, float *pz,
@@ -2731,6 +2742,7 @@ static uint64_t klovrp_begin_frame_impl(int guest_frame_index) {
     klovrp_jit_frame_begin(r);
     // Per-frame statements too (klovrp_asw_frame fills them at EndFrame4).
     r->asw = 0;
+    r->depth_near = r->depth_far = 0;
     r->asw_submit_flags = 0;
     // Cleared, not carried: the render viewport is a per-frame statement the
     // guest makes at EndFrame4, and a rect left over from the previous frame
@@ -3062,9 +3074,11 @@ static uint64_t klovrp_EndFrame(int guest_frame_index) {
 // The guest's submitted-frame counter — see KL_OVRP_POKE and kl_vulkan_capture_eyes.
 static unsigned g_vk_frame;
 
+static void kl_loadvid_tick(void);
 static uint64_t klovrp_EndFrame4(int guest_frame_index, const void *layer_submits,
                                  int layer_submit_count, void *sync) {
     ovrp_hit("ovrp_EndFrame4");
+    kl_loadvid_tick();
     { static unsigned n; if (n < 48 || n % 300 == 0) {
         uint64_t tid=0; pthread_threadid_np(NULL,&tid);
         fprintf(stderr, "  [ovrp] frameloop EndFrame4 #%u frameIdx=%d layers=%d "
@@ -3100,6 +3114,10 @@ static uint64_t klovrp_EndFrame4(int guest_frame_index, const void *layer_submit
     // record's fallback ladder tests it (klovrp_end_frame_impl).
     int named = klovrp_submit_stage(layer_submits, layer_submit_count);
     klovrp_asw_frame(layer_submits, layer_submit_count, named);
+    // VPKTAA: which frame record this EndFrame files (for kl_vulkan_eye_depth_tag).
+    pthread_mutex_lock(&g_frames.mu);
+    uint64_t pend_serial = g_frames.pending.serial;
+    pthread_mutex_unlock(&g_frames.mu);
     uint64_t r = klovrp_end_frame_impl(guest_frame_index, have ? vp : NULL,
                                        have ? of : NULL, named);
 
@@ -3126,6 +3144,18 @@ static uint64_t klovrp_EndFrame4(int guest_frame_index, const void *layer_submit
         // it. Ordinary runs write no captures at all, so this is the only
         // frame-completion point either way.
         kl_vulkan_frame_done(named < 0 ? 0 : named);
+        // The eye depth kl_vulkan just filed for this stage belongs to the frame
+        // record filed above — tag it with that record's serial so VPKTAA never
+        // pairs a picture with another frame's depth. 0 = this frame was not
+        // filed (dropped): the depth is then unusable by construction.
+        {
+            uint64_t tag = 0;
+            pthread_mutex_lock(&g_frames.mu);
+            for (int st = 0; pend_serial && st < KLOVRP_MAX_STAGES && !tag; st++)
+                if (g_frames.r[st].serial == pend_serial && g_frames.r[st].complete) tag = pend_serial;
+            pthread_mutex_unlock(&g_frames.mu);
+            kl_vulkan_eye_depth_tag(named < 0 ? 0 : named, tag);
+        }
     }
     ovrp_log_ret("EndFrame4", r, &nr_end);
     return r;
@@ -5224,6 +5254,9 @@ static struct klovrp_layer {
     uint32_t tex[KLOVRP_MAX_STAGES][2];           // GL names, per stage per eye
     int      is_eye;                              // eye layer, or the dummy
     int      used;                                // this slot has been set up before
+    unsigned submit_tick;                         // kl_loadvid tick of the last submit
+    int      android_surface;                     // the guest fetched its Surface
+                                                  // (+1; 0 = never) - see kl_loadvid_recount
     int      prev_id;                             // the id this slot answered to
                                                   // before its last destroy — what
                                                   // lets a Vulkan reuse find the
@@ -5257,16 +5290,46 @@ static struct klovrp_layer *klovrp_layer(int id) {
 // destroys the layer, g_loadvid_active clears, and the world shows through.
 static int g_loadvid_active;
 static int g_loadvid_suppressed;   // the guest asked to hide the loading screen
+// AC Nexus log 43: "live" (set up, not destroyed) was the trigger, and AC almost
+// never destroys a layer - it re-creates its overlay set per loading phase - so
+// the skybox stayed up the whole session and the eye picture was never shown,
+// menu or game. On Quest a layer the app stops SUBMITTING is simply not drawn.
+// So the trigger is now an Equirect VIDEO layer (desc flag AndroidSurfaceSwapChain,
+// 1<<7: its content is a MediaPlayer Surface we cannot decode, which is the
+// only reason the host plays the mp4 in its place) that the guest submitted in
+// the last KL_LOADVID_GRACE (45) frames; set-up counts as a submit.
+// KL_LOADVID_ANY_EQ=1 restores the old rule (any live Equirect layer).
+#define KLOVRP_LAYERFLAG_ANDROID_SURFACE (1 << 7)
+static unsigned g_loadvid_tick;    // ovrp_EndFrame4 count
 static void kl_loadvid_recount(void) {
-    int any = 0;
-    for (int i = 0; i < KLOVRP_MAX_LAYERS; i++)
-        if (g_layers[i].id && !g_layers[i].is_eye && g_layers[i].desc.shape == 5) {
-            any = 1; break;
+    static int any_eq = -1, grace = -1;
+    if (any_eq < 0) any_eq = kl_env_on("KL_LOADVID_ANY_EQ", 0);
+    if (grace < 0) { grace = (int)kl_env_float("KL_LOADVID_GRACE", 45.0f); if (grace < 1) grace = 1; }
+    int any = 0, id = 0;
+    for (int i = 0; i < KLOVRP_MAX_LAYERS && !any; i++) {
+        const struct klovrp_layer *c = &g_layers[i];
+        if (!c->id || c->is_eye || c->desc.shape != 5) continue;
+        if (any_eq) { any = 1; id = c->id; break; }
+        if (!(c->desc.layer_flags & KLOVRP_LAYERFLAG_ANDROID_SURFACE) && !c->android_surface)
+            continue;
+        if (c->submit_tick && g_loadvid_tick - (c->submit_tick - 1) <= (unsigned)grace) {
+            any = 1; id = c->id;
         }
-    if (any != g_loadvid_active)
-        fprintf(stderr, "  [ovrp] loading-video skybox %s (an Equirect layer is %s)\n",
-                any ? "ON" : "OFF", any ? "live" : "gone");
+    }
+    if (any != g_loadvid_active) {
+        static int said;
+        if (said++ < 64)
+            fprintf(stderr, "  [ovrp] loading-video skybox %s (%s%d, frame %u)\n",
+                    any ? "ON" : "OFF",
+                    any ? "Equirect video layer submitted: " : "no Equirect video layer submitted "
+                          "recently - the eye picture shows; last id ", id, g_loadvid_tick);
+    }
     g_loadvid_active = any;
+}
+// Called once per ovrp_EndFrame4: ages the submits.
+static void kl_loadvid_tick(void) {
+    g_loadvid_tick++;
+    kl_loadvid_recount();
 }
 // Swift-facing: 1 while the guest has a live Equirect loading layer.
 int kl_loadingvideo_active(void) {
@@ -5657,7 +5720,10 @@ static void klovrp_asw_frame(const void *layer_submits, int count, int named_sta
                 set_sw ? " — calling it with true" : " (not exported: cannot enable AppSW)");
         if (set_sw) set_sw(1);
     }
-    if (wants && (f < 4 || (eye->submit_flags != last_flags && dumps < 24))) {
+    // Also every 1800 frames: the SpaceWarp fields (delta pose, near/far) are
+    // only filled once AppSW runs, which is after the first dumps.
+    if (wants && (f < 4 || (eye->submit_flags != last_flags && dumps < 24) ||
+                  (f % 1800 == 0 && f > 0))) {
         dumps++;
         uint32_t wd[0x130 / 4];
         memset(wd, 0, sizeof wd);
@@ -5678,6 +5744,14 @@ static void klovrp_asw_frame(const void *layer_submits, int count, int named_sta
             fprintf(stderr, "  [asw]   +0x%03x: %08x %08x %08x %08x  (%g %g %g %g)\n",
                     off, q[0], q[1], q[2], q[3],
                     (double)fl[0], (double)fl[1], (double)fl[2], (double)fl[3]);
+        }
+        // The last 8 bytes of the 0x130 union (the loop above stops at +0x128).
+        if (got >= 0x130) {
+            float fl[2];
+            memcpy(fl, &wd[0x128 / 4], sizeof fl);
+            fprintf(stderr, "  [asw]   +0x128: %08x %08x  (%g %g)  [Fov[2] seen at +0x104..+0x123 "
+                            "(Up Down Left Right per eye); candidates for NearZ/FarZ: +0x124..]\n",
+                    wd[0x128 / 4], wd[0x12c / 4], (double)fl[0], (double)fl[1]);
         }
     }
     last_flags = eye->submit_flags;
@@ -5708,9 +5782,35 @@ static void klovrp_asw_frame(const void *layer_submits, int count, int named_sta
                             "depth written; motion %dx%d\n",
                     f, named_stage, (unsigned)bits, n_store, n_mv, n_dp, w, h);
     }
+    // VPKTAA depth linearisation: near/far straight from the submit, once the
+    // offset is known (KL_VPKTAA_NEARFAR_OFF=0x...; FarZ is the next float).
+    // Unset = 0/0 and VPKTAA uses its defaults (KL_VPKTAA_NEAR / KL_VPKTAA_FAR).
+    float znear = 0.0f, zfar = 0.0f;
+    {
+        static long nf_off = -2;
+        if (nf_off == -2) {
+            const char *v = getenv("KL_VPKTAA_NEARFAR_OFF");
+            nf_off = v && *v ? strtol(v, NULL, 0) : -1;
+            if (nf_off > 0x130 - 8 || nf_off < 0x48) nf_off = -1;
+            if (nf_off > 0) fprintf(stderr, "  [asw] near/far read from eye submit +%#lx\n", nf_off);
+        }
+        if (nf_off > 0) {
+            float nfv[2] = { 0, 0 };
+            vm_size_t got2 = 0;
+            if (vm_read_overwrite(mach_task_self(), (vm_address_t)eye + (vm_address_t)nf_off,
+                                  sizeof nfv, (vm_address_t)nfv, &got2) == KERN_SUCCESS &&
+                got2 == sizeof nfv && isfinite(nfv[0]) && nfv[0] > 1e-4f && nfv[0] < 10.0f &&
+                (nfv[1] == 0.0f || !isfinite(nfv[1]) || nfv[1] > nfv[0])) {
+                znear = nfv[0];
+                zfar = isfinite(nfv[1]) ? nfv[1] : 0.0f;
+            }
+        }
+    }
     pthread_mutex_lock(&g_frames.mu);
     g_frames.pending.asw = bits;
     g_frames.pending.asw_submit_flags = eye->submit_flags;
+    g_frames.pending.depth_near = znear;
+    g_frames.pending.depth_far = zfar;
     pthread_mutex_unlock(&g_frames.mu);
 }
 
@@ -5821,6 +5921,7 @@ static void klovrp_record_overlays(const void *layer_submits, int count) {
             }
         }
         if (!l || l->is_eye) continue;
+        l->submit_tick = g_loadvid_tick + 1;   // kl_loadvid_recount
         kl_ovrp_overlay *o = &tmp[n++];
         memset(o, 0, sizeof *o);
         o->layer_id = effective_id;
@@ -6366,6 +6467,7 @@ static uint64_t klovrp_SetupLayer(void *device, const ovrp_layer_desc_eyefov *de
     l->desc   = *desc;
     l->is_eye = is_eye;
     l->used   = 1;
+    l->submit_tick = g_loadvid_tick + 1;   // set-up counts as a submit (kl_loadvid_recount)
     *layer_id = l->id;
     // Make the reuse REAL on the Vulkan path. The slot's GL names survive in
     // l->tex, but a Vulkan guest's storage lives in kl_vulkan's layer-image
@@ -6438,8 +6540,34 @@ static uint64_t klovrp_EnqueueSetupLayer2(const ovrp_layer_desc_eyefov *desc,
 static kl_ovrp_overlay g_enq[KLOVRP_MAX_LAYERS];
 static int g_enq_n;
 static int g_enq_frame = -0x7fffffff;
+// Census of the submitted overlay set, printed when the SET of layer ids
+// changes (bounded): which layers a frame really carries, where, how big and
+// with which flags/rect - "[cp] compositing overlay layer N" only says the
+// first pose a layer was drawn with, and panels the game parks at the origin
+// (AC Nexus log 43: layers 6/9/10/16 at ~0 m) cannot be told from live ones.
+static void klovrp_enq_census(void) {
+    static int said;
+    static int last_ids[KLOVRP_MAX_LAYERS], last_n = -1;
+    if (said >= 40) return;
+    int same = last_n == g_enq_n;
+    for (int i = 0; same && i < g_enq_n; i++) same = last_ids[i] == g_enq[i].layer_id;
+    if (same) return;
+    last_n = g_enq_n;
+    for (int i = 0; i < g_enq_n; i++) last_ids[i] = g_enq[i].layer_id;
+    said++;
+    fprintf(stderr, "  [ovrp] overlay set (%d layer(s)):", g_enq_n);
+    for (int i = 0; i < g_enq_n; i++) {
+        const kl_ovrp_overlay *o = &g_enq[i];
+        fprintf(stderr, " #%d %s%s %.2fx%.2f@(%.2f %.2f %.2f) f%#x%s%s;", o->layer_id,
+                klovrp_shape_name(o->shape), o->head_locked ? "/head" : "",
+                (double)o->size[0], (double)o->size[1],
+                (double)o->pose[4], (double)o->pose[5], (double)o->pose[6], (unsigned)o->flags,
+                o->tex ? "" : " notex", o->rect_on ? " rect" : "");
+    }
+    fprintf(stderr, "\n");
+}
 static void klovrp_enq_flush(void) {
-    if (g_enq_n) kl_ovrp_overlays_external(g_enq, g_enq_n);
+    if (g_enq_n) { klovrp_enq_census(); kl_ovrp_overlays_external(g_enq, g_enq_n); }
     g_enq_n = 0;
 }
 // ovrp_SetColorScaleAndOffset(ovrpVector4f scale, ovrpVector4f offset, ovrpBool
@@ -6523,6 +6651,7 @@ static uint64_t klovrp_EnqueueSubmitLayer2(uint32_t flags, void *texL, void *tex
         g_enq_frame = frame_index;
     }
     struct klovrp_layer *l = klovrp_layer(layer_id);
+    if (l) l->submit_tick = g_loadvid_tick + 1;
     if (l && !l->is_eye && g_enq_n < KLOVRP_MAX_LAYERS) {
         kl_ovrp_overlay *o = &g_enq[g_enq_n++];
         memset(o, 0, sizeof *o);
@@ -7099,6 +7228,8 @@ static uint64_t klovrp_GetLayerAndroidSurfaceObject(int layer_id, void **surface
     ovrp_hit("ovrp_GetLayerAndroidSurfaceObject");
     if (!surface) return (uint64_t)(int64_t)OVRP_FAIL_INVALID_PARAM;
     *surface = kl_hostvideo_surface_object(layer_id);
+    struct klovrp_layer *l = klovrp_layer(layer_id);
+    if (l && *surface) { l->android_surface = 1; kl_loadvid_recount(); }
     return *surface ? OVRP_SUCCESS : OVRP_FAIL_UNSUPPORTED;
 }
 
