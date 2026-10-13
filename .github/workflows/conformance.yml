@@ -1,0 +1,118 @@
+# Khronos conformance tests packaged for VisionQuestPro: the Vulkan CTS (deqp-vk), built for
+# Android arm64 exactly like a Quest game's native code, and packaged as an APK the app prepares
+# and runs as one more game (guest kind "exe"). Published as the release "conformance"
+# (VulkanCTS.apk). Linux runner only: no macOS minutes.
+#
+# Only when asked for: by hand (Actions > conformance > Run workflow) or a push whose commit
+# message has [conformance] in it. The CTS sources, its dependencies and the compiler cache are
+# cached per CTS version, so a rebuild only recompiles what changed.
+name: conformance
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  vulkan-cts:
+    if: github.event_name == 'workflow_dispatch' || contains(github.event.head_commit.message, '[conformance]')
+    concurrency:
+      group: conformance
+      cancel-in-progress: true
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+    env:
+      CTS_TAG: vulkan-cts-1.4.6.2
+      ANDROID_API: "29"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Tools
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq ninja-build ccache zip > /dev/null
+          echo "NDK=${ANDROID_NDK_LATEST_HOME:-$ANDROID_NDK_HOME}" >> "$GITHUB_ENV"
+          BT=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)
+          PL=$(ls -d "$ANDROID_HOME"/platforms/android-* | sort -V | tail -1)
+          echo "AAPT2=$BT/aapt2" >> "$GITHUB_ENV"
+          echo "ANDROID_JAR=$PL/android.jar" >> "$GITHUB_ENV"
+          echo "build-tools $BT, platform $PL, NDK ${ANDROID_NDK_LATEST_HOME:-$ANDROID_NDK_HOME}"
+
+      - uses: actions/cache@v4
+        id: ctssrc
+        with:
+          path: cts
+          key: vkcts-src-${{ env.CTS_TAG }}-v1
+      - name: VK-GL-CTS ${{ env.CTS_TAG }} and its dependencies
+        if: steps.ctssrc.outputs.cache-hit != 'true'
+        run: |
+          set -o pipefail
+          git clone -q --depth 1 --branch "$CTS_TAG" https://github.com/KhronosGroup/VK-GL-CTS cts
+          (cd cts && python3 external/fetch_sources.py 2>&1 | tail -40) | tee fetch.log
+
+      - name: Patches for the in-process executable
+        run: python3 conformance/vulkan/patch_deqp.py cts
+
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/ccache
+          key: vkcts-ccache-${{ env.CTS_TAG }}-${{ github.run_id }}
+          restore-keys: vkcts-ccache-${{ env.CTS_TAG }}-
+
+      - name: Configure (Android arm64 executable, Release)
+        run: |
+          set -o pipefail
+          ccache -M 3G > /dev/null
+          cmake -G Ninja -S cts -B build \
+            -DDEQP_TARGET=android -DDEQP_TARGET_TOOLCHAIN=ndk-modern \
+            -DANDROID_NDK_PATH="$NDK" -DANDROID_ABI=arm64-v8a -DDE_ANDROID_API="$ANDROID_API" \
+            -DDEQP_ANDROID_EXE=ON -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+            "-DCMAKE_EXE_LINKER_FLAGS=-Wl,--export-dynamic-symbol=main" 2>&1 | tail -60 | tee configure.log
+
+      - name: Build deqp-vk
+        run: |
+          set -o pipefail
+          cmake --build build --target deqp-vk deqp-vk-data -- -j"$(nproc)" -k 0 2>&1 \
+            | grep -v "^\[[0-9]*/[0-9]*\] Building" | tail -400 | tee build.log
+          ccache -s | tee -a build.log
+
+      - name: Package VulkanCTS.apk
+        run: |
+          set -euo pipefail
+          EXE=build/external/vulkancts/modules/vulkan/deqp-vk
+          DATA=build/external/vulkancts/modules/vulkan/vulkan
+          test -f "$EXE" && test -d "$DATA"
+          STRIP="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip"
+          READELF="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf"
+          mkdir -p pkg/lib/arm64-v8a pkg/assets
+          cp "$EXE" pkg/lib/arm64-v8a/libdeqp-vk.so
+          "$STRIP" --strip-unneeded pkg/lib/arm64-v8a/libdeqp-vk.so
+          "$READELF" -h pkg/lib/arm64-v8a/libdeqp-vk.so | grep -E "Type|Machine" | tee package.log
+          "$READELF" --dyn-syms -W pkg/lib/arm64-v8a/libdeqp-vk.so | awk '$8=="main"' | tee -a package.log
+          "$READELF" --dyn-syms -W pkg/lib/arm64-v8a/libdeqp-vk.so | awk '$8=="main"' | grep -q main
+          "$READELF" -d pkg/lib/arm64-v8a/libdeqp-vk.so | grep NEEDED | tee -a package.log
+          cp -R "$DATA" pkg/assets/vulkan
+          python3 conformance/vulkan/caselists.py cts/external/vulkancts/mustpass/main pkg/assets/caselists | tee -a package.log
+          sed "s/@VERSION@/${CTS_TAG#vulkan-cts-}/" conformance/vulkan/AndroidManifest.xml > pkg/AndroidManifest.xml
+          "$AAPT2" link -o VulkanCTS.apk --manifest pkg/AndroidManifest.xml -I "$ANDROID_JAR"
+          # Native code uncompressed (as Android stores it), data and lists deflated.
+          (cd pkg && zip -q -0 -r ../VulkanCTS.apk lib && zip -q -9 -r ../VulkanCTS.apk assets)
+          echo "files in data: $(find pkg/assets -type f | wc -l)" | tee -a package.log
+          ls -la VulkanCTS.apk pkg/lib/arm64-v8a | tee -a package.log
+
+      - name: Publish the logs (branch ci-logs, conformance.txt)
+        if: always()
+        run: bash scripts/ci-publish-log.sh conformance fetch.log configure.log build.log package.log
+
+      - name: Publish VulkanCTS.apk as the release "conformance"
+        if: success() && github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete conformance --yes --cleanup-tag || true
+          gh release create conformance VulkanCTS.apk \
+            --target "$GITHUB_SHA" --prerelease \
+            --title "Tests oficiales de conformidad (Khronos)" \
+            --notes "Vulkan CTS ${CTS_TAG#vulkan-cts-} (deqp-vk) para Android arm64, empaquetado como APK para VisionQuestPro. La app lo descarga desde Ajustes > Conformidad."
