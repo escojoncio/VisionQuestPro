@@ -46,6 +46,9 @@ enum VQLaunch {
         VQOVRPluginVersion.apply(apk: game.apk)
         VQLog.log("Arranque: \(game.id) (\(game.package)) tree=\(choice.prepared.tree.path) dylibs=\(choice.prepared.dylibs.path) "
                   + "files=\(files.path) obb=\(obbRel)")
+        setenv("KL_GUEST_KIND", game.guestKind, 1)
+        setenv("KL_GUEST_ENTRY", game.entryLib, 1)
+        if game.nativeFuncName.isEmpty { unsetenv("KL_GUEST_FUNC") } else { setenv("KL_GUEST_FUNC", game.nativeFuncName, 1) }
         let rc = kl_app_configure_game(game.id, choice.prepared.tree.path, game.apk.path, choice.prepared.dylibs.path,
                                        files.path, obbRel, documents)
         VQLog.log("Arranque: kl_app_configure_game -> \(rc): \(String(cString: kl_app_status()))")

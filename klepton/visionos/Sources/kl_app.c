@@ -208,10 +208,23 @@ int kl_app_configure_game(const char *name, const char *tree, const char *apk,
     snprintf(s_assets, sizeof s_assets, "%s/assets", tree);
     snprintf(s_libdir, sizeof s_libdir, "%s/lib/arm64-v8a", tree);
     snprintf(s_obb,    sizeof s_obb,    "%s", obb_rel && *obb_rel ? obb_rel : "obb");
+    // Engine chosen by the launcher from the game's own files (VQGames):
+    // KL_GUEST_KIND = unity | ue4 | native, KL_GUEST_ENTRY = entry library
+    // without ".so" (libmain, libUE4/libUnreal, the manifest's android.app.lib_name).
+    static char s_entry[256];
+    const char *kind_s  = getenv("KL_GUEST_KIND");
+    const char *entry_s = getenv("KL_GUEST_ENTRY");
+    kl_guest_kind kind = KL_GUEST_UNITY;
+    if (kind_s && !strcmp(kind_s, "ue4"))    kind = KL_GUEST_UE4;
+    if (kind_s && !strcmp(kind_s, "native")) kind = KL_GUEST_NATIVE;
+    snprintf(s_entry, sizeof s_entry, "%s",
+             entry_s && *entry_s ? entry_s : kind == KL_GUEST_UE4 ? "libUE4" : "libmain");
+    fprintf(stderr, "  [klepton] guest kind %s, entry %s.so\n",
+            kind == KL_GUEST_UE4 ? "ue4" : kind == KL_GUEST_NATIVE ? "native" : "unity", s_entry);
     t = (kl_target){ .name = s_name, .tree = s_tree, .apk = s_apk,
                      .assets = s_assets, .libdir = s_libdir,
-                     .entry_lib = "libmain", .userdata = s_name,
-                     .obb = s_obb, .kind = KL_GUEST_UNITY };
+                     .entry_lib = s_entry, .userdata = s_name,
+                     .obb = s_obb, .kind = kind };
     g_target = &t;
 
     if (kl_x18_init() != 0)
