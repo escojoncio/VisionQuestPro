@@ -327,6 +327,22 @@ typedef struct {
     VkFence         cap_fence;
 } klvk_device;
 
+// vkQueueSubmit needs EXTERNAL synchronisation on the queue (Vulkan spec): two
+// threads must never submit to the same VkQueue at once. Our own submits (new-image
+// clears, captures, shadow copies) run on whatever thread asked — AoT log 47: the
+// game thread allocating an OVROverlay quad (GetLayerTexturePtr -> clear) while
+// Unity's render thread submitted — and that thread never came back (game frozen
+// at serial 10300, music on). Every submit, ours and the guest's, goes through
+// this one lock. Held only for the submit call itself, never across a wait.
+static pthread_mutex_t g_qsub_mu = PTHREAD_MUTEX_INITIALIZER;
+static VkResult klvk_qsubmit(klvk_device *d, VkQueue q, uint32_t n,
+                             const VkSubmitInfo *si, VkFence f) {
+    pthread_mutex_lock(&g_qsub_mu);
+    VkResult r = d->QueueSubmit(q, n, si, f);
+    pthread_mutex_unlock(&g_qsub_mu);
+    return r;
+}
+
 typedef struct {
     uint32_t       magic;
     klvk_device   *d;
@@ -915,7 +931,7 @@ static VkResult klvk_AcquireNextImageKHR(VkDevice dev, VkSwapchainKHR h,
             .signalSemaphoreCount = sem ? 1u : 0u,
             .pSignalSemaphores = sem ? &sem : NULL,
         };
-        VkResult r = d->QueueSubmit(d->queue, 1, &si, fence);
+        VkResult r = klvk_qsubmit(d, d->queue, 1, &si, fence);
         if (r != VK_SUCCESS) VKT("acquire signal submit: %d\n", r);
     }
     (void)dev;
@@ -1061,7 +1077,7 @@ static int cap_image_layer(klvk_device *d, VkQueue q, VkImage img, uint32_t w, u
         .pCommandBuffers = &d->cap_cmd,
     };
     d->ResetFences(d->dev, 1, &d->cap_fence);
-    VkResult r = d->QueueSubmit(q, 1, &si, d->cap_fence);
+    VkResult r = klvk_qsubmit(d, q, 1, &si, d->cap_fence);
     free(stages);
     if (r != VK_SUCCESS) { VKI("capture submit: %d\n", r); return 0; }
     d->WaitForFences(d->dev, 1, &d->cap_fence, VK_TRUE, 2000000000ull);
@@ -1600,7 +1616,7 @@ static void klvk_image_clear_black(klvk_device *d, VkImage img, uint32_t layers,
         if (d->EndCommandBuffer(cmd) != VK_SUCCESS) goto out;
         VkSubmitInfo si = { .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO, .commandBufferCount = 1, .pCommandBuffers = &cmd };
         d->ResetFences(d->dev, 1, &fence);
-        if (d->QueueSubmit(d->queue, 1, &si, fence) == VK_SUCCESS &&
+        if (klvk_qsubmit(d, d->queue, 1, &si, fence) == VK_SUCCESS &&
             d->WaitForFences(d->dev, 1, &fence, VK_TRUE, 2000000000ull) != VK_SUCCESS) {
             // Still pending: its command buffer and fence must not be reset. Stop clearing.
             pool = VK_NULL_HANDLE;
@@ -1612,6 +1628,11 @@ out:
     pthread_mutex_unlock(&mu);
 }
 
+// Set around an allocation that must not run the synchronous clear (submit + fence
+// wait) on the calling thread: a non-eye OVROverlay layer image is allocated on the
+// GAME thread inside GetLayerTexturePtr, and the compositor already skips a layer
+// the guest has not written (kl_vulkan_layer_written), so the clear buys nothing.
+static __thread int t_klvk_no_clear;
 static VkImage klvk_image_alloc(klvk_device *d, VkFormat fmt,
                                 unsigned w, unsigned h, uint32_t layers,
                                 uint32_t mips, VkImageUsageFlags usage,
@@ -1663,7 +1684,7 @@ static VkImage klvk_image_alloc(klvk_device *d, VkFormat fmt,
     }
     if (mem_out) *mem_out = mem;
     klvk_img_reg_add(img);
-    if (clear_new) klvk_image_clear_black(d, img, ic.arrayLayers, ic.mipLevels);
+    if (clear_new && !t_klvk_no_clear) klvk_image_clear_black(d, img, ic.arrayLayers, ic.mipLevels);
     return img;
 }
 
@@ -1767,11 +1788,13 @@ unsigned long long kl_vulkan_layer_image(int layer_key, int stage, int eye,
     // out of it. TRANSFER_DST is there because Unity clears some targets with
     // vkCmdClearColorImage rather than a load op.
     VkDeviceMemory mem = VK_NULL_HANDLE;
+    t_klvk_no_clear = !is_eye && kl_env_on("KL_VK_LAYER_NOCLEAR", 1);
     VkImage img = klvk_image_alloc(d, fmt, w, h, (uint32_t)layers, 1,
                                    VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
                                    VK_IMAGE_USAGE_SAMPLED_BIT |
                                    VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
                                    VK_IMAGE_USAGE_TRANSFER_DST_BIT, &mem);
+    t_klvk_no_clear = 0;
     if (img == VK_NULL_HANDLE) return 0;
     // KL_VK_EYE_TINT=1 pre-clears the image to a colour nothing in a rendered
     // scene produces, which is the A/B that separates the two ways an eye
@@ -1824,7 +1847,7 @@ unsigned long long kl_vulkan_layer_image(int layer_key, int stage, int eye,
         VkSubmitInfo si = { .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
                             .commandBufferCount = 1, .pCommandBuffers = &d->cap_cmd };
         d->ResetFences(d->dev, 1, &d->cap_fence);
-        if (d->QueueSubmit(d->queue, 1, &si, d->cap_fence) == VK_SUCCESS)
+        if (klvk_qsubmit(d, d->queue, 1, &si, d->cap_fence) == VK_SUCCESS)
             d->WaitForFences(d->dev, 1, &d->cap_fence, VK_TRUE, 2000000000ull);
         VKI("eye image stage %d pre-cleared: %s (KL_VK_EYE_TINT)\n", stage,
             layers > 1 ? "layer 0 GREEN, layer 1 BLUE"
@@ -2301,7 +2324,7 @@ static int klvk_ed_snapshot(klvk_device *d, int stage, int eye, VkImage src, VkF
     VkSubmitInfo si = { .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
                         .commandBufferCount = 1, .pCommandBuffers = &cmd };
     d->ResetFences(d->dev, 1, &fence);
-    if (d->QueueSubmit(d->queue, 1, &si, fence) != VK_SUCCESS) return 0;
+    if (klvk_qsubmit(d, d->queue, 1, &si, fence) != VK_SUCCESS) return 0;
     if (d->WaitForFences(d->dev, 1, &fence, VK_TRUE, 2000000000ull) != VK_SUCCESS) {
         broken = 1;     // still pending: never reset this command buffer again
         VKI("[taa-depth] depth snapshot copy timed out — copies off for this run\n");
@@ -2743,7 +2766,7 @@ static void klvk_shadow_pump(void) {
         .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
         .commandBufferCount = 1, .pCommandBuffers = &cmd,
     };
-    if (d->QueueSubmit(d->queue, 1, &si, fence) == VK_SUCCESS) {
+    if (klvk_qsubmit(d, d->queue, 1, &si, fence) == VK_SUCCESS) {
         pending = 1;
         pthread_mutex_lock(&g_shadow_lock);
         for (int i = 0; i < nwork; i++)
@@ -3153,7 +3176,7 @@ static void klvk_eye_shadow_copy(klvk_device *d, int stage) {
         .commandBufferCount = 1, .pCommandBuffers = &cmd,
     };
     d->ResetFences(d->dev, 1, &fence);
-    if (d->QueueSubmit(d->queue, 1, &si, fence) != VK_SUCCESS) return;
+    if (klvk_qsubmit(d, d->queue, 1, &si, fence) != VK_SUCCESS) return;
     d->WaitForFences(d->dev, 1, &fence, VK_TRUE, 2000000000ull);
 
     if (!g_eye_shadow_mtl[stage])
@@ -3259,7 +3282,7 @@ static VkResult klvk_QueuePresentKHR(VkQueue q, const VkPresentInfoKHR *pi) {
                 .pWaitSemaphores = pi->pWaitSemaphores,
         .pWaitDstStageMask = stages,
             };
-            d->QueueSubmit(q, 1, &si, VK_NULL_HANDLE);
+            klvk_qsubmit(d, q, 1, &si, VK_NULL_HANDLE);
             free(stages);
         }
         if (pi->pResults) pi->pResults[i] = VK_SUCCESS;
@@ -5048,7 +5071,12 @@ static VkResult VKAPI_CALL klvk_QueueSubmit(VkQueue q, uint32_t n,
                 klvk_tid(), n, cb, fence != VK_NULL_HANDLE);
         }
     }
-    VkResult r = real ? real(q, n, si, fence) : VK_ERROR_INITIALIZATION_FAILED;
+    VkResult r = VK_ERROR_INITIALIZATION_FAILED;
+    if (real) {
+        pthread_mutex_lock(&g_qsub_mu);      // see klvk_qsubmit
+        r = real(q, n, si, fence);
+        pthread_mutex_unlock(&g_qsub_mu);
+    }
     // Same thread, same queue, right after the guest's work: copy every wanted
     // overlay texture into its persistent shadow (see klvk_shadow_pump).
     if (r == VK_SUCCESS) klvk_shadow_pump();
