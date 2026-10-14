@@ -129,7 +129,7 @@ enum VQCompilerProbe {
     static func start() {
         guard timer == nil else { return }
         let t = DispatchSource.makeTimerSource(queue: .global(qos: .utility))
-        t.schedule(deadline: .now() + 5, repeating: 15)
+        t.schedule(deadline: .now() + 20, repeating: 15)
         t.setEventHandler { probe() }
         timer = t
         t.resume()

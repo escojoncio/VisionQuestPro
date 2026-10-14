@@ -21,14 +21,29 @@ final class VQModel: ObservableObject {
     @Published var certificate: String? = VQSigner.current
 
     private init() {
+        // Safe mode: a launch that did not survive 8 s leaves this flag set, and the next one skips
+        // the optional launch work (log copy to QUEST, compiler probe) so the app always opens.
+        let defaults = UserDefaults.standard
+        let lastLaunchDied = defaults.bool(forKey: "vq.launchPending")
+        defaults.set(true, forKey: "vq.launchPending")
+        defaults.synchronize()
         VQLog.start()
-        refresh()
-        // Off the main thread and after the UI is up: copying the previous session's logs into the
-        // QUEST folder (File Provider storage, tens of MB) must never hold up the launch.
-        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 3) {
-            VQLog.savePreviousSessionToQuest()
+        if lastLaunchDied {
+            VQLog.log("Arranque: el anterior se cerró en los primeros segundos — modo seguro (sin copia de registros ni sonda del compilador)")
         }
-        VQCompilerProbe.start()
+        refresh()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 8) {
+            UserDefaults.standard.set(false, forKey: "vq.launchPending")
+            VQLog.log("Arranque: completado")
+        }
+        if !lastLaunchDied {
+            // Off the main thread and after the UI is up: copying the previous session's logs into
+            // the QUEST folder (File Provider storage, tens of MB) must never hold up the launch.
+            DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 10) {
+                VQLog.savePreviousSessionToQuest()
+            }
+            VQCompilerProbe.start()
+        }
     }
 
     func refresh() {
