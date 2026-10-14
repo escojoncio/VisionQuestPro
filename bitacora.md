@@ -7,20 +7,21 @@ Historial completo: `git log -p bitacora.md` (compactada el 2026-10-14; lo cerra
   Fallos por subgrupo: renderpasses ~500 (formats.* clear/load/input attachments), pipeline.stencil 136,
   copy_and_blit 90, image_clearing 57, pipeline.image/blend/sampler ~95, draw.basic/multiple_clears ~50,
   glsl.texture_functions offsets/query ~110, image.mutable 51.
-- Build con VPKEngine `7f18f05` (sin probar; la de `b71ed3f` falló por un error ARC en metal2): copias depth/stencil
-  por aspecto, clears en quads (rects, capas, aspectos, área parcial, load ops depth≠stencil), clear colors por formato,
-  `vkCmdResolveImage`, timeline semaphores, synchronization2, copy_commands2, multi_draw, dynamic_rendering anunciada,
-  mirror_clamp_to_edge. Las extensiones nuevas solo se anuncian con `VPVK_EXTRA_EXTENSIONS=1` (VQConformance lo pone
-  en ambos CTS; VQLaunch lo quita para juegos hasta verlas pasar).
+- Build con VPKEngine `0d66e5b` (sin probar). Sobre lo de `7f18f05` (resolve de imagen, timeline, sync2,
+  copy_commands2, multi_draw, clears en quads, copias por aspecto) añade: profundidad D24 convertida en copias,
+  depth_stencil_resolve, imágenes 1D como 2D (con mips y arrays; ~80 fallos glsl.texture_functions), texelFetchOffset,
+  texture2d_ms + textureSamples, referencia de stencil por cara y máscaras dinámicas (~136 fallos pipeline.stencil).
+  Traductor v3: los juegos retraducen sus recetas una vez. Extensiones nuevas solo con `VPVK_EXTRA_EXTENSIONS=1`
+  (VQConformance lo pone en ambos CTS; VQLaunch lo quita para juegos).
 - OpenXR CTS (log 61): 0 tests en 2 s porque no existía `/sdcard/files` (no podía abrir `openxr_cts.xml`). Arreglo:
   `kl_guest_mkdirs()` (kl_native.c, declarado en klepton.h) crea `/sdcard/files` antes de onCreate y en
   getFilesDir/getExternalFilesDir. Progreso visible: `kl_openxr_status_log/_text` (kl_openxr.c) cuenta secciones
   (`--durations yes`), aserciones `FAILED:`, frames y el resumen final; liblog lo alimenta (kl_va_handlers.c,
   kl_shim.c) y el compositor lo pinta en el HUD con `KL_STATUS_HUD=1` (KleptonCompositor.swift; la app lo pone solo
   para el OpenXR CTS).
-- Siguiente (orden): D24 depth en copias, depth_stencil_resolve, fallos de glsl texture offsets/query,
-  stencil/blend/sampler, queries (leen 0), eventos (se fijan al grabar), `maxMultiviewViewCount`. Para causas reales
-  hacen falta los .qpa (`QUEST/Partidas/Vulkan CTS (Khronos)/cts`).
+- Siguiente (orden): queryLod trilineal, queries (leen 0), eventos (se fijan al grabar), `maxMultiviewViewCount`,
+  renderpasses formats/attachment y copy_and_blit restantes (ver si siguen tras esta build). Para causas reales hacen
+  falta los .qpa (`QUEST/Partidas/Vulkan CTS (Khronos)/cts`).
 - Prueba: instalar, «Borrar resultados» en Conformidad, Vulkan CTS y después OpenXR CTS (progreso en el HUD).
 
 ## Robustez del CTS (2026-10-14, motivo: log 59 bloqueado en `048-draw-001` tras `Caused_GPU_Hang_Error`)
