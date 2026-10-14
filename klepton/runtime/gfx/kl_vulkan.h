@@ -407,4 +407,7 @@ unsigned long long kl_vulkan_xr_image(unsigned w, unsigned h, unsigned layers,
 // be exported.
 void *kl_vulkan_xr_image_mtl(unsigned long long image);
 
+// ...and its release (xrDestroySwapchain): destroyed after a short grace period.
+void kl_vulkan_xr_image_free(unsigned long long image);
+
 #endif
