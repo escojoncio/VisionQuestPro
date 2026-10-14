@@ -4,7 +4,7 @@ import CompositorServices
 
 // The visionOS host app (Swift for the platform layer).
 //
-// The boot gate is deliberately a plain WindowGroup and nothing else: the gate is "the
+// The boot gate is deliberately a plain window and nothing else: the gate is "the
 // guest boots inside an app bundle under AMFI, and a veneer executes", and an
 // ImmersiveSpace would have put Compositor Services into the picture before
 // there was anything to present, so a failure in either half would have read
@@ -195,7 +195,10 @@ struct KleptonApp: App {
     var body: some Scene {
         // VisionQuestPro: the launcher (VQLauncher.swift) is the window; BootView is its
         // "running" page.
-        WindowGroup(id: VQMainWindow.id) { VQRootView() }
+        // A single-instance Window, not a WindowGroup: a WindowGroup lets the system restore two
+        // launcher windows at launch (one left open + one reopened by openWindow when a game ended),
+        // and openWindow on a Window brings the existing one forward instead of adding another.
+        Window("VisionQuestPro", id: VQMainWindow.id) { VQRootView() }
             .defaultSize(width: 1280, height: 800)
             // On the app's phase, not this window's: closing the boot window
             // while the immersive space is up is not backgrounding, and must
@@ -209,9 +212,12 @@ struct KleptonApp: App {
         // untouched. visionOS centres a freshly opened window on the viewer's gaze,
         // which is the whole point — the hidden field is anchored to a 2D window
         // off to the side of an immersive guest, so its keyboard is never in view.
-        WindowGroup(id: "kbentry") { KeyboardEntryView() }
+        // Single instance, never opened at launch and never restored: only the guest asks for it.
+        Window("Teclado", id: "kbentry") { KeyboardEntryView() }
             .defaultSize(width: 560, height: 240)
             .windowResizability(.contentSize)
+            .defaultLaunchBehavior(.suppressed)
+            .restorationBehavior(.disabled)
 
         ImmersiveSpace(id: Immersive.id) {
             CompositorLayer(configuration: KleptonStageConfiguration()) { layerRenderer in

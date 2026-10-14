@@ -16,6 +16,9 @@ Historial completo: `git log -p bitacora.md` (compactada el 2026-10-14; lo cerra
   gathers ConstOffsets, IO empaquetado por componente, texel buffers de storage, multiview occlusion (2880 vs 64),
   blits enteros/3D, queryLod, indirectos desde compute.
 - Prueba: instalar, Vulkan CTS sin borrar resultados (reanuda), compartir registros.
+- Ventanas: launcher = `Window` (instancia única) en vez de `WindowGroup` (KleptonApp.swift): salían 2 launchers al
+  abrir (openWindow al acabar un juego con otro ya abierto + restauración de escenas). `kbentry` = `Window` con
+  `.defaultLaunchBehavior(.suppressed)` y `.restorationBehavior(.disabled)`.
 
 ## Robustez del CTS (2026-10-14, motivo: log 59 bloqueado en `048-draw-001` tras `Caused_GPU_Hang_Error`)
 - VPKEngine (`gpu/metal2`, `gpu/vulkan`; detalle en su bitácora 2026-10-14 (2)): ninguna espera a la GPU es infinita.
