@@ -2,22 +2,16 @@
 
 Historial completo: `git log -p bitacora.md` (compactada el 2026-10-14; lo cerrado queda en una línea con referencia).
 
-## 2026-10-14 (6) — CAUSA de «no arranca»: restauración de escena, no el código
+## EMPEZAR AQUÍ — 2026-10-14 (6): CAUSA de «no arranca»: restauración de escena, no el código
 - Informe .ips (xrOS 27.0 24M362): `SIGTRAP` en SwiftUI `AppSceneDelegate.makeSceneHostWindow(restorationSceneItemID:
   restorationData:…)` desde `scene(_:willConnectTo:)`, antes de cualquier código propio. El sistema intentaba restaurar
   la sesión guardada tras el OpenXR CTS (log 61, muerto por memoria con el espacio inmersivo abierto); persistía al
   instalar encima. Arreglo: `.restorationBehavior(.disabled)` en la `Window` principal (KleptonApp.swift). Remedio sin
   build: eliminar la app del todo y reinstalar.
-- Las reversiones de (5) fueron innecesarias: reintroducir los cambios de (4) (621d102..6fe05ab y VPKEngine 1f246f1).
+- Los cambios de (4) (621d102..6fe05ab) y VPKEngine 1f246f1 están reintroducidos íntegros; la reversión intermedia
+  (6476c93, VPKEngine 07c79f3) fue innecesaria.
 
-## AVISO — 2026-10-14 (5): código REVERTIDO al estado de a1df14a (+ VPKEngine revertido a 9f62f9c)
-- Las builds 621d102, aae1aea, cefc682 y 6fe05ab NO arrancaban (se cierran al abrir, sin informe). Causa sin
-  identificar: se probó quitar el Menu con ShareLink y restaurar el toolbar, sin efecto. Agentes: empaquetado, firma,
-  enlazado e Info.plist idénticos a a1df14a.
-- Todo lo descrito en la sección (4) está en git (621d102..6fe05ab, VPKEngine 1f246f1) pero NO en el árbol actual.
-  Reintroducir por partes, una build por parte, empezando por lo que no se ejecuta al arrancar.
-
-## EMPEZAR AQUÍ — 2026-10-14 (4)
+## 2026-10-14 (4) — cambios tras los logs 60/61
 - Vulkan CTS (log 60, `cts_3`): sesión cortada por tiempo en la tanda 35/106 (12 645/36 087 casos; 4 348 Pass,
   297 Fail = 93,6 % de los soportados, 8 000 NotSupported). Faltan las tandas 035–105: seguir sin borrar resultados.
 - Causa común de muchos fallos: desde 2 s tras arrancar, conexiones NUEVAS a servicios del sistema fallaban

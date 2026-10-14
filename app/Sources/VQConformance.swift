@@ -279,6 +279,7 @@ enum VQConformance {
         let cut = head.prefix(60 + min(failures.count, 240)).joined(separator: "\n")
         VQLog.log("Conformidad:\n" + cut + (head.count > 300 ? "\n  … (lista completa en Registros/conformidad-vulkan.txt)" : ""))
         fputs("\n=== Conformidad Vulkan (\(reason)) ===\n" + cut + "\n", stderr)
+        VQLog.saveToQuest("conformidad")
     }
 
     static let okStatuses: Set<String> = ["Pass", "NotSupported", "QualityWarning", "CompatibilityWarning"]
