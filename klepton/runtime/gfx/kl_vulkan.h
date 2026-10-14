@@ -410,4 +410,7 @@ void *kl_vulkan_xr_image_mtl(unsigned long long image);
 // ...and its release (xrDestroySwapchain): destroyed after a short grace period.
 void kl_vulkan_xr_image_free(unsigned long long image);
 
+// Memory pressure: frees every destroyed OpenXR swapchain image still in its grace period.
+void kl_vulkan_trim(const char *why);
+
 #endif
