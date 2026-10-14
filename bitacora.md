@@ -2,7 +2,7 @@
 
 Historial completo: `git log -p bitacora.md` (compactada el 2026-10-14; lo cerrado queda en una línea con referencia).
 
-## EMPEZAR AQUÍ — 2026-10-14 (6): CAUSA de «no arranca»: restauración de escena, no el código
+## 2026-10-14 (6) — CAUSA de «no arranca»: restauración de escena, no el código
 - Informe .ips (xrOS 27.0 24M362): `SIGTRAP` en SwiftUI `AppSceneDelegate.makeSceneHostWindow(restorationSceneItemID:
   restorationData:…)` desde `scene(_:willConnectTo:)`, antes de cualquier código propio. El sistema intentaba restaurar
   la sesión guardada tras el OpenXR CTS (log 61, muerto por memoria con el espacio inmersivo abierto); persistía al
@@ -10,6 +10,24 @@ Historial completo: `git log -p bitacora.md` (compactada el 2026-10-14; lo cerra
   build: eliminar la app del todo y reinstalar.
 - Los cambios de (4) (621d102..6fe05ab) y VPKEngine 1f246f1 están reintroducidos íntegros; la reversión intermedia
   (6476c93, VPKEngine 07c79f3) fue innecesaria.
+
+## EMPEZAR AQUÍ — 2026-10-14 (8): Vulkan CTS COMPLETO (rapida, cts_4 + cts_5, logs 62–63)
+- 36 087/36 087 casos, 0 Crash/Timeout/DeviceLost. Pass 8 567, Fail 898 (90,5 % de los soportados), NotSupported 26 622.
+- Fallos por grupo (orden de ataque, todo en VPKEngine `gpu/metal2` + traductor):
+  1. `draw.renderpass.multi_draw` 96 (61 imagen, 35 stencil; casos `multiview`, stride/offset, draw_id) → multi-draw
+     indirecto + multiview + stencil.
+  2. `renderpasses.renderpass{1,2}.{suballocation,dedicated_allocation}.attachment.*` 276: combinaciones de
+     loadOp CLEAR/DONT_CARE/LOAD y Samples>1 (MSAA) por attachment.
+  3. `draw.renderpass.basic_draw` 35 (line_list/line_strip/triangle_fan: diferencias pequeñas → rasterización de
+     líneas/fans), `indirect_draw` 25, `multiple_clears_within_render_pass` 23, `instanced` 12.
+  4. `image.mutable.*` / `format_reinterpret` / `subresource_layout` ~75 (vistas de otro formato, draw_copy +
+     load_op_clear), `api.copy_and_blit` ~40, `buffer_view.access` 15, `image_clearing` 10.
+  5. `glsl.texture_functions.textureproj*offset` 28, `pipeline.monolithic.sampler` 17, sync timeline
+     device_host 16, `synchronization{,2}.op.single_queue` 19, `depth_stencil_resolve` 7.
+  6. NotSupported (perfil Adreno 740): maintenance5/6, shader_draw_parameters, scalarBlockLayout, 8/16-bit storage,
+     format_feature_flags2, geometry/tessellation (Metal no las tiene: emulación aparte), cola compute exclusiva.
+  Detalle por caso: `Registros/conformidad-detalle.txt` (en el visor; el usuario los pasa por chat).
+- Build pendiente: incluye `9aca3ef` (cola de retiro). Lanzar una sola build con lo anterior + primeros grupos.
 
 ## 2026-10-14 (7) — resultados tras df34dd2 (SIN build todavía; esperar al Vulkan CTS completo)
 - Vulkan CTS (cts_4): 88/106 tandas en 3 min, 30 607 casos, 0 Crash/Timeout/DeviceLost; Pass 8 363, Fail 859 (90,7 %),
