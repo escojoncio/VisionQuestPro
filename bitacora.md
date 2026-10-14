@@ -17,7 +17,11 @@ Historial completo: `git log -p bitacora.md` (compactada el 2026-10-14; lo cerra
     kl_app.c). Siguiente: cruzar el momento del primer INACCESIBLE con ports/fds (¿fuga de puertos por VkDevice?).
   - Registros sin hoja de Compartir: `VQLog.saveToQuest` → `QUEST/Registros/<fecha>-<etiqueta>/` (últimas 12):
     al arrancar si hay boot log nuevo (`sesion-anterior`), al final del resumen del CTS (`conformidad`) y a mano.
-    `VQShareLogs.swift` sustituye los 5 `ShareLink` por un menú (Compartir oculto si la sonda dice INACCESIBLE).
+    `VQShareLogs.swift`: botón «Guardar registros» (copia a QUEST, la etiqueta confirma 4 s) + el `ShareLink` de siempre
+    (oculto si la sonda dice INACCESIBLE). NUNCA un `ShareLink` dentro de un `Menu`: builds 621d102/aae1aea no
+    arrancaban en visionOS 27.2 (el menú del toolbar del launcher prepara la hoja de Compartir al construir la ventana).
+  - Arranque: modo seguro (`vq.launchPending`, VQLauncher.swift): si el anterior no llegó a 8 s, sin copia de
+    registros ni sonda. Copia de la sesión anterior a los 10 s en segundo plano; sonda a los 20 s.
 - `dEQP-VK.info.platform` (Crash, signal 11): `createPlatform()` de deqp pasaba a `Platform` una referencia a un
   `NativeActivity` de la pila. `patch_deqp.py` lo hace `static`. Requiere APK nuevo (`conformance.yml`, target vulkan).
 - OpenXR CTS (log 61): muerto por presión de memoria del sistema tras `MaxLayers-noninteractive` (16 capas 4766×1912:

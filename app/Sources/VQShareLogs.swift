@@ -1,7 +1,11 @@
-// VisionQuestPro: the logs button. A menu with the system share sheet and a copy to
-// QUEST/Registros (Files app). The share sheet is left out while the compiler probe says new
-// connections to system services fail in this process: in that state it aborted the app inside
-// ExtensionFoundation (log 60), and the copy needs no service at all.
+// VisionQuestPro: the logs buttons. A plain button that copies the logs to QUEST/Registros (Files
+// app, no system service involved) and, beside it, the system ShareLink as it always was.
+//
+// NOT a Menu: a ShareLink inside a Menu has the menu built with the share entry at launch (the
+// launcher toolbar), and on visionOS 27.2 that path aborted the app before its window appeared —
+// the same ExtensionFoundation cast failure (`_NSXPCDistantObject` → `_EXDiscoveryServiceProtocol`)
+// the share sheet hit in log 60. A standalone ShareLink in the toolbar is what every build up to
+// a1df14a shipped, and it opened fine on 27.2.
 
 import Combine
 import SwiftUI
@@ -14,28 +18,23 @@ struct VQShareLogs: View {
     private let tick = Timer.publish(every: 5, on: .main, in: .common).autoconnect()
 
     var body: some View {
-        Menu {
-            if !broken {
-                ShareLink(items: VQLog.shareable) { Label(VQL("Compartir…", "Share…"), systemImage: "square.and.arrow.up") }
-            }
+        Group {
+            // No alert: presentation modifiers hosted in a toolbar item are unreliable on visionOS.
+            // The label itself says what happened, for 4 s.
             Button {
                 if let dest = VQLog.saveToQuest("manual") {
-                    note = VQL("Guardados en QUEST/Registros/\(dest.lastPathComponent)",
-                               "Saved to QUEST/Registros/\(dest.lastPathComponent)")
+                    note = VQL("Guardado en QUEST/Registros", "Saved to QUEST/Registros")
+                    VQLog.log("Registros guardados a mano en \(dest.lastPathComponent)")
                 } else {
-                    note = VQL("Elige antes la carpeta QUEST.", "Choose the QUEST folder first.")
+                    note = VQL("Elige la carpeta QUEST", "Choose the QUEST folder")
                 }
-            } label: { Label(VQL("Guardar en QUEST/Registros", "Save to QUEST/Registros"), systemImage: "folder") }
-        } label: { Label(title, systemImage: icon) }
-        .onAppear { broken = VQCompilerProbe.servicesBroken }
-        .onReceive(tick) { _ in broken = VQCompilerProbe.servicesBroken }
-        .alert(note ?? "", isPresented: Binding(get: { note != nil }, set: { if !$0 { note = nil } })) {
-            Button("OK", role: .cancel) { note = nil }
-        } message: {
-            if broken {
-                Text(VQL("Compartir está desactivado hasta reiniciar la app: los servicios del sistema no responden en este proceso.",
-                         "Sharing is off until the app restarts: system services are not answering in this process."))
+                DispatchQueue.main.asyncAfter(deadline: .now() + 4) { note = nil }
+            } label: { Label(note ?? VQL("Guardar registros", "Save logs"), systemImage: note == nil ? "folder" : "checkmark") }
+            if !broken {
+                ShareLink(items: VQLog.shareable) { Label(title, systemImage: icon) }
             }
         }
+        .onAppear { broken = VQCompilerProbe.servicesBroken }
+        .onReceive(tick) { _ in broken = VQCompilerProbe.servicesBroken }
     }
 }
