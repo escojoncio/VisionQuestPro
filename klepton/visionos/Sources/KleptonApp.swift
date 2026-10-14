@@ -200,6 +200,11 @@ struct KleptonApp: App {
         // and openWindow on a Window brings the existing one forward instead of adding another.
         Window("VisionQuestPro", id: VQMainWindow.id) { VQRootView() }
             .defaultSize(width: 1280, height: 800)
+            // Never restored from the previous session: after a run the system killed with the
+            // immersive space open (OpenXR CTS, log 61), every launch died inside SwiftUI's
+            // makeSceneHostWindow(restorationSceneItemID:…) before any of our code ran — with any
+            // build, until the app was removed. A launch always starts from the launcher.
+            .restorationBehavior(.disabled)
             // On the app's phase, not this window's: closing the boot window
             // while the immersive space is up is not backgrounding, and must
             // not be treated as it. The log line above every decision is what

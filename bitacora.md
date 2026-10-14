@@ -2,6 +2,14 @@
 
 Historial completo: `git log -p bitacora.md` (compactada el 2026-10-14; lo cerrado queda en una línea con referencia).
 
+## 2026-10-14 (6) — CAUSA de «no arranca»: restauración de escena, no el código
+- Informe .ips (xrOS 27.0 24M362): `SIGTRAP` en SwiftUI `AppSceneDelegate.makeSceneHostWindow(restorationSceneItemID:
+  restorationData:…)` desde `scene(_:willConnectTo:)`, antes de cualquier código propio. El sistema intentaba restaurar
+  la sesión guardada tras el OpenXR CTS (log 61, muerto por memoria con el espacio inmersivo abierto); persistía al
+  instalar encima. Arreglo: `.restorationBehavior(.disabled)` en la `Window` principal (KleptonApp.swift). Remedio sin
+  build: eliminar la app del todo y reinstalar.
+- Las reversiones de (5) fueron innecesarias: reintroducir los cambios de (4) (621d102..6fe05ab y VPKEngine 1f246f1).
+
 ## AVISO — 2026-10-14 (5): código REVERTIDO al estado de a1df14a (+ VPKEngine revertido a 9f62f9c)
 - Las builds 621d102, aae1aea, cefc682 y 6fe05ab NO arrancaban (se cierran al abrir, sin informe). Causa sin
   identificar: se probó quitar el Menu con ShareLink y restaurar el toolbar, sin efecto. Agentes: empaquetado, firma,
