@@ -21,28 +21,12 @@ final class VQModel: ObservableObject {
     @Published var certificate: String? = VQSigner.current
 
     private init() {
-        // Safe mode: a launch that did not survive 8 s leaves this flag set, and the next one skips
-        // the optional launch work (log copy to QUEST, compiler probe) so the app always opens.
-        let defaults = UserDefaults.standard
-        let lastLaunchDied = defaults.bool(forKey: "vq.launchPending")
-        defaults.set(true, forKey: "vq.launchPending")
-        defaults.synchronize()
         VQLog.start()
-        if lastLaunchDied {
-            VQLog.log("Arranque: el anterior se cerró en los primeros segundos — modo seguro (sin copia de registros ni sonda del compilador)")
-        }
         refresh()
-        DispatchQueue.main.asyncAfter(deadline: .now() + 8) {
-            UserDefaults.standard.set(false, forKey: "vq.launchPending")
-            VQLog.log("Arranque: completado")
-        }
-        if !lastLaunchDied {
-            // Off the main thread and after the UI is up: copying the previous session's logs into
-            // the QUEST folder (File Provider storage, tens of MB) must never hold up the launch.
-            DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 10) {
-                VQLog.savePreviousSessionToQuest()
-            }
-            VQCompilerProbe.start()
+        // Off the main thread and well after the UI is up: copying the previous session's logs
+        // into the QUEST folder (File Provider storage, tens of MB) must never hold up the launch.
+        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 10) {
+            VQLog.savePreviousSessionToQuest()
         }
     }
 
@@ -143,7 +127,7 @@ struct VQLauncherView: View {
             .toolbar {
                 ToolbarItemGroup(placement: .topBarTrailing) {
                     Button { model.refresh() } label: { Label(VQL("Actualizar", "Refresh"), systemImage: "arrow.clockwise") }
-                    VQShareLogs(title: VQL("Registros", "Logs"), icon: "doc.text")
+                    ShareLink(items: VQLog.shareable) { Label(VQL("Registros", "Logs"), systemImage: "doc.text") }
                     Button { showSettings = true } label: { Label(VQL("Ajustes", "Settings"), systemImage: "gearshape") }
                 }
             }
@@ -340,7 +324,8 @@ struct VQSettingsView: View {
                     if case .success(let url) = r { model.choose(url) }
                 }
                 Section(VQL("Registros", "Logs")) {
-                    VQShareLogs()
+                    ShareLink(items: VQLog.shareable) { Label(VQL("Compartir registros", "Share logs"), systemImage: "square.and.arrow.up") }
+                    VQSaveLogsButton()
                     ScrollView {
                         Text(VQLog.tail(VQLog.appLog)).font(.system(.caption2, design: .monospaced)).textSelection(.enabled)
                             .frame(maxWidth: .infinity, alignment: .leading)
@@ -423,7 +408,7 @@ struct VQLoadingView: View {
             HStack(spacing: 16) {
                 Button(action: showLog) { Label(VQL("Ver registro", "Show log"), systemImage: "doc.text.magnifyingglass") }
                     .buttonStyle(.bordered)
-                VQShareLogs()
+                ShareLink(items: VQLog.shareable) { Label(VQL("Compartir registros", "Share logs"), systemImage: "square.and.arrow.up") }
                     .buttonStyle(.bordered)
             }
             .font(.callout)
@@ -446,7 +431,7 @@ struct VQEndedView: View {
                 .font(.title3).foregroundStyle(.secondary).multilineTextAlignment(.center)
             Spacer()
             HStack(spacing: 16) {
-                VQShareLogs()
+                ShareLink(items: VQLog.shareable) { Label(VQL("Compartir registros", "Share logs"), systemImage: "square.and.arrow.up") }
                     .buttonStyle(.bordered)
                 Button {
                     VQLog.log("Cerrar app tras la partida")
