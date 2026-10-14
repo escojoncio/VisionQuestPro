@@ -3,13 +3,18 @@
 Historial completo: `git log -p bitacora.md` (compactada el 2026-10-14; lo cerrado queda en una línea con referencia).
 
 ## EMPEZAR AQUÍ — 2026-10-14
-- Builds: `ac1a840` falló (Swift: `VQConformance.reason(_:)` chocaba con el parámetro `reason` de `summarize`) →
-  renombrada `notSupportedReason`, build `[build]` siguiente en curso. VPKEngine `f55e17e` compila en CI (OK).
-- Sin probar en el visor: todo el bloque «Robustez del CTS» de abajo, y las fences precisas también en juegos.
-- Prueba siguiente: Vulkan CTS (siempre en ventana; la app pone `KL_IMMERSIVE=0`). Leer del resumen
-  (`Registros/conformidad-vulkan.txt` + log): secciones «Colgados / dispositivo perdido / crash» (qué caso de
-  `draw` colgó la GPU en el log 59; con strict el log trae `gpu.err what=command_buffer … encoders=…`) y «No
-  soportados por motivo». Después: OpArrayLength y fallos por grupo (sección Conformidad).
+- Log 60 (build del arreglo de robustez): los 2 casos de draw que colgaban la GPU acabaron como DeviceLost a los 20 s
+  y el run siguió (46 tandas). Muerte nueva en `093-synchronization-003`: `vkCreatePipelineCache` con datos iniciales
+  encolaba ~3300 recetas sin sus shaders → `setComputeFunction:nil` → aborto de Metal en hilos de compilación.
+- Arreglado en VPKEngine `a0b39c4` (bitácora 2026-10-14 (3)): caché de pipelines sin prewarm/shaders ausentes, nil
+  comprobado, y **OpArrayLength** (causa real de los cuelgues de draw: compute saltado → argumentos indirectos basura).
+- Siguiente prueba: Vulkan CTS (ventana). Resumen del log 60 (17586 de 36087, 80,9 % de los soportados, 1024 Fail):
+  motivos NotSupported principales: maintenanceN, formatos, depth_stencil_resolve (776), sparse, map_memory2,
+  `maxMultiviewViewCount below min value` (386, relevante para Quest), colas, dynamic_rendering (202),
+  `Dynamic indexing not supported` (135), `Vertex pipeline stores and atomics not supported` (127),
+  separate_depth_stencil_layouts. Grupos con más fallos: pipeline-monolithic 250, api-heavy 149, api 72.
+- Plan tras el test: implementar todo lo que el log señale como necesario para juegos de Quest (perfil Adreno 740);
+  si no da tiempo, todo lo ya reconocido (lista «Pendiente» de Conformidad).
 
 ## Robustez del CTS (2026-10-14, motivo: log 59 bloqueado en `048-draw-001` tras `Caused_GPU_Hang_Error`)
 - VPKEngine (`gpu/metal2`, `gpu/vulkan`; detalle en su bitácora 2026-10-14 (2)): ninguna espera a la GPU es infinita.
@@ -46,8 +51,7 @@ Historial completo: `git log -p bitacora.md` (compactada el 2026-10-14; lo cerra
 - Sesiones: log 56 fesetround & co. (resuelto); log 57 aborto 1D comprimida (resuelto en VPKEngine) y `[imgfmt]`
   limitado; log 58: 6551 casos, 96,9 % de los soportados; log 59: bloqueo en draw (resuelto arriba, sin probar).
 - Pendiente (por orden):
-  1. Identificar el caso de draw que cuelga la GPU (siguiente sesión) y arreglar su causa.
-  2. `unsupported SPIR-V instruction 68` = OpArrayLength (SSBO runtime arrays): tamaño del buffer en un buffer auxiliar.
+  1-2. HECHO: caso de draw identificado (OpArrayLength) y OpArrayLength implementado (VPKEngine `a0b39c4`).
   3. Fails conocidos (104): texel buffers sint/snorm/16-bit, fragment_shader_output int/snorm, blits 1D (1D como 2D),
      device_init (multiview/shader_draw_parameters → FEATURE_NOT_PRESENT si no se anuncian), format_properties
      (A1R5G5B5, A8B8G8R8_SNORM, R32G32B32 vertex), image_format_properties sampleCounts>1 sin color attachment,
