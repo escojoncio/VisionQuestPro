@@ -53,6 +53,7 @@ enum VQLaunch {
         VQLog.log("Arranque: \(game.id) (\(game.package)) tree=\(choice.prepared.tree.path) dylibs=\(choice.prepared.dylibs.path) "
                   + "files=\(files.path) obb=\(obbRel)")
         VQApiScan.run(game: game, tree: choice.prepared.tree)
+        VQCompilerProbe.start()   // only once a guest runs: nothing at app launch
         if game.package == VQConformance.openXRPackage { VQConformance.prepareOpenXR() } else { unsetenv("KL_INTENT_EXTRAS"); unsetenv("KL_STATUS_HUD") }
         if VQConformance.isConformance(game) {
             // After applyToEnvironment: the test run is window-only (no immersive space).

@@ -1,40 +1,27 @@
-// VisionQuestPro: the logs buttons. A plain button that copies the logs to QUEST/Registros (Files
-// app, no system service involved) and, beside it, the system ShareLink as it always was.
+// VisionQuestPro: "Save logs" — copies the logs to QUEST/Registros (Files app) with no system
+// service involved. Only in Settings > Registros, next to the system ShareLink.
 //
-// NOT a Menu: a ShareLink inside a Menu has the menu built with the share entry at launch (the
-// launcher toolbar), and on visionOS 27.2 that path aborted the app before its window appeared —
-// the same ExtensionFoundation cast failure (`_NSXPCDistantObject` → `_EXDiscoveryServiceProtocol`)
-// the share sheet hit in log 60. A standalone ShareLink in the toolbar is what every build up to
-// a1df14a shipped, and it opened fine on 27.2.
+// The launcher toolbar keeps exactly the ShareLink it always had: builds 621d102/aae1aea/cefc682
+// added a Menu, then a second toolbar button, beside it, and none of them launched on visionOS 27.2
+// (a ShareLink that ends up inside a menu — explicit or the toolbar's overflow — has the share
+// sheet's extension discovery run while the window is built, which aborted the app in log 60).
 
-import Combine
 import SwiftUI
 
-struct VQShareLogs: View {
-    var title = VQL("Compartir registros", "Share logs")
-    var icon = "square.and.arrow.up"
+struct VQSaveLogsButton: View {
     @State private var note: String?
-    @State private var broken = VQCompilerProbe.servicesBroken
-    private let tick = Timer.publish(every: 5, on: .main, in: .common).autoconnect()
 
     var body: some View {
-        Group {
-            // No alert: presentation modifiers hosted in a toolbar item are unreliable on visionOS.
-            // The label itself says what happened, for 4 s.
-            Button {
-                if let dest = VQLog.saveToQuest("manual") {
-                    note = VQL("Guardado en QUEST/Registros", "Saved to QUEST/Registros")
-                    VQLog.log("Registros guardados a mano en \(dest.lastPathComponent)")
-                } else {
-                    note = VQL("Elige la carpeta QUEST", "Choose the QUEST folder")
-                }
-                DispatchQueue.main.asyncAfter(deadline: .now() + 4) { note = nil }
-            } label: { Label(note ?? VQL("Guardar registros", "Save logs"), systemImage: note == nil ? "folder" : "checkmark") }
-            if !broken {
-                ShareLink(items: VQLog.shareable) { Label(title, systemImage: icon) }
+        Button {
+            if VQLog.saveToQuest("manual") != nil {
+                note = VQL("Guardado en QUEST/Registros", "Saved to QUEST/Registros")
+            } else {
+                note = VQL("Elige la carpeta QUEST", "Choose the QUEST folder")
             }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 4) { note = nil }
+        } label: {
+            Label(note ?? VQL("Guardar registros en QUEST", "Save logs to QUEST"),
+                  systemImage: note == nil ? "folder" : "checkmark")
         }
-        .onAppear { broken = VQCompilerProbe.servicesBroken }
-        .onReceive(tick) { _ in broken = VQCompilerProbe.servicesBroken }
     }
 }
