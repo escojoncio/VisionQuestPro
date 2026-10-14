@@ -23,11 +23,6 @@ final class VQModel: ObservableObject {
     private init() {
         VQLog.start()
         refresh()
-        // Off the main thread and well after the UI is up: copying the previous session's logs
-        // into the QUEST folder (File Provider storage, tens of MB) must never hold up the launch.
-        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 10) {
-            VQLog.savePreviousSessionToQuest()
-        }
     }
 
     func refresh() {
@@ -325,7 +320,6 @@ struct VQSettingsView: View {
                 }
                 Section(VQL("Registros", "Logs")) {
                     ShareLink(items: VQLog.shareable) { Label(VQL("Compartir registros", "Share logs"), systemImage: "square.and.arrow.up") }
-                    VQSaveLogsButton()
                     ScrollView {
                         Text(VQLog.tail(VQLog.appLog)).font(.system(.caption2, design: .monospaced)).textSelection(.enabled)
                             .frame(maxWidth: .infinity, alignment: .leading)
