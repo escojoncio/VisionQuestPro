@@ -535,25 +535,6 @@ static long long kl_phys_footprint(void) {
     return (long long)info.phys_footprint;
 }
 
-// Mach port names and open descriptors in this process, for the heartbeat. Log 60: after a while
-// every NEW connection to a system service failed (MTLCompilerService "Connection init failed at
-// lookup", then the share sheet aborted in ExtensionFoundation) while old ones kept working —
-// the signature of a process that ran out of port names or descriptors. Every 16 s, cheap.
-static void kl_ipc_counts(int *ports, int *fds) {
-    *ports = -1; *fds = -1;
-    mach_port_name_array_t names = NULL; mach_msg_type_number_t nn = 0;
-    mach_port_type_array_t types = NULL; mach_msg_type_number_t nt = 0;
-    if (mach_port_names(mach_task_self(), &names, &nn, &types, &nt) == KERN_SUCCESS) {
-        *ports = (int)nn;
-        if (names) vm_deallocate(mach_task_self(), (vm_address_t)names, nn * sizeof *names);
-        if (types) vm_deallocate(mach_task_self(), (vm_address_t)types, nt * sizeof *types);
-    }
-    int top = getdtablesize(), n = 0;
-    if (top > 16384) top = 16384;
-    for (int i = 0; i < top; i++) if (fcntl(i, F_GETFD) != -1) n++;
-    *fds = n;
-}
-
 static void *heartbeat(void *arg) {
     (void)arg;
     // Polled faster than it prints, so a phase change is reported when it
@@ -569,13 +550,6 @@ static void *heartbeat(void *arg) {
             clock_gettime(CLOCK_REALTIME, &ts);
             struct tm tm;
             localtime_r(&ts.tv_sec, &tm);
-            if (ticks % 64 == 0) {
-                int ports, fds;
-                kl_ipc_counts(&ports, &fds);
-                fprintf(stderr, "[hb] %02d:%02d:%02d  phase=%s  foot=%lldM avail=%lldM ports=%d fds=%d\n",
-                        tm.tm_hour, tm.tm_min, tm.tm_sec, phase,
-                        kl_phys_footprint() >> 20, kl_avail_memory() >> 20, ports, fds);
-            } else
             fprintf(stderr, "[hb] %02d:%02d:%02d  phase=%s  foot=%lldM avail=%lldM\n",
                     tm.tm_hour, tm.tm_min, tm.tm_sec, phase,
                     kl_phys_footprint() >> 20, kl_avail_memory() >> 20);

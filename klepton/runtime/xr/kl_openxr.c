@@ -4686,13 +4686,10 @@ static XrResult klxr_CreateSwapchain(void *session, const XrSwapchainCreateInfo 
     sc->width = info->width; sc->height = info->height;
     sc->array_size = info->arraySize; sc->mip_count = info->mipCount;
     sc->usage = info->usageFlags;
-    sc->static_image = (info->createFlags & 0x2u) != 0;   // XR_SWAPCHAIN_CREATE_STATIC_IMAGE_BIT
-    // A static swapchain is acquired once, ever: it has exactly one image (an app that
-    // enumerates 3 and acquires them all gets CALL_ORDER_INVALID on the second — CTS
-    // "Swapchains / Non-default create flags").
-    sc->count = sc->static_image ? 1 : KLXR_SWAPCHAIN_IMAGES;
+    sc->count = KLXR_SWAPCHAIN_IMAGES;
     sc->acq_n = 0;
     sc->waited = 0;
+    sc->static_image = (info->createFlags & 0x2u) != 0;   // XR_SWAPCHAIN_CREATE_STATIC_IMAGE_BIT
     sc->last_released = -1;
     sc->eye = -1;
     sc->mtl_eye = -1;

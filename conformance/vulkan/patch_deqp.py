@@ -39,13 +39,6 @@ patch("framework/platform/tcuMain.cpp",
       "int main(int argc, char **argv)\n{\n    return vq_exe_main(argc, argv);\n}\n\n"
       "extern \"C\" __attribute__((visibility(\"default\"), used)) int vq_exe_main(int argc, char **argv)\n")
 
-# createPlatform() hands Platform a reference to a NativeActivity on its own stack: every later
-# use of m_activity (describePlatform in dEQP-VK.info.platform) read a dead stack slot and
-# crashed (signal 11, log 60). Static storage keeps the (NULL) activity alive.
-patch("framework/platform/android/tcuAndroidPlatform.cpp",
-      "    tcu::Android::NativeActivity activity(NULL);\n    return new tcu::Android::Platform(activity);\n",
-      "    static tcu::Android::NativeActivity activity(NULL);\n    return new tcu::Android::Platform(activity);\n")
-
 patch("framework/platform/android/tcuAndroidPlatform.cpp",
       "void Platform::describePlatform(std::ostream &dst) const\n{\n",
       "void Platform::describePlatform(std::ostream &dst) const\n{\n"

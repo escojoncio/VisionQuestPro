@@ -17,7 +17,6 @@
 #include <stdatomic.h>
 #include <stdint.h>
 #ifdef __APPLE__
-#include <dispatch/dispatch.h>   // the retire queue's delayed pump
 #include <mach/mach.h>   // vm_read_overwrite — read a guest pointer without faulting (klvk_resolve_cell)
 #endif
 #include <stdio.h>
@@ -143,7 +142,6 @@ unsigned long long kl_vulkan_xr_image(unsigned w, unsigned h, unsigned l,
 }
 void *kl_vulkan_xr_image_mtl(unsigned long long img) { (void)img; return NULL; }
 void kl_vulkan_xr_image_free(unsigned long long img) { (void)img; }
-void kl_vulkan_trim(const char *why) { (void)why; }
 
 #else  /* MoltenVK headers present */
 
@@ -1726,7 +1724,6 @@ static int klvk_retire_image_ex(klvk_device *d, VkImage img, VkDeviceMemory mem,
                                 uint32_t w, uint32_t h, uint32_t layers, int quick);
 static void klvk_retire_forget(klvk_device *d, VkImage img);
 static void klvk_retire_pump(klvk_device *d);
-static void klvk_retire_schedule(void);   // a delayed pump (destroyed OpenXR images)
 // The guest used `img` (attachment, copy): if it is waiting to be freed, its
 // grace period restarts — it is not dead yet. One load while nothing waits.
 static void klvk_retire_touch(VkImage img, const char *how);
@@ -3069,13 +3066,7 @@ void kl_vulkan_xr_image_free(unsigned long long image) {
         return;
     }
     klvk_retire_pump(d);
-    // The queue was only pumped at frame ends and on the next destroy: after the OpenXR CTS
-    // "MaxLayers" (16 swapchains of 4766x1912 destroyed, then tests that end no frame) ~1.7 GB
-    // stayed queued for 30 s and the system killed the app under memory pressure (log 61).
-    // One pump per burst, 0.6 s later (past the 0.5 s grace), off the guest's thread.
-    klvk_retire_schedule();
 }
-
 
 // The MTLTexture behind an image this file created, for the compositor seam.
 // NULL when the export is unavailable — the caller reports it, because only the
@@ -3782,11 +3773,7 @@ static void klvk_retire_forget(klvk_device *d, VkImage img) {
     pthread_mutex_unlock(&g_ed_rec_mu);
 }
 
-// force_quick: destroyed OpenXR swapchain images go now, grace or not (memory pressure).
-static void klvk_retire_pump_ex(klvk_device *d, int force_quick);
-static void klvk_retire_pump(klvk_device *d) { klvk_retire_pump_ex(d, 0); }
-
-static void klvk_retire_pump_ex(klvk_device *d, int force_quick) {
+static void klvk_retire_pump(klvk_device *d) {
     if (!d || !d->DestroyImage) return;
     static double after = -1;
     if (after < 0) {
@@ -3802,7 +3789,7 @@ static void klvk_retire_pump_ex(klvk_device *d, int force_quick) {
     for (unsigned i = 0; i < g_retire_n;) {
         // Quick entries (destroyed OpenXR swapchain images: the app has let go of them and
         // no frame end may come to count) wait 0.5 s only.
-        const int due = g_retire[i].quick ? (force_quick || now - g_retire[i].at >= 0.5)
+        const int due = g_retire[i].quick ? (now - g_retire[i].at >= 0.5)
                                           : (now - g_retire[i].at >= after && f >= g_retire[i].frame + 8);
         if (due) {
             go[n].img = g_retire[i].img; go[n].mem = g_retire[i].mem; go[n].what = g_retire[i].what;
@@ -3824,48 +3811,6 @@ static void klvk_retire_pump_ex(klvk_device *d, int force_quick) {
                 go[i].what, (void *)go[i].img, w, h, after, g_retired_bytes_est >> 20);
     }
 }
-
-static int klvk_retire_quick_waiting(void) {
-    int any = 0;
-    pthread_mutex_lock(&g_retire_mu);
-    for (unsigned i = 0; i < g_retire_n && !any; i++) any = g_retire[i].quick;
-    pthread_mutex_unlock(&g_retire_mu);
-    return any;
-}
-
-static int g_retire_timer;   // a delayed pump is scheduled
-static void klvk_retire_timer_fire(void *ctx);
-static void klvk_retire_schedule(void) {
-    if (!__atomic_exchange_n(&g_retire_timer, 1, __ATOMIC_ACQ_REL))
-        dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW, 600 * NSEC_PER_MSEC),
-                         dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), NULL, klvk_retire_timer_fire);
-}
-
-static void klvk_retire_timer_fire(void *ctx) {
-    (void)ctx;
-    __atomic_store_n(&g_retire_timer, 0, __ATOMIC_RELEASE);
-    if (!kl_vulkan_guest_active()) return;
-    klvk_device *d = g_devs[0];
-    if (!d) return;
-    klvk_retire_pump(d);
-    // Something younger than 0.5 s still waiting: one more pass later.
-    // Only quick entries need the timer; replaced eye images wait for frame ends anyway.
-    if (klvk_retire_quick_waiting()) klvk_retire_schedule();
-}
-
-// Memory pressure (kl_mem_pressure_fire, footprint or the OS's own warning): every destroyed
-// OpenXR swapchain image still in its grace period is freed at once.
-void kl_vulkan_trim(const char *why) {
-    if (!kl_vulkan_guest_active()) return;
-    klvk_device *d = g_devs[0];
-    if (!d) return;
-    unsigned before = __atomic_load_n(&g_retire_live, __ATOMIC_ACQUIRE);
-    klvk_retire_pump_ex(d, 1);
-    unsigned after = __atomic_load_n(&g_retire_live, __ATOMIC_ACQUIRE);
-    VKI("[mem] trim (%s): %u retired image(s) freed now, %u still in grace\n",
-        why ? why : "?", before > after ? before - after : 0, after);
-}
-
 
 static float klvk_halton(unsigned i, unsigned b) {
     float f = 1.0f, r = 0.0f;

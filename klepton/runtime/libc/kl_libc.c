@@ -1111,12 +1111,7 @@ int klb_sysinfo(void *out) {
 static _Atomic int g_lowmem_armed = 1;
 static _Atomic uint64_t g_lowmem_fired;
 
-void kl_vulkan_trim(const char *why);   // kl_vulkan.c: destroyed OpenXR images, no grace
-
 void kl_mem_pressure_fire(const char *why) {
-    // Our own garbage first, whatever the guest does: destroyed OpenXR swapchain images still
-    // waiting out their grace period (the OpenXR CTS was killed holding them, log 61).
-    kl_vulkan_trim(why);
     if (!kl_jni_low_memory()) {
         static _Atomic int said;
         if (atomic_fetch_add(&said, 1) == 0)

@@ -2,6 +2,13 @@
 
 Historial completo: `git log -p bitacora.md` (compactada el 2026-10-14; lo cerrado queda en una línea con referencia).
 
+## AVISO — 2026-10-14 (5): código REVERTIDO al estado de a1df14a (+ VPKEngine revertido a 9f62f9c)
+- Las builds 621d102, aae1aea, cefc682 y 6fe05ab NO arrancaban (se cierran al abrir, sin informe). Causa sin
+  identificar: se probó quitar el Menu con ShareLink y restaurar el toolbar, sin efecto. Agentes: empaquetado, firma,
+  enlazado e Info.plist idénticos a a1df14a.
+- Todo lo descrito en la sección (4) está en git (621d102..6fe05ab, VPKEngine 1f246f1) pero NO en el árbol actual.
+  Reintroducir por partes, una build por parte, empezando por lo que no se ejecuta al arrancar.
+
 ## EMPEZAR AQUÍ — 2026-10-14 (4)
 - Vulkan CTS (log 60, `cts_3`): sesión cortada por tiempo en la tanda 35/106 (12 645/36 087 casos; 4 348 Pass,
   297 Fail = 93,6 % de los soportados, 8 000 NotSupported). Faltan las tandas 035–105: seguir sin borrar resultados.
