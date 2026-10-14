@@ -22,9 +22,13 @@ final class VQModel: ObservableObject {
 
     private init() {
         VQLog.start()
-        VQLog.savePreviousSessionToQuest()
-        VQCompilerProbe.start()
         refresh()
+        // Off the main thread and after the UI is up: copying the previous session's logs into the
+        // QUEST folder (File Provider storage, tens of MB) must never hold up the launch.
+        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 3) {
+            VQLog.savePreviousSessionToQuest()
+        }
+        VQCompilerProbe.start()
     }
 
     func refresh() {
