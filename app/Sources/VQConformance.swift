@@ -35,6 +35,7 @@ enum VQConformance {
         // A line on the head-locked HUD with the run's progress: the test draws almost nothing.
         setenv("KL_STATUS_HUD", "1", 1)
         setenv("VPVK_EXTRA_EXTENSIONS", "1", 1)
+        neutralGraphics()
         VQLog.log("Conformidad OpenXR: plugin Vulkan2, sin tests interactivos; progreso en el HUD; resultado en el registro del juego y en openxr_cts.xml")
     }
     static let profile = "rapida"
@@ -50,7 +51,9 @@ enum VQConformance {
     struct Outcome {
         let status: String    // Pass, Fail, NotSupported, QualityWarning, CompatibilityWarning, InternalError, Crash, Timeout, ...
         let detail: String
+        var texts: [String] = []  // the case's <Text> lines (first few): what exactly went wrong
     }
+    static var detailFile: URL { VQLog.directory.appendingPathComponent("conformidad-detalle.txt") }
 
     /// The run in progress (read by the window while main() runs).
     struct Live {
@@ -152,6 +155,7 @@ enum VQConformance {
         // Extensions VPKEngine advertises only to the conformance run until it has validated them
         // (timeline semaphores, synchronization2, dynamic rendering, copy_commands2, multi_draw…).
         setenv("VPVK_EXTRA_EXTENSIONS", "1", 1)
+        neutralGraphics()
 
         VQLog.log("Conformidad: \(batches.count) tandas, \(totalCases) casos (perfil \(profile)); hechos \(done), "
                   + "pendientes \(totalCases - done) en \(planned.count) tandas; esta sesión: hasta \(Int(budget / 60)) min, "
@@ -261,6 +265,15 @@ enum VQConformance {
             }
         }
         try? out.write(to: summaryFile, atomically: true, encoding: .utf8)
+        // Every failure with the test's own explanation (<Text> lines of the .qpa): shared with the
+        // logs, so the cause of each failure arrives without copying the cts folder by hand.
+        var detailOut = "Vulkan CTS (\(profile)) — detalle de fallos (\(failures.count)) — \(reason)\n"
+        for (name, o) in failures {
+            detailOut += "\n\(o.status) \(name)\n"
+            if !o.detail.isEmpty { detailOut += "  = \(o.detail)\n" }
+            for t in o.texts { detailOut += "  · \(t)\n" }
+        }
+        try? detailOut.write(to: detailFile, atomically: true, encoding: .utf8)
         // The log gets the head and the first failures; the file has all of them.
         let head = out.components(separatedBy: "\n")
         let cut = head.prefix(60 + min(failures.count, 240)).joined(separator: "\n")
@@ -322,17 +335,23 @@ enum VQConformance {
         var out: [String: Outcome] = [:]
         var current: String?
         var status = "", detail = ""
+        var texts: [String] = []
         text.enumerateLines { line, _ in
             if line.hasPrefix("#beginTestCaseResult ") {
                 current = String(line.dropFirst("#beginTestCaseResult ".count)).trimmingCharacters(in: .whitespaces)
-                status = ""; detail = ""
+                status = ""; detail = ""; texts = []
             } else if line.hasPrefix("#endTestCaseResult") {
-                if let c = current { out[c] = Outcome(status: status.isEmpty ? "InternalError" : status, detail: detail) }
+                if let c = current { out[c] = Outcome(status: status.isEmpty ? "InternalError" : status, detail: detail, texts: texts) }
                 current = nil
             } else if line.hasPrefix("#terminateTestCaseResult") {
                 let why = line.dropFirst("#terminateTestCaseResult".count).trimmingCharacters(in: .whitespaces)
-                if let c = current { out[c] = Outcome(status: why.isEmpty ? "Crash" : why, detail: detail) }
+                if let c = current { out[c] = Outcome(status: why.isEmpty ? "Crash" : why, detail: detail, texts: texts) }
                 current = nil
+            } else if current != nil, texts.count < 6, let t = line.range(of: "<Text>") {
+                var d = String(line[t.upperBound...])
+                if let e = d.range(of: "</Text>") { d = String(d[..<e.lowerBound]) }
+                let s = d.trimmingCharacters(in: .whitespaces)
+                if !s.isEmpty && !texts.contains(s) { texts.append(String(s.prefix(240))) }
             } else if current != nil, let r = line.range(of: "StatusCode=\"") {
                 let rest = line[r.upperBound...]
                 if let q = rest.firstIndex(of: "\"") {
@@ -431,11 +450,35 @@ enum VQConformance {
         }
     }
 
+    /// The conformance tests check the driver itself: none of the game-facing graphics settings
+    /// (anisotropy forced on samplers, VPKTAA jitter, MSAA forced/overridden, foveation, render
+    /// scale) may change what they render. Overrides what applyToEnvironment set for this launch.
+    static func neutralGraphics() {
+        setenv("VPVK_ANISO", "0", 1)
+        setenv("VPVK_TAA_JITTER", "0", 1)
+        setenv("VPVK_FORCE_1X", "0", 1)
+        setenv("VPVK_MSAA", "0", 1)
+        setenv("KL_VPKTAA", "0", 1)
+        setenv("KL_AA_MODE", "off", 1)
+        var c = vq_gfx_config()
+        c.foveation_mode = 0
+        c.vpktaa_enabled = 0
+        c.render_scale = 1
+        c.asw_disabled = 1
+        c.quest3_profile = 1
+        c.anisotropy = 0
+        c.force_single_sample = 0
+        c.msaa_override = 0
+        _ = vq_gfx_config_apply(&c)
+        VQLog.log("Conformidad: gráficos neutros (sin anisotrópico forzado, sin VPKTAA, MSAA del test, sin foveado)")
+    }
+
     /// Forgets every result (the next launch starts from the first batch).
     static func reset(game: VQGame) {
         guard let saves = VQFolder.shared.saves(for: game.id) else { return }
         try? FileManager.default.removeItem(at: saves.appendingPathComponent("cts"))
         try? FileManager.default.removeItem(at: summaryFile)
+        try? FileManager.default.removeItem(at: detailFile)
         VQLog.log("Conformidad: resultados borrados")
     }
 }
