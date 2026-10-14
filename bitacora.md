@@ -11,6 +11,16 @@ Historial completo: `git log -p bitacora.md` (compactada el 2026-10-14; lo cerra
 - Los cambios de (4) (621d102..6fe05ab) y VPKEngine 1f246f1 están reintroducidos íntegros; la reversión intermedia
   (6476c93, VPKEngine 07c79f3) fue innecesaria.
 
+## 2026-10-14 (7) — resultados tras df34dd2 (SIN build todavía; esperar al Vulkan CTS completo)
+- Vulkan CTS (cts_4): 88/106 tandas en 3 min, 30 607 casos, 0 Crash/Timeout/DeviceLost; Pass 8 363, Fail 859 (90,7 %),
+  NotSupported 21 385. Sin archivo binario el CTS va ~30x más rápido. Sonda `[xpc]` OK. Faltan tandas 088–105.
+- OpenXR CTS (log 62): STATIC_IMAGE ya pasa (único FAILED = capa de conformidad). Aborto final:
+  `libc++abi … std::system_error: mutex lock failed: Invalid argument` en un `xrCreateSession` (38.ª sesión) — mismo
+  aborto que el log 22; sin backtrace (el latido también se para desde 22:44:15, igual que en el log 61). Pendiente.
+- `kl_mem trim (system critical)`: 253 imágenes retiradas seguían en cola → el temporizador solo se reprogramaba con
+  entradas quick. Cambio local (kl_vulkan.c): `klvk_retire_image_ex` programa el temporizador; este se reprograma
+  mientras quede algo; las reemplazadas caducan también a 4×`KL_VK_FREE_AFTER_S` sin fines de frame.
+
 ## 2026-10-14 (4) — cambios tras los logs 60/61
 - Vulkan CTS (log 60, `cts_3`): sesión cortada por tiempo en la tanda 35/106 (12 645/36 087 casos; 4 348 Pass,
   297 Fail = 93,6 % de los soportados, 8 000 NotSupported). Faltan las tandas 035–105: seguir sin borrar resultados.

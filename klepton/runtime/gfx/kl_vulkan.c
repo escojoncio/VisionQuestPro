@@ -3728,6 +3728,7 @@ static int klvk_retire_image_ex(klvk_device *d, VkImage img, VkDeviceMemory mem,
         g_retire_n++;
         queued = 1;
         __atomic_store_n(&g_retire_live, g_retire_n, __ATOMIC_RELEASE);
+        klvk_retire_schedule();   // pumped by the timer too, not only at frame ends
     } else if (!quick) {
         static int said;
         if (!said++) VKI("[mem] retire queue full (%d) — %s %p kept, not freed\n",
@@ -3802,8 +3803,12 @@ static void klvk_retire_pump_ex(klvk_device *d, int force_quick) {
     for (unsigned i = 0; i < g_retire_n;) {
         // Quick entries (destroyed OpenXR swapchain images: the app has let go of them and
         // no frame end may come to count) wait 0.5 s only.
+        // Replaced images also go after 4x the grace without frame ends: a guest that stops
+        // ending frames (OpenXR CTS between sessions) left 253 of them queued until the system
+        // was in critical memory pressure (log 62).
         const int due = g_retire[i].quick ? (force_quick || now - g_retire[i].at >= 0.5)
-                                          : (now - g_retire[i].at >= after && f >= g_retire[i].frame + 8);
+                                          : (now - g_retire[i].at >= after && f >= g_retire[i].frame + 8) ||
+                                            now - g_retire[i].at >= after * 4;
         if (due) {
             go[n].img = g_retire[i].img; go[n].mem = g_retire[i].mem; go[n].what = g_retire[i].what;
             go[n].w = g_retire[i].w; go[n].h = g_retire[i].h; go[n].layers = g_retire[i].layers; n++;
@@ -3825,14 +3830,6 @@ static void klvk_retire_pump_ex(klvk_device *d, int force_quick) {
     }
 }
 
-static int klvk_retire_quick_waiting(void) {
-    int any = 0;
-    pthread_mutex_lock(&g_retire_mu);
-    for (unsigned i = 0; i < g_retire_n && !any; i++) any = g_retire[i].quick;
-    pthread_mutex_unlock(&g_retire_mu);
-    return any;
-}
-
 static int g_retire_timer;   // a delayed pump is scheduled
 static void klvk_retire_timer_fire(void *ctx);
 static void klvk_retire_schedule(void) {
@@ -3848,9 +3845,9 @@ static void klvk_retire_timer_fire(void *ctx) {
     klvk_device *d = g_devs[0];
     if (!d) return;
     klvk_retire_pump(d);
-    // Something younger than 0.5 s still waiting: one more pass later.
-    // Only quick entries need the timer; replaced eye images wait for frame ends anyway.
-    if (klvk_retire_quick_waiting()) klvk_retire_schedule();
+    // Anything still waiting: another pass later (quick entries need 0.5 s, replaced ones up
+    // to 4x KL_VK_FREE_AFTER_S without frame ends).
+    if (__atomic_load_n(&g_retire_live, __ATOMIC_ACQUIRE)) klvk_retire_schedule();
 }
 
 // Memory pressure (kl_mem_pressure_fire, footprint or the OS's own warning): every destroyed
