@@ -2,23 +2,26 @@
 
 Historial completo: `git log -p bitacora.md` (compactada el 2026-10-14; lo cerrado queda en una línea con referencia).
 
-## EMPEZAR AQUÍ — 2026-10-14 (2)
-- Vulkan CTS (log 62, ~106 tandas por la tanda multiview nueva): crash en tanda ~15-25 (SIGSEGV en libdeqp-vk
-  recuperado + abort "Unable to reach"); fallos aún en clears/load de renderpasses, blend, copias, consultas.
-- Build con VPKEngine (9) (detalle en su bitácora): blend factors completos + dual-source, salidas de color a 4
-  componentes (traductor v5: recetas se retraducen), passes sin attachments, triangle fans, timestamps, copias
-  2D↔3D y entre formatos, ballot completo, diagnóstico `gpu.clear` de clears en quad.
-- App: `VQConformance.neutralGraphics()` en ambos CTS (sin aniso forzado, sin jitter VPKTAA, sin MSAA forzado,
-  `vq_gfx_config` neutro) — el CTS fallaba multiview renderpass1 con los ajustes del juego. `VQLaunch` quita
-  `VPVK_TAA_JITTER`. Resumen escribe `conformidad-detalle.txt` (hasta 6 líneas `<Text>` por caso fallido),
-  incluido en «Compartir registros».
-- Pendiente: color de clears en quad (mirar `gpu.clear`), indexado dinámico de arrays de descriptores/IO,
-  gathers ConstOffsets, IO empaquetado por componente, texel buffers de storage, multiview occlusion (2880 vs 64),
-  blits enteros/3D, queryLod, indirectos desde compute.
-- Prueba: instalar, Vulkan CTS sin borrar resultados (reanuda), compartir registros.
-- Ventanas: launcher = `Window` (instancia única) en vez de `WindowGroup` (KleptonApp.swift): salían 2 launchers al
-  abrir (openWindow al acabar un juego con otro ya abierto + restauración de escenas). `kbentry` = `Window` con
-  `.defaultLaunchBehavior(.suppressed)` y `.restorationBehavior(.disabled)`.
+## EMPEZAR AQUÍ — 2026-10-14 (3)
+- Vulkan CTS (cts_2): todas las tandas terminadas; bloqueos = crashes de Metal en
+  `image.texel_view_compatible` (vistas sin comprimir de texturas comprimidas) y `indirect_draw...from_compute`.
+  Arreglado en VPKEngine (10) (detalle en su bitácora): vistas rechazadas limpio, indirectos en GPU (+multiview,
+  draw count), indexado dinámico de descriptores/IO, gather offsets, varyings empaquetados, texel buffers,
+  blits enteros/3D. Traductor v6: recetas se retraducen.
+- OpenXR CTS (log 59): cierre por memoria (1→4,6 GB en 2 s): `xrDestroySwapchain` no liberaba las VkImage.
+  Ahora `kl_vulkan_xr_image_free` (kl_vulkan.c, tabla `g_xr_img`) → cola de retiro con gracia 0,5 s
+  (`quick`), destrucción inmediata si la cola está llena; `xrDestroySession` destruye sus swapchains.
+  kl_openxr.c: acquire/wait/release en FIFO (varias adquiridas, STATIC_IMAGE una vez), xrBeginFrame consume un
+  xrWaitFrame (contador atómico; sin wait = CALL_ORDER_INVALID; frame abierto = XR_FRAME_DISCARDED),
+  xrEndFrame valida antes de consumir (TIME_INVALID, LAYER_INVALID, >16 capas LAYER_LIMIT_EXCEEDED, blend
+  1..3), READY→SYNCHRONIZED→VISIBLE→FOCUSED al primer xrEndFrame (`KL_XR_SYNC_ON_FRAME=0` = antes),
+  xrRequestExitSession baja FOCUSED→VISIBLE→SYNCHRONIZED→STOPPING; blend modes OPAQUE, ALPHA_BLEND, ADDITIVE
+  (con passthrough). Pendiente: capa `XR_APILAYER_KHRONOS_runtime_conformance` (el loader propio no carga
+  capas: 1 fallo fijo).
+- App: launcher `Window` (instancia única), `kbentry` sin lanzar ni restaurar.
+- Pendiente Vulkan: clears de color en quad (`gpu.clear`), multiview+occlusion, queryLod, 16-bit storage.
+- Prueba: Vulkan CTS (Borrar resultados para medir todo con v6) y OpenXR CTS; compartir registros y la carpeta
+  `QUEST/Partidas/<test>/cts`.
 
 ## Robustez del CTS (2026-10-14, motivo: log 59 bloqueado en `048-draw-001` tras `Caused_GPU_Hang_Error`)
 - VPKEngine (`gpu/metal2`, `gpu/vulkan`; detalle en su bitácora 2026-10-14 (2)): ninguna espera a la GPU es infinita.

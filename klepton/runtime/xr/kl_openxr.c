@@ -512,6 +512,10 @@ typedef struct { int32_t type; void *next;
                  uint32_t recommendedSwapchainSampleCount,
                           maxSwapchainSampleCount; } XrViewConfigurationView;
 
+// Composition layers per xrEndFrame (XrSystemGraphicsProperties.maxLayerCount; more is
+// XR_ERROR_LAYER_LIMIT_EXCEEDED). 16 is the spec's minimum and what Quest reports.
+enum { KLXR_MAX_LAYERS = 16 };
+
 // The result codes we return. Named as the spec names them so a value in a
 // guest log ("error: -7") can be read straight off this list.
 enum {
@@ -519,6 +523,7 @@ enum {
     // is >= 0 — a caller testing `== XR_SUCCESS` misreads them all)
     KLXR_SUCCESS                        = 0,
     KLXR_EVENT_UNAVAILABLE              = 4,
+    KLXR_FRAME_DISCARDED                = 9,
     KLXR_SPACE_BOUNDS_UNAVAILABLE       = 7,
     // ...then the failures, in the spec's own numeric order so a code in a
     // guest log can be found by scanning
@@ -543,6 +548,10 @@ enum {
     KLXR_ERROR_REFERENCE_SPACE_UNSUPPORTED = -31,
     KLXR_ERROR_FORM_FACTOR_UNSUPPORTED  = -34,
     KLXR_ERROR_CALL_ORDER_INVALID       = -37,
+    KLXR_ERROR_TIME_INVALID             = -30,
+    KLXR_ERROR_LAYER_INVALID            = -23,
+    KLXR_ERROR_LAYER_LIMIT_EXCEEDED     = -24,
+    KLXR_ERROR_ENVIRONMENT_BLEND_MODE_UNSUPPORTED = -42,
     KLXR_ERROR_GRAPHICS_DEVICE_INVALID  = -38,
     KLXR_ERROR_VIEW_CONFIGURATION_TYPE_UNSUPPORTED = -41,
     KLXR_ERROR_ACTIONSET_NOT_ATTACHED   = -46,
@@ -1428,6 +1437,15 @@ static XrResult klxr_GetViewConfigurationProperties(void *instance, XrSystemId s
 // its background transparent for a blend that never happens — a correct RGB
 // frame that composites as fully transparent, with no error surface.
 enum { KLXR_BLEND_OPAQUE = 1 };
+// The blend modes enumerated: OPAQUE always; with passthrough allowed also ALPHA_BLEND and
+// ADDITIVE (both composited over the room, see klxr_passthrough_scan). xrEndFrame rejects modes
+// that do not exist with XR_ERROR_ENVIRONMENT_BLEND_MODE_UNSUPPORTED; ALPHA_BLEND / ADDITIVE with
+// passthrough switched off in the app are still accepted (shown opaque) so a game that asks for
+// them keeps its picture.
+static int klxr_blend_mode_supported(int32_t mode) {
+    return mode >= KLXR_BLEND_OPAQUE && mode <= 3;
+}
+
 static XrResult klxr_EnumerateEnvironmentBlendModes(void *instance, XrSystemId system_id,
                                                     int32_t view_config_type,
                                                     uint32_t capacity, uint32_t *count_out,
@@ -1436,13 +1454,14 @@ static XrResult klxr_EnumerateEnvironmentBlendModes(void *instance, XrSystemId s
     if (system_id != KLXR_SYSTEM_ID) KLXR_RET(KLXR_ERROR_SYSTEM_INVALID);
     if (view_config_type != KLXR_VIEW_CONFIG_PRIMARY_STEREO)
         KLXR_RET(KLXR_ERROR_VIEW_CONFIGURATION_TYPE_UNSUPPORTED);
-    XrResult r = klxr_two_call(capacity, count_out, kl_passthrough_mode() != 1 ? 2 : 1);
+    XrResult r = klxr_two_call(capacity, count_out, kl_passthrough_mode() != 1 ? 3 : 1);
     if (r != KLXR_SUCCESS || capacity == 0) return r;
     if (!modes) KLXR_RET(KLXR_ERROR_VALIDATION_FAILURE);
     modes[0] = KLXR_BLEND_OPAQUE;
     // ALPHA_BLEND second (passthrough): the host now composites the eye layer
     // over the room when a guest picks it (kl_passthrough). OPAQUE stays first.
     if (capacity >= 2 && kl_passthrough_mode() != 1) modes[1] = 3;
+    if (capacity >= 3 && kl_passthrough_mode() != 1) modes[2] = 2;   // ADDITIVE
     return KLXR_SUCCESS;
 }
 
@@ -1666,7 +1685,7 @@ static XrResult klxr_GetSystemProperties(void *instance, XrSystemId system_id,
     // the view configuration below where the guest will actually read it.
     props->graphicsProperties.maxSwapchainImageWidth  = (uint32_t)(ew > 0 ? ew * 2 : 8192);
     props->graphicsProperties.maxSwapchainImageHeight = (uint32_t)(eh > 0 ? eh * 2 : 8192);
-    props->graphicsProperties.maxLayerCount = 16;
+    props->graphicsProperties.maxLayerCount = KLXR_MAX_LAYERS;
     props->trackingProperties.orientationTracking = 1;
     props->trackingProperties.positionTracking = 1;
     // VisionQuestPro: the capability structs of extensions we advertise but
@@ -1984,6 +2003,10 @@ typedef struct {
     int   exit_requested;
     int   action_sets_attached;   // xrAttachSessionActionSets is once, and final
     int      frame_begun;         // between xrBeginFrame and xrEndFrame
+    int      wait_pending;        // xrWaitFrame calls not yet consumed by an xrBeginFrame (atomic:
+                                  // engines wait on the game thread and begin on the render thread)
+    int      sync_pending;        // running, READY until the first frame is submitted
+    int      posted;              // the last session state QUEUED (state = last polled)
     int64_t  frame_predicted_time;// what the last xrWaitFrame promised
     uint64_t frames_waited, frames_ended, layers_ignored, layers_quad;
     // One head per frame for xrLocateViews — see the comment there.
@@ -2327,6 +2350,7 @@ static void klxr_post_event(klxr_session *s, int kind, int state) {
 }
 
 static void klxr_post_state(klxr_session *s, int state) {
+    s->posted = state;
     klxr_post_event(s, KLXR_EV_SESSION_STATE, state);
 }
 
@@ -2410,9 +2434,14 @@ static XrResult klxr_CreateSession(void *instance, const XrSessionCreateInfo *in
     return KLXR_SUCCESS;
 }
 
+static XrResult klxr_DestroySwapchain(void *swapchain);
+static void klxr_destroy_session_swapchains(klxr_session *s);
 static XrResult klxr_DestroySession(void *session) {
     klxr_session *s = klxr_sess(session);
     if (!s) KLXR_RET(KLXR_ERROR_HANDLE_INVALID);
+    // Child swapchains go with the session (an app may skip xrDestroySwapchain): their images and
+    // slots are freed.
+    klxr_destroy_session_swapchains(s);
     s->magic = 0;
     return KLXR_SUCCESS;
 }
@@ -2445,13 +2474,20 @@ static XrResult klxr_BeginSession(void *session, const XrSessionBeginInfo *info)
         KLXR_RET(KLXR_ERROR_VIEW_CONFIGURATION_TYPE_UNSUPPORTED);
     klxr_log_chain("xrBeginSession", info->next);
     s->running = 1;
+    s->frame_begun = 0;
+    s->wait_pending = 0;
     // SYNCHRONIZED is "the app's frame loop is now ticking with the runtime's",
     // VISIBLE is "and its pictures are being shown", FOCUSED is "and it is
-    // receiving input". Nothing here ever takes focus away, so all three go
-    // out together and the guest's own handler walks them in order.
-    klxr_post_state(s, KLXR_SESSION_STATE_SYNCHRONIZED);
-    klxr_post_state(s, KLXR_SESSION_STATE_VISIBLE);
-    klxr_post_state(s, KLXR_SESSION_STATE_FOCUSED);
+    // receiving input". The spec (and the CTS) wants READY -> SYNCHRONIZED only after
+    // the app has submitted a frame, so the three go out at the first successful
+    // xrEndFrame (klxr_session_frame_submitted). KL_XR_SYNC_ON_FRAME=0: at once, as before.
+    if (kl_env_on("KL_XR_SYNC_ON_FRAME", 1)) {
+        s->sync_pending = 1;
+    } else {
+        klxr_post_state(s, KLXR_SESSION_STATE_SYNCHRONIZED);
+        klxr_post_state(s, KLXR_SESSION_STATE_VISIBLE);
+        klxr_post_state(s, KLXR_SESSION_STATE_FOCUSED);
+    }
     // Tell the user-presence-aware guest (missioniss) the user is present, so its
     // SDK caches OVRPlugin.userPresent=1 and picks its Oculus VR helper (which
     // reports poses) instead of the deviceless one (which does not).
@@ -2466,6 +2502,9 @@ static XrResult klxr_EndSession(void *session) {
     if (!s->running) KLXR_RET(KLXR_ERROR_SESSION_NOT_RUNNING);
     if (s->state != KLXR_SESSION_STATE_STOPPING) KLXR_RET(KLXR_ERROR_SESSION_NOT_STOPPING);
     s->running = 0;
+    s->sync_pending = 0;
+    s->frame_begun = 0;
+    s->wait_pending = 0;
     klxr_post_state(s, KLXR_SESSION_STATE_IDLE);
     klxr_post_state(s, s->exit_requested ? KLXR_SESSION_STATE_EXITING
                                          : KLXR_SESSION_STATE_READY);
@@ -2479,7 +2518,18 @@ static XrResult klxr_RequestExitSession(void *session) {
     if (!s) KLXR_RET(KLXR_ERROR_HANDLE_INVALID);
     if (!s->running) KLXR_RET(KLXR_ERROR_SESSION_NOT_RUNNING);
     s->exit_requested = 1;
-    klxr_post_state(s, KLXR_SESSION_STATE_STOPPING);
+    // Walked out the way it was walked in: FOCUSED -> VISIBLE -> SYNCHRONIZED -> STOPPING.
+    if (s->sync_pending) {
+        // Never synchronized: READY -> SYNCHRONIZED -> STOPPING (the spec's only way to STOPPING).
+        s->sync_pending = 0;
+        klxr_post_state(s, KLXR_SESSION_STATE_SYNCHRONIZED);
+    } else {
+        if (s->posted >= KLXR_SESSION_STATE_FOCUSED && s->posted < KLXR_SESSION_STATE_STOPPING)
+            klxr_post_state(s, KLXR_SESSION_STATE_VISIBLE);
+        if (s->posted >= KLXR_SESSION_STATE_VISIBLE && s->posted < KLXR_SESSION_STATE_STOPPING)
+            klxr_post_state(s, KLXR_SESSION_STATE_SYNCHRONIZED);
+    }
+    if (s->posted != KLXR_SESSION_STATE_STOPPING) klxr_post_state(s, KLXR_SESSION_STATE_STOPPING);
     return KLXR_SUCCESS;
 }
 
@@ -4403,7 +4453,14 @@ typedef struct {
     uint32_t tex[KLXR_SWAPCHAIN_IMAGES];       // GLES: texture names
     uint64_t vk_img[KLXR_SWAPCHAIN_IMAGES];    // Vulkan: VkImage handles
     int      count;
-    int      acquired;        // index the app currently holds, -1 when none
+    // Acquire / wait / release follow the spec's FIFO: up to `count` images may be acquired at
+    // once; xrWaitSwapchainImage waits on the OLDEST acquired one, xrReleaseSwapchainImage
+    // releases the oldest WAITED one (one waited image at a time).
+    int      acq_q[KLXR_SWAPCHAIN_IMAGES];  // acquired, not yet released, oldest first
+    int      acq_n;
+    int      waited;          // acq_q[0] has been waited on (and not yet released)
+    int      static_image;    // XR_SWAPCHAIN_CREATE_STATIC_IMAGE_BIT: one acquire, ever
+    int      acquires;        // total acquires (for the static-image rule)
     int      last_released;   // ...and the last one it handed BACK, which is the
                               // image it drew: by xrEndFrame the guest's own
                               // framebuffer may already point at the next one
@@ -4630,7 +4687,9 @@ static XrResult klxr_CreateSwapchain(void *session, const XrSwapchainCreateInfo 
     sc->array_size = info->arraySize; sc->mip_count = info->mipCount;
     sc->usage = info->usageFlags;
     sc->count = KLXR_SWAPCHAIN_IMAGES;
-    sc->acquired = -1;
+    sc->acq_n = 0;
+    sc->waited = 0;
+    sc->static_image = (info->createFlags & 0x2u) != 0;   // XR_SWAPCHAIN_CREATE_STATIC_IMAGE_BIT
     sc->last_released = -1;
     sc->eye = -1;
     sc->mtl_eye = -1;
@@ -4648,6 +4707,7 @@ static XrResult klxr_CreateSwapchain(void *session, const XrSwapchainCreateInfo 
             if (!sc->vk_img[i]) {
                 fprintf(stderr, "  [xr] xrCreateSwapchain: VkImage %d of %d failed\n",
                         i, sc->count);
+                for (int j = 0; j < i; j++) kl_vulkan_xr_image_free(sc->vk_img[j]);
                 sc->magic = 0;
                 KLXR_RET(KLXR_ERROR_RUNTIME_FAILURE);
             }
@@ -5279,8 +5339,18 @@ static XrResult klxr_DestroySwapchain(void *swapchain) {
     if (gl_DeleteFramebuffers)
         for (int i = 0; i < sc->count; i++)
             if (sc->blit_fbo[i]) gl_DeleteFramebuffers(1, &sc->blit_fbo[i]);
+    // Vulkan: the images and their memory (they leaked before: the OpenXR CTS ran the process
+    // out of memory creating eye-sized swapchains).
+    for (int i = 0; i < sc->count; i++)
+        if (sc->vk_img[i]) kl_vulkan_xr_image_free(sc->vk_img[i]);
     memset(sc, 0, sizeof *sc);
     return KLXR_SUCCESS;
+}
+
+static void klxr_destroy_session_swapchains(klxr_session *s) {
+    for (int i = 0; i < KLXR_SWAPCHAIN_MAX; i++)
+        if (g_swapchains[i].magic == KLXR_MAGIC_SWAPCHAIN && g_swapchains[i].session == s)
+            klxr_DestroySwapchain(&g_swapchains[i]);
 }
 
 static XrResult klxr_EnumerateSwapchainImages(void *swapchain, uint32_t capacity,
@@ -5340,10 +5410,13 @@ static XrResult klxr_AcquireSwapchainImage(void *swapchain,
     if (!sc) KLXR_RET(KLXR_ERROR_HANDLE_INVALID);
     if (!index) KLXR_RET(KLXR_ERROR_VALIDATION_FAILURE);
     if (info) klxr_log_chain("xrAcquireSwapchainImage", info->next);
-    if (sc->acquired >= 0) KLXR_RET(KLXR_ERROR_CALL_ORDER_INVALID);
-    sc->acquired = sc->next_index;
+    if (sc->acq_n >= sc->count) KLXR_RET(KLXR_ERROR_CALL_ORDER_INVALID);   // all acquired
+    if (sc->static_image && sc->acquires > 0) KLXR_RET(KLXR_ERROR_CALL_ORDER_INVALID);
+    const int idx = sc->next_index;
+    sc->acq_q[sc->acq_n++] = idx;
+    sc->acquires++;
     sc->next_index = (sc->next_index + 1) % sc->count;
-    *index = (uint32_t)sc->acquired;
+    *index = (uint32_t)idx;
     return KLXR_SUCCESS;
 }
 
@@ -5353,7 +5426,9 @@ static XrResult klxr_WaitSwapchainImage(void *swapchain,
     klxr_swapchain *sc = klxr_swapchain_of(swapchain);
     if (!sc) KLXR_RET(KLXR_ERROR_HANDLE_INVALID);
     if (info) klxr_log_chain("xrWaitSwapchainImage", info->next);
-    if (sc->acquired < 0) KLXR_RET(KLXR_ERROR_CALL_ORDER_INVALID);
+    // Nothing acquired, or the oldest is already waited and not released yet.
+    if (sc->acq_n == 0 || sc->waited) KLXR_RET(KLXR_ERROR_CALL_ORDER_INVALID);
+    sc->waited = 1;
     return KLXR_SUCCESS;
 }
 
@@ -5363,9 +5438,11 @@ static XrResult klxr_ReleaseSwapchainImage(void *swapchain,
     klxr_swapchain *sc = klxr_swapchain_of(swapchain);
     if (!sc) KLXR_RET(KLXR_ERROR_HANDLE_INVALID);
     if (info) klxr_log_chain("xrReleaseSwapchainImage", info->next);
-    if (sc->acquired < 0) KLXR_RET(KLXR_ERROR_CALL_ORDER_INVALID);
-    sc->last_released = sc->acquired;
-    sc->acquired = -1;
+    if (!sc->waited || sc->acq_n == 0) KLXR_RET(KLXR_ERROR_CALL_ORDER_INVALID);  // nothing waited
+    sc->last_released = sc->acq_q[0];
+    for (int i = 1; i < sc->acq_n; i++) sc->acq_q[i - 1] = sc->acq_q[i];
+    sc->acq_n--;
+    sc->waited = 0;
     return KLXR_SUCCESS;
 }
 
@@ -5495,8 +5572,12 @@ static XrResult klxr_WaitFrame(void *session, const XrFrameWaitInfo *info,
     // on is true.
     state->shouldRender = (s->state == KLXR_SESSION_STATE_VISIBLE ||
                            s->state == KLXR_SESSION_STATE_FOCUSED);
+    // Strictly increasing across waits (two waits in one period must not repeat a time).
+    if (state->predictedDisplayTime <= s->frame_predicted_time)
+        state->predictedDisplayTime = s->frame_predicted_time + 1;
     s->frame_predicted_time = state->predictedDisplayTime;
     s->frames_waited++;
+    __atomic_fetch_add(&s->wait_pending, 1, __ATOMIC_ACQ_REL);
     return KLXR_SUCCESS;
 }
 
@@ -5506,9 +5587,15 @@ static XrResult klxr_BeginFrame(void *session, const XrFrameBeginInfo *info) {
     if (!s) KLXR_RET(KLXR_ERROR_HANDLE_INVALID);
     if (info) klxr_log_chain("xrBeginFrame", info->next);
     if (!s->running) KLXR_RET(KLXR_ERROR_SESSION_NOT_RUNNING);
-    // Calling xrBeginFrame twice without an xrEndFrame between is legal and
-    // means the app discarded a frame; the runtime says so with a success code
-    // rather than an error. We do not track it as an error either.
+    // Every xrBeginFrame consumes one xrWaitFrame; without one it is a call-order error
+    // (and changes nothing). A begin while a frame is already begun discards that frame:
+    // XR_FRAME_DISCARDED, a success code, and the new frame is the begun one.
+    int pending = __atomic_load_n(&s->wait_pending, __ATOMIC_ACQUIRE);
+    do {
+        if (pending <= 0) KLXR_RET(KLXR_ERROR_CALL_ORDER_INVALID);
+    } while (!__atomic_compare_exchange_n(&s->wait_pending, &pending, pending - 1, 0, __ATOMIC_ACQ_REL,
+                                          __ATOMIC_ACQUIRE));
+    if (s->frame_begun) return KLXR_FRAME_DISCARDED;
     s->frame_begun = 1;
     return KLXR_SUCCESS;
 }
@@ -5639,10 +5726,25 @@ static XrResult klxr_EndFrame(void *session, const XrFrameEndInfo *info) {
     if (info->type != XR_TYPE_FRAME_END_INFO) KLXR_RET(KLXR_ERROR_VALIDATION_FAILURE);
     klxr_log_chain("xrEndFrame", info->next);
     if (!s->running) KLXR_RET(KLXR_ERROR_SESSION_NOT_RUNNING);
-    klxr_passthrough_scan(info);
     if (!s->frame_begun) KLXR_RET(KLXR_ERROR_CALL_ORDER_INVALID);
+    // Validation first: a rejected xrEndFrame leaves the frame begun (the next begin
+    // reports it discarded), as the spec and the CTS expect.
+    if (info->displayTime <= 0) KLXR_RET(KLXR_ERROR_TIME_INVALID);
+    if (!klxr_blend_mode_supported(info->environmentBlendMode))
+        KLXR_RET(KLXR_ERROR_ENVIRONMENT_BLEND_MODE_UNSUPPORTED);
+    if (info->layerCount > KLXR_MAX_LAYERS) KLXR_RET(KLXR_ERROR_LAYER_LIMIT_EXCEEDED);
+    if (info->layerCount && !info->layers) KLXR_RET(KLXR_ERROR_LAYER_INVALID);
+    for (uint32_t i = 0; i < info->layerCount; i++)
+        if (!info->layers[i]) KLXR_RET(KLXR_ERROR_LAYER_INVALID);
+    klxr_passthrough_scan(info);
     s->frame_begun = 0;
     s->frames_ended++;
+    if (s->sync_pending) {      // first submitted frame: READY -> SYNCHRONIZED -> VISIBLE -> FOCUSED
+        s->sync_pending = 0;
+        klxr_post_state(s, KLXR_SESSION_STATE_SYNCHRONIZED);
+        klxr_post_state(s, KLXR_SESSION_STATE_VISIBLE);
+        klxr_post_state(s, KLXR_SESSION_STATE_FOCUSED);
+    }
 
     // KL_GLFB_DRAW_CENSUS: periodically dump WHERE the guest's draws land and
     // each framebuffer's colour attachment (texture, array layer, format). The

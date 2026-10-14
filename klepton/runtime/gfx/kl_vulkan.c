@@ -141,6 +141,7 @@ unsigned long long kl_vulkan_xr_image(unsigned w, unsigned h, unsigned l,
     (void)w; (void)h; (void)l; (void)m; (void)f; (void)depth; return 0;
 }
 void *kl_vulkan_xr_image_mtl(unsigned long long img) { (void)img; return NULL; }
+void kl_vulkan_xr_image_free(unsigned long long img) { (void)img; }
 
 #else  /* MoltenVK headers present */
 
@@ -1719,6 +1720,10 @@ static VkImage klvk_image_alloc(klvk_device *d, VkFormat fmt,
 // 5921/6144 MiB with every reallocation kept. Defined beside kl_vulkan_frame_done.
 static void klvk_retire_image(klvk_device *d, VkImage img, VkDeviceMemory mem, const char *what,
                               uint32_t w, uint32_t h, uint32_t layers);
+static int klvk_retire_image_ex(klvk_device *d, VkImage img, VkDeviceMemory mem, const char *what,
+                                uint32_t w, uint32_t h, uint32_t layers, int quick);
+static void klvk_retire_forget(klvk_device *d, VkImage img);
+static void klvk_retire_pump(klvk_device *d);
 // The guest used `img` (attachment, copy): if it is waiting to be freed, its
 // grace period restarts — it is not dead yet. One load while nothing waits.
 static void klvk_retire_touch(VkImage img, const char *how);
@@ -2983,6 +2988,12 @@ void *kl_vulkan_xr_physical_device(void *vk_instance) {
     return (void *)pd[0];
 }
 
+// The OpenXR swapchain images made here, with their memory, so xrDestroySwapchain can free
+// them (kl_vulkan_xr_image_free).
+#define KLVK_XR_IMAGES_MAX 256
+static struct { VkImage img; VkDeviceMemory mem; uint32_t w, h, layers; } g_xr_img[KLVK_XR_IMAGES_MAX];
+static pthread_mutex_t g_xr_img_mu = PTHREAD_MUTEX_INITIALIZER;
+
 // One OpenXR swapchain image.
 //
 // Deliberately NOT keyed on (stage, eye) the way the OVRPlugin eye images are:
@@ -3005,11 +3016,56 @@ unsigned long long kl_vulkan_xr_image(unsigned w, unsigned h, unsigned layers,
         ? (VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT)
         : (VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
            VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT);
+    klvk_retire_pump(d);   // swapchain images destroyed a moment ago (OpenXR: no frame ends needed)
     VkDeviceMemory mem = VK_NULL_HANDLE;
     VkImage img = klvk_image_alloc(d, (VkFormat)vk_format, w, h,
                                    layers ? layers : 1, mips ? mips : 1, usage, &mem);
     if (img == VK_NULL_HANDLE) return 0;
+    pthread_mutex_lock(&g_xr_img_mu);
+    int slot = -1;
+    for (int i = 0; i < KLVK_XR_IMAGES_MAX; i++) if (!g_xr_img[i].img) { slot = i; break; }
+    if (slot >= 0) {
+        g_xr_img[slot].img = img; g_xr_img[slot].mem = mem;
+        g_xr_img[slot].w = w; g_xr_img[slot].h = h; g_xr_img[slot].layers = layers ? layers : 1;
+    }
+    pthread_mutex_unlock(&g_xr_img_mu);
+    if (slot < 0) {
+        static int said;
+        if (!said++) VKI("[mem] xr image table full (%d): image %p will not be freed\n", KLVK_XR_IMAGES_MAX, (void *)img);
+    }
     return (uint64_t)(uintptr_t)img;
+}
+
+// xrDestroySwapchain: the image and its memory go to the retire queue (0.5 s grace for a
+// compositor still sampling it) instead of leaking — the OpenXR CTS creates and destroys
+// hundreds of eye-sized swapchains and ran the process out of memory (4.6 GB in 2 s).
+void kl_vulkan_xr_image_free(unsigned long long image) {
+    if (!image || !kl_vulkan_guest_active()) return;
+    klvk_device *d = g_devs[0];
+    if (!d) return;
+    VkImage img = (VkImage)(uintptr_t)image;
+    VkDeviceMemory mem = VK_NULL_HANDLE;
+    uint32_t w = 0, h = 0, layers = 1;
+    int found = 0;
+    pthread_mutex_lock(&g_xr_img_mu);
+    for (int i = 0; i < KLVK_XR_IMAGES_MAX; i++)
+        if (g_xr_img[i].img == img) {
+            mem = g_xr_img[i].mem; w = g_xr_img[i].w; h = g_xr_img[i].h; layers = g_xr_img[i].layers;
+            memset(&g_xr_img[i], 0, sizeof g_xr_img[i]);
+            found = 1;
+            break;
+        }
+    pthread_mutex_unlock(&g_xr_img_mu);
+    if (!found) return;   // not ours (or the table was full when it was made)
+    klvk_retire_pump(d);   // make room first
+    if (!klvk_retire_image_ex(d, img, mem, "xr swapchain image", w, h, layers, 1)) {
+        // Retire queue full (a burst of destroyed swapchains): destroyed now rather than leaked.
+        klvk_retire_forget(d, img);
+        if (d->DestroyImage) d->DestroyImage(d->dev, img, NULL);
+        if (mem && d->FreeMemory) d->FreeMemory(d->dev, mem, NULL);
+        return;
+    }
+    klvk_retire_pump(d);
 }
 
 // The MTLTexture behind an image this file created, for the compositor seam.
@@ -3614,9 +3670,9 @@ unsigned long long kl_vulkan_taa_raw_record(void) {
 // cached somewhere (compositor, VPKTAA) keeps its storage alive by retaining it,
 // so a late reader never reads freed memory. KL_VK_FREE_OLD=0 keeps them.
 // ---------------------------------------------------------------------------
-#define KLVK_RETIRE_MAX 64
+#define KLVK_RETIRE_MAX 256
 static struct { VkImage img; VkDeviceMemory mem; double at; unsigned long long frame; const char *what;
-                uint32_t w, h, layers; }
+                uint32_t w, h, layers; int quick; }
     g_retire[KLVK_RETIRE_MAX];
 static unsigned g_retire_n;
 static pthread_mutex_t g_retire_mu = PTHREAD_MUTEX_INITIALIZER;
@@ -3645,12 +3701,14 @@ static void klvk_retire_touch(VkImage img, const char *how) {
     pthread_mutex_unlock(&g_retire_mu);
 }
 
-static void klvk_retire_image(klvk_device *d, VkImage img, VkDeviceMemory mem, const char *what,
-                              uint32_t w, uint32_t h, uint32_t layers) {
+static int klvk_retire_image_ex(klvk_device *d, VkImage img, VkDeviceMemory mem, const char *what,
+                                uint32_t w, uint32_t h, uint32_t layers, int quick) {
     (void)d;
-    if (!img) return;
+    int queued = 0;
+    if (!img) return 1;
     pthread_mutex_lock(&g_retire_mu);
     if (g_retire_n < KLVK_RETIRE_MAX) {
+        g_retire[g_retire_n].quick = quick;
         g_retire[g_retire_n].img = img;
         g_retire[g_retire_n].mem = mem;
         g_retire[g_retire_n].at = klvk_now_s();
@@ -3659,13 +3717,20 @@ static void klvk_retire_image(klvk_device *d, VkImage img, VkDeviceMemory mem, c
         g_retire[g_retire_n].w = w; g_retire[g_retire_n].h = h;
         g_retire[g_retire_n].layers = layers ? layers : 1;
         g_retire_n++;
+        queued = 1;
         __atomic_store_n(&g_retire_live, g_retire_n, __ATOMIC_RELEASE);
-    } else {
+    } else if (!quick) {
         static int said;
         if (!said++) VKI("[mem] retire queue full (%d) — %s %p kept, not freed\n",
                          KLVK_RETIRE_MAX, what, (void *)img);
     }
     pthread_mutex_unlock(&g_retire_mu);
+    return queued;
+}
+
+static void klvk_retire_image(klvk_device *d, VkImage img, VkDeviceMemory mem, const char *what,
+                              uint32_t w, uint32_t h, uint32_t layers) {
+    (void)klvk_retire_image_ex(d, img, mem, what, w, h, layers, 0);
 }
 
 // Every cache keyed by the VkImage handle forgets it before the handle can be
@@ -3722,7 +3787,11 @@ static void klvk_retire_pump(klvk_device *d) {
     unsigned n = 0;
     pthread_mutex_lock(&g_retire_mu);
     for (unsigned i = 0; i < g_retire_n;) {
-        if (now - g_retire[i].at >= after && f >= g_retire[i].frame + 8) {
+        // Quick entries (destroyed OpenXR swapchain images: the app has let go of them and
+        // no frame end may come to count) wait 0.5 s only.
+        const int due = g_retire[i].quick ? (now - g_retire[i].at >= 0.5)
+                                          : (now - g_retire[i].at >= after && f >= g_retire[i].frame + 8);
+        if (due) {
             go[n].img = g_retire[i].img; go[n].mem = g_retire[i].mem; go[n].what = g_retire[i].what;
             go[n].w = g_retire[i].w; go[n].h = g_retire[i].h; go[n].layers = g_retire[i].layers; n++;
             g_retire[i] = g_retire[--g_retire_n];
