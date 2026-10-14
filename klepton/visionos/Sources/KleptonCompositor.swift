@@ -2140,6 +2140,10 @@ final class KleptonCompositor {
     // with the overlay pipeline through kl_overlay_build, like any guest Quad layer, from a
     // CoreGraphics bitmap refreshed twice a second.
     static let fpsHudEnabled: Bool = (getenv("KL_FPS_HUD").map { String(cString: $0) } ?? "0") == "1"
+    // KL_STATUS_HUD=1 (the app sets it for the OpenXR CTS, which draws almost nothing): a second line
+    // with the run's progress from kl_openxr_status_text, so a black view still says it is working.
+    static let statusHudEnabled: Bool = (getenv("KL_STATUS_HUD").map { String(cString: $0) } ?? "0") == "1"
+    static var hudEnabled: Bool { fpsHudEnabled || statusHudEnabled }
     private var hudTex: MTLTexture?
     private var hudWindowStart = Date()
     private var hudPresents = 0, hudGuestFrames = 0
@@ -2148,7 +2152,7 @@ final class KleptonCompositor {
     private var hudDepth: MTLDepthStencilState?
 
     private func hudCount(rendered: kl_ovrp_render_pose, haveRendered: Bool) {
-        guard Self.fpsHudEnabled else { return }
+        guard Self.hudEnabled else { return }
         hudPresents += 1
         if haveRendered, UInt64(rendered.serial) != hudLastSerial {
             hudLastSerial = UInt64(rendered.serial)
@@ -2159,16 +2163,26 @@ final class KleptonCompositor {
             let game = Double(hudGuestFrames) / dt, comp = Double(hudPresents) / dt
             let res = haveRendered && rendered.viewport_of.0 > 0
                 ? "\(rendered.viewport_of.0)x\(rendered.viewport_of.1)" : "-"
-            hudLine = String(format: "Juego %.0f fps  Visor %.0f Hz  %@  VPKTAA %@",
-                             game, comp, res,
-                             !taaOut.isEmpty || taa?.inlineShowing == true ? "on" : "off")
+            var lines: [String] = []
+            if Self.fpsHudEnabled {
+                lines.append(String(format: "Juego %.0f fps  Visor %.0f Hz  %@  VPKTAA %@",
+                                    game, comp, res,
+                                    !taaOut.isEmpty || taa?.inlineShowing == true ? "on" : "off"))
+            }
+            if Self.statusHudEnabled {
+                var buf = [CChar](repeating: 0, count: 256)
+                let n = kl_openxr_status_text(&buf, Int32(buf.count))
+                lines.append(n > 0 ? String(cString: buf) : String(format: "Esperando al test... (visor %.0f Hz)", comp))
+            }
+            hudLine = lines.joined(separator: "\n")
             hudGuestFrames = 0; hudPresents = 0; hudWindowStart = Date()
             hudTex = makeHudTexture(hudLine) ?? hudTex
         }
     }
 
     private func makeHudTexture(_ text: String) -> MTLTexture? {
-        let w = 1024, h = 80
+        let rows = text.split(separator: "\n", omittingEmptySubsequences: false)
+        let w = 1024, h = 80 * max(1, rows.count)
         guard let cs = CGColorSpace(name: CGColorSpace.sRGB),
               let ctx = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: w * 4,
                                   space: cs, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return nil }
@@ -2178,9 +2192,13 @@ final class KleptonCompositor {
         let attrs: [NSAttributedString.Key: Any] = [
             NSAttributedString.Key(kCTFontAttributeName as String): font,
             NSAttributedString.Key(kCTForegroundColorAttributeName as String): CGColor(red: 0.3, green: 1, blue: 0.4, alpha: 1)]
-        let line = CTLineCreateWithAttributedString(NSAttributedString(string: text, attributes: attrs))
-        ctx.textPosition = CGPoint(x: 16, y: 26)
-        CTLineDraw(line, ctx)
+        // Fit long status lines: the panel is 1024 px wide at 30 pt Menlo (~55 characters).
+        for (i, row) in rows.enumerated() {
+            let shown = row.count > 54 ? String(row.prefix(52)) + "…" : String(row)
+            let line = CTLineCreateWithAttributedString(NSAttributedString(string: shown, attributes: attrs))
+            ctx.textPosition = CGPoint(x: 16, y: CGFloat(26 + 80 * (rows.count - 1 - i)))
+            CTLineDraw(line, ctx)
+        }
         guard let data = ctx.data else { return nil }
         let d = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba8Unorm_srgb, width: w, height: h,
                                                          mipmapped: false)
@@ -2193,14 +2211,14 @@ final class KleptonCompositor {
 
     private func drawFpsHud(_ enc: MTLRenderCommandEncoder, viewIndices: [Int],
                             drawable: LayerRenderer.Drawable, originFromHead: simd_float4x4) {
-        guard Self.fpsHudEnabled, let tex = hudTex, let pipe = overlayPipeline, let sampler else { return }
+        guard Self.hudEnabled, let tex = hudTex, let pipe = overlayPipeline, let sampler else { return }
         var ov = kl_ovrp_overlay()
         ov.layer_id = -99
         ov.shape = 0
         ov.tex_w = Int32(tex.width); ov.tex_h = Int32(tex.height)
         // Head-locked, 1 m ahead and a little below the line of sight; identity orientation.
         ov.pose = (0, 0, 0, 1, 0, -0.22, -1.0)
-        ov.size = (0.42, 0.033)
+        ov.size = (0.42, 0.033 * Float(tex.height / 80))
         ov.head_locked = 1
         ov.origin_top_left = 1
         var uniforms: [kl_overlay_uniforms] = []

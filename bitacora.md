@@ -2,19 +2,23 @@
 
 Historial completo: `git log -p bitacora.md` (compactada el 2026-10-14; lo cerrado queda en una línea con referencia).
 
-## EMPEZAR AQUÍ — 2026-10-14
-- Log 60 (build del arreglo de robustez): los 2 casos de draw que colgaban la GPU acabaron como DeviceLost a los 20 s
-  y el run siguió (46 tandas). Muerte nueva en `093-synchronization-003`: `vkCreatePipelineCache` con datos iniciales
-  encolaba ~3300 recetas sin sus shaders → `setComputeFunction:nil` → aborto de Metal en hilos de compilación.
-- Arreglado en VPKEngine `a0b39c4` (bitácora 2026-10-14 (3)): caché de pipelines sin prewarm/shaders ausentes, nil
-  comprobado, y **OpArrayLength** (causa real de los cuelgues de draw: compute saltado → argumentos indirectos basura).
-- Siguiente prueba: Vulkan CTS (ventana). Resumen del log 60 (17586 de 36087, 80,9 % de los soportados, 1024 Fail):
-  motivos NotSupported principales: maintenanceN, formatos, depth_stencil_resolve (776), sparse, map_memory2,
-  `maxMultiviewViewCount below min value` (386, relevante para Quest), colas, dynamic_rendering (202),
-  `Dynamic indexing not supported` (135), `Vertex pipeline stores and atomics not supported` (127),
-  separate_depth_stencil_layouts. Grupos con más fallos: pipeline-monolithic 250, api-heavy 149, api 72.
-- Plan tras el test: implementar todo lo que el log señale como necesario para juegos de Quest (perfil Adreno 740);
-  si no da tiempo, todo lo ya reconocido (lista «Pendiente» de Conformidad).
+## EMPEZAR AQUÍ — 2026-10-14 noche
+- Vulkan CTS rapida COMPLETO (log 61, 36087/36087): 81,0 % de lo soportado; 1513 Fail, 7 Crash, 28101 NotSupported.
+  Fallos por subgrupo: renderpasses ~500 (formats.* clear/load/input attachments), pipeline.stencil 136,
+  copy_and_blit 90, image_clearing 57, pipeline.image/blend/sampler ~95, draw.basic/multiple_clears ~50,
+  glsl.texture_functions offsets/query ~110, image.mutable 51.
+- Build con VPKEngine `b71ed3f` (sin probar): copias depth/stencil por aspecto, clears en quads (rects, capas,
+  aspectos, área parcial, load ops depth≠stencil), clear colors por formato entero/float.
+- OpenXR CTS (log 61): 0 tests en 2 s porque no existía `/sdcard/files` (no podía abrir `openxr_cts.xml`). Arreglo:
+  `kl_guest_mkdirs()` (kl_native.c, declarado en klepton.h) crea `/sdcard/files` antes de onCreate y en
+  getFilesDir/getExternalFilesDir. Progreso visible: `kl_openxr_status_log/_text` (kl_openxr.c) cuenta secciones
+  (`--durations yes`), aserciones `FAILED:`, frames y el resumen final; liblog lo alimenta (kl_va_handlers.c,
+  kl_shim.c) y el compositor lo pinta en el HUD con `KL_STATUS_HUD=1` (KleptonCompositor.swift; la app lo pone solo
+  para el OpenXR CTS).
+- Siguiente (orden): extensiones (timeline semaphores, synchronization2, dynamic_rendering anunciada,
+  depth_stencil_resolve, sampler_mirror_clamp_to_edge, copy_commands2, vertexPipelineStoresAndAtomics, multi_draw),
+  D24 depth en copias, fallos de glsl texture offsets/query, stencil/blend/sampler. Para causas reales hacen falta
+  los .qpa (`QUEST/Partidas/Vulkan CTS (Khronos)/cts`).
 
 ## Robustez del CTS (2026-10-14, motivo: log 59 bloqueado en `048-draw-001` tras `Caused_GPU_Hang_Error`)
 - VPKEngine (`gpu/metal2`, `gpu/vulkan`; detalle en su bitácora 2026-10-14 (2)): ninguna espera a la GPU es infinita.

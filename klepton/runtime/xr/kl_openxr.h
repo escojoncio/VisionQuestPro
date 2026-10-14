@@ -153,4 +153,13 @@ void kl_openxr_set_grip_tune(float grip_pitch_deg, float aim_pitch_deg,
 void kl_openxr_grip_tune(float *grip_pitch_deg, float *aim_pitch_deg,
                          float pivot[3], float pos[3]);
 
+// Progress of a conformance run that has no window of its own (the OpenXR CTS draws almost
+// nothing): instances and sessions the runtime created, frames ended, and what the CTS printed
+// (each finished test with --durations, failed assertions, the final counts). The guest's
+// log lines are fed in by liblog (kl_openxr_status_log); the compositor shows the text on its
+// head-locked HUD. kl_openxr_status_text copies it into buf (always NUL-terminated) and returns
+// its length, 0 while nothing has happened.
+void kl_openxr_status_log(const char *tag, const char *text);
+int  kl_openxr_status_text(char *buf, int cap);
+
 #endif
