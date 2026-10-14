@@ -7,13 +7,14 @@ Historial completo: `git log -p bitacora.md` (compactada el 2026-10-14; lo cerra
   Fallos por subgrupo: renderpasses ~500 (formats.* clear/load/input attachments), pipeline.stencil 136,
   copy_and_blit 90, image_clearing 57, pipeline.image/blend/sampler ~95, draw.basic/multiple_clears ~50,
   glsl.texture_functions offsets/query ~110, image.mutable 51.
-- Build con VPKEngine `3ce5f73` (sin probar). Sobre `7f18f05` (resolve de imagen, timeline, sync2, copy_commands2,
+- Build con VPKEngine `e63e12f` (sin probar). Sobre `7f18f05` (resolve de imagen, timeline, sync2, copy_commands2,
   multi_draw, clears en quads, copias por aspecto) añade: profundidad D24 convertida en copias, depth_stencil_resolve,
-  imágenes 1D como 2D (~80 fallos glsl.texture_functions), texelFetchOffset, texture2d_ms + textureSamples,
-  stencil por cara y máscaras dinámicas (~136 fallos pipeline.stencil), occlusion queries reales (antes devolvían
-  0: un juego que las use dejaba de ver objetos), eventos al completar el envío, multiview hasta 8 vistas (694 casos
-  antes NotSupported). Traductor v3: los juegos retraducen sus recetas una vez. Extensiones nuevas solo con
-  `VPVK_EXTRA_EXTENSIONS=1` (VQConformance lo pone en ambos CTS; VQLaunch lo quita para juegos).
+  imágenes 1D como 2D (~80 fallos glsl.texture_functions), texelFetchOffset, texture2d_ms + textureSamples, stencil
+  por cara y máscaras dinámicas (~136 fallos pipeline.stencil), occlusion queries reales (antes devolvían 0: un
+  juego que las use dejaba de ver objetos), eventos al completar el envío, multiview hasta 8 vistas (694 casos antes
+  NotSupported), propiedades de formato y features conformes, gl_ClipDistance real. Traductor v4: los juegos
+  retraducen sus recetas una vez. Extensiones nuevas solo con `VPVK_EXTRA_EXTENSIONS=1` (VQConformance lo pone en
+  ambos CTS; VQLaunch lo quita para juegos).
 - OpenXR CTS (log 61): 0 tests en 2 s porque no existía `/sdcard/files` (no podía abrir `openxr_cts.xml`). Arreglo:
   `kl_guest_mkdirs()` (kl_native.c, declarado en klepton.h) crea `/sdcard/files` antes de onCreate y en
   getFilesDir/getExternalFilesDir. Progreso visible: `kl_openxr_status_log/_text` (kl_openxr.c) cuenta secciones
