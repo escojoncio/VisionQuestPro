@@ -34,6 +34,7 @@ enum VQConformance {
         setenv("KL_INTENT_EXTRAS", extras.joined(separator: "\n"), 1)
         // A line on the head-locked HUD with the run's progress: the test draws almost nothing.
         setenv("KL_STATUS_HUD", "1", 1)
+        setenv("VPVK_EXTRA_EXTENSIONS", "1", 1)
         VQLog.log("Conformidad OpenXR: plugin Vulkan2, sin tests interactivos; progreso en el HUD; resultado en el registro del juego y en openxr_cts.xml")
     }
     static let profile = "rapida"
@@ -148,6 +149,9 @@ enum VQConformance {
         // ends as DeviceLost and the next one runs on a fresh device (Klepton's exe runner) instead
         // of the whole run waiting forever (log 59, draw).
         setenv("VPVK_DEVICE_LOST_STRICT", "1", 1)
+        // Extensions VPKEngine advertises only to the conformance run until it has validated them
+        // (timeline semaphores, synchronization2, dynamic rendering, copy_commands2, multi_draw…).
+        setenv("VPVK_EXTRA_EXTENSIONS", "1", 1)
 
         VQLog.log("Conformidad: \(batches.count) tandas, \(totalCases) casos (perfil \(profile)); hechos \(done), "
                   + "pendientes \(totalCases - done) en \(planned.count) tandas; esta sesión: hasta \(Int(budget / 60)) min, "
