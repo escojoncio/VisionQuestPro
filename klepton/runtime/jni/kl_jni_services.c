@@ -1208,11 +1208,13 @@ static klj_val klj_Context_getExternalFilesDir(void *env, void *self, const klj_
     // strcat into a 128-byte buffer (vicecity) overflows on the long form.
     if (type && *type) snprintf(path, sizeof path, "/sdcard/files/%s", type);
     else               snprintf(path, sizeof path, "/sdcard/files");
+    kl_guest_mkdirs(path);   // Android creates it on this call
     KLJ_LOG("getExternalFilesDir(%s) -> %s", type ? type : "null", path);
     return (klj_val){.l = klj_new_file(path)};
 }
 static klj_val klj_Context_getFilesDir(void *env, void *self, const klj_val *a, int n) {
     (void)env; (void)self; (void)a; (void)n;
+    kl_guest_mkdirs("/sdcard/files");
     return (klj_val){.l = klj_new_file("/sdcard/files")};   // short form; see getExternalFilesDir
 }
 static klj_val klj_Context_getCacheDir(void *env, void *self, const klj_val *a, int n) {

@@ -156,6 +156,9 @@ void kl_dl_report_images(FILE *f);
 // it; returns `path` unchanged otherwise. Every guest file entry point goes
 // through this — Unity reads its CPU and memory configuration out of procfs.
 const char *kl_guest_path(const char *path, char *buf, size_t cap);
+// Creates a guest directory and its parents (mkdir -p through kl_guest_path): the folders Android
+// guarantees to exist (getFilesDir, getExternalFilesDir) before a guest writes into them.
+void kl_guest_mkdirs(const char *guest_path);
 // Register the APK -> unpacked-tree mapping for raw "<apk>/assets/..." opens
 // (split assets). See the implementation comment in kl_libc.c.
 void kl_guest_path_map(const char *apk, const char *unpacked_dir);

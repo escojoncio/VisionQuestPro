@@ -7,8 +7,10 @@
 // frames. GTA Vice City VR (libmiamivr) is the first guest through it.
 #include "kl_native.h"
 
+#include <errno.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <time.h>
 
 #include "klepton.h"
@@ -542,7 +544,39 @@ int kl_native_create(FILE *out) {
     // android.app.func_name (manifest meta-data, via the launcher) renames the
     // entry point; default as on Android.
     const char *fn = getenv("KL_GUEST_FUNC");
+    // Android creates the files dir before onCreate; a guest that writes straight into it (the
+    // OpenXR CTS: <externalDataPath>/openxr_cts.xml) fails otherwise and runs no test at all.
+    (void)kl_jni_env();   // registers the /sdcard mapping kl_guest_path needs
+    kl_guest_mkdirs("/sdcard/files");
     return kl_na_create(g_img, fn && *fn ? fn : "ANativeActivity_onCreate", "/sdcard/files", out);
+}
+
+void kl_guest_mkdirs(const char *guest_path) {
+    if (!guest_path || !*guest_path) return;
+    char buf[1024], host[1024];
+    const char *p = kl_guest_path(guest_path, buf, sizeof buf);
+    if (!p || snprintf(host, sizeof host, "%s", p) >= (int)sizeof host) return;
+    struct stat st;
+    if (stat(host, &st) == 0 && S_ISDIR(st.st_mode)) return;   // the usual case: nothing to do
+    if (strncmp(guest_path, "/sdcard", 7) == 0 && strcmp(host, guest_path) == 0) {
+        fprintf(stderr, "  [fs] mkdir -p %s: no /sdcard mapping yet, not created\n", guest_path);
+        return;
+    }
+    for (char *s = host + 1; *s; s++) {
+        if (*s != '/') continue;
+        *s = '\0';
+        if (stat(host, &st) == 0 && S_ISDIR(st.st_mode)) { *s = '/'; continue; }   // sandbox ancestors
+        if (mkdir(host, 0755) != 0 && errno != EEXIST) {
+            fprintf(stderr, "  [fs] mkdir -p %s: %s: %s\n", guest_path, host, strerror(errno));
+            *s = '/';
+            return;
+        }
+        *s = '/';
+    }
+    if (mkdir(host, 0755) != 0)
+        fprintf(stderr, "  [fs] mkdir -p %s (%s): %s\n", guest_path, host, strerror(errno));
+    else
+        fprintf(stderr, "  [fs] created %s (%s)\n", guest_path, host);
 }
 
 void kl_native_start(FILE *out) { kl_na_start(out); }

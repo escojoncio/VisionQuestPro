@@ -24,13 +24,17 @@ enum VQConformance {
     /// launch extras: the Vulkan2 graphics plugin, non-interactive tests only, XML results.
     /// Its console report (pass/fail per test and the totals) lands in the guest log.
     static func prepareOpenXR() {
+        // args: Catch2 command line (TAB-separated array). `--durations yes` prints every finished test
+        // ("0.123 s: name"), which the HUD counts (kl_openxr_status_text).
         let extras = [
             "graphicsPlugin=Vulkan2",
-            "args=~[interactive]",
+            "args=~[interactive]\t--durations\tyes",
             "xmlFilename=openxr_cts.xml",
         ]
         setenv("KL_INTENT_EXTRAS", extras.joined(separator: "\n"), 1)
-        VQLog.log("Conformidad OpenXR: plugin Vulkan2, sin tests interactivos; resultado en el registro del juego y en openxr_cts.xml")
+        // A line on the head-locked HUD with the run's progress: the test draws almost nothing.
+        setenv("KL_STATUS_HUD", "1", 1)
+        VQLog.log("Conformidad OpenXR: plugin Vulkan2, sin tests interactivos; progreso en el HUD; resultado en el registro del juego y en openxr_cts.xml")
     }
     static let profile = "rapida"
 

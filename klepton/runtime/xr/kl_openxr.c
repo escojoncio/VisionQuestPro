@@ -41,6 +41,8 @@
 #include <math.h>
 #include <unistd.h>
 #include "kl_openxr.h"
+#include <pthread.h>
+#include <ctype.h>
 #include "kl_jni.h"
 #include "kl_ovrp.h"
 #include "kl_egl.h"
@@ -1455,8 +1457,76 @@ static XrResult klxr_StructureTypeToString(void *instance, int32_t value, char *
     return KLXR_SUCCESS;
 }
 
+// ---- conformance-run status (kl_openxr_status_text) ------------------------------------------
+static pthread_mutex_t g_st_mu = PTHREAD_MUTEX_INITIALIZER;
+static unsigned long g_st_instances, g_st_sessions, g_st_frames;
+static unsigned g_st_tests, g_st_failed_asserts;
+static int  g_st_cts, g_st_done;
+static long g_st_ok = -1, g_st_fail = -1;
+static char g_st_last[96];
+
+static void klxr_status_line(const char *line) {
+    // Catch2 --durations: "0.123 s: <test name>" after every test case.
+    const char *p = line;
+    while (*p == ' ') p++;
+    if (isdigit((unsigned char)*p)) {
+        const char *q = p;
+        while (isdigit((unsigned char)*q) || *q == '.') q++;
+        if (strncmp(q, " s: ", 4) == 0) {
+            g_st_tests++;
+            snprintf(g_st_last, sizeof g_st_last, "%s", q + 4);
+            return;
+        }
+    }
+    if (strstr(line, "FAILED:")) g_st_failed_asserts++;
+    const char *c;
+    if ((c = strstr(line, "Test Success Count:"))) g_st_ok = strtol(c + 19, NULL, 10);
+    if ((c = strstr(line, "Test Failure Count:"))) g_st_fail = strtol(c + 19, NULL, 10);
+    if (strstr(line, "end conformance test")) g_st_done = 1;
+}
+
+void kl_openxr_status_log(const char *tag, const char *text) {
+    if (!tag || !text || strcmp(tag, "OpenXR_Conformance") != 0) return;
+    pthread_mutex_lock(&g_st_mu);
+    g_st_cts = 1;
+    char line[512];
+    for (const char *s = text; *s; ) {
+        const char *nl = strchr(s, '\n');
+        size_t n = nl ? (size_t)(nl - s) : strlen(s);
+        if (n >= sizeof line) n = sizeof line - 1;
+        memcpy(line, s, n);
+        line[n] = '\0';
+        klxr_status_line(line);
+        if (!nl) break;
+        s = nl + 1;
+    }
+    pthread_mutex_unlock(&g_st_mu);
+}
+
+int kl_openxr_status_text(char *buf, int cap) {
+    if (!buf || cap <= 0) return 0;
+    buf[0] = '\0';
+    pthread_mutex_lock(&g_st_mu);
+    int n = 0;
+    // Short lines: the HUD shows about 52 characters. "secc." counts Catch2 sections (each test and
+    // its nested sections print a duration line), "fallos" failed assertions until the final counts.
+    if (g_st_cts && g_st_done) {
+        char ok[24], ko[24];
+        if (g_st_ok < 0) snprintf(ok, sizeof ok, "?"); else snprintf(ok, sizeof ok, "%ld", g_st_ok);
+        if (g_st_fail < 0) snprintf(ko, sizeof ko, "%u aserc.", g_st_failed_asserts);
+        else snprintf(ko, sizeof ko, "%ld", g_st_fail);
+        n = snprintf(buf, (size_t)cap, "CTS FIN: %s ok, %s fallos. Sal.", ok, ko);
+    } else if (g_st_cts) {
+        n = snprintf(buf, (size_t)cap, "CTS %u secc %u fallos %lu fr | %s", g_st_tests, g_st_failed_asserts,
+                     g_st_frames, g_st_last[0] ? g_st_last : "arrancando");
+    }
+    pthread_mutex_unlock(&g_st_mu);
+    return n < 0 ? 0 : (n >= cap ? cap - 1 : n);
+}
+
 static XrResult klxr_CreateInstance(const XrInstanceCreateInfo *info, void **instance) {
     fprintf(stderr, "  [xr] >> %s\n", "xrCreateInstance");
+    pthread_mutex_lock(&g_st_mu); g_st_instances++; pthread_mutex_unlock(&g_st_mu);
     if (!info || !instance) KLXR_RET(KLXR_ERROR_VALIDATION_FAILURE);
     if (info->type != XR_TYPE_INSTANCE_CREATE_INFO) KLXR_RET(KLXR_ERROR_VALIDATION_FAILURE);
 
@@ -2262,6 +2332,7 @@ static void klxr_post_state(klxr_session *s, int state) {
 
 static XrResult klxr_CreateSession(void *instance, const XrSessionCreateInfo *info,
                                    void **session) {
+    pthread_mutex_lock(&g_st_mu); g_st_sessions++; pthread_mutex_unlock(&g_st_mu);
     fprintf(stderr, "  [xr] >> %s\n", "xrCreateSession");
     klxr_instance *inst = klxr_inst(instance);
     if (!inst) KLXR_RET(KLXR_ERROR_HANDLE_INVALID);
@@ -5561,6 +5632,7 @@ static void klxr_pose_trace_report(klxr_session *s) {
 static void klxr_passthrough_scan(const XrFrameEndInfo *info);   // XR_FB_passthrough section
 static XrResult klxr_EndFrame(void *session, const XrFrameEndInfo *info) {
     KLXR_TRACE("xrEndFrame");
+    pthread_mutex_lock(&g_st_mu); g_st_frames++; pthread_mutex_unlock(&g_st_mu);
     klxr_session *s = klxr_sess(session);
     if (!s) KLXR_RET(KLXR_ERROR_HANDLE_INVALID);
     if (!info) KLXR_RET(KLXR_ERROR_VALIDATION_FAILURE);

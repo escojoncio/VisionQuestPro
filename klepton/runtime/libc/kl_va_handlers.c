@@ -150,6 +150,16 @@ int klh_android_log_print(int prio, const char *tag, const char *fmt, kl_va *va)
     KL_MARSHAL(fmt, va, KL_VA_PRINTF);
     static const char lv[] = "??VDIWEF";
     fprintf(stderr, "%c/%s: ", (prio >= 0 && prio < 8) ? lv[prio] : '?', tag ? tag : "");
+    // The OpenXR CTS's progress, for the compositor's HUD (kl_openxr_status_text).
+    if (tag && strcmp(tag, "OpenXR_Conformance") == 0) {
+        char text[1024];
+        va_list cp;
+        va_copy(cp, _ap);
+        vsnprintf(text, sizeof text, fmt, cp);
+        va_end(cp);
+        extern void kl_openxr_status_log(const char *, const char *);
+        kl_openxr_status_log(tag, text);
+    }
     int n = vfprintf(stderr, fmt, _ap);
     fputc('\n', stderr);
     // hl2 eye-copy RT probe: the guest logs "began eye submission" on the eye-submission

@@ -1890,6 +1890,8 @@ static void kl_closelog(void) {}
 static int  kl_cxa_atexit(void (*f)(void *), void *a, void *d) { (void)f;(void)a;(void)d; return 0; }
 static void kl_cxa_finalize(void *d) { (void)d; }
 static void kl_android_log_write(int p, const char *t, const char *m) {
+    extern void kl_openxr_status_log(const char *, const char *);
+    kl_openxr_status_log(t, m);   // OpenXR CTS progress (HUD); ignores every other tag
     fprintf(stderr, "[%d/%s] %s\n", p, t ? t : "", m ? m : ""); }
 // liblog: everything at INFO or above is loggable (Oboe gates its verbose output on this).
 static int g_log_min_prio = 4; /* ANDROID_LOG_INFO */
