@@ -65,7 +65,7 @@ struct VQConformanceView: View {
             HStack(spacing: 16) {
                 Button(action: showLog) { Label(VQL("Ver registro", "Show log"), systemImage: "doc.text.magnifyingglass") }
                     .buttonStyle(.bordered)
-                ShareLink(items: VQLog.shareable) { Label(VQL("Compartir registros", "Share logs"), systemImage: "square.and.arrow.up") }
+                VQShareLogs()
                     .buttonStyle(.bordered)
                 if finished {
                     Button {

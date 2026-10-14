@@ -22,6 +22,8 @@ final class VQModel: ObservableObject {
 
     private init() {
         VQLog.start()
+        VQLog.savePreviousSessionToQuest()
+        VQCompilerProbe.start()
         refresh()
     }
 
@@ -122,7 +124,7 @@ struct VQLauncherView: View {
             .toolbar {
                 ToolbarItemGroup(placement: .topBarTrailing) {
                     Button { model.refresh() } label: { Label(VQL("Actualizar", "Refresh"), systemImage: "arrow.clockwise") }
-                    ShareLink(items: VQLog.shareable) { Label(VQL("Registros", "Logs"), systemImage: "doc.text") }
+                    VQShareLogs(title: VQL("Registros", "Logs"), icon: "doc.text")
                     Button { showSettings = true } label: { Label(VQL("Ajustes", "Settings"), systemImage: "gearshape") }
                 }
             }
@@ -319,7 +321,7 @@ struct VQSettingsView: View {
                     if case .success(let url) = r { model.choose(url) }
                 }
                 Section(VQL("Registros", "Logs")) {
-                    ShareLink(items: VQLog.shareable) { Label(VQL("Compartir registros", "Share logs"), systemImage: "square.and.arrow.up") }
+                    VQShareLogs()
                     ScrollView {
                         Text(VQLog.tail(VQLog.appLog)).font(.system(.caption2, design: .monospaced)).textSelection(.enabled)
                             .frame(maxWidth: .infinity, alignment: .leading)
@@ -402,7 +404,7 @@ struct VQLoadingView: View {
             HStack(spacing: 16) {
                 Button(action: showLog) { Label(VQL("Ver registro", "Show log"), systemImage: "doc.text.magnifyingglass") }
                     .buttonStyle(.bordered)
-                ShareLink(items: VQLog.shareable) { Label(VQL("Compartir registros", "Share logs"), systemImage: "square.and.arrow.up") }
+                VQShareLogs()
                     .buttonStyle(.bordered)
             }
             .font(.callout)
@@ -425,7 +427,7 @@ struct VQEndedView: View {
                 .font(.title3).foregroundStyle(.secondary).multilineTextAlignment(.center)
             Spacer()
             HStack(spacing: 16) {
-                ShareLink(items: VQLog.shareable) { Label(VQL("Compartir registros", "Share logs"), systemImage: "square.and.arrow.up") }
+                VQShareLogs()
                     .buttonStyle(.bordered)
                 Button {
                     VQLog.log("Cerrar app tras la partida")

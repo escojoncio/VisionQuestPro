@@ -2,26 +2,35 @@
 
 Historial completo: `git log -p bitacora.md` (compactada el 2026-10-14; lo cerrado queda en una línea con referencia).
 
-## EMPEZAR AQUÍ — 2026-10-14 (3)
-- Vulkan CTS (cts_2): todas las tandas terminadas; bloqueos = crashes de Metal en
-  `image.texel_view_compatible` (vistas sin comprimir de texturas comprimidas) y `indirect_draw...from_compute`.
-  Arreglado en VPKEngine (10) (detalle en su bitácora): vistas rechazadas limpio, indirectos en GPU (+multiview,
-  draw count), indexado dinámico de descriptores/IO, gather offsets, varyings empaquetados, texel buffers,
-  blits enteros/3D. Traductor v6: recetas se retraducen.
-- OpenXR CTS (log 59): cierre por memoria (1→4,6 GB en 2 s): `xrDestroySwapchain` no liberaba las VkImage.
-  Ahora `kl_vulkan_xr_image_free` (kl_vulkan.c, tabla `g_xr_img`) → cola de retiro con gracia 0,5 s
-  (`quick`), destrucción inmediata si la cola está llena; `xrDestroySession` destruye sus swapchains.
-  kl_openxr.c: acquire/wait/release en FIFO (varias adquiridas, STATIC_IMAGE una vez), xrBeginFrame consume un
-  xrWaitFrame (contador atómico; sin wait = CALL_ORDER_INVALID; frame abierto = XR_FRAME_DISCARDED),
-  xrEndFrame valida antes de consumir (TIME_INVALID, LAYER_INVALID, >16 capas LAYER_LIMIT_EXCEEDED, blend
-  1..3), READY→SYNCHRONIZED→VISIBLE→FOCUSED al primer xrEndFrame (`KL_XR_SYNC_ON_FRAME=0` = antes),
-  xrRequestExitSession baja FOCUSED→VISIBLE→SYNCHRONIZED→STOPPING; blend modes OPAQUE, ALPHA_BLEND, ADDITIVE
-  (con passthrough). Pendiente: capa `XR_APILAYER_KHRONOS_runtime_conformance` (el loader propio no carga
-  capas: 1 fallo fijo).
-- App: launcher `Window` (instancia única), `kbentry` sin lanzar ni restaurar.
-- Pendiente Vulkan: clears de color en quad (`gpu.clear`), multiview+occlusion, queryLod, 16-bit storage.
-- Prueba: Vulkan CTS (Borrar resultados para medir todo con v6) y OpenXR CTS; compartir registros y la carpeta
-  `QUEST/Partidas/<test>/cts`.
+## EMPEZAR AQUÍ — 2026-10-14 (4)
+- Vulkan CTS (log 60, `cts_3`): sesión cortada por tiempo en la tanda 35/106 (12 645/36 087 casos; 4 348 Pass,
+  297 Fail = 93,6 % de los soportados, 8 000 NotSupported). Faltan las tandas 035–105: seguir sin borrar resultados.
+- Causa común de muchos fallos: desde 2 s tras arrancar, conexiones NUEVAS a servicios del sistema fallaban
+  (`MTLCompilerService … Connection init failed at lookup with error 3`: 17 pipelines, librería de blits → ~90
+  `blit_unsupported …library_failed`, 118 `archive_save`). Al pulsar Compartir, la hoja del sistema abortó la app
+  (`Could not cast _NSXPCDistantObject → _EXDiscoveryServiceProtocol`, mismo síntoma). Causa raíz SIN identificar.
+  - VPKEngine (11): reintentos/backoff de compilación, sin cachear fallos por compilador inaccesible.
+  - CTS sin archivo binario: `VQLaunch` no pone `VP_PIPELINE_CACHE_DIR` si `isConformance` (A/B: si sigue
+    cayendo, no era el archivo).
+  - Diagnóstico: `VQCompilerProbe` (VQLog.swift) compila una librería única cada 15 s → `[xpc] compilador Metal
+    OK|INACCESIBLE` en cambios y cada 5 min; latido `[hb] … ports=N fds=M` cada 64 ticks (`kl_ipc_counts`,
+    kl_app.c). Siguiente: cruzar el momento del primer INACCESIBLE con ports/fds (¿fuga de puertos por VkDevice?).
+  - Registros sin hoja de Compartir: `VQLog.saveToQuest` → `QUEST/Registros/<fecha>-<etiqueta>/` (últimas 12):
+    al arrancar si hay boot log nuevo (`sesion-anterior`), al final del resumen del CTS (`conformidad`) y a mano.
+    `VQShareLogs.swift` sustituye los 5 `ShareLink` por un menú (Compartir oculto si la sonda dice INACCESIBLE).
+- `dEQP-VK.info.platform` (Crash, signal 11): `createPlatform()` de deqp pasaba a `Platform` una referencia a un
+  `NativeActivity` de la pila. `patch_deqp.py` lo hace `static`. Requiere APK nuevo (`conformance.yml`, target vulkan).
+- OpenXR CTS (log 61): muerto por presión de memoria del sistema tras `MaxLayers-noninteractive` (16 capas 4766×1912:
+  0,7→3,5 GB en 4 s; la cola de retiro solo se vaciaba en fin de frame/otra destrucción, ~30 s después).
+  - `kl_vulkan.c`: `klvk_retire_schedule` (dispatch_after_f 0,6 s, cola global utility) vacía las imágenes `quick`;
+    `kl_vulkan_trim()` (desde `kl_mem_pressure_fire`, kl_libc.c) las libera ya (`klvk_retire_pump_ex(d,1)`).
+  - `kl_openxr.c`: swapchain `STATIC_IMAGE` = 1 imagen (antes 3 y solo 1 adquirible → CALL_ORDER_INVALID en
+    «Swapchains / Non-default create flags»).
+  - El XML del CTS se escribe al final: tras un cierre, los resultados solo están en el log (`V/OpenXR_Conformance`).
+- Pendiente Vulkan (tras medir otra vez): image_clearing 1–2 canales/enteros, multiview clears, texel buffers,
+  different_signedness, aliasing, shader_access secundarios, clears en quad (`gpu.clear`), multiview+occlusion,
+  queryLod, 16-bit storage; capa `XR_APILAYER_KHRONOS_runtime_conformance` (el loader propio no carga capas).
+- Resuelto antes (detalle en git): OpenXR swapchains liberados/FIFO/orden de frames/estados (sesión (3)), VPKEngine (10).
 
 ## Robustez del CTS (2026-10-14, motivo: log 59 bloqueado en `048-draw-001` tras `Caused_GPU_Hang_Error`)
 - VPKEngine (`gpu/metal2`, `gpu/vulkan`; detalle en su bitácora 2026-10-14 (2)): ninguna espera a la GPU es infinita.

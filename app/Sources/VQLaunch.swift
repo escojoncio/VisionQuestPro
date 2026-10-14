@@ -40,7 +40,11 @@ enum VQLaunch {
         VQSettings.shared.applyToEnvironment(game: game)
         let psoCache = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("VisionQuestPro/PipelineCache/\(game.id)", isDirectory: true)
-        setenv("VP_PIPELINE_CACHE_DIR", psoCache.path, 1)
+        // The conformance tests: no Metal binary archive. Their pipelines are one-off (nothing to
+        // reuse) and log 60 had every archive save fail with MTLCompilerService unreachable from
+        // 2 s into the run while blit libraries failed to compile in the same windows — the
+        // archive work is the first suspect for overloading the compiler service.
+        if VQConformance.isConformance(game) { unsetenv("VP_PIPELINE_CACHE_DIR") } else { setenv("VP_PIPELINE_CACHE_DIR", psoCache.path, 1) }
         // The conformance tests compile their own pipelines; a prewarm of earlier runs' recipes
         // would only slow every vkCreateDevice down (prepareRun turns it off in the driver too).
         if !VQConformance.isConformance(game) { VQPrewarm.run(gameFolder: game.folder, cache: psoCache) }
