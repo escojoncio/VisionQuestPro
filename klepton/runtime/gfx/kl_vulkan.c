@@ -3965,7 +3965,11 @@ static void klvk_taa_next_jitter(int stage, int resolving, int hook_on, int gate
 // ---- async frame end (see kl_vulkan_frame_done) ----
 static int klvk_frame_async_on(void) {
     static int on = -1;
-    if (on < 0) on = kl_env_on("KL_VK_FRAME_ASYNC", 1);
+    // OFF by default since 2026-10-15 (14): AC Nexus, during ShaderWarmupManager, left 589
+    // native submits stuck (gpu.err native_stuck, head waiting on its event), the game stalled
+    // ~1.2 s per frame and VPKEngine's completion path then aborted on "mutex lock failed:
+    // Invalid argument" (MetalBackend::Impl::err from the encodeNative block). AoT ran fine.
+    if (on < 0) on = kl_env_on("KL_VK_FRAME_ASYNC", 0);
     return on;
 }
 static void klvk_serial_advance(uint64_t to);
@@ -3992,7 +3996,7 @@ static int klvk_frame_async(uint64_t issued) {
     if (!kl_vulkan_native_submit(klvk_frame_async_encode, (void *)(uintptr_t)issued)) return 0;
     static int said;
     if (!said++) VKI("frame end: ASYNC (no vkQueueWaitIdle; the serial advances when the frame's "
-                     "GPU work completes) — KL_VK_FRAME_ASYNC=0 restores the wait\n");
+                     "GPU work completes; KL_VK_FRAME_ASYNC=1)\n");
     return 1;
 #else
     (void)issued; return 0;

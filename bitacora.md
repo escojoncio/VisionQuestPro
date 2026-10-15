@@ -24,6 +24,12 @@ Historial completo: `git log -p bitacora.md` (compactada el 2026-10-15; lo cerra
   (1,0,1,1) → `[vk] [magenta] fragment module …` y `[magenta] pipeline … uses that fragment module` (renderPass,
   attachments, samples). Si salen: Unity sustituye un shader no soportado (siguiente: qué caps). Si no: buscar en otra
   parte (clear/blit). AC además arranca en inglés (`Language set: English(US)`) con es_ES elegido — pendiente.
+- CRASH AC (log 12:18:59–12:19:23, build 13): `gpu.err what=native_stuck n=589 head=3 client=2` a las 12:19:20 tras
+  `ShaderWarmupManager.WarmUpShaders`, frames de ~1,2 s, y aborto `libc++abi … system_error: mutex lock failed:
+  Invalid argument` en `vpgpu::metal2::MetalBackend::Impl::err` desde el bloque de `encodeNative` (hilo guest).
+  Causa: el fin de frame asíncrono (13) vía `kl_vulkan_native_submit`. `KL_VK_FRAME_ASYNC` ahora def. 0 (vuelve el
+  vkQueueWaitIdle). Pendiente en VPKEngine: por qué se atasca la cola nativa y el mutex inválido en `err()`.
+  AC de ese log: entradas con es_ES pero `Language set: English(US)`; sin línea `[magenta]` (build 13 no la tenía).
 - `VQLog.savePreviousSessionToQuest(atStartup:)`: la copia diferida no hace nada si ya se lanzó un juego.
 - Pendiente: saturación del visor al iniciar AC; voces AC «Voice Starvation»; idioma AC.
 
