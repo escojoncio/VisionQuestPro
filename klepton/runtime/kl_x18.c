@@ -513,22 +513,83 @@ static int klx_unallocated(uint32_t w) {
     unsigned op0 = (w >> 25) & 0xf;
     return op0 <= 3;                       // 0/1/3 unallocated, 2 = SVE
 }
+
+// Literal pools that the code ITSELF points at. GCC-built libraries (Wwise's
+// libAkSoundEngine and its plug-ins, AC Nexus) keep float constants in .text
+// right after a function and reach them with `adr xN, pool` + `ldr qN, [xN]`.
+// Words such as 0x40000000 (2.0f) and 0x80000000 (-0.0f) are unallocated
+// encodings, so two of them within 16 words of a real x18 instruction made
+// the window vote "data" and the site was left unveneered: measured,
+// libAkSoundEngine+0x1da450 `ubfx x18, x4, #0, #32` / +0x1da460 `fmov s2, w18`
+// (pool at +0x1da420, referenced by `adr x3` at +0x1da1d4) and
+// libAkConvolutionReverb+0xae48 `mov x7, x18` (pool at +0xae70, two `adr x5`).
+// An unpatched read of x18 sees Darwin's register, not the shadow slot.
+//
+// A word that an `adr` or a load-literal in the same chunk targets is KNOWN
+// data: it is not evidence about its neighbours (it is a constant the
+// function owns, not a sign that the neighbourhood is a table), and a site
+// sitting on one is data outright. adr is followed by up to a 16-byte load,
+// so it marks four words; ldr literal marks its own access size. A jump-table
+// `adr` marks code words, which are allocated encodings anyway — no effect.
+// Crypto tables keep their verdict: they are reached through ONE adr at the
+// base, so at most four of their words stop counting.
+static uint8_t *klx_lit_map(const uint32_t *w, size_t n) {
+    // Two bitmaps in one block: bit k = "not evidence" (adr: 4 words, literal:
+    // its size), bit n+k = "data outright" (ldr literal targets only — an adr
+    // can name code, e.g. a jump-table base or a function address, and the
+    // first words there may be real x18 instructions).
+    uint8_t *m = calloc((2 * n + 7) / 8 + 1, 1);
+    if (!m) return NULL;
+    for (size_t i = 0; i < n; i++) {
+        uint32_t x = w[i];
+        int64_t off; unsigned words; int literal;
+        if ((x & 0x9F000000u) == 0x10000000u) {            // adr
+            int64_t imm = (int64_t)((((x >> 5) & 0x7ffff) << 2) | ((x >> 29) & 3));
+            off = (imm << 43) >> 43;
+            words = 4;
+            literal = 0;
+        } else if ((x & 0x3B000000u) == 0x18000000u) {     // ldr (literal), GP or SIMD
+            unsigned opc = (x >> 30) & 3, V = (x >> 26) & 1;
+            if (!V && opc == 3) continue;                  // prfm
+            int64_t imm = (int64_t)((x >> 5) & 0x7ffff);
+            off = ((imm << 45) >> 45) * 4;
+            words = V ? (opc == 0 ? 1 : opc == 1 ? 2 : 4) : (opc == 1 ? 2 : 1);
+            literal = 1;
+        } else {
+            continue;
+        }
+        if (off & 3) continue;
+        int64_t t = (int64_t)i + off / 4;
+        for (unsigned k = 0; k < words; k++, t++) {
+            if (t < 0 || (size_t)t >= n) continue;
+            m[t >> 3] |= (uint8_t)(1u << (t & 7));
+            if (literal) { size_t u = n + (size_t)t; m[u >> 3] |= (uint8_t)(1u << (u & 7)); }
+        }
+    }
+    return m;
+}
+#define KLX_BIT(m, k) ((m) && ((m)[(k) >> 3] >> ((k) & 7) & 1))
+
 // `i` is a word index into `w`; the window is clamped to the chunk, which is a
 // whole executable section minus its known data ranges, so clamping only ever
-// bites at a section edge.
-static int klx_looks_like_data(const uint32_t *w, size_t n, size_t i) {
+// bites at a section edge. `lit` (may be NULL) is klx_lit_map of the same chunk.
+static int klx_looks_like_data(const uint32_t *w, size_t n, size_t i, const uint8_t *lit) {
+    if (KLX_BIT(lit, n + i)) return 1;                 // a load-literal reads it
     size_t lo = i > KLX_WIN_HALF ? i - KLX_WIN_HALF : 0;
     size_t hi = i + KLX_WIN_HALF + 1 < n ? i + KLX_WIN_HALF + 1 : n;
     unsigned bad = 0;
     for (size_t k = lo; k < hi; k++)
-        if (klx_unallocated(w[k]) && ++bad >= KLX_WIN_LIMIT) return 1;
+        if (!KLX_BIT(lit, k) && klx_unallocated(w[k]) && ++bad >= KLX_WIN_LIMIT) return 1;
     return 0;
 }
 
 // Exposed so the offline tool reports the same verdict the loader acts on —
 // two answers to "is this word data" is how the pair drifts.
+// No literal map here: the callers are the TLS rewriters (kl_image.c,
+// klepton_ld.c), one call per `mrs tpidr_el0` site, and building the map per
+// call would rescan the whole chunk each time. Their verdict is unchanged.
 int kl_x18_is_data(const void *code, size_t size, size_t index) {
-    return klx_looks_like_data((const uint32_t *)code, size / 4, index);
+    return klx_looks_like_data((const uint32_t *)code, size / 4, index, NULL);
 }
 
 // One survey feeding both the count and the emitter, so a chunk with no real
@@ -548,14 +609,16 @@ static unsigned klx_survey(const void *code, size_t size, unsigned *data,
     unsigned c = 0;
     if (data) *data = 0;
     if (ctr) *ctr = 0;
+    uint8_t *lit = klx_lit_map(w, n);
     for (size_t i = 0; i < n; i++) {
         klx_info in;
         klx_decode(w[i], &in);
         if (!in.nfields && !in.sysreg) continue;
-        if (klx_looks_like_data(w, n, i)) { if (data && in.nfields) (*data)++; continue; }
+        if (klx_looks_like_data(w, n, i, lit)) { if (data && in.nfields) (*data)++; continue; }
         if (in.nfields) c++;
         if (in.sysreg && ctr) (*ctr)++;
     }
+    free(lit);
     return c;
 }
 
@@ -597,6 +660,23 @@ static unsigned enc_mov_imm64(unsigned t, uint64_t v, uint32_t *out) {
     }
     if (!k) out[k++] = enc_movz(t, 0, 0);
     return k;
+}
+
+static int op0_is_dpimm(uint32_t w) { return (((w >> 25) & 0xf) & 0xe) == 0x8; }
+
+// adrp xT, <page of target>, computed against the pc the adrp will execute at.
+static int enc_adrp(unsigned t, uint64_t pc, uint64_t target, uint32_t *out) {
+    int64_t d = ((int64_t)(target & ~0xFFFULL) - (int64_t)(pc & ~0xFFFULL)) >> 12;
+    if (d < -(1LL << 20) || d >= (1LL << 20)) return 0;
+    uint32_t v = (uint32_t)((uint64_t)d & 0x1fffff);
+    *out = 0x90000000u | ((v & 3) << 29) | ((v >> 2) << 5) | t;
+    return 1;
+}
+static uint32_t enc_add_imm(unsigned d, unsigned n, unsigned imm12) {   // add xD, xN, #imm12
+    return 0x91000000u | ((imm12 & 0xfff) << 10) | (n << 5) | d;
+}
+static uint32_t enc_ldur(unsigned t, unsigned n, int off) {   // ldur xT, [xN, #off]
+    return 0xF8400000u | (((uint32_t)off & 0x1ff) << 12) | (n << 5) | t;
 }
 
 static int enc_b(uint64_t from, uint64_t to, uint32_t *out) {
@@ -716,6 +796,9 @@ int kl_x18_emit(void *code, size_t size, uint64_t code_va,
     if (!do_x18 && !do_ctr) return 0;
 
     uint32_t *out = (uint32_t *)pool, *pool_end = (uint32_t *)((uint8_t *)pool + poolcap);
+    // Built from the words BEFORE any site is patched, exactly as the survey
+    // saw them (a patched site is a `b`, which marks nothing).
+    uint8_t *lit = klx_lit_map(w, n);
 
     for (size_t i = 0; i < n; i++) {
         klx_info in;
@@ -724,7 +807,7 @@ int kl_x18_emit(void *code, size_t size, uint64_t code_va,
         // Not a refusal: a refusal is a site we could not veneer, and this is a
         // word that was never an instruction. Already tallied by the survey
         // above, so only skipped here.
-        if (klx_looks_like_data(w, n, i)) continue;
+        if (klx_looks_like_data(w, n, i, lit)) continue;
 
         // Which rewrite this word wants. A word can want both — `mrs x18,
         // CTR_EL0` — and then the CTR veneer is the one that serves it, because
@@ -828,6 +911,108 @@ int kl_x18_emit(void *code, size_t size, uint64_t code_va,
             continue;
         }
 
+        // `adr x18, label` and `ldr {w18|x18}, label` / `ldrsw x18, label` —
+        // x18 is only the DESTINATION, so the veneer rebuilds the address
+        // with adrp+add against the label's absolute position and stores the
+        // result in the shadow slot. GCC-built Wwise code does exactly this
+        // to reach its float literal pools: libResonanceAudio+0x1f3fc
+        // `adr x18, +0x1f5f0` then `ldr q4, [x18]` — refusing the adr left
+        // the slot at 0 and the (veneered) load faulted at address 0 on the
+        // first audio frame of AC Nexus.
+        if ((in.pcrel == KLX_PC_ADR || in.pcrel == KLX_PC_LITERAL) && !in.hazard &&
+            in.roles == KLX_W && out + VEN_MAX_INSN <= pool_end) {
+            uint64_t target;
+            if (in.pcrel == KLX_PC_ADR) {
+                int64_t imm = (int64_t)((((word >> 5) & 0x7ffff) << 2) | ((word >> 29) & 3));
+                target = spc + (uint64_t)((imm << 43) >> 43);
+            } else {
+                int64_t imm = (int64_t)((word >> 5) & 0x7ffff);
+                target = spc + (uint64_t)(((imm << 45) >> 45) * 4);
+            }
+            unsigned a, b;
+            pick_scratch(in.gp_used, &a, &b);
+            uint32_t body[VEN_MAX_INSN], patch;
+            unsigned k = 0;
+            int ok = 1;
+            body[k++] = enc_stp(a, b, -16);
+            body[k++] = enc_mrs_tpidrro(a);
+            ok &= enc_adrp(b, vpc + k * 4, target, &body[k]); k++;
+            body[k++] = enc_add_imm(b, b, (unsigned)(target & 0xfff));
+            if (in.pcrel == KLX_PC_LITERAL) {
+                unsigned opc = (word >> 30) & 3;           // 00 ldr w, 01 ldr x, 10 ldrsw
+                body[k++] = (opc == 1 ? 0xF9400000u : opc == 2 ? 0xB9800000u : 0xB9400000u)
+                            | (b << 5) | b;
+            }
+            body[k++] = enc_str(b, a, (unsigned)KLX_TSD_SLOT * 8);
+            body[k++] = enc_ldp(a, b, -16);
+            ok &= enc_b(vpc + k * 4, spc + 4, &body[k]); k++;
+            ok &= enc_b(spc, vpc, &patch);
+            if (!ok) {
+                note_refusal(word); st->refused++;
+                if (out_of_reach(spc, vpc)) st->far_refused++;
+                continue;
+            }
+            memcpy(out, body, k * 4);
+            out += k;
+            w[i] = patch;
+            st->patched++;
+            continue;
+        }
+
+        // `add|sub sp, xN, x18[, ext]` / `add|sub sp, x18, #imm` — a variable
+        // stack allocation sized by x18 (libAkSoundEngine+0x1b6e58
+        // `sub sp, x7, x18` after `and x18, x21, #0x1fffffff0`). x18 is only
+        // read; the hazard is that sp moves, so the spill made below the OLD
+        // sp has to be reloaded through the old sp, kept in `b`:
+        //
+        //      stp  a, b, [sp, #-16]
+        //      mrs  a, tpidrro_el0
+        //      ldr  b, [a, #slot*8]          b = guest x18
+        //      <insn, Rd sp->a, x18->b>      a = new sp
+        //      add  b, sp, #0                b = old sp
+        //      add  sp, a, #0
+        //      ldur a, [b, #-16]
+        //      ldur b, [b, #-8]
+        //      b    <site+4>
+        //
+        // Signal-safe for an allocation (new sp below old): before the switch
+        // the spill is in the old sp's red zone, after it the spill is ABOVE
+        // the new sp, where no signal frame goes. A deallocation of more than
+        // 112 bytes would leave it below the new red zone for two loads.
+        {
+            int addsub_imm = ((word >> 23) & 0x3f) == 0x22 || ((word >> 23) & 0x3f) == 0x23;
+            int addsub_ext = ((word >> 24) & 0x1f) == 0x0b && ((word >> 21) & 1);
+            if ((op0_is_dpimm(word) ? addsub_imm : addsub_ext) &&
+                in.hazard == KLX_HZ_SPWRITE && in.roles == KLX_R &&
+                !((word >> 29) & 1) && (word & 31) == 31 && out + VEN_MAX_INSN <= pool_end) {
+                unsigned a, b;
+                pick_scratch(in.gp_used, &a, &b);
+                uint32_t body[VEN_MAX_INSN], patch;
+                unsigned k = 0;
+                int ok = 1;
+                body[k++] = enc_stp(a, b, -16);
+                body[k++] = enc_mrs_tpidrro(a);
+                body[k++] = enc_ldr(b, a, (unsigned)KLX_TSD_SLOT * 8);
+                body[k++] = (klx_substitute(word, &in, b) & ~31u) | a;
+                body[k++] = enc_add_imm(b, 31, 0);      // b = old sp
+                body[k++] = enc_add_imm(31, a, 0);      // sp = new sp
+                body[k++] = enc_ldur(a, b, -16);
+                body[k++] = enc_ldur(b, b, -8);
+                ok &= enc_b(vpc + k * 4, spc + 4, &body[k]); k++;
+                ok &= enc_b(spc, vpc, &patch);
+                if (!ok) {
+                    note_refusal(word); st->refused++;
+                    if (out_of_reach(spc, vpc)) st->far_refused++;
+                    continue;
+                }
+                memcpy(out, body, k * 4);
+                out += k;
+                w[i] = patch;
+                st->patched++;
+                continue;
+            }
+        }
+
         if (in.hazard || in.pcrel == KLX_PC_ADR || in.pcrel == KLX_PC_LITERAL ||
             out + VEN_MAX_INSN > pool_end) { note_refusal(word); st->refused++; continue; }
 
@@ -891,6 +1076,7 @@ int kl_x18_emit(void *code, size_t size, uint64_t code_va,
         st->patched++;
     }
 
+    free(lit);
     if (pool_used) *pool_used = (size_t)((uint8_t *)out - (uint8_t *)pool);
     return 0;
 }

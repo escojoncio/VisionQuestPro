@@ -24,7 +24,7 @@ import Foundation
 
 enum VQPrepare {
     /// Bumped when the conversion changes (a new klepton-ld, a new layout): every cache is redone.
-    static let converterVersion = "kld-2"
+    static let converterVersion = "kld-3"
 
     struct Prepared {
         let tree: URL

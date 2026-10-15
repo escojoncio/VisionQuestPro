@@ -309,11 +309,16 @@ final class VQSettings: ObservableObject {
         let aaKey = game?.aaKey ?? ""
         let aa = VQGameAA.load(key: aaKey)
         let msaaOverride = aa.effectiveMSAA
-        let vpktaa = aa.mode == .auto || aa.mode == .vpktaa
+        let detected = VQGameAA.detected(key: aaKey)
+        // Auto on a game already seen rendering its eyes with MSAA: VPKTAA would be switched
+        // off live anyway, so it is off from the start. That also keeps SpaceWarp storage
+        // unserved (KL_VPKTAA=0): the provider turns AppSW off and the game does not render
+        // a motion-vector pass every frame for nothing (AC Nexus 4x, AoT 2x).
+        let msaaGame = (detected ?? 1) > 1
+        let vpktaa = aa.mode == .vpktaa || (aa.mode == .auto && !msaaGame)
         if aaKey.isEmpty { unsetenv("VQ_GAME_KEY") } else { setenv("VQ_GAME_KEY", aaKey, 1) }
         setenv("KL_AA_MODE", aa.mode.rawValue, 1)
         setenv("VPVK_MSAA", String(msaaOverride), 1)
-        let detected = VQGameAA.detected(key: aaKey)
         c.vpktaa_enabled = vpktaa ? 1 : 0
         c.msaa_override = Int32(msaaOverride)
         c.vpktaa_percent = Float(vpktaaPercent)
