@@ -20,6 +20,20 @@ Objetivo: que ningún juego note diferencia con un Quest 3. Hacerlo en este orde
    el CTS de GLES (dEQP-GLES2/3/31, ya incluido en VK-GL-CTS). Quitar el bloqueo «solo Vulkan» del launcher al terminar.
 7. **Limpieza de muletas de AC** (al cerrar pasos 2 y 4): ver entrada (20).
 Todos estos pasos son OBLIGATORIOS y van en este orden.
+
+## DESPUÉS de los pasos obligatorios — SSAO propio en VPKEngine
+- Pase de oclusión ambiental en pantalla propio, a partir del buffer de profundidad del juego (el mismo que captura
+  VPKTAA), aplicado a la imagen antes de enviarla al compositor. Genérico para todos los juegos.
+- **Toggle en Ajustes** (por juego, desactivado por defecto): un juego que ya trae su propio SSAO/AO no debe recibirlo
+  dos veces. Opcional: detectar AO propio del juego (p. ej. renderer feature SSAO de URP / pases AO conocidos de Unreal)
+  y avisar en la tarjeta del juego.
+- Objetivo: el menor coste en ms posible (VR estéreo, 2 ojos a alta resolución). Pautas: media (o cuarto de)
+  resolución, profundidad reconstruida a lineal una sola vez y compartida con VPKTAA, pocas muestras + ruido azul
+  y acumulación temporal reutilizando la historia/vectores de VPKTAA, desenfoque bilateral separable por profundidad,
+  upsample guiado por profundidad, ambos ojos en un único dispatch (array de capas), solo dentro de la zona nítida del
+  foveado (periferia barata o sin AO). Medir ms GPU por pase en el log.
+- Origen: Attack on Titan VR: Unbreakable (URP 2021.3) no trae el shader SSAO de URP en la build, así que no se puede
+  activar editando sus assets.
 Lo que hace falta del usuario: logs de juegos variados (cada uno destapa huecos distintos); tandas periódicas del
 Vulkan CTS desde la app; el informe de capacidades (vulkaninfo) de un Quest 3 real para comparar con datos exactos
 (vulkan.gpuinfo.org bloquea la descarga automática).
