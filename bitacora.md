@@ -11,7 +11,30 @@ Historial completo: `git log -p bitacora.md` (compactada el 2026-10-14; lo cerra
 - Los cambios de (4) (621d102..6fe05ab) y VPKEngine 1f246f1 están reintroducidos íntegros; la reversión intermedia
   (6476c93, VPKEngine 07c79f3) fue innecesaria.
 
-## EMPEZAR AQUÍ — 2026-10-15 (12): poses por índice de frame (temblor al girar), registros completos — SIN PROBAR
+## EMPEZAR AQUÍ — 2026-10-15 (13): fin de frame asíncrono, pose de render real, geometry para Unity — SIN PROBAR
+- Resultado de (12) (Registros 5/6, log AoT completo 11:52–11:53): temblor al girar sigue; AoT 50–75 fps (pocos a
+  90) con ~7 ms de GPU; compositor sano (cadencia 11,11 ms, 0 negros nuevos); sin gpu.err; VPKTAA off (MSAA 2x).
+  Ring de poses: el hilo principal hace Update(Render,F) DOS veces por frame, la 2.ª DESPUÉS de BeginFrame4(F) en
+  el hilo de render; GetNodePoseState3 vio frameIndex=0 en sus lecturas → el anillo no sirve para las lecturas.
+  AC: el log no llegó (el visor se satura al iniciar AC y hay que reiniciar); capturas AC siguen 100 % magenta.
+  Corrupción del borde derecho en frame 2: no reapareció en esta tanda.
+- `kl_ovrp.c`: el registro del frame sigue la ÚLTIMA lectura de cabeza/ojos (nodos 0,1,2,9, step Render) hecha en
+  el hilo de BeginFrame4 (`g_render_tid`, `g_pend_rr`) entre BeginFrame4 y EndFrame4. Log cada 300 frames:
+  `[ovrp] render-thread pose vs BeginFrame record: worst/mean/… differed` (= error que había antes).
+  `KL_OVRP_RENDER_READ=0` lo desactiva. Si no sale la línea, el hilo de render no lee poses (ver otra vía).
+- `kl_vulkan.c` fin de frame ASÍNCRONO (`KL_VK_FRAME_ASYNC`, def. 1): en vez de vkQueueWaitIdle por frame (CPU y
+  GPU nunca se solapaban), `kl_vulkan_native_submit` con un CB vacío en la cola de VPKEngine y
+  `addCompletedHandler:` (objc_msgSend + bloque C) que avanza el serial; máx. 3 en vuelo (si no, espera como antes).
+  No con VPKTAA inline ni con capturas KL_VK_OUT. Log: `frame end: ASYNC …` una vez. Riesgo a vigilar: overlays
+  muestreados antes de que acabe su copia (parpadeo de capas).
+- VPKEngine `628c3b4`: `VPVK_REPORT_GEOM=1` reporta geometryShader/tessellationShader + límites tipo Adreno.
+  Hipótesis magenta AC: Unity descarta subshaders target 4.6/5.0 o `require geometry` → shader de error. La app la
+  pone en `applyToEnvironment` (juegos) y `VQConformance` la quita. Si un pipeline trae etapa geom/tess real:
+  `vk.err what=stage` en el log.
+- Pendiente: log de AC (se copia como «sesion-anterior» al lanzar el siguiente juego); saturación al iniciar AC
+  (memoria: foot 4,4 GB a 1,5 min en log z9); voces AC «Voice Starvation» (streaming Wwise); HUD AoT.
+
+## 2026-10-15 (12): poses por índice de frame (temblor al girar), registros completos — probado: sigue temblor
 - Resultado de (11) (capturas 11:25–11:29): AoT CON imagen y en español (HUD: juego 55 fps / visor 90 Hz, VPKTAA off);
   AoT log de z7: fps del juego mayormente 90, con caídas a 35–85. AC: capas OVROverlay 100 % magenta (255,0,255)
   en la captura del compositor, incluida la capa 3 (Quad head-locked 1024², «own image (guest wrote it)», escrita por

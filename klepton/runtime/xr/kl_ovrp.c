@@ -2662,6 +2662,13 @@ static klovrp_pose g_render_sample;
 // GetNodePoseState3(Render, F, ...) answers from it, and BeginFrame4(F) records it:
 // picture F and pose F are the same pose by construction. KL_OVRP_FRAME_RING=0
 // restores the shared sample.
+// The thread that calls BeginFrame4 — Unity's render thread — and whether, during the
+// current frame, that thread has read the head/eyes. Its read IS the pose the frame is
+// drawn with (2026-10-15 AoT log: the main thread updates Render twice per frame, the
+// second time AFTER BeginFrame4(F), so a record taken at BeginFrame was not the pose
+// rendered). The frame record follows the render thread's last head/eye read.
+static uint64_t g_render_tid;
+static int g_pend_rr;     // under g_frames.mu: the pending record came from a render-thread read
 #define KLOVRP_FRING 16
 static struct { int valid, frame; klovrp_pose head, hand[2]; } g_fring[KLOVRP_FRING];
 static pthread_mutex_t g_fring_mu = PTHREAD_MUTEX_INITIALIZER;
@@ -3040,6 +3047,9 @@ static uint64_t klovrp_begin_frame_impl(int guest_frame_index) {
     r->serial = s;
     r->stage = -1;
     r->complete = 0;
+    g_pend_rr = 0;
+    { uint64_t tid = 0; pthread_threadid_np(NULL, &tid);
+      __atomic_store_n(&g_render_tid, tid, __ATOMIC_RELEASE); }
     r->submit_ns = klovrp_mono_ns();
     // Unity's own frame counter — the number it picks its stage from.
     g_frames.pending_index = guest_frame_index;
@@ -4186,6 +4196,36 @@ uint64_t klovrp_GetNodePoseState_impl(int step, int node, void *out) {
     klovrp_pose head = klovrp_step_head(step);
     const klovrp_pose *p = &head;
     klovrp_pose hand, eye;
+    static int rr_on = -1;
+    if (rr_on < 0) rr_on = kl_env_on("KL_OVRP_RENDER_READ", 1);
+    if (step == KLOVRP_STEP_RENDER && (node <= 2 || node == 9) && rr_on) {
+        uint64_t tid = 0; pthread_threadid_np(NULL, &tid);
+        if (tid == __atomic_load_n(&g_render_tid, __ATOMIC_ACQUIRE)) {
+            static float worst; static double sum; static unsigned frames, moved;
+            pthread_mutex_lock(&g_frames.mu);
+            kl_ovrp_render_pose *pr = &g_frames.pending;
+            if (pr->serial && !pr->complete) {
+                if (!g_pend_rr) {
+                    klovrp_pose a = { .qx = pr->qx, .qy = pr->qy, .qz = pr->qz, .qw = pr->qw };
+                    float d = klovrp_quat_degrees(&a, &head);
+                    if (d > worst) worst = d;
+                    sum += d; frames++;
+                    if (d > 0.01f) moved++;
+                    if (frames % 300 == 0) {
+                        fprintf(stderr, "  [ovrp] render-thread pose vs BeginFrame record: worst %.2f "
+                                        "deg, mean %.3f deg, %u of 300 frames differed — the record now "
+                                        "follows the render thread's read\n",
+                                (double)worst, sum / 300.0, moved);
+                        worst = 0; sum = 0; moved = 0;
+                    }
+                }
+                pr->px = head.px; pr->py = head.py; pr->pz = head.pz;
+                pr->qx = head.qx; pr->qy = head.qy; pr->qz = head.qz; pr->qw = head.qw;
+                g_pend_rr = 1;
+            }
+            pthread_mutex_unlock(&g_frames.mu);
+        }
+    }
     if (node == 0 || node == 1) {
     // EyeLeft/EyeRight. The head pose displaced by this eye's own offset,
         // rotated into the world by the head's orientation — this pair IS the

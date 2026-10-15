@@ -19,6 +19,8 @@
 #ifdef __APPLE__
 #include <dispatch/dispatch.h>   // the retire queue's delayed pump
 #include <mach/mach.h>   // vm_read_overwrite — read a guest pointer without faulting (klvk_resolve_cell)
+#include <objc/message.h> // addCompletedHandler: on VPKEngine's command buffer (frame-end async)
+#include <objc/runtime.h>
 #endif
 #include <stdio.h>
 #include <time.h>
@@ -3960,6 +3962,43 @@ static void klvk_taa_next_jitter(int stage, int resolving, int hook_on, int gate
     last = j.enabled;
 }
 
+// ---- async frame end (see kl_vulkan_frame_done) ----
+static int klvk_frame_async_on(void) {
+    static int on = -1;
+    if (on < 0) on = kl_env_on("KL_VK_FRAME_ASYNC", 1);
+    return on;
+}
+static void klvk_serial_advance(uint64_t to);
+#ifdef __APPLE__
+static _Atomic unsigned g_async_inflight;
+static void klvk_frame_async_encode(void *mtl_cmdbuf, void *user) {
+    uint64_t v = (uint64_t)(uintptr_t)user;
+    if (!mtl_cmdbuf) return;
+    atomic_fetch_add(&g_async_inflight, 1);
+    void (^done)(void *) = ^(void *cb) {
+        (void)cb;
+        klvk_serial_advance(v);
+        atomic_fetch_sub(&g_async_inflight, 1);
+    };
+    ((void (*)(void *, SEL, void (^)(void *)))objc_msgSend)(
+        mtl_cmdbuf, sel_registerName("addCompletedHandler:"), done);
+}
+#endif
+// 1 when the completion is armed. Bounded: past 3 frames in flight the caller waits as before,
+// so a GPU that falls behind cannot let the guest run arbitrarily far ahead.
+static int klvk_frame_async(uint64_t issued) {
+#ifdef __APPLE__
+    if (atomic_load(&g_async_inflight) >= 3) return 0;
+    if (!kl_vulkan_native_submit(klvk_frame_async_encode, (void *)(uintptr_t)issued)) return 0;
+    static int said;
+    if (!said++) VKI("frame end: ASYNC (no vkQueueWaitIdle; the serial advances when the frame's "
+                     "GPU work completes) — KL_VK_FRAME_ASYNC=0 restores the wait\n");
+    return 1;
+#else
+    (void)issued; return 0;
+#endif
+}
+
 void kl_vulkan_frame_done(int stage) {
     if (!kl_vulkan_guest_active()) return;
     // This frame's number (the serial it stands for), before the depth is filed.
@@ -4059,6 +4098,17 @@ void kl_vulkan_frame_done(int stage) {
     if (committed && !nowait) {
         if (d && d->queue && d->QueueWaitIdle) d->QueueWaitIdle(d->queue);
         klvk_serial_advance(issued);
+    }
+    // ASYNC frame end (default, KL_VK_FRAME_ASYNC=1): instead of vkQueueWaitIdle — which
+    // blocked Unity's render thread until the GPU had finished EVERY frame, so CPU and GPU never
+    // overlapped (AoT 50–75 fps with ~7 ms of GPU work, 2026-10-15) — submit an empty command
+    // buffer on VPKEngine's queue (ordered after the frame, the same door the VPKTAA resolve
+    // uses) and advance the serial from its completion handler. The compositor still only ever
+    // shows a frame whose GPU work is complete; the guest simply keeps going meanwhile.
+    // Not with VPKTAA inline (that path files its own records), and not for the capture runs.
+    if (!committed && !taa_inline && klvk_frame_async_on() && !cap_dir() &&
+        klvk_frame_async(issued)) {
+        committed = 2;   // handled: neither the wait below nor an immediate advance
     }
     if (!committed) {
         if (kl_env_on("KL_VK_FRAME_SYNC", 1) && d && d->queue) {
