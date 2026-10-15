@@ -3033,11 +3033,13 @@ final class KleptonCompositor {
                 // guest -> cleared once to transparent (unwrittenLayerReady), so
                 // uninitialised memory (AC Nexus: pink/purple flashes) never
                 // reaches the display.
-                let t = (ownFirst ? kl_vulkan_layer_mtl_texture(ov.layer_id, ov.stage, Int32(vi), &w, &h) : nil)
-                    ?? kl_vulkan_mtl_for_handle(ov.tex)
-                    ?? ownLayerFallback(ov.layer_id, stage: ov.stage, view: Int32(vi),
-                                        written: ownFirst, w: &w, h: &h)
-                    ?? kl_glfb_layer_mtl_texture(ov.layer_id, ov.stage, &w, &h)
+                var how = "own image (guest wrote it)"
+                var t = ownFirst ? kl_vulkan_layer_mtl_texture(ov.layer_id, ov.stage, Int32(vi), &w, &h) : nil
+                if t == nil { t = kl_vulkan_mtl_for_handle(ov.tex); how = "guest texL \(String(ov.tex, radix: 16))" }
+                if t == nil { t = ownLayerFallback(ov.layer_id, stage: ov.stage, view: Int32(vi),
+                                                   written: ownFirst, w: &w, h: &h); how = "own image (unwritten fallback)" }
+                if t == nil { t = kl_glfb_layer_mtl_texture(ov.layer_id, ov.stage, &w, &h); how = "glfb" }
+                if t != nil { overlaySource[ov.layer_id] = how }
                 if texture == nil, let t { texture = Unmanaged<MTLTexture>
                     .fromOpaque(t).takeUnretainedValue() }
                 var u = kl_overlay_build(&ov, Int32(vi), originFromHead,
@@ -3079,7 +3081,9 @@ final class KleptonCompositor {
                 NSLog("[cp] compositing overlay layer \(ov.layer_id): "
                       + "\(ov.size.0)x\(ov.size.1) m at (\(ov.pose.4), \(ov.pose.5), "
                       + "\(ov.pose.6))"
-                      + (ov.head_locked != 0 ? ", HEAD-LOCKED" : ""))
+                      + (ov.head_locked != 0 ? ", HEAD-LOCKED" : "")
+                      + ", flags 0x\(String(ov.flags, radix: 16)), from \(overlaySource[ov.layer_id] ?? "?")"
+                      + " \(texture.width)x\(texture.height) fmt \(texture.pixelFormat.rawValue)")
             }
         }
         if let hv, !hvDrawn {
@@ -3683,6 +3687,8 @@ final class KleptonCompositor {
     private let overlaysEnabled = klEnvOn("KL_GUEST_OVERLAYS", default: true)
     private var loggedOverlayMiss = Set<Int32>()
     private var loggedOverlayDraw = Set<Int32>()
+    /// Which rung of the texture ladder each overlay was drawn from (logged once per layer).
+    private var overlaySource: [Int32: String] = [:]
     /// Layer images (by texture) the guest never wrote that were cleared once to
     /// transparent before their first composite (unwrittenLayerReady).
     private var clearedUnwritten = Set<ObjectIdentifier>()

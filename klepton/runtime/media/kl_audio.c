@@ -823,6 +823,26 @@ size_t kl_audio_write_src(const void *src, const void *pcm, size_t bytes) {
     g_writes++;
     unsigned long wno = g_writes;
 
+    // Adaptive latency. A real underrun (the reader found the ring empty while
+    // the guest was playing) is heard as a crackle — AC Nexus's Wwise mixer at
+    // 40 ms, 2026-10-15. Each new one raises the fill target by 10 ms, up to
+    // 120 ms, so the ring settles at the depth this guest's scheduling needs
+    // instead of crackling for the whole run. KL_AUDIO_ADAPT=0 keeps it fixed.
+    {
+        static uint32_t seen_under;
+        static int adapt = -1;
+        if (adapt < 0) adapt = kl_env_on("KL_AUDIO_ADAPT", 1);
+        uint32_t u = atomic_load_explicit(&g_underruns, memory_order_relaxed);
+        if (adapt && u != seen_under && g_out_rate > 0) {
+            seen_under = u;
+            size_t step = (size_t)g_out_rate / 100, cap120 = (size_t)g_out_rate * 12 / 100;
+            if (g_target + step <= cap120 && g_target + step < g_cap - 1) {
+                g_target += step;
+                fprintf(stderr, "  [au] underrun #%u -> fill target %.0f ms\n",
+                        u, 1000.0 * (double)g_target / g_out_rate);
+            }
+        }
+    }
     // The target has to be able to hold at least two of these, or the wait
     // below can never be satisfied and every write times out.
     if (g_target < frames * 2) {
@@ -954,9 +974,11 @@ size_t kl_audio_write_src(const void *src, const void *pcm, size_t bytes) {
     // not loaded, no events) — a different bug from an output that never opened.
     if ((wno % 1000) == 1) {
         fprintf(stderr, "  [au] guest PCM so far: peak %d/32767, %lu of %lu "
-                        "buffers all-zero — %s\n",
+                        "buffers all-zero — %s; underruns %u, target %.0f ms\n",
                 g_peak, g_silent_buffers, wno,
-                g_peak ? "producing audio" : "ONLY SILENCE so far");
+                g_peak ? "producing audio" : "ONLY SILENCE so far",
+                atomic_load(&g_underruns),
+                g_out_rate ? 1000.0 * (double)g_target / g_out_rate : 0.0);
     }
     pthread_mutex_unlock(&g_wlock);
     pthread_mutex_unlock(&st->mu);

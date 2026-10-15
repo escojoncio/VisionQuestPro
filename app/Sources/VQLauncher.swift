@@ -269,6 +269,12 @@ struct VQSettingsView: View {
                         .font(.caption)
                     VQVPKTAATuning(settings: settings)
                     Toggle(VQL("Idioma del sistema si el juego lo incluye (si no, inglés)", "System language if the game ships it (else English)"), isOn: $settings.systemLanguage)
+                    Picker(VQL("Idioma del juego", "Game language"), selection: $settings.gameLanguage) {
+                        Text(VQL("Automático (sistema)", "Automatic (system)")).tag("auto")
+                        Text(VQL("Español (España)", "Spanish (Spain)")).tag("es_ES")
+                        Text(VQL("Español (México)", "Spanish (Mexico)")).tag("es_MX")
+                        Text(VQL("Inglés", "English")).tag("en_US")
+                    }
                     Picker(VQL("Postura", "Posture"), selection: $settings.posture) {
                         Text(VQL("Automática", "Automatic")).tag("auto")
                         Text(VQL("Sentado", "Seated")).tag("seated")

@@ -1355,7 +1355,7 @@ void kl_pthread_boost_qos(uint64_t threadid) {
 #endif
 }
 
-typedef struct { void *(*fn)(void *); void *arg; } tramp;
+typedef struct { void *(*fn)(void *); void *arg; int rt; } tramp;
 static void *thread_tramp(void *p) {
     tramp t = *(tramp *)p; free(p);
     kl_thread_init();
@@ -1379,6 +1379,22 @@ static void *thread_tramp(void *p) {
                     q ? "USER_INITIATED" : "default", q);
         }
         if (q) pthread_set_qos_class_self_np(QOS_CLASS_USER_INITIATED, 0);
+        // A guest thread created with SCHED_FIFO/SCHED_RR asked for real-time
+        // scheduling: Wwise's audio/stream threads (AC Nexus: 334 "Voice
+        // Starvation" at default QoS — the stream I/O thread fell behind), CRI's
+        // ADX2 server (AoT). Darwin has no SCHED_FIFO for apps; the class it
+        // schedules ahead of the compositor's default work is USER_INTERACTIVE.
+        // KL_GUEST_RT_QOS=0 restores default.
+        static int rtq = -1;
+        if (rtq < 0) rtq = kl_env_on("KL_GUEST_RT_QOS", 1);
+        if (rtq && t.rt) {
+            pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
+            static int said;
+            if (said++ < 8)
+                fprintf(stderr, "  [thr] guest thread entry %p asked for real-time "
+                                "scheduling (policy %d) -> USER_INTERACTIVE QoS\n",
+                        (void *)t.fn, t.rt);
+        }
     }
 #endif
     thread_register(pthread_self());
@@ -1430,6 +1446,7 @@ int klb_pthread_create(pthread_t *out, const bionic_attr *ga,
     }
     tramp *t = malloc(sizeof *t);
     t->fn = fn; t->arg = arg;
+    t->rt = (ga && (ga->policy == 1 || ga->policy == 2)) ? ga->policy : 0;   // SCHED_FIFO / SCHED_RR
     int rc = px(pthread_create(out, &da, thread_tramp, t));
     pthread_attr_destroy(&da);
     if (rc) free(t);
@@ -1672,7 +1689,17 @@ int klb_pthread_getschedparam(void *t, int *policy, void *param) {
     return 0;
 }
 int klb_pthread_setschedparam(void *t, int policy, const void *param) {
-    (void)t; (void)policy; (void)param;
+    (void)param;
+    // Real-time policy asked for an existing thread (the Android audio idiom):
+    // same mapping as at creation, USER_INTERACTIVE QoS, through the boost door.
+#ifdef __APPLE__
+    if ((policy == 1 || policy == 2) && t && kl_env_on("KL_GUEST_RT_QOS", 1)) {
+        uint64_t id = 0;
+        if (pthread_threadid_np((pthread_t)t, &id) == 0 && id) kl_pthread_boost_qos(id);
+    }
+#else
+    (void)t; (void)policy;
+#endif
     return 0;
 }
 int klb_pthread_setschedprio(void *t, int prio) {

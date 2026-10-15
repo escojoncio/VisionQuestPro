@@ -549,8 +549,40 @@ final class KleptonControllers {
             m.preferredSystemGestureState = .disabled
         }
         if !capturedLogged { capturedLogged = true
-            NSLog("[input] PS buttons captured (system gesture disabled)") }
+            NSLog("[input] PS buttons captured (system gesture disabled)")
+            probeHomeButtonAPI(c) }
         NSLog("[input] \(c.vendorName ?? "?") system gestures: \(names.sorted())")
+    }
+
+    /// The PS button is not among the Sense elements visionOS hands an app (the census lists
+    /// only "Button Menu"), so it cannot be disabled like the others. Whatever this OS offers
+    /// for taking the Home button lives in the runtime, not in the XROS 26.5 SDK we build
+    /// against: list every selector on the GameController classes that mentions home/system
+    /// gesture/reserved, so the next log says exactly what to call.
+    static func probeHomeButtonAPI(_ c: GCController) {
+        let classes = ["GCController", "GCControllerElement", "GCControllerButtonInput",
+                       "GCPhysicalInputProfile", "GCDevicePhysicalInput", "GCExtendedGamepad",
+                       "GCEventInteraction", "GCControllerLiveInput"]
+        let keys = ["home", "system", "gesture", "reserved", "inapp", "button"]
+        for name in classes {
+            guard let cls: AnyClass = NSClassFromString(name) else { continue }
+            var found: [String] = []
+            for meta in [false, true] {
+                guard let target: AnyClass = meta ? object_getClass(cls) : cls else { continue }
+                var n: UInt32 = 0
+                guard let list = class_copyMethodList(target, &n) else { continue }
+                for i in 0..<Int(n) {
+                    let sel = NSStringFromSelector(method_getName(list[i]))
+                    let l = sel.lowercased()
+                    if keys.contains(where: { l.contains($0) }) && !l.hasPrefix("_") || l.contains("homebutton") {
+                        found.append((meta ? "+" : "-") + sel)
+                    }
+                }
+                free(list)
+            }
+            NSLog("[input] API probe \(name): \(found.sorted().joined(separator: " "))")
+        }
+        NSLog("[input] API probe GCControllerHomeButtonSetting class: \(NSClassFromString("GCControllerHomeButtonSetting") != nil)")
     }
 
     /// Right PS hold timer: >= 0.75 s fires one recenter per hold.
