@@ -6078,7 +6078,7 @@ static uint32_t klvk_sample_mask(void) {
     if (v < 0) {
         extern int kl_is_ac_nexus(void);
         extern int kl_ac_nexus_known(void);
-        int r = kl_env_int("KL_VK_MAX_SAMPLES", kl_is_ac_nexus() ? 2 : 0);
+        int r = kl_env_int("KL_VK_MAX_SAMPLES", 0) /* AC back to 4x: transient MSAA is memoryless in VPKEngine */;
         if (!kl_ac_nexus_known()) return r == 1 ? 0x1u : r == 2 ? 0x3u : r == 4 ? 0x7u : ~0u;
         v = r;
     }

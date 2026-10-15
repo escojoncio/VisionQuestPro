@@ -18,7 +18,18 @@ Lo que hace falta del usuario: logs de juegos variados (cada uno destapa huecos 
 Vulkan CTS desde la app; el informe de capacidades (vulkaninfo) de un Quest 3 real para comparar con datos exactos
 (vulkan.gpuinfo.org bloquea la descarga automática).
 
-## EMPEZAR AQUÍ — 2026-10-15 (19): paso 1 (GPU = Adreno 740) iniciado — SIN PUSH, SIN BUILD
+## EMPEZAR AQUÍ — 2026-10-16 (20): perfil Adreno bloque 2 + AC a 4x — SIN BUILD (pendiente visto bueno)
+- VPKEngine (push): `1495086` sin BC, ASTC no cuadrados (`FormatInfo::blockHeight`), R4G4B4A4=ABGR4, sin
+  EXT_metal_objects visible; `1e6d988` shaderInt16 (16 bits en registros de 32), shaderDrawParameters (buffer 29
+  `VpDrawParams`), maintenance2/3, storage_buffer_storage_class, driver_properties QUALCOMM, Vulkan11/12/13 structs,
+  extensiones 1.2/1.3 fuera de VPVK_EXTRA_EXTENSIONS (menos EXT_multi_draw); `kTranslatorVersion`=8 (retraduce
+  recetas); `f836aeb` host_query_reset; `1e483b2` arreglos de revisión (baseVertex no indexado, spec int16, ext16).
+- NO declarado (el traductor no lo cumple): samplerYcbcrConversion, variablePointers, 16/8-bit storage, apiVersion 1.3
+  (faltan maintenance4, BDA, memory model…), B4G4R4A4. MSL nuevo sin compilar en Apple: vigilar errores de pipeline.
+- VisionQuestPro: AC vuelve a MSAA 4x (`KL_VK_MAX_SAMPLES` def. 0 para todos); ojo 3840 de AC solo si se pide 2x
+  explícito (kl_ovrp.c). Vigilar memoria en AC.
+
+## 2026-10-15 (19): paso 1 (GPU = Adreno 740) iniciado
 - VPKEngine, 4 commits locales (pendientes de push): `ced6226` memoria LAZILY_ALLOCATED sin RAM (tipo 3 sin host,
   `DeviceMemory::lazy`, commitment 0; la ruta MSAA memoryless/MultisampleResolve ya existía en metal2); `ad18998`
   STORAGE_IMAGE_ATOMIC/STORAGE_TEXEL_BUFFER_ATOMIC en R32_UINT/SINT (`MTLTextureUsageShaderAtomic`, sin probar en

@@ -1502,7 +1502,8 @@ void kl_ovrp_set_eye_texture_size(int w, int h) {
         extern int kl_is_ac_nexus(void);
         const char *ms = getenv("KL_VK_MAX_SAMPLES");
         const char *vm = getenv("VPVK_MSAA");
-        int samples_ok = !ms || (atoi(ms) >= 1 && atoi(ms) <= 2);
+        // 2x is no longer the AC default (4x, memoryless): the larger eye only when 2x is asked for.
+        int samples_ok = ms && atoi(ms) >= 1 && atoi(ms) <= 2;
         int msaa_ok = !vm || atoi(vm) <= 2;
         if (kl_is_ac_nexus() && samples_ok && msaa_ok && kl_ovrp_stage_count() <= 2)
             cap_dflt = 3840;
