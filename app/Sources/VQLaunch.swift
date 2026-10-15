@@ -107,9 +107,6 @@ final class VQSettings: ObservableObject {
     @Published var perfDiag: Bool { didSet { save() } }
     /// "Diagnóstico de ficheros": every guest file operation and its result in the log (KL_TRACE_FS=1).
     @Published var fsDiag: Bool { didSet { save() } }
-    /// Pose the timewarp record of a frame carries (KL_OVRP_POSE_LAST): true = the frame's LAST
-    /// Update(Render) sample (the one Unity draws with), false = its first (builds before 14).
-    @Published var poseLastSample: Bool { didSet { save() } }
     @Published var renderScale: Double { didSet { save() } }    // 0.5...1.5
     // Resolution base: false = the game's original (Quest 3 budget), true = Vision Pro's request.
     /// "original" (Quest 3 budget) | "compositor" (visionOS drawable) | "native" (AVP panel density, heaviest).
@@ -155,7 +152,6 @@ final class VQSettings: ObservableObject {
             ?? ((d.object(forKey: "vq.aniso16") as? Bool) == false ? 0 : 16)
         perfDiag = d.object(forKey: "vq.perfDiag") as? Bool ?? false
         fsDiag = d.object(forKey: "vq.fsDiag") as? Bool ?? false
-        poseLastSample = d.object(forKey: "vq.poseLast") as? Bool ?? true
         renderScale = d.object(forKey: "vq.renderScale") as? Double ?? 1
         if let rb = d.string(forKey: "vq.resBase"), ["original", "compositor", "native"].contains(rb) {
             resolutionBase = rb
@@ -209,7 +205,6 @@ final class VQSettings: ObservableObject {
         d.set(anisoLevel, forKey: "vq.anisoLevel")
         d.set(perfDiag, forKey: "vq.perfDiag")
         d.set(fsDiag, forKey: "vq.fsDiag")
-        d.set(poseLastSample, forKey: "vq.poseLast")
         d.set(renderScale, forKey: "vq.renderScale")
         d.set(resolutionBase, forKey: "vq.resBase")
         d.set(showFps, forKey: "vq.showFps")
@@ -339,7 +334,7 @@ final class VQSettings: ObservableObject {
         // Per-pass GPU timing in VPKEngine (gpu.passtime lines, one rendering frame every 90).
         if perfDiag { setenv("VP_PASS_TIMING", "90", 1) } else { unsetenv("VP_PASS_TIMING") }
         if fsDiag { setenv("KL_TRACE_FS", "1", 1) } else { unsetenv("KL_TRACE_FS") }
-        setenv("KL_OVRP_POSE_LAST", poseLastSample ? "1" : "0", 1)
+        unsetenv("KL_OVRP_POSE_LAST")  // build 14's "last sample" variant: measured worse, off
         // Game MSAA forced to 1x ONLY in the explicit VPKTAA mode; auto keeps a game's MSAA
         // (and turns VPKTAA off for it, live, once VPKEngine sees the eye pass).
         c.force_single_sample = aa.mode == .vpktaa ? 1 : 0
@@ -365,7 +360,7 @@ final class VQSettings: ObservableObject {
         setenv("VPVK_REPORT_GEOM", "1", 1)
         unsetenv("VPVK_TAA_JITTER")  // set to 0 by the conformance runs only (VQConformance.neutralGraphics)
         let detText = detected.map { "\($0)x" } ?? "no"
-        VQLog.log("Gráficos: foveado Quest siempre apagado; foveado propio \(foveation), AA: modo \(aa.mode.rawValue), MSAA override \(msaaOverride), detectado \(detText) (juego \(aaKey.isEmpty ? "?" : aaKey)\(aa.stored ? "" : ", por defecto")), VPKTAA permitido \(vpktaa) \(Int(vpktaaPercent)) % nitidez \(vpktaaSharpness), forzar 1x \(c.force_single_sample != 0), anisotrópico x\(anisoLevel), diagnóstico de rendimiento \(perfDiag), diagnóstico de ficheros \(fsDiag), pose del frame \(poseLastSample ? "última" : "primera"), escala \(renderScale), ASW apagado \(aswDisabled), perfil Quest 3 \(quest3Profile), FPS en pantalla \(showFps)")
+        VQLog.log("Gráficos: foveado Quest siempre apagado; foveado propio \(foveation), AA: modo \(aa.mode.rawValue), MSAA override \(msaaOverride), detectado \(detText) (juego \(aaKey.isEmpty ? "?" : aaKey)\(aa.stored ? "" : ", por defecto")), VPKTAA permitido \(vpktaa) \(Int(vpktaaPercent)) % nitidez \(vpktaaSharpness), forzar 1x \(c.force_single_sample != 0), anisotrópico x\(anisoLevel), diagnóstico de rendimiento \(perfDiag), diagnóstico de ficheros \(fsDiag), escala \(renderScale), ASW apagado \(aswDisabled), perfil Quest 3 \(quest3Profile), FPS en pantalla \(showFps)")
         VQLog.log("Ajustes: sin red \(offline), log del juego \(guestLog), vigilante \(Int(watchdogSeconds)) s")
     }
 }

@@ -2689,20 +2689,27 @@ static int klovrp_fring_on(void) {
     if (on < 0) on = kl_env_on("KL_OVRP_FRAME_RING", 1);
     return on;
 }
-// Which Update(Render, F) sample stands for frame F (2026-10-15 (14), AoT log 12:17): the
-// main thread calls Update(Render, F) TWICE — at the top of the frame and again at
-// BeforeRender, after BeginFrame4(F) — and Unity's camera takes the BeforeRender one
-// (the input subsystem's late update). The real OVRPlugin's EndFrame also submits the
-// newest tracking state for that frame index. Keeping the FIRST sample (builds 12/13)
-// filed a record a few ms older than the picture: an error proportional to head speed,
-// i.e. the shake when turning. 1 (default) = the last sample of the frame wins and
-// EndFrame4(F) re-files the record with it; 0 = the first sample (previous behaviour).
-// The app sets it (Ajustes > Diagnóstico, "Pose del frame").
+// Which Update(Render, F) sample stands for frame F. The main thread calls
+// Update(Render, F) TWICE — at the top of the frame and again after BeginFrame4(F).
+// Build 14 (2026-10-15) took the LAST one and re-filed the record with it at EndFrame:
+// MEASURED WORSE on the headset (AoT 12:44, "the eyes do not even line up when turning"),
+// so Unity renders with the FIRST sample (the display provider reads the eye poses right
+// after that first Update). 0 (default) = first sample, and every later Render read of
+// the frame — any thread, any frameIndex — answers that same sample (klovrp_Update2,
+// klovrp_step_head). KL_OVRP_POSE_LAST=1 keeps the measured-worse variant for A/B only.
 static int klovrp_pose_last(void) {
     static int on = -1;
-    if (on < 0) on = kl_env_on("KL_OVRP_POSE_LAST", 1);
+    if (on < 0) on = kl_env_on("KL_OVRP_POSE_LAST", 0);
     return on;
 }
+// The newest pinned frame: what a Render read answers when it names no live frame index
+// (frameIndex 0 from C#, a read before the first frame, a read from another thread). Before
+// (builds <= 13) such a read fell through to g_step_head[0], which the SECOND Update of the
+// frame refreshed with a new tracker sample — so the same guest frame was answered two
+// different head poses depending on who asked (2026-10-15 (15)).
+static int g_fring_newest = -1;
+static uint64_t g_update_tid;   // the thread that pins frames (Unity's main thread)
+static void klovrp_read_census_report(void);
 // Files the sample for `frame`. Returns 1 if it was newly pinned, 2 if an existing one
 // was replaced by this newer sample (KL_OVRP_POSE_LAST), 0 if kept / ring unused.
 static int klovrp_fring_pin(int frame, const klovrp_pose *h, const klovrp_pose *l,
@@ -2745,6 +2752,19 @@ static uint64_t klovrp_Update2(int step, int frame_index, double prediction) {
     klovrp_pose r = klovrp_pose_read(&g_hand_pose[1]);
     if (ix == 0) {
         int fresh = klovrp_fring_pin(frame_index, &h, &l, &r);
+        if (fresh) {
+            if (frame_index > __atomic_load_n(&g_fring_newest, __ATOMIC_ACQUIRE))
+                __atomic_store_n(&g_fring_newest, frame_index, __ATOMIC_RELEASE);
+            uint64_t tid = 0; pthread_threadid_np(NULL, &tid);
+            __atomic_store_n(&g_update_tid, tid, __ATOMIC_RELEASE);
+            klovrp_read_census_report();
+        }
+        // Already pinned (the frame's second Update): the frame keeps its ONE pose — the
+        // step sample below is the pinned one, not this newer tracker read.
+        if (!fresh && klovrp_fring_get(frame_index, 0, &h)) {
+            (void)klovrp_fring_get(frame_index, 1, &l);
+            (void)klovrp_fring_get(frame_index, 2, &r);
+        }
         static unsigned said;
         if (said < 24) {
             said++;
@@ -2812,7 +2832,8 @@ static klovrp_pose klovrp_step_head(int step) {
     klovrp_pose h = __atomic_load_n(&g_step_valid[ix], __ATOMIC_ACQUIRE)
                     ? klovrp_seq_read(&g_step_head[ix], &g_step_seq)
                     : klovrp_head();
-    if (ix == 0) (void)klovrp_fring_get(t_req_frame, 0, &h);
+    if (ix == 0 && !klovrp_fring_get(t_req_frame, 0, &h))
+        (void)klovrp_fring_get(__atomic_load_n(&g_fring_newest, __ATOMIC_ACQUIRE), 0, &h);
     // OVRPlugin's read: into the guest's tracking space (see
     // kl_ovrp_guest_origin_y). The stored sample stays in display space.
     __atomic_store_n(&g_ovrp_space_used, 1, __ATOMIC_RELEASE);
@@ -2896,7 +2917,8 @@ static klovrp_pose klovrp_step_hand(int step, int hand) {
         p = klovrp_seq_read(&g_step_hand[ix][hand], &g_step_seq);
     else
         p = klovrp_hand(hand);
-    if (ix == 0) (void)klovrp_fring_get(t_req_frame, 1 + hand, &p);
+    if (ix == 0 && !klovrp_fring_get(t_req_frame, 1 + hand, &p))
+        (void)klovrp_fring_get(__atomic_load_n(&g_fring_newest, __ATOMIC_ACQUIRE), 1 + hand, &p);
     __atomic_store_n(&g_ovrp_space_used, 1, __ATOMIC_RELEASE);
     p.py -= klovrp_guest_origin_y();      // guest tracking space, as the head
     // Here and not in klovrp_hand: this is the OVRPlugin guest's read.
@@ -3020,6 +3042,7 @@ static uint64_t klovrp_begin_frame_impl(int guest_frame_index) {
         pthread_mutex_lock(&g_fring_mu);
         memset(g_fring, 0, sizeof g_fring);
         pthread_mutex_unlock(&g_fring_mu);
+        __atomic_store_n(&g_fring_newest, -1, __ATOMIC_RELEASE);
         __atomic_store_n(&g_fring_begin, guest_frame_index, __ATOMIC_RELEASE);
     } else if (guest_frame_index > __atomic_load_n(&g_fring_begin, __ATOMIC_ACQUIRE)) {
         __atomic_store_n(&g_fring_begin, guest_frame_index, __ATOMIC_RELEASE);
@@ -3028,7 +3051,24 @@ static uint64_t klovrp_begin_frame_impl(int guest_frame_index) {
     klovrp_pose h = klovrp_head();
     if (__atomic_load_n(&g_saw_update2, __ATOMIC_ACQUIRE)) {
         // This frame's pinned sample when there is one: exactly what every Render read
-        // for this frame index answered (see g_fring).
+        // for this frame index answered (see g_fring). Not pinned yet (BeginFrame before
+        // any Update of this index): pin the current pose now, so the record and every
+        // later read of the frame still agree.
+        {
+            klovrp_pose probe;
+            if (!klovrp_fring_get(guest_frame_index, 0, &probe)) {
+                klovrp_pose ph = klovrp_pose_read(&g_head_pose);
+                if (!__atomic_load_n(&g_head_set, __ATOMIC_ACQUIRE)) ph.py = klovrp_eye_height();
+                klovrp_pose pl = klovrp_pose_read(&g_hand_pose[0]), pr = klovrp_pose_read(&g_hand_pose[1]);
+                if (klovrp_fring_pin(guest_frame_index, &ph, &pl, &pr) == 1) {
+                    if (guest_frame_index > __atomic_load_n(&g_fring_newest, __ATOMIC_ACQUIRE))
+                        __atomic_store_n(&g_fring_newest, guest_frame_index, __ATOMIC_RELEASE);
+                    static unsigned said; if (said++ < 4)
+                        fprintf(stderr, "  [ovrp] BeginFrame4 %d before any Update(Render) of it — pinned here\n",
+                                guest_frame_index);
+                }
+            }
+        }
         t_req_frame = guest_frame_index;
         h = klovrp_step_head(KLOVRP_STEP_RENDER);
         t_req_frame = -1;
@@ -4398,7 +4438,54 @@ uint64_t klovrp_GetNodePoseState_impl(int step, int node, void *out) {
     return OVRP_SUCCESS;
 }
 
-    // The 1.40 wrapper's pose query — ovrp_GetNodePoseState3. This is NOT a
+    // Census of the guest's Render-step pose reads (2026-10-15 (15)): which thread asks, which
+// frame index it names relative to the newest pinned frame, whether the render thread is
+// inside BeginFrame4..EndFrame4 at the time, and — the number that matters — how far the
+// HEAD pose answered is from the pinned pose of the newest frame (must be 0.00 when every
+// read of a frame is served one pose). Printed every 300 pinned frames as one line.
+static struct { unsigned n, main_thr, render_thr, other_thr, idx_same, idx_next, idx_prev, idx_zero,
+                idx_other, in_frame, head, hand; float worst; } g_rc;
+static void klovrp_read_census(int frame_index, int node, const void *out) {
+    uint64_t tid = 0; pthread_threadid_np(NULL, &tid);
+    int newest = __atomic_load_n(&g_fring_newest, __ATOMIC_ACQUIRE);
+    g_rc.n++;
+    if (tid == __atomic_load_n(&g_update_tid, __ATOMIC_ACQUIRE)) g_rc.main_thr++;
+    else if (tid == __atomic_load_n(&g_render_tid, __ATOMIC_ACQUIRE)) g_rc.render_thr++;
+    else g_rc.other_thr++;
+    if (frame_index == newest) g_rc.idx_same++;
+    else if (frame_index == newest + 1) g_rc.idx_next++;
+    else if (frame_index == newest - 1) g_rc.idx_prev++;
+    else if (frame_index == 0) g_rc.idx_zero++;
+    else g_rc.idx_other++;
+    pthread_mutex_lock(&g_frames.mu);
+    if (g_frames.pending.serial && !g_frames.pending.complete) g_rc.in_frame++;
+    pthread_mutex_unlock(&g_frames.mu);
+    if (node == 2 || node == 9) {
+        g_rc.head++;
+        klovrp_pose pinned;
+        // Against the frame the read NAMED when that one is pinned (a render-thread read of
+        // F-1 while F is already pinned is correct), else against the newest.
+        if (klovrp_fring_get(frame_index, 0, &pinned) || klovrp_fring_get(newest, 0, &pinned)) {
+            const float *f = out;
+            klovrp_pose a = { .qx = f[0], .qy = f[1], .qz = f[2], .qw = f[3] };
+            float d = klovrp_quat_degrees(&a, &pinned);
+            if (d > g_rc.worst) g_rc.worst = d;
+        }
+    } else if (node == 3 || node == 4) g_rc.hand++;
+}
+static void klovrp_read_census_report(void) {
+    static unsigned frames;
+    if (++frames % 300) return;
+    fprintf(stderr, "  [ovrp] Render reads over 300 frames: %u (thread main %u / render %u / other %u; "
+                    "frameIndex = newest %u, +1 %u, -1 %u, 0 %u, other %u; inside BeginFrame..EndFrame %u; "
+                    "head/eye %u, hands %u) — answered head vs pinned pose worst %.2f deg\n",
+            g_rc.n, g_rc.main_thr, g_rc.render_thr, g_rc.other_thr, g_rc.idx_same, g_rc.idx_next,
+            g_rc.idx_prev, g_rc.idx_zero, g_rc.idx_other, g_rc.in_frame, g_rc.head, g_rc.hand,
+            (double)g_rc.worst);
+    memset(&g_rc, 0, sizeof g_rc);
+}
+
+// The 1.40 wrapper's pose query — ovrp_GetNodePoseState3. This is NOT a
 // renamed alias of the un-numbered form: the real plugin (0x16f680) reads its
 // out pointer from x3, and the wrapper (OculusSystem::GetNodePoseState, a
 // MEMBER function, this in x0) hard-codes w0 = -1 before the call — its own
@@ -4436,6 +4523,7 @@ static uint64_t klovrp_GetNodePoseState3(int a, int b, int c, void *out) {
     t_req_frame = (a == KLOVRP_STEP_RENDER) ? b : -1;
     uint64_t res = klovrp_GetNodePoseState_impl(a, c, out);
     t_req_frame = -1;
+    if (a == KLOVRP_STEP_RENDER) klovrp_read_census(b, c, out);
     return res;
 }
 
