@@ -88,9 +88,21 @@ enum VQLog {
         return dest
     }
 
+    nonisolated(unsafe) private static var gameLaunched = false
+    private static let previousSessionLock = NSLock()
+
     /// At launch: the previous session's logs (guest log, crash report) go to QUEST/Registros once,
     /// so a session that ended in a crash can be read from the Files app.
-    static func savePreviousSessionToQuest() {
+    /// `atStartup`: the delayed call from the launcher's init. It does nothing once a game has been
+    /// launched in this process — by then the boot log is that game's, newer than the saved date,
+    /// and was copied a few seconds in (2026-10-15 12:19:03: AC's first 4 s filed as
+    /// "sesion-anterior"). Launching a game copies the previous one first, as before.
+    static func savePreviousSessionToQuest(atStartup: Bool = false) {
+        previousSessionLock.lock()
+        let skip = atStartup && gameLaunched
+        if !atStartup { gameLaunched = true }
+        previousSessionLock.unlock()
+        if skip { return }
         let key = "vq.lastSavedBootLogDate"
         guard let date = (try? FileManager.default.attributesOfItem(atPath: bootLog.path))?[.modificationDate] as? Date
         else { return }

@@ -4979,6 +4979,89 @@ static void kl_pipe_report(const char *kind, unsigned n, double dt_ms) {
             g_pipe_gfx, g_pipe_comp, tot, (double)g_pipe_ns / 1e9, kind, n, dt_ms);
     }
 }
+// Constant-magenta fragment shaders (2026-10-15 (14), AC Nexus: every OVROverlay source
+// texture is 100 % (255,0,255)). Unity's error shader returns fixed4(1,0,1,1); a fragment
+// module whose SPIR-V holds that constant vec4, and the pipelines built on it, prove that
+// Unity replaced an unsupported shader (and say how many pipelines) — or rule it out.
+#define KLVK_MAGENTA_MAX 64
+static VkShaderModule g_magenta_mod[KLVK_MAGENTA_MAX];
+static int g_magenta_n;
+static pthread_mutex_t g_magenta_mu = PTHREAD_MUTEX_INITIALIZER;
+static int klvk_spirv_const_magenta_fs(const uint32_t *w, size_t n) {
+    if (n < 5 || w[0] != 0x07230203u || w[3] == 0 || w[3] > (1u << 22)) return 0;
+    uint32_t bound = w[3];
+    uint8_t *k = calloc(bound, 1);   // 1 f32 type, 2 vec4 f32 type, 3 const 1.0, 4 const 0.0
+    if (!k) return 0;
+    int frag = 0, found = 0;
+    for (size_t i = 5; i < n; ) {
+        uint32_t wc = w[i] >> 16, op = w[i] & 0xffffu;
+        if (wc == 0 || i + wc > n) break;
+        const uint32_t *a = w + i + 1;
+        if (op == 15 && wc >= 3 && a[0] == 4) frag = 1;                          // OpEntryPoint Fragment
+        else if (op == 22 && wc >= 3 && a[0] < bound && a[1] == 32) k[a[0]] = 1;  // OpTypeFloat 32
+        else if (op == 23 && wc >= 4 && a[0] < bound && a[1] < bound && k[a[1]] == 1 && a[2] == 4)
+            k[a[0]] = 2;                                                          // OpTypeVector f32 x4
+        else if (op == 43 && wc >= 4 && a[0] < bound && a[1] < bound && k[a[0]] == 1) {
+            if (a[2] == 0x3f800000u) k[a[1]] = 3; else if (a[2] == 0) k[a[1]] = 4;  // OpConstant
+        } else if (op == 44 && wc == 7 && a[0] < bound && k[a[0]] == 2) {         // OpConstantComposite
+            int ok = 1;
+            for (int c = 0; c < 4; c++) if (a[2 + c] >= bound) ok = 0;
+            if (ok && k[a[2]] == 3 && k[a[3]] == 4 && k[a[4]] == 3 && k[a[5]] == 3) found = 1;
+        }
+        i += wc;
+    }
+    free(k);
+    return frag && found;
+}
+static void klvk_note_magenta_module(const VkShaderModuleCreateInfo *ci, VkShaderModule m) {
+    if (!ci || !ci->pCode || (ci->codeSize & 3u) || !m) return;
+    int magenta = klvk_spirv_const_magenta_fs(ci->pCode, ci->codeSize / 4);
+    // vkDestroyShaderModule is not hooked and handles are reused: every new module either
+    // (re)enters the set or drops a stale entry carrying the same handle.
+    int idx = -1;
+    pthread_mutex_lock(&g_magenta_mu);
+    int n = g_magenta_n, at = -1;
+    for (int i = 0; i < n; i++) if (g_magenta_mod[i] == m) { at = i; break; }
+    if (!magenta && at >= 0) {
+        g_magenta_mod[at] = g_magenta_mod[n - 1];
+        __atomic_store_n(&g_magenta_n, n - 1, __ATOMIC_RELEASE);
+    } else if (magenta && at < 0) {
+        if (n >= KLVK_MAGENTA_MAX) { memmove(g_magenta_mod, g_magenta_mod + 1, (size_t)(n - 1) * sizeof *g_magenta_mod); n--; }
+        g_magenta_mod[n] = m;
+        __atomic_store_n(&g_magenta_n, n + 1, __ATOMIC_RELEASE);
+        static unsigned seen; idx = (int)++seen;
+    }
+    pthread_mutex_unlock(&g_magenta_mu);
+    if (idx > 0 && idx <= 16)
+        VKI("[magenta] fragment module %p returns the constant (1,0,1,1) — Unity's error "
+            "shader or an equivalent (%zu SPIR-V words, #%d)\n", (void *)m, ci->codeSize / 4, idx);
+}
+static void klvk_note_magenta_pipelines(uint32_t n, const VkGraphicsPipelineCreateInfo *ci,
+                                        const VkPipeline *out) {
+    if (!__atomic_load_n(&g_magenta_n, __ATOMIC_ACQUIRE) || !ci || !out) return;
+    static unsigned said, total;
+    for (uint32_t i = 0; i < n; i++) {
+        for (uint32_t s = 0; s < ci[i].stageCount && ci[i].pStages; s++) {
+            const VkPipelineShaderStageCreateInfo *st = &ci[i].pStages[s];
+            if (st->stage != VK_SHADER_STAGE_FRAGMENT_BIT) continue;
+            int hit = 0;
+            pthread_mutex_lock(&g_magenta_mu);
+            for (int m = 0; m < g_magenta_n && !hit; m++) hit = g_magenta_mod[m] == st->module;
+            pthread_mutex_unlock(&g_magenta_mu);
+            if (!hit) continue;
+            unsigned t = __atomic_add_fetch(&total, 1, __ATOMIC_RELAXED);
+            if (__atomic_fetch_add(&said, 1, __ATOMIC_RELAXED) < 16) {
+                VKI("[magenta] pipeline %p uses that fragment module (renderPass %p subpass %u, "
+                    "%u colour attachment(s), %u samples) — %u such pipeline(s) so far\n",
+                    (void *)out[i], (void *)ci[i].renderPass, ci[i].subpass,
+                    ci[i].pColorBlendState ? ci[i].pColorBlendState->attachmentCount : 0,
+                    ci[i].pMultisampleState ? (unsigned)ci[i].pMultisampleState->rasterizationSamples : 0,
+                    t);
+            }
+        }
+    }
+}
+
 static VkResult VKAPI_CALL klvk_CreateGraphicsPipelines(VkDevice dev,
         VkPipelineCache cache, uint32_t n, const VkGraphicsPipelineCreateInfo *ci,
         const VkAllocationCallbacks *alloc, VkPipeline *out) {
@@ -5062,6 +5145,7 @@ static VkResult VKAPI_CALL klvk_CreateGraphicsPipelines(VkDevice dev,
             "geometry)\n", fixed); } }
     g_pipe_gfx += n;
     kl_pipe_report("gfx", n, kl_pipe_ms() - t0);
+    if (r == VK_SUCCESS) klvk_note_magenta_pipelines(n, ci, out);
     return r;
 }
 static VkResult VKAPI_CALL klvk_CreateComputePipelines(VkDevice dev,
@@ -7394,12 +7478,19 @@ static VkResult VKAPI_CALL klvk_CreateShaderModule(VkDevice dev,
         VkShaderModule *out) {
     static PFN_vkCreateShaderModule real;
     if (!real && real_gdpa) real = (PFN_vkCreateShaderModule)real_gdpa(dev, "vkCreateShaderModule");
-    if (!emu_on() || !ci || !ci->pCode || (ci->codeSize & 3u) || !real)
-        return real ? real(dev, ci, alloc, out) : VK_ERROR_INITIALIZATION_FAILED;
+    if (!emu_on() || !ci || !ci->pCode || (ci->codeSize & 3u) || !real) {
+        VkResult r0 = real ? real(dev, ci, alloc, out) : VK_ERROR_INITIALIZATION_FAILED;
+        if (r0 == VK_SUCCESS && out) klvk_note_magenta_module(ci, *out);
+        return r0;
+    }
     size_t nwords = ci->codeSize / 4;
     size_t outw = 0;
     uint32_t *nc = klvk_spirv_mirror_rewrite(ci->pCode, nwords, &outw);
-    if (!nc) return real(dev, ci, alloc, out);   // nothing to change
+    if (!nc) {   // nothing to change
+        VkResult r1 = real(dev, ci, alloc, out);
+        if (r1 == VK_SUCCESS && out) klvk_note_magenta_module(ci, *out);
+        return r1;
+    }
     VkShaderModuleCreateInfo m = *ci;
     m.pCode = nc;
     m.codeSize = outw * 4;
@@ -7416,6 +7507,7 @@ static VkResult VKAPI_CALL klvk_CreateShaderModule(VkDevice dev,
             VKI("[emu] SPIR-V texel->2D rewrite applied (%zu -> %zu words)\n",
                 nwords, outw); }
     }
+    if (r == VK_SUCCESS && out) klvk_note_magenta_module(ci, *out);
     return r;
 }
 
