@@ -7283,8 +7283,8 @@ static uint64_t klovrp_GetLayerTextureFoveation(int layer_id, int stage, int eye
     return OVRP_FAIL_UNSUPPORTED;
 }
 
-// ovrp_GetLayerTextureSpaceWarp(layerId, stage, eye, uint64_t* motion,
-//                               uint64_t* depth) - the Application SpaceWarp
+// ovrp_GetLayerTextureSpaceWarp(layerId, stage, eye, uint64_t* motion, x4,
+//                               uint64_t* depth, x6) - the Application SpaceWarp
 // motion-vector + depth textures, GetLayerTextureFoveation's exact shape and
 // exact answer. ASW is frame extrapolation driven by motion vectors the GUEST
 // renders; nothing on this host consumes them - the reprojection here is the
@@ -7309,19 +7309,35 @@ static uint64_t klovrp_GetLayerTextureFoveation(int layer_id, int stage, int eye
 // The GLES path keeps refusing: the guest's GL names would have to be backed by
 // MTLTextures through kl_glfb like the eye ones, and no GLES Quest title uses
 // AppSW (it is Vulkan-only on Quest).
+//
+// **The real export takes SEVEN arguments, and depth is the SIXTH.** Measured
+// on libOVRPlugin 1.89 (AoT) +0x16efc0: x3, x4, x5 and x6 are four out-pointers,
+// all required (each `cbz -> -1001`), passed on as one block. The caller,
+// libOculusXRPlugin CreateMotionVectorTexture (+0x13c28, identical binary in
+// AC Nexus and AoT), hands x3 = &motion (sp+0x88), x4 = sp+0x18, x5 = &depth
+// (sp+0x20), x6 = sp+0x10, and afterwards reads ONLY [sp+0x88] as the motion
+// image and [sp+0x20] as the depth image. This used to write depth through
+// x4, so [sp+0x20] kept a stale stack word — the address of the plugin's own
+// global at +0x53534 — and Unity built its SpaceWarp depth views on that: the
+// "wild handle 0x...03534" substituted by a 4096x4096 scratch in both games,
+// i.e. every motion-vector pass rendered against a depth of the wrong size.
+// x4/x6 are answered 0 (the caller never reads them).
 static uint64_t klovrp_GetLayerTextureSpaceWarp(int layer_id, int stage, int eye,
-                                                uint64_t *motion, uint64_t *depth) {
+                                                uint64_t *motion, uint64_t *aux4,
+                                                uint64_t *depth, uint64_t *aux6) {
     ovrp_hit("ovrp_GetLayerTextureSpaceWarp");
     static int calls;
     int n = ++calls;
     if (n <= 16)
         fprintf(stderr, "  [asw] GetLayerTextureSpaceWarp #%d(layer %d, stage %d, eye %d, "
-                        "motion=%p, depth=%p) vpktaa=%d vulkan=%d\n",
-                n, layer_id, stage, eye, (void *)motion, (void *)depth,
-                klovrp_asw_on(), kl_vulkan_guest_active());
-    if (!motion || !depth) return OVRP_FAIL_INVALID_PARAM;
+                        "motion=%p, x4=%p, depth=%p, x6=%p) vpktaa=%d vulkan=%d\n",
+                n, layer_id, stage, eye, (void *)motion, (void *)aux4, (void *)depth,
+                (void *)aux6, klovrp_asw_on(), kl_vulkan_guest_active());
+    if (!motion || !aux4 || !depth || !aux6) return OVRP_FAIL_INVALID_PARAM;
     *motion = 0;
+    *aux4 = 0;
     *depth = 0;
+    *aux6 = 0;
     if (!klovrp_asw_on() || !kl_vulkan_guest_active())
         return OVRP_FAIL_UNSUPPORTED;
 

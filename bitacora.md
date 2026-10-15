@@ -11,7 +11,35 @@ Historial completo: `git log -p bitacora.md` (compactada el 2026-10-14; lo cerra
 - Los cambios de (4) (621d102..6fe05ab) y VPKEngine 1f246f1 están reintroducidos íntegros; la reversión intermedia
   (6476c93, VPKEngine 07c79f3) fue innecesaria.
 
-## EMPEZAR AQUÍ — 2026-10-15 (9): build con VPKEngine 935aa1b (arreglos del Vulkan CTS completo) — SIN PROBAR
+## EMPEZAR AQUÍ — 2026-10-15 (10): x18 en código GCC (Wwise) + ABI de SpaceWarp — SIN PROBAR
+- Resultado de (9) (logs 2026-10-15 09:55 AC / 10:02 AoT): AC ya pasa del Wwise (bancos cargan) y muere en el 1.er
+  frame de audio: SIGSEGV 0x0, `ldr q4,[x18]` veneered en libResonanceAudio+0x1f40c tras `adr x18,+0x1f5f0`
+  (+0x1f3fc) REFUSADO (KLX_PC_ADR) → ranura TSD = 0. AoT: parpadeo + rayas rojas al inicio.
+- Herramienta: arnés Linux de `kl_x18_emit` (scratchpad, compila kl_x18.c con stubs de libkern/mach y
+  `tp=0`) sobre todas las .so de AC y AoT: antes 6 refusados (5 `adr x18` en libAkSoundEngine/libResonanceAudio,
+  1 `sub sp,x7,x18` VLA en libAkSoundEngine+0x1b6e58) y sitios reales tomados por datos junto a pools literales
+  GCC (libAkSoundEngine+0x1da450/0x1da460, libAkConvolutionReverb+0xae48), y 3 palabras de pool (`ldr s,lit`)
+  PARCHEADAS como si fueran código (libAkSoundEngine+0x262be4/0x262de0/0x264548, constantes de Opus). Ahora:
+  0 refusados en ambos juegos, esos pools = datos.
+- `kl_x18.c`: `klx_lit_map` (bit k: destino de `adr` 4 palabras / `ldr literal` su tamaño → no cuenta como
+  evidencia; bit n+k: destino de `ldr literal` → dato seguro; `adr` nunca marca dato seguro por jump tables).
+  `kl_x18_is_data` (TLS rewriters) sigue sin mapa (coste por sitio). Veneers nuevos: `adr x18` y `ldr w18/x18/
+  ldrsw x18, lit` (adrp+add desde el veneer → str ranura); `add/sub sp, xN, x18[,ext]` y `add/sub sp, x18, #imm`
+  (b = sp viejo, sp = nuevo, recarga a/b vía b). `KLX_VEN_MAX_INSN` 8→12. `VQPrepare.converterVersion` kld-3
+  (todas las librerías se retraducen la 1.ª vez).
+- `kl_ovrp.c` `ovrp_GetLayerTextureSpaceWarp`: la export real tiene 7 args (x3..x6 punteros, todos obligatorios;
+  libOVRPlugin 1.89 +0x16efc0). libOculusXRPlugin (MISMO binario en AC y AoT) lee motion=[x3] y depth=[x5]
+  (CreateMotionVectorTexture +0x13c28). Escribíamos depth en x4 → [sp+0x20] basura = &global del plugin
+  +0x53534 → «wild handle 0x…03534» D24S8 sustituido por scratch 4096² en AMBOS juegos. Ahora depth en x5, x4/x6=0.
+- `VQLaunch.swift`: AA auto con MSAA ya detectado (`vq.aaDetected` > 1: AC 4x, AoT 2x) → VPKTAA off desde el
+  arranque (KL_VPKTAA=0) → SpaceWarp no se sirve, el proveedor apaga AppSW (sin pase de MV por frame).
+- Probar: AC (audio y que pase del primer frame de Wwise; capas rosas), AoT (parpadeo/rayas). Buscar en log:
+  ausencia de `wild handle`, `[asw]` sin GetLayerTextureSpaceWarp en juegos MSAA, faults `[x18]`.
+- Rosa de AC sigue sin causa: capas 2/3 OVROverlay. Capa 2 = vkCmdBlitImage desde ASTC_6x6_SRGB 2x2 →
+  `gpu.err blit_unsupported out_of_range` (VPKEngine anuncia BLIT_SRC para ASTC? revisar format features);
+  capa 3 = vkCmdCopyImage desde RGBA8 1024². Siguiente: procedencia de la textura fuente.
+
+## 2026-10-15 (9): build con VPKEngine 935aa1b (arreglos del Vulkan CTS completo)
 - Base medida (CTS rapida completo, cts_4+cts_5, logs 62–63): 36 087 casos, Pass 8 567, Fail 898, NotSupported 26 622.
 - VPKEngine `bbc2791`+`935aa1b` (detalle en su bitácora «2026-10-15 (12)»): imágenes LINEAR con píxeles en su memoria
   (casi todo draw.*), multiview clears por vista, DONT_CARE con área parcial, store D/S por aspecto, resolve MSAA

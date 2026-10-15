@@ -162,7 +162,7 @@ uint64_t kl_x18_ctr_value(void);
 
 // Longest veneer, in instructions. Public because klepton-ld sizes its pool from
 // the site count before it emits anything.
-#define KLX_VEN_MAX_INSN 8
+#define KLX_VEN_MAX_INSN 12
 
 typedef struct {
     unsigned sites;     // instructions found naming x18
