@@ -14,6 +14,12 @@ Objetivo: que ningún juego note diferencia con un Quest 3. Hacerlo en este orde
    (`VQApiScan.swift`) y cerrar lo que marque SIN IMPLEMENTAR (p. ej. AMediaDataSource_setGetAvailableSize/newUri).
 4. **Compositor.** Ritmo de panel fijo (100 Hz) y reproyección con profundidad por píxel (no solo giro).
 5. **Rendimiento.** Shaders precompilados sin tirones y paso a la traducción anticipada (AOT) de VPKEngine.
+6. **OpenGL ES** (tras el paso 1, con el CTS de Vulkan a 0 fallos): capa GLES/EGL propia encima del Vulkan de VPKEngine
+   (`libGLESv2/v3` + `libEGL` del guest → llamadas Vulkan; GLSL ES → SPIR-V → traductor existente), código 100 %
+   propio, sin ANGLE. Así los juegos GLES heredan perfil Adreno, MSAA, VPKTAA, foveado y caché de shaders. Validar con
+   el CTS de GLES (dEQP-GLES2/3/31, ya incluido en VK-GL-CTS). Quitar el bloqueo «solo Vulkan» del launcher al terminar.
+7. **Limpieza de muletas de AC** (al cerrar pasos 2 y 4): ver entrada (20).
+Todos estos pasos son OBLIGATORIOS y van en este orden.
 Lo que hace falta del usuario: logs de juegos variados (cada uno destapa huecos distintos); tandas periódicas del
 Vulkan CTS desde la app; el informe de capacidades (vulkaninfo) de un Quest 3 real para comparar con datos exactos
 (vulkan.gpuinfo.org bloquea la descarga automática).
