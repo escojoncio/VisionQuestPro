@@ -26,7 +26,7 @@ final class VQModel: ObservableObject {
         // Off the main thread and well after the UI is up: copying the previous session's logs
         // into the QUEST folder (File Provider storage, tens of MB) must never hold up the launch.
         DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 10) {
-            VQLog.savePreviousSessionToQuest()
+            VQLog.savePreviousSessionToQuest(atStartup: true)
         }
     }
 
@@ -321,6 +321,10 @@ struct VQSettingsView: View {
                     Toggle(VQL("Capturas de diagnóstico", "Diagnostic captures"), isOn: $settings.diagCaptures)
                     Toggle(VQL("Diagnóstico de rendimiento", "Performance diagnostics"), isOn: $settings.perfDiag)
                     Toggle(VQL("Diagnóstico de ficheros (log grande)", "File diagnostics (large log)"), isOn: $settings.fsDiag)
+                    Toggle(VQL("Pose del frame: última lectura del juego", "Frame pose: the game's last reading"), isOn: $settings.poseLastSample)
+                    Text(VQL("Activado: la reproyección usa la misma pose con la que el juego dibujó el frame (arreglo del temblor al girar la cabeza). Desactivado: la primera lectura, como en builds anteriores (para comparar).",
+                             "On: reprojection uses the same pose the game drew the frame with (fix for the shake when turning the head). Off: the first reading, as in earlier builds (to compare)."))
+                        .font(.caption)
                     Text(VQL("El foveado propio del juego (Quest) está siempre apagado. Foveado y VPKTAA los aplica VPKEngine (aún sin efecto con MoltenVK). M5 solo aparece en un Vision Pro M5. Se aplica al lanzar el juego.",
                              "The game's own (Quest) foveation is always off. Foveation and VPKTAA are applied by VPKEngine (no effect yet with MoltenVK). M5 only appears on a Vision Pro M5. Applied when the game launches."))
                         .font(.caption)

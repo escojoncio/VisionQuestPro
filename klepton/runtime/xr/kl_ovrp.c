@@ -2689,16 +2689,32 @@ static int klovrp_fring_on(void) {
     if (on < 0) on = kl_env_on("KL_OVRP_FRAME_RING", 1);
     return on;
 }
-// Pins the sample for `frame` if it has none yet. Returns 1 if it was newly pinned.
+// Which Update(Render, F) sample stands for frame F (2026-10-15 (14), AoT log 12:17): the
+// main thread calls Update(Render, F) TWICE — at the top of the frame and again at
+// BeforeRender, after BeginFrame4(F) — and Unity's camera takes the BeforeRender one
+// (the input subsystem's late update). The real OVRPlugin's EndFrame also submits the
+// newest tracking state for that frame index. Keeping the FIRST sample (builds 12/13)
+// filed a record a few ms older than the picture: an error proportional to head speed,
+// i.e. the shake when turning. 1 (default) = the last sample of the frame wins and
+// EndFrame4(F) re-files the record with it; 0 = the first sample (previous behaviour).
+// The app sets it (Ajustes > Diagnóstico, "Pose del frame").
+static int klovrp_pose_last(void) {
+    static int on = -1;
+    if (on < 0) on = kl_env_on("KL_OVRP_POSE_LAST", 1);
+    return on;
+}
+// Files the sample for `frame`. Returns 1 if it was newly pinned, 2 if an existing one
+// was replaced by this newer sample (KL_OVRP_POSE_LAST), 0 if kept / ring unused.
 static int klovrp_fring_pin(int frame, const klovrp_pose *h, const klovrp_pose *l,
                             const klovrp_pose *r) {
     if (!klovrp_fring_on() || !klovrp_fring_live(frame)) return 0;
     int slot = frame % KLOVRP_FRING, fresh = 0;
     pthread_mutex_lock(&g_fring_mu);
-    if (!g_fring[slot].valid || g_fring[slot].frame != frame) {
+    int known = g_fring[slot].valid && g_fring[slot].frame == frame;
+    if (!known || klovrp_pose_last()) {
         g_fring[slot].valid = 1; g_fring[slot].frame = frame;
         g_fring[slot].head = *h; g_fring[slot].hand[0] = *l; g_fring[slot].hand[1] = *r;
-        fresh = 1;
+        fresh = known ? 2 : 1;
     }
     pthread_mutex_unlock(&g_fring_mu);
     return fresh;
@@ -2734,7 +2750,9 @@ static uint64_t klovrp_Update2(int step, int frame_index, double prediction) {
             said++;
             uint64_t tid = 0; pthread_threadid_np(NULL, &tid);
             fprintf(stderr, "  [ovrp] Update(Render) frameIndex=%d tid=%llu -> %s\n", frame_index,
-                    (unsigned long long)tid, fresh ? "pinned" : "already pinned (kept)");
+                    (unsigned long long)tid,
+                    fresh == 1 ? "pinned" : fresh == 2 ? "replaced by this newer sample (last wins)"
+                                                       : "already pinned (kept)");
         }
     }
 
@@ -3138,8 +3156,48 @@ static void klovrp_record_overlays(const void *layer_submits, int count);
 // provider (8786 disagreements in a 9000-frame 1.40 run, see EndFrame4), and a
 // compositor keyed on kl_ovrp_last_complete_stage() would then sample the stage
 // the guest is drawing into NEXT — a torn picture with every counter healthy.
+// EndFrame(F): the record takes the LAST Render sample filed for frame F (see
+// klovrp_pose_last) — the BeforeRender one Unity drew the picture with, which arrives
+// after BeginFrame4(F) and so was never in the record. A render-thread read during the
+// frame (g_pend_rr) is the drawn pose itself and is left alone. Logged every 300
+// frames: how far the record moved; ~0 with the head still, ~a degree turning.
+static void klovrp_record_last_sample(int frame) {
+    if (!klovrp_pose_last() || !__atomic_load_n(&g_saw_update2, __ATOMIC_ACQUIRE)) return;
+    static unsigned frames, moved, missing;
+    static float worst; static double sum;
+    klovrp_pose h;
+    if (!klovrp_fring_get(frame, 0, &h)) {
+        if (missing++ == 0)
+            fprintf(stderr, "  [ovrp] EndFrame %d: no Render sample filed for this frame index — "
+                            "the record keeps BeginFrame's pose\n", frame);
+        return;
+    }
+    h.py -= klovrp_guest_origin_y();   // the space klovrp_step_head answers in
+    float d = -1.0f;
+    pthread_mutex_lock(&g_frames.mu);
+    kl_ovrp_render_pose *r = &g_frames.pending;
+    if (r->serial && !r->complete && !g_pend_rr && g_frames.pending_index == frame) {
+        klovrp_pose a = { .qx = r->qx, .qy = r->qy, .qz = r->qz, .qw = r->qw };
+        d = klovrp_quat_degrees(&a, &h);
+        r->px = h.px; r->py = h.py; r->pz = h.pz;
+        r->qx = h.qx; r->qy = h.qy; r->qz = h.qz; r->qw = h.qw;
+    }
+    pthread_mutex_unlock(&g_frames.mu);
+    if (d < 0) return;
+    if (d > worst) worst = d;
+    sum += d;
+    if (d > 0.01f) moved++;
+    if (++frames % 300 == 0) {
+        fprintf(stderr, "  [ovrp] frame record -> last Update(Render) of its frame: worst %.2f deg, "
+                        "mean %.3f deg, %u of 300 frames moved (KL_OVRP_POSE_LAST=1; 0 = first sample)\n",
+                (double)worst, sum / 300.0, moved);
+        worst = 0; sum = 0; moved = 0;
+    }
+}
+
 static uint64_t klovrp_end_frame_impl(int guest_frame_index, const int *viewports,
                                       const int *viewport_of, int named_stage) {
+    klovrp_record_last_sample(guest_frame_index);
 // Close the observation window opened at BeginFrame. `observed` is still
     // the sticky answer; `mask`/`binds` are what say whether it belongs to this
     // frame, and they are the difference between an association that is known
@@ -6968,16 +7026,46 @@ static void klovrp_enq_flush(void) {
 // ends its frames with ovrp_EndFrame4, that call (plus a repeated layer id, as
 // a safety net) is the only boundary, so the WHOLE set is published at once.
 // Guests that never call EndFrame4 keep the frameIndex heuristic.
+//
+// 2026-10-15 (14), AoT HUD blinking: Unity enqueues the overlays on its MAIN thread and
+// calls EndFrame4 on its RENDER thread. An EndFrame4 landing between two enqueues of the
+// same frame published half a set ({2}), the next enqueue of layer 2 then flushed {3}, and
+// from there every set was split across the two threads' boundaries — layers came and
+// went frame to frame. Now, when the enqueuing thread is not EndFrame4's, the set is
+// closed only on the enqueuing thread itself, by the NEXT frame's first enqueue
+// (layerIndex back to 0, or a repeated layer id): every published set is whole, one
+// frame later at most. Single-thread guests keep EndFrame4 as the boundary.
 static pthread_mutex_t g_enq_mu = PTHREAD_MUTEX_INITIALIZER;
 static int g_enq_endframe_seen;
+static uint64_t g_enq_tid;          // thread of the last EnqueueSubmitLayer2
+static int g_enq_last_index = -1;   // its layerIndex
+static int g_enq_idle_endframes;    // EndFrame4s since the last enqueue (cross-thread case)
+static uint64_t klovrp_self_tid(void) { uint64_t t = 0; pthread_threadid_np(NULL, &t); return t; }
 static void klovrp_enq_endframe(void) {
+    uint64_t self = klovrp_self_tid();
     pthread_mutex_lock(&g_enq_mu);
     if (!g_enq_endframe_seen) {
         g_enq_endframe_seen = 1;
         fprintf(stderr, "  [ovrp] overlay set boundary = ovrp_EndFrame4 (frameIndex "
                         "of Enqueue'd layers no longer splits the set)\n");
     }
-    klovrp_enq_flush();
+    if (!g_enq_tid || g_enq_tid == self) {
+        klovrp_enq_flush();
+    } else if (++g_enq_idle_endframes >= 3) {
+        // No enqueue across 3 EndFrame4s: the enqueuing thread stopped (overlays removed,
+        // loading): its last set is complete, publish it rather than leave it pending.
+        klovrp_enq_flush();
+        g_enq_last_index = -1;
+    } else {
+        static int said;
+        if (!said) {
+            said = 1;
+            fprintf(stderr, "  [ovrp] overlays enqueued on thread %llu, EndFrame4 on %llu: the set "
+                            "is closed on the enqueuing thread (layerIndex 0 / repeated id), never "
+                            "half-way from EndFrame4\n",
+                    (unsigned long long)g_enq_tid, (unsigned long long)self);
+        }
+    }
     pthread_mutex_unlock(&g_enq_mu);
 }
 // ovrp_SetColorScaleAndOffset(ovrpVector4f scale, ovrpVector4f offset, ovrpBool
@@ -7054,13 +7142,20 @@ static uint64_t klovrp_EnqueueSubmitLayer2(uint32_t flags, void *texL, void *tex
                 pose ? pose[4] : 0.f, pose ? pose[5] : 0.f, pose ? pose[6] : 0.f,
                 scale ? scale[0] : 0.f, scale ? scale[1] : 0.f, scale ? scale[2] : 0.f);
     }
+    uint64_t self_tid = klovrp_self_tid();
     pthread_mutex_lock(&g_enq_mu);
     int dup = 0;
     for (int i = 0; i < g_enq_n; i++) if (g_enq[i].layer_id == layer_id) { dup = 1; break; }
-    if (dup || (!g_enq_endframe_seen && frame_index != g_enq_frame)) {
+    // layerIndex back to 0 after counting up = a new frame's list (never on a guest that
+    // passes 0 for every layer: g_enq_last_index stays 0 there).
+    int restart = layer_index == 0 && g_enq_n > 0 && g_enq_last_index > 0;
+    if (dup || restart || (!g_enq_endframe_seen && frame_index != g_enq_frame)) {
         klovrp_enq_flush();
         g_enq_frame = frame_index;
     }
+    g_enq_tid = self_tid;
+    g_enq_last_index = layer_index;
+    g_enq_idle_endframes = 0;
     struct klovrp_layer *l = klovrp_layer(layer_id);
     if (l) l->submit_tick = g_loadvid_tick + 1;
     if (l && !l->is_eye && g_enq_n < KLOVRP_MAX_LAYERS) {
