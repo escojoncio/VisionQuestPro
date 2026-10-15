@@ -42,6 +42,7 @@
 #include <unistd.h>
 #include "kl_openxr.h"
 #include <pthread.h>
+#include <stdatomic.h>
 #include <ctype.h>
 #include "kl_jni.h"
 #include "kl_ovrp.h"
@@ -691,6 +692,7 @@ static klxr_row g_xr[] = {
 #undef X
 };
 #define KLXR_COUNT ((int)(sizeof g_xr / sizeof g_xr[0]))
+static void *klxr_guest_fn(klxr_row *row);   // trampolines, near kl_openxr_lookup
 // The refusal each row starts with, in the same order: a row whose fn is still
 // this after klxr_install is an entry point nothing implements.
 static void *const g_xr_stub_fn[] = {
@@ -825,7 +827,7 @@ static int klxr_GetInstanceProcAddr(void *instance, const char *name, void **fun
         KLXR_RET(KLXR_ERROR_FUNCTION_UNSUPPORTED);
     }
     row->resolved++;
-    *function = row->fn;
+    *function = klxr_guest_fn(row);
     return KLXR_SUCCESS;
 }
 
@@ -1330,6 +1332,130 @@ static void klxr_fill_space_velocity(void *next, const float *lin, const float *
     }
 }
 
+// ---- API layers: the Khronos runtime-conformance layer, and only it ----------
+//
+// The OpenXR CTS ships XR_APILAYER_KHRONOS_runtime_conformance in its own APK
+// (libXrApiLayer_runtime_conformance.so) and REQUIRES it enabled: it wraps every
+// call and checks the runtime's answers (handle lifetimes, call order, output
+// structs). The Khronos loader would find it through its manifest; we replace
+// that loader, so we play its part here: advertise the layer when its library is
+// loadable, negotiate with it at xrCreateInstance and put it in front of the
+// runtime. The interposition happens through per-row trampolines (below): imports
+// are bound at relocation time, before any layer exists, so every pointer the
+// guest holds jumps through a slot that xrCreateInstance can redirect.
+#define KLXR_CONF_LAYER "XR_APILAYER_KHRONOS_runtime_conformance"
+#define KLXR_CONF_LAYER_SO "libXrApiLayer_runtime_conformance.so"
+enum { KLXR_ERROR_INITIALIZATION_FAILED = -6, KLXR_ERROR_API_LAYER_NOT_PRESENT = -36 };
+
+typedef struct { int32_t structType; uint32_t structVersion; size_t structSize;
+                 uint32_t minInterfaceVersion, maxInterfaceVersion;
+                 uint64_t minApiVersion, maxApiVersion; } klxr_neg_loader_info;
+typedef struct { int32_t structType; uint32_t structVersion; size_t structSize;
+                 uint32_t layerInterfaceVersion; uint64_t layerApiVersion;
+                 void *getInstanceProcAddr; void *createApiLayerInstance; } klxr_neg_layer_req;
+typedef struct klxr_layer_next { int32_t structType; uint32_t structVersion; size_t structSize;
+                 char layerName[256]; void *nextGetInstanceProcAddr;
+                 void *nextCreateApiLayerInstance; struct klxr_layer_next *next; } klxr_layer_next;
+typedef struct { int32_t structType; uint32_t structVersion; size_t structSize;
+                 void *loaderInstance; char settings_file_location[512];
+                 klxr_layer_next *nextInfo; } klxr_layer_create;
+
+typedef int (*klxr_gipa_fn)(void *, const char *, void **);
+typedef XrResult (*klxr_layer_create_fn)(const XrInstanceCreateInfo *, const klxr_layer_create *, void **);
+typedef XrResult (*klxr_negotiate_fn)(const klxr_neg_loader_info *, const char *, klxr_neg_layer_req *);
+
+void *klb_dlopen(const char *path, int flags);   // kl_dl.c — the guest's own dlopen
+void *klb_dlsym(void *handle, const char *name);
+int kl_can_dlopen(const char *path);
+
+static int g_layer_avail;                 // latched once the library is seen
+static int klxr_layer_available(void) {
+    // Only a positive answer is cached: asked too early (before the guest library
+    // directory is set up) the probe would say no and lock the CTS out for good.
+    if (!g_layer_avail) {
+        const char *off = getenv("KHRONOS_runtime_conformance_disabled");
+        if (!(off && off[0]) && kl_can_dlopen(KLXR_CONF_LAYER_SO)) {
+            g_layer_avail = 1;
+            fprintf(stderr, "  [xr] API layer %s available (%s)\n", KLXR_CONF_LAYER,
+                    KLXR_CONF_LAYER_SO);
+        }
+    }
+    return g_layer_avail;
+}
+static klxr_gipa_fn g_layer_gipa;         // non-NULL while a layered instance lives
+static void klxr_layer_route(void *instance);
+static XrResult klxr_CreateInstance_rt(const XrInstanceCreateInfo *info, void **instance);
+static void klxr_layer_unroute(void);
+static int klxr_GetInstanceProcAddr(void *instance, const char *name, void **function);
+static int klxr_next_GetInstanceProcAddr(void *instance, const char *name, void **function);
+
+// The layer's `next` create: the runtime itself.
+static XrResult klxr_next_CreateApiLayerInstance(const XrInstanceCreateInfo *info,
+                                                 const klxr_layer_create *li, void **instance) {
+    (void)li;
+    // The layer passes the app's create info through, still naming itself; the
+    // runtime below it has no layers to check.
+    XrInstanceCreateInfo copy = *info;
+    copy.enabledApiLayerCount = 0;
+    copy.enabledApiLayerNames = NULL;
+    return klxr_CreateInstance_rt(&copy, instance);
+}
+
+static XrResult klxr_CreateInstance(const XrInstanceCreateInfo *info, void **instance) {
+    if (!info || !instance) KLXR_RET(KLXR_ERROR_VALIDATION_FAILURE);
+    int want_layer = 0;
+    for (uint32_t i = 0; i < info->enabledApiLayerCount; i++) {
+        const char *n = info->enabledApiLayerNames ? info->enabledApiLayerNames[i] : NULL;
+        if (n && strcmp(n, KLXR_CONF_LAYER) == 0 && klxr_layer_available()) { want_layer = 1; continue; }
+        // Strict (the spec's answer) only where layers exist at all — the CTS. A
+        // game asking for a debug layer it never ships must keep booting, as it
+        // did before layers were served.
+        if (!klxr_layer_available()) {
+            fprintf(stderr, "  [xr] xrCreateInstance: API layer \"%s\" not present — ignored\n",
+                    n ? n : "(null)");
+            continue;
+        }
+        fprintf(stderr, "  [xr] xrCreateInstance: API layer \"%s\" NOT PRESENT\n", n ? n : "(null)");
+        KLXR_RET(KLXR_ERROR_API_LAYER_NOT_PRESENT);
+    }
+    if (!want_layer) return klxr_CreateInstance_rt(info, instance);
+
+    void *h = klb_dlopen(KLXR_CONF_LAYER_SO, 0x2 /* RTLD_NOW */);
+    klxr_negotiate_fn neg = h ? (klxr_negotiate_fn)klb_dlsym(h, "xrNegotiateLoaderApiLayerInterface") : NULL;
+    if (!neg) {
+        fprintf(stderr, "  [xr] API layer %s: library or negotiate symbol missing\n", KLXR_CONF_LAYER);
+        KLXR_RET(KLXR_ERROR_API_LAYER_NOT_PRESENT);
+    }
+    klxr_neg_loader_info li = { 1, 1, sizeof li, 1, 1,
+                                (1ull << 48), (1ull << 48) | (1ull << 32) | 0xffffffffull };
+    klxr_neg_layer_req rq = { 2, 1, sizeof rq, 0, 0, NULL, NULL };
+    XrResult r = neg(&li, KLXR_CONF_LAYER, &rq);
+    if (r < 0 || !rq.getInstanceProcAddr || !rq.createApiLayerInstance) {
+        fprintf(stderr, "  [xr] API layer negotiation failed r=%d\n", (int)r);
+        KLXR_RET(KLXR_ERROR_API_LAYER_NOT_PRESENT);
+    }
+    klxr_layer_next nx;
+    memset(&nx, 0, sizeof nx);
+    nx.structType = 5; nx.structVersion = 1; nx.structSize = sizeof nx;
+    snprintf(nx.layerName, sizeof nx.layerName, "%s", KLXR_CONF_LAYER);
+    nx.nextGetInstanceProcAddr = (void *)klxr_next_GetInstanceProcAddr;
+    nx.nextCreateApiLayerInstance = (void *)klxr_next_CreateApiLayerInstance;
+    klxr_layer_create lc;
+    memset(&lc, 0, sizeof lc);
+    lc.structType = 4; lc.structVersion = 1; lc.structSize = sizeof lc;
+    lc.loaderInstance = (void *)&lc;
+    lc.nextInfo = &nx;
+    r = ((klxr_layer_create_fn)rq.createApiLayerInstance)(info, &lc, instance);
+    if (r < 0) {
+        fprintf(stderr, "  [xr] API layer createApiLayerInstance -> %d\n", (int)r);
+        return r;
+    }
+    g_layer_gipa = (klxr_gipa_fn)rq.getInstanceProcAddr;
+    klxr_layer_route(*instance);
+    fprintf(stderr, "  [xr] API layer %s active in front of the runtime\n", KLXR_CONF_LAYER);
+    return r;
+}
+
 static XrResult klxr_EnumerateInstanceExtensionProperties(
         const char *layer_name, uint32_t capacity, uint32_t *count_out,
         XrExtensionProperties *props) {
@@ -1337,7 +1463,11 @@ static XrResult klxr_EnumerateInstanceExtensionProperties(
     // A layer name we do not have is XR_ERROR_API_LAYER_NOT_PRESENT, but we
     // have no layers at all, so the only legal argument is NULL and anything
     // else is the guest asking about something that cannot exist here.
-    if (layer_name && layer_name[0]) KLXR_RET(KLXR_ERROR_VALIDATION_FAILURE);
+    if (layer_name && layer_name[0]) {
+        if (strcmp(layer_name, KLXR_CONF_LAYER) == 0 && klxr_layer_available())
+            return klxr_two_call(capacity, count_out, 0);   // its own extensions: none we expose
+        KLXR_RET(KLXR_ERROR_API_LAYER_NOT_PRESENT);
+    }
 
     XrResult r = klxr_two_call(capacity, count_out, KLXR_EXT_COUNT);
     if (r != KLXR_SUCCESS || capacity == 0) return r;
@@ -1373,8 +1503,21 @@ static XrResult klxr_EnumerateInstanceExtensionProperties(
 // klxr_GetInstanceProcAddr does not validate one.
 static XrResult klxr_EnumerateApiLayerProperties(uint32_t capacity,
                                                  uint32_t *count_out, void *props) {
-    (void)props;   // never written: the count is always zero
-    return klxr_two_call(capacity, count_out, 0);
+    uint32_t n = klxr_layer_available() ? 1 : 0;
+    XrResult r = klxr_two_call(capacity, count_out, n);
+    if (r != KLXR_SUCCESS || capacity == 0 || n == 0) return r;
+    if (!props) KLXR_RET(KLXR_ERROR_VALIDATION_FAILURE);
+    // XrApiLayerProperties: type, next, layerName[256], specVersion, layerVersion,
+    // description[256]. Written field by field: no header here defines it.
+    struct { int32_t type; void *next; char layerName[256]; uint64_t specVersion;
+             uint32_t layerVersion; char description[256]; } *p = props;
+    if (p->type != 1 /* XR_TYPE_API_LAYER_PROPERTIES */) KLXR_RET(KLXR_ERROR_VALIDATION_FAILURE);
+    snprintf(p->layerName, sizeof p->layerName, "%s", KLXR_CONF_LAYER);
+    p->specVersion = (1ull << 48) | (1ull << 32);
+    p->layerVersion = 1;
+    snprintf(p->description, sizeof p->description, "%s",
+             "Khronos runtime conformance layer (from the CTS APK)");
+    return KLXR_SUCCESS;
 }
 
 
@@ -1543,7 +1686,7 @@ int kl_openxr_status_text(char *buf, int cap) {
     return n < 0 ? 0 : (n >= cap ? cap - 1 : n);
 }
 
-static XrResult klxr_CreateInstance(const XrInstanceCreateInfo *info, void **instance) {
+static XrResult klxr_CreateInstance_rt(const XrInstanceCreateInfo *info, void **instance) {
     fprintf(stderr, "  [xr] >> %s\n", "xrCreateInstance");
     pthread_mutex_lock(&g_st_mu); g_st_instances++; pthread_mutex_unlock(&g_st_mu);
     if (!info || !instance) KLXR_RET(KLXR_ERROR_VALIDATION_FAILURE);
@@ -1597,6 +1740,7 @@ static XrResult klxr_DestroyInstance(void *instance) {
     klxr_instance *inst = klxr_inst(instance);
     if (!inst) KLXR_RET(KLXR_ERROR_HANDLE_INVALID);
     inst->magic = 0;
+    klxr_layer_unroute();   // the layer (if any) is calling us on its way out
     return KLXR_SUCCESS;
 }
 
@@ -7438,12 +7582,97 @@ static void klxr_install(void) {
     }
 }
 
+// ---- trampolines: one indirect jump per row ---------------------------------
+// Every pointer handed to the guest (import binding, dlsym, xrGetInstanceProcAddr)
+// is a 16-byte stub that loads its row's slot and branches, so the argument
+// registers pass through untouched whatever the signature. The slot holds the
+// row's implementation, or the API layer's entry once one is routed in front
+// (klxr_layer_route). Only built for arm64 Apple; elsewhere rows are handed out
+// directly and layers are unavailable.
+#define KLXR_TRAMPS 512
+_Static_assert(KLXR_COUNT <= KLXR_TRAMPS, "raise KLXR_TRAMPS");
+__attribute__((visibility("hidden"))) _Atomic(void *) kl_xr_slots[KLXR_TRAMPS];
+#if defined(__aarch64__) && defined(__APPLE__)
+#define KLXR_HAVE_TRAMPS 1
+__asm__(
+    ".text\n"
+    ".p2align 4\n"
+    ".private_extern _kl_xr_tramp\n"
+    "_kl_xr_tramp:\n"
+    ".set kl_xr_i, 0\n"
+    ".rept 512\n"
+    "  adrp x16, _kl_xr_slots@PAGE\n"
+    "  add  x16, x16, _kl_xr_slots@PAGEOFF\n"
+    "  ldr  x16, [x16, #(kl_xr_i * 8)]\n"
+    "  br   x16\n"
+    "  .set kl_xr_i, kl_xr_i + 1\n"
+    ".endr\n");
+extern char kl_xr_tramp[];
+#else
+#define KLXR_HAVE_TRAMPS 0
+#endif
+
+// The pointer the GUEST gets for a row: the trampoline when an API layer could be
+// routed in (the CTS), the implementation itself otherwise (games: zero cost).
+static void *klxr_guest_fn(klxr_row *row) {
+#if KLXR_HAVE_TRAMPS
+    if (klxr_layer_available()) {
+        int i = (int)(row - g_xr);
+        if (!atomic_load_explicit(&kl_xr_slots[i], memory_order_relaxed))
+            atomic_store(&kl_xr_slots[i], row->fn);
+        return kl_xr_tramp + 16 * i;
+    }
+#endif
+    return row->fn;
+}
+
+// The layer's `next` getInstanceProcAddr: the real rows, never the trampolines
+// (which would loop back into the layer).
+static int klxr_next_GetInstanceProcAddr(void *instance, const char *name, void **function) {
+    (void)instance;
+    if (!function) KLXR_RET(KLXR_ERROR_FUNCTION_UNSUPPORTED);
+    *function = NULL;
+    klxr_row *row = name ? klxr_row_for(name) : NULL;
+    if (!row) KLXR_RET(KLXR_ERROR_FUNCTION_UNSUPPORTED);
+    row->resolved++;
+    *function = row->fn;
+    return KLXR_SUCCESS;
+}
+
+// Rows the loader itself answers, never through a layer: the bootstrap calls and
+// the procaddr door (the layer's own gipa is reached through it).
+static int klxr_loader_owned(const char *n) {
+    return !strcmp(n, "xrGetInstanceProcAddr") || !strcmp(n, "xrCreateInstance") ||
+           !strcmp(n, "xrEnumerateApiLayerProperties") ||
+           !strcmp(n, "xrEnumerateInstanceExtensionProperties") ||
+           !strcmp(n, "xrInitializeLoaderKHR");
+}
+
+static void klxr_layer_route(void *instance) {
+    int routed = 0;
+    for (int i = 0; i < KLXR_COUNT; i++) {
+        void *f = g_xr[i].fn;
+        if (!klxr_loader_owned(g_xr[i].name)) {
+            void *lf = NULL;
+            if (g_layer_gipa(instance, g_xr[i].name, &lf) >= 0 && lf) { f = lf; routed++; }
+        }
+        atomic_store(&kl_xr_slots[i], f);
+    }
+    fprintf(stderr, "  [xr] API layer routed %d of %d entry points\n", routed, KLXR_COUNT);
+}
+static void klxr_layer_unroute(void) {
+    if (!g_layer_gipa) return;
+    g_layer_gipa = NULL;
+    for (int i = 0; i < KLXR_COUNT; i++)
+        atomic_store(&kl_xr_slots[i], g_xr[i].fn);
+}
+
 void *kl_openxr_lookup(const char *name) {
     klxr_install();
     klxr_row *row = klxr_row_for(name);
     if (!row) return NULL;      // a lookup must still be able to say no
     row->resolved++;
-    return row->fn;
+    return klxr_guest_fn(row);
 }
 
 // ...and the DLOPEN door, which is how a UNITY guest arrives.

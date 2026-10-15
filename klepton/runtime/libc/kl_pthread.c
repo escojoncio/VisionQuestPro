@@ -130,7 +130,7 @@ typedef struct {
 static mtx_entry g_mtx_map[MTX_MAP_SIZE];
 
 static unsigned mtx_hash(uintptr_t a) {
-    return (unsigned)(((a >> 4) * 0x9E3779B97F4A7C15ULL) >> 49);
+    return (unsigned)(((a >> 4) * 0x9E3779B97F4A7C15ULL) >> 46);   // 18 bits = MTX_MAP_SIZE
 }
 
 static pthread_mutex_t *mtx_make(void) {
@@ -232,9 +232,21 @@ static pthread_cond_t *cnd(void *g) { return cnd_host(cnd_entry_for(g)); }
 // publishes the key with the CAS and the mutex immediately after, so a reader
 // that arrives between the two waits rather than dereferencing NULL. Bounded by
 // a handful of instructions on the creating thread, so a yield loop is right.
+static mtx_entry *mtx_overflow_quiet(void);
 static pthread_mutex_t *mtx_host(mtx_entry *e) {
     pthread_mutex_t *m = atomic_load(&e->m);
-    while (!m) { sched_yield(); m = atomic_load(&e->m); }
+    // Bounded: a slot destroyed under a thread still using it (guest UB) has m
+    // NULL with no publisher coming; fall back to the shared mutex, don't spin.
+    for (int n = 0; !m; n++) {
+        if (n > 2000) {
+            static _Atomic int said;
+            if (atomic_fetch_add(&said, 1) < 4)
+                fprintf(stderr, "  [klb] mutex used after pthread_mutex_destroy (guest "
+                                "use-after-destroy) — using the shared fallback mutex\n");
+            return atomic_load(&mtx_overflow_quiet()->m);
+        }
+        sched_yield(); m = atomic_load(&e->m);
+    }
     return m;
 }
 
@@ -254,6 +266,16 @@ static pthread_mutex_t *mtx_host(mtx_entry *e) {
 // exists so a pathological guest degrades instead of hanging (which is exactly
 // what TWD2 did at the old 32768).
 static mtx_entry g_mtx_overflow;
+static mtx_entry *mtx_overflow_quiet(void) {
+    if (!atomic_load(&g_mtx_overflow.m)) {
+        pthread_mutex_t *m = mtx_make();
+        pthread_mutex_t *expect = NULL;
+        if (!atomic_compare_exchange_strong(&g_mtx_overflow.m, &expect, m) && m) {
+            pthread_mutex_destroy(m); free(m);
+        }
+    }
+    return &g_mtx_overflow;
+}
 static mtx_entry *mtx_overflow(void) {
     if (!atomic_load(&g_mtx_overflow.m)) {
         pthread_mutex_t *m = mtx_make();
@@ -269,42 +291,66 @@ static mtx_entry *mtx_overflow(void) {
                 MTX_MAP_SIZE);
     return &g_mtx_overflow;
 }
+// A destroyed slot becomes a TOMBSTONE (key 1, never a guest address: mutexes are
+// at least 4-aligned), not an empty one. Clearing the key to 0 cut every probe
+// chain running through it: a live mutex inserted past the destroyed one stopped
+// being found, the next lock created a SECOND host mutex for the same guest
+// address, and a holder's unlock / a condvar's latched mutex then met the other
+// one. Each create+destroy cycle (one per OpenXR session in the CTS) punched a new
+// hole, so it surfaced only after dozens of sessions, as libc++'s
+// `mutex lock failed: Invalid argument` (VisionQuestPro log 62, 38th xrCreateSession).
+#define MTX_TOMB ((uintptr_t)1)
+// Lookups that HIT stay lock-free. Inserts and destroys serialise on this one
+// lock: with tombstones reusable, two threads first-locking the same address
+// could otherwise claim two different slots (one at a tombstone, one at an empty
+// slot further on), which is the duplicate-host-mutex bug again. Inserts are
+// rare (first use of each address), so the lock costs nothing measurable.
+static pthread_mutex_t g_mtx_insert_mu = PTHREAD_MUTEX_INITIALIZER;
+static mtx_entry *mtx_probe(uintptr_t want, unsigned *slot, int *full) {
+    unsigned probes = 0, tomb = ~0u;
+    unsigned i = mtx_hash(want) & (MTX_MAP_SIZE - 1);
+    *full = 0;
+    for (;; i = (i + 1) & (MTX_MAP_SIZE - 1)) {
+        uintptr_t k = atomic_load(&g_mtx_map[i].key);
+        if (k == want) return &g_mtx_map[i];
+        if (!k) break;
+        if (k == MTX_TOMB && tomb == ~0u) tomb = i;
+        if (++probes >= MTX_MAP_SIZE) { *full = (tomb == ~0u); break; }
+    }
+    *slot = tomb != ~0u ? tomb : i;
+    return NULL;
+}
 static mtx_entry *mtx_entry_for(void *g) {
     uintptr_t want = (uintptr_t)g;
-    pthread_mutex_t *fresh = NULL;
-    unsigned probes = 0;
-    for (unsigned i = mtx_hash(want) & (MTX_MAP_SIZE - 1); ; i = (i + 1) & (MTX_MAP_SIZE - 1)) {
-        uintptr_t k = atomic_load(&g_mtx_map[i].key);
-        if (k == want) {
-            if (fresh) { pthread_mutex_destroy(fresh); free(fresh); }
-            return &g_mtx_map[i];
-        }
-        if (k) {
-            // Bound the probe: a full table (every slot occupied by a DIFFERENT
-            // key) would otherwise loop forever. One full sweep proves it full.
-            if (++probes >= MTX_MAP_SIZE) {
-                if (fresh) { pthread_mutex_destroy(fresh); free(fresh); }
-                return mtx_overflow();
-            }
-            continue;
-        }
-        // empty: build the mutex first, so claiming the key publishes a
-        // complete entry. Kept across a lost race rather than rebuilt.
-        if (!fresh) fresh = mtx_make();
-        uintptr_t expect = 0;
-        if (!atomic_compare_exchange_strong(&g_mtx_map[i].key, &expect, want))
-            { i--; continue; }          // lost the race; re-read this slot
-        atomic_store(&g_mtx_map[i].m, fresh);
-        return &g_mtx_map[i];
+    unsigned at; int full;
+    mtx_entry *e = mtx_probe(want, &at, &full);
+    if (e) return e;
+    pthread_mutex_t *fresh = mtx_make();          // built outside the lock
+    pthread_mutex_lock(&g_mtx_insert_mu);
+    e = mtx_probe(want, &at, &full);              // rescan: someone may have won
+    if (!e && full) e = mtx_overflow();
+    if (!e) {
+        e = &g_mtx_map[at];
+        atomic_store(&e->m, NULL);
+        atomic_store(&e->owner, NULL);
+        atomic_store(&e->locksite, NULL);
+        atomic_store(&e->depth, 0);
+        atomic_store(&e->key, want);              // readers wait in mtx_host for m
+        atomic_store(&e->m, fresh);
+        fresh = NULL;
     }
+    pthread_mutex_unlock(&g_mtx_insert_mu);
+    if (fresh) { pthread_mutex_destroy(fresh); free(fresh); }
+    return e;
 }
 
 static mtx_entry *mtx_find(void *g) {
     uintptr_t want = (uintptr_t)g;
+    unsigned probes = 0;
     for (unsigned i = mtx_hash(want) & (MTX_MAP_SIZE - 1); ; i = (i + 1) & (MTX_MAP_SIZE - 1)) {
         uintptr_t k = atomic_load(&g_mtx_map[i].key);
         if (k == want) return &g_mtx_map[i];
-        if (!k) return NULL;
+        if (!k || ++probes >= MTX_MAP_SIZE) return NULL;
     }
 }
 
@@ -597,6 +643,12 @@ int klb_pthread_mutex_lock(void *m) {
     mtx_wait_enter(m, __builtin_return_address(0));
     int r = px(pthread_mutex_lock(mtx_host(e)));
     mtx_wait_leave();
+    if (r) {
+        static _Atomic int said;
+        if (atomic_fetch_add(&said, 1) < 8)
+            fprintf(stderr, "  [klb] pthread_mutex_lock(%p) failed r=%d slot=%u ra=%p\n",
+                    m, r, (unsigned)(e - g_mtx_map), __builtin_return_address(0));
+    }
     if (r == 0) atomic_fetch_add(&e->depth, 1);
     if (r == 0) {
         atomic_store(&e->locksite, __builtin_return_address(0));
@@ -633,7 +685,17 @@ int klb_pthread_mutex_trylock(void *m) {
 int klb_pthread_mutex_destroy(void *p) {
     mtx_log("destroy", p, 0);
     mtx_entry *e = mtx_find(p);
-    if (e) atomic_store(&e->key, 0);    // host leaks; it may be held
+    if (e) {
+        // The host mutex leaks (it may still be held); the slot becomes a
+        // tombstone so probe chains through it stay intact (see MTX_TOMB).
+        // Under the insert lock, so no insert can claim it mid-way.
+        pthread_mutex_lock(&g_mtx_insert_mu);
+        if (atomic_load(&e->key) == (uintptr_t)p) {
+            atomic_store(&e->key, MTX_TOMB);
+            atomic_store(&e->m, NULL);
+        }
+        pthread_mutex_unlock(&g_mtx_insert_mu);
+    }
     return 0;
 }
 

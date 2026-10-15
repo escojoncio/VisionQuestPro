@@ -190,6 +190,14 @@ void kl_mem_report(void);
 uint64_t kl_mem_budget_bytes(void);
 uint64_t kl_mem_available_bytes(void);
 
+// The futex emulation (kl_libc.c). _dump prints every futex word that has
+// waiters (or was woken recently) with its value, waiter count, the waiters'
+// guest call sites and the last WAKE — the [snap] watchdog calls it. Never blocks.
+// _forget_thread drops this thread's waiter records after it was jumped out of
+// a wait (fault / watchdog recovery), so they stop absorbing wakes.
+void kl_futex_dump(FILE *out);
+void kl_futex_forget_thread(void);
+
 // errno numbering diverges above 34 between Linux and Darwin, and guest code
 // compares against Linux's values (see kl_libc.c).
 int kl_errno_to_linux(int e);

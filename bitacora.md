@@ -11,23 +11,40 @@ Historial completo: `git log -p bitacora.md` (compactada el 2026-10-14; lo cerra
 - Los cambios de (4) (621d102..6fe05ab) y VPKEngine 1f246f1 están reintroducidos íntegros; la reversión intermedia
   (6476c93, VPKEngine 07c79f3) fue innecesaria.
 
-## EMPEZAR AQUÍ — 2026-10-14 (8): Vulkan CTS COMPLETO (rapida, cts_4 + cts_5, logs 62–63)
-- 36 087/36 087 casos, 0 Crash/Timeout/DeviceLost. Pass 8 567, Fail 898 (90,5 % de los soportados), NotSupported 26 622.
-- Fallos por grupo (orden de ataque, todo en VPKEngine `gpu/metal2` + traductor):
-  1. `draw.renderpass.multi_draw` 96 (61 imagen, 35 stencil; casos `multiview`, stride/offset, draw_id) → multi-draw
-     indirecto + multiview + stencil.
-  2. `renderpasses.renderpass{1,2}.{suballocation,dedicated_allocation}.attachment.*` 276: combinaciones de
-     loadOp CLEAR/DONT_CARE/LOAD y Samples>1 (MSAA) por attachment.
-  3. `draw.renderpass.basic_draw` 35 (line_list/line_strip/triangle_fan: diferencias pequeñas → rasterización de
-     líneas/fans), `indirect_draw` 25, `multiple_clears_within_render_pass` 23, `instanced` 12.
-  4. `image.mutable.*` / `format_reinterpret` / `subresource_layout` ~75 (vistas de otro formato, draw_copy +
-     load_op_clear), `api.copy_and_blit` ~40, `buffer_view.access` 15, `image_clearing` 10.
-  5. `glsl.texture_functions.textureproj*offset` 28, `pipeline.monolithic.sampler` 17, sync timeline
-     device_host 16, `synchronization{,2}.op.single_queue` 19, `depth_stencil_resolve` 7.
-  6. NotSupported (perfil Adreno 740): maintenance5/6, shader_draw_parameters, scalarBlockLayout, 8/16-bit storage,
-     format_feature_flags2, geometry/tessellation (Metal no las tiene: emulación aparte), cola compute exclusiva.
-  Detalle por caso: `Registros/conformidad-detalle.txt` (en el visor; el usuario los pasa por chat).
-- Build pendiente: incluye `9aca3ef` (cola de retiro). Lanzar una sola build con lo anterior + primeros grupos.
+## EMPEZAR AQUÍ — 2026-10-15 (9): build con VPKEngine 935aa1b (arreglos del Vulkan CTS completo) — SIN PROBAR
+- Base medida (CTS rapida completo, cts_4+cts_5, logs 62–63): 36 087 casos, Pass 8 567, Fail 898, NotSupported 26 622.
+- VPKEngine `bbc2791`+`935aa1b` (detalle en su bitácora «2026-10-15 (12)»): imágenes LINEAR con píxeles en su memoria
+  (casi todo draw.*), multiview clears por vista, DONT_CARE con área parcial, store D/S por aspecto, resolve MSAA
+  entero/parcial, input attachments MS, autodependencias, formato del VkBufferView en el traductor (texel buffers),
+  OpCompositeInsert con operandos corregidos, shadow+grad, frexp/ldexp exactos, mipLodBias, clip distance en FS,
+  bucles >8192, timeline wait-before-signal, aliasing de imágenes, cube array en load/store, etc.
+  `kTranslatorVersion` 7 (los juegos retraducen shaders una vez).
+- Klepton (esta build):
+  - `kl_pthread.c`: mapa de mutex con TUMBAS (destroy dejaba key 0 y cortaba cadenas → dos mutex host para un mutex
+    guest → `mutex lock failed: Invalid argument`, OpenXR CTS log 62, sesión 38). Inserción/destroy serializados
+    (`g_mtx_insert_mu`), hash de 18 bits (antes 15: solo usaba 32k de 262k ranuras), `mtx_host` acotado con
+    fallback, log `[klb] pthread_mutex_lock(...) failed`.
+  - `kl_openxr.c`: capa `XR_APILAYER_KHRONOS_runtime_conformance` (si `libXrApiLayer_runtime_conformance.so` es
+    cargable): EnumerateApiLayerProperties/ExtensionProperties(layer), negociación, `createApiLayerInstance` con
+    `next` = runtime, trampolines arm64 por fila (`kl_xr_slots`, `klxr_guest_fn`) que `klxr_layer_route` redirige a
+    la capa; `unroute` en DestroyInstance. Juegos (sin la .so): punteros directos, capas desconocidas ignoradas.
+  - `kl_ndk.c`: AAssetManager_open/openDir con rutas absolutas (`kl_asset_resolve` → `kl_guest_path`; si no existe,
+    `assets/` como antes) → bancos de Wwise (AC Nexus). Stubs AInputQueue/AKeyEvent/AMotionEvent.
+  - libc: `klb_openat` pasaba AT_FDCWD de Linux (−100) a Darwin (openat relativos = EBADF). Nuevos: fstatat,
+    faccessat, mkdirat, unlinkat, renameat, readlink(at), fchmodat, fchownat, linkat, symlinkat, rmdir, remove,
+    truncate, chmod/chown/lchown, link/symlink, mkfifo, creat, utime/utimes/utimensat/futimens, pathconf/fpathconf,
+    __realpath_chk/__getcwd_chk, ftw/nftw, glob/globfree, fstatfs, __openat_2, freopen, nextafterf, __libc_init
+    (+ alias *64). `kl_libc_table.h`: quitadas las 25 KL_FWD que tapaban los shims.
+  - Futex reescrito (`kl_futex_impl`): lista de waiters por bucket, WAKE devuelve los despertados, REQUEUE/CMP_REQUEUE,
+    WAKE_OP con signo, plazo monotónico. `kl_futex_dump()` en el `[snap]`: por dirección valor, waiters, último WAKE.
+- Probar: (1) Vulkan CTS con «Borrar resultados»; (2) OpenXR CTS (debe salir «API layer … active» y ya no el aborto
+  de la sesión 38); (3) AC Nexus/AoT/Batman: audio Wwise, congelado (`[futex]` en el `[snap]`), capas rosas.
+- Pendiente conocido: pSampleMask del pipeline; multisample.misc entero; linkage ivec4→ivec2; mipmap projected;
+  rasterization *_point; capa Vulkan del conformance layer (no cargamos capas Vulkan); CTS de OpenXR con trampolines
+  solo si la .so se detecta antes de relocalizar (si sale «API layer routed 0», revisar orden).
+
+## 2026-10-14 (8) — resultados del CTS completo (base de lo anterior)
+- Ver git log -p bitacora.md (lista de grupos 1–6).
 
 ## 2026-10-14 (7) — resultados tras df34dd2 (SIN build todavía; esperar al Vulkan CTS completo)
 - Vulkan CTS (cts_4): 88/106 tandas en 3 min, 30 607 casos, 0 Crash/Timeout/DeviceLost; Pass 8 363, Fail 859 (90,7 %),
