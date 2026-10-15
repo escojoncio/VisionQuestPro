@@ -52,6 +52,11 @@ final class VQModel: ObservableObject {
         progressText = VQL("Preparando…", "Preparing…")
         message = nil
         Thread.detachNewThread {
+            // The previous game's logs, BEFORE this one starts and overwrites them. The delayed
+            // copy in init() fired 10 s after launch, i.e. inside the NEW session when a game was
+            // started quickly: QUEST/Registros then held 10 s of the new run instead of the old
+            // one (2026-10-15). Guarded by the boot log's date, so it never copies twice.
+            VQLog.savePreviousSessionToQuest()
             do {
                 let prepared = try VQPrepare.prepare(game) { fraction, text in
                     Task { @MainActor in

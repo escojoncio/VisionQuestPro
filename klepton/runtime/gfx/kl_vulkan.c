@@ -3142,7 +3142,17 @@ void kl_vulkan_xr_api_range(unsigned *min_major, unsigned *min_minor,
 // line is the signal.
 void kl_vulkan_capture_layers(void) {
     const char *dir = cap_dir();
-    if (!dir || !kl_vulkan_guest_active()) return;
+    // The app's «capturas de diagnóstico» (KL_CAPTURE=1, KL_CAPTURE_DIR = QUEST/Registros)
+    // also captures the layers and their guest SOURCE textures, twice per run: each pass is a
+    // synchronous GPU readback on the guest thread, so it is bounded.
+    if (!kl_vulkan_guest_active()) return;
+    if (!dir && kl_env_on("KL_CAPTURE", 0)) {
+        static int runs;
+        if (runs >= 2) return;
+        dir = kl_env_str("KL_CAPTURE_DIR", NULL);
+        if (dir) runs++;
+    }
+    if (!dir) return;
     klvk_device *d = g_devs[0];
     if (!d) return;
     for (int i = 0; i < KLVK_MAX_LAYERS; i++) {

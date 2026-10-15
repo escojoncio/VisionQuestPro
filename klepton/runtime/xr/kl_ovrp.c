@@ -2650,17 +2650,86 @@ static int         g_saw_update2;
 // the guest was told to render with rather than re-reading anything.
 static klovrp_pose g_render_sample;
 
+// Render-step samples KEYED BY THE GUEST'S FRAME INDEX (2026-10-15, "the picture
+// shakes when I turn my head, in every game"). Unity runs two threads: the main
+// thread calls WaitToBeginFrame(N+1) + Update(Render, N+1) while the render thread
+// is still between BeginFrame4(N) and EndFrame4(N). One shared g_step_head made the
+// answer to "where is the head for frame N" depend on which thread asked when: the
+// render thread could draw frame N with N+1's sample while the record filed for N
+// held N's (or the reverse), and the timewarp then corrected by the wrong delta —
+// an error proportional to head speed, invisible with the head still. Now the
+// first Render sample for frame F is pinned in this ring, every
+// GetNodePoseState3(Render, F, ...) answers from it, and BeginFrame4(F) records it:
+// picture F and pose F are the same pose by construction. KL_OVRP_FRAME_RING=0
+// restores the shared sample.
+#define KLOVRP_FRING 16
+static struct { int valid, frame; klovrp_pose head, hand[2]; } g_fring[KLOVRP_FRING];
+static pthread_mutex_t g_fring_mu = PTHREAD_MUTEX_INITIALIZER;
+static __thread int t_req_frame = -1;     // set around GetNodePoseState3's read
+// The newest frame index BeginFrame4 has seen. A frame index far behind it is not a
+// live frame id (a guest that passes 0 or a constant): the ring is then not used,
+// so it can never freeze the head on one old sample.
+static int g_fring_begin = -1;
+static int g_fring_prev = -1;     // BeginFrame's previous index (game thread order)
+static int g_fring_off;           // a repeated BeginFrame index: not a frame id, ring off for good
+static int klovrp_fring_live(int frame) {
+    if (__atomic_load_n(&g_fring_off, __ATOMIC_ACQUIRE)) return 0;
+    int b = __atomic_load_n(&g_fring_begin, __ATOMIC_ACQUIRE);
+    return frame >= 0 && b >= 0 && frame >= b - 4 && frame <= b + 8;
+}
+static int klovrp_fring_on(void) {
+    static int on = -1;
+    if (on < 0) on = kl_env_on("KL_OVRP_FRAME_RING", 1);
+    return on;
+}
+// Pins the sample for `frame` if it has none yet. Returns 1 if it was newly pinned.
+static int klovrp_fring_pin(int frame, const klovrp_pose *h, const klovrp_pose *l,
+                            const klovrp_pose *r) {
+    if (!klovrp_fring_on() || !klovrp_fring_live(frame)) return 0;
+    int slot = frame % KLOVRP_FRING, fresh = 0;
+    pthread_mutex_lock(&g_fring_mu);
+    if (!g_fring[slot].valid || g_fring[slot].frame != frame) {
+        g_fring[slot].valid = 1; g_fring[slot].frame = frame;
+        g_fring[slot].head = *h; g_fring[slot].hand[0] = *l; g_fring[slot].hand[1] = *r;
+        fresh = 1;
+    }
+    pthread_mutex_unlock(&g_fring_mu);
+    return fresh;
+}
+// The pinned sample for `frame` (part: 0 head, 1 left hand, 2 right hand).
+static int klovrp_fring_get(int frame, int part, klovrp_pose *out) {
+    if (!klovrp_fring_on() || !klovrp_fring_live(frame)) return 0;
+    int slot = frame % KLOVRP_FRING, ok = 0;
+    pthread_mutex_lock(&g_fring_mu);
+    if (g_fring[slot].valid && g_fring[slot].frame == frame) {
+        *out = part == 0 ? g_fring[slot].head : g_fring[slot].hand[part - 1];
+        ok = 1;
+    }
+    pthread_mutex_unlock(&g_fring_mu);
+    return ok;
+}
+
 static uint64_t klovrp_Update2(int step, int frame_index, double prediction) {
     ovrp_hit("ovrp_Update2");
     { static unsigned n; if (n < 48 || n % 600 == 0)
         fprintf(stderr, "  [ovrp] frameloop Update2 #%u step=%d\n", n, step); n++; }
-    (void)frame_index; (void)prediction;
+    (void)prediction;
     int ix = klovrp_step_ix(step);
 
     klovrp_pose h = klovrp_pose_read(&g_head_pose);
     if (!__atomic_load_n(&g_head_set, __ATOMIC_ACQUIRE)) h.py = klovrp_eye_height();
     klovrp_pose l = klovrp_pose_read(&g_hand_pose[0]);
     klovrp_pose r = klovrp_pose_read(&g_hand_pose[1]);
+    if (ix == 0) {
+        int fresh = klovrp_fring_pin(frame_index, &h, &l, &r);
+        static unsigned said;
+        if (said < 24) {
+            said++;
+            uint64_t tid = 0; pthread_threadid_np(NULL, &tid);
+            fprintf(stderr, "  [ovrp] Update(Render) frameIndex=%d tid=%llu -> %s\n", frame_index,
+                    (unsigned long long)tid, fresh ? "pinned" : "already pinned (kept)");
+        }
+    }
 
     // How much the head moved between this frame's sample and the last one for
     // the same step. This is the quantity the old code was silently absorbing
@@ -2718,6 +2787,7 @@ static klovrp_pose klovrp_step_head(int step) {
     klovrp_pose h = __atomic_load_n(&g_step_valid[ix], __ATOMIC_ACQUIRE)
                     ? klovrp_seq_read(&g_step_head[ix], &g_step_seq)
                     : klovrp_head();
+    if (ix == 0) (void)klovrp_fring_get(t_req_frame, 0, &h);
     // OVRPlugin's read: into the guest's tracking space (see
     // kl_ovrp_guest_origin_y). The stored sample stays in display space.
     __atomic_store_n(&g_ovrp_space_used, 1, __ATOMIC_RELEASE);
@@ -2801,6 +2871,7 @@ static klovrp_pose klovrp_step_hand(int step, int hand) {
         p = klovrp_seq_read(&g_step_hand[ix][hand], &g_step_seq);
     else
         p = klovrp_hand(hand);
+    if (ix == 0) (void)klovrp_fring_get(t_req_frame, 1 + hand, &p);
     __atomic_store_n(&g_ovrp_space_used, 1, __ATOMIC_RELEASE);
     p.py -= klovrp_guest_origin_y();      // guest tracking space, as the head
     // Here and not in klovrp_hand: this is the OVRPlugin guest's read.
@@ -2912,9 +2983,31 @@ static uint64_t klovrp_begin_frame_impl(int guest_frame_index) {
     // and rendered every eye from. Not a fresh read: a fresh read at this
     // moment is a pose the picture was never drawn with, and reprojection
     // subtracts whatever is recorded here.
+    // Frame ids must ADVANCE for the ring to mean anything: the same id twice turns it
+    // off for the run (a constant would pin one sample forever), and an id that goes
+    // BACKWARDS is a restarted count — the ring is cleared and follows the new one.
+    if (guest_frame_index == g_fring_prev && !g_fring_off) {
+        __atomic_store_n(&g_fring_off, 1, __ATOMIC_RELEASE);
+        fprintf(stderr, "  [ovrp] BeginFrame repeated frame index %d — per-frame pose ring off\n",
+                guest_frame_index);
+    }
+    if (guest_frame_index < g_fring_prev) {
+        pthread_mutex_lock(&g_fring_mu);
+        memset(g_fring, 0, sizeof g_fring);
+        pthread_mutex_unlock(&g_fring_mu);
+        __atomic_store_n(&g_fring_begin, guest_frame_index, __ATOMIC_RELEASE);
+    } else if (guest_frame_index > __atomic_load_n(&g_fring_begin, __ATOMIC_ACQUIRE)) {
+        __atomic_store_n(&g_fring_begin, guest_frame_index, __ATOMIC_RELEASE);
+    }
+    g_fring_prev = guest_frame_index;
     klovrp_pose h = klovrp_head();
-    if (__atomic_load_n(&g_saw_update2, __ATOMIC_ACQUIRE)) h = klovrp_step_head(KLOVRP_STEP_RENDER);
-    else h.py -= kl_ovrp_guest_origin_y();   // same space GetNodePoseState answered in
+    if (__atomic_load_n(&g_saw_update2, __ATOMIC_ACQUIRE)) {
+        // This frame's pinned sample when there is one: exactly what every Render read
+        // for this frame index answered (see g_fring).
+        t_req_frame = guest_frame_index;
+        h = klovrp_step_head(KLOVRP_STEP_RENDER);
+        t_req_frame = -1;
+    } else h.py -= kl_ovrp_guest_origin_y();   // same space GetNodePoseState answered in
     pthread_mutex_lock(&g_frames.mu);
     uint64_t s = ++g_frames.serial;
     // Into the PENDING record, not into a stage. Which stage this frame goes to
@@ -4231,7 +4324,21 @@ static uint64_t klovrp_GetNodePoseState3(int a, int b, int c, void *out) {
                     b, c);
         }
     }
-    return klovrp_GetNodePoseState_impl(a, c, out);
+    // b is the guest's frame index (ovrp_GetNodePoseState3(step, frameIndex, node, out)):
+    // a Render read is answered from that frame's pinned sample (see g_fring).
+    {
+        static unsigned said;
+        if (said < 12 && a == KLOVRP_STEP_RENDER) {
+            said++;
+            uint64_t tid = 0; pthread_threadid_np(NULL, &tid);
+            fprintf(stderr, "  [ovrp] GetNodePoseState3(Render) frameIndex=%d node=%d tid=%llu\n",
+                    b, c, (unsigned long long)tid);
+        }
+    }
+    t_req_frame = (a == KLOVRP_STEP_RENDER) ? b : -1;
+    uint64_t res = klovrp_GetNodePoseState_impl(a, c, out);
+    t_req_frame = -1;
+    return res;
 }
 
 // The wait for a frame to be beginable. Real 0x16ec30 is a scalar INT return
