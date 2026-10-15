@@ -90,6 +90,28 @@ enum VQLog {
 
     nonisolated(unsafe) private static var gameLaunched = false
     private static let previousSessionLock = NSLock()
+    private static let savedDateKey = "vq.lastSavedBootLogDate"
+
+    /// The game has ended in THIS process (immersive space closed): its logs go to QUEST/Registros
+    /// now, while they are complete and the app is still alive — not on the next launch, which
+    /// depended on the player opening the app again and the folder being reachable then
+    /// (2026-10-15: "I have to open and close the app until it decides to save the log").
+    /// Off the main thread (tens of MB into File Provider storage); `wait` blocks the caller until
+    /// it is done, at most 20 s — for the path that _exit()s right after.
+    static func saveSessionEnd(_ game: String?, wait: Bool) {
+        fflush(nil)
+        let label = "fin-" + (game.map { String($0.prefix(24)).replacingOccurrences(of: " ", with: "_") } ?? "juego")
+        let done = DispatchSemaphore(value: 0)
+        DispatchQueue.global(qos: .userInitiated).async {
+            if saveToQuest(label) != nil,
+               let date = (try? FileManager.default.attributesOfItem(atPath: bootLog.path))?[.modificationDate] as? Date {
+                UserDefaults.standard.set(date.timeIntervalSince1970, forKey: savedDateKey)
+                UserDefaults.standard.synchronize()
+            }
+            done.signal()
+        }
+        if wait { _ = done.wait(timeout: .now() + 20) }
+    }
 
     /// At launch: the previous session's logs (guest log, crash report) go to QUEST/Registros once,
     /// so a session that ended in a crash can be read from the Files app.
@@ -103,13 +125,27 @@ enum VQLog {
         if !atStartup { gameLaunched = true }
         previousSessionLock.unlock()
         if skip { return }
-        let key = "vq.lastSavedBootLogDate"
         guard let date = (try? FileManager.default.attributesOfItem(atPath: bootLog.path))?[.modificationDate] as? Date
         else { return }
-        let last = UserDefaults.standard.double(forKey: key)
+        let last = UserDefaults.standard.double(forKey: savedDateKey)
         guard date.timeIntervalSince1970 > last + 1 else { return }
-        if saveToQuest("sesion-anterior") != nil {
-            UserDefaults.standard.set(date.timeIntervalSince1970, forKey: key)
+        // The QUEST folder (File Provider storage) is not always reachable right after launch:
+        // the start-up copy keeps trying for a minute rather than giving up silently. The copy
+        // made when a game is launched tries once (it is in the launch path) and stops the
+        // start-up one, whose later attempts would otherwise file the NEW game's log.
+        for attempt in 1...(atStartup ? 12 : 1) {
+            if atStartup {
+                previousSessionLock.lock()
+                let launched = gameLaunched
+                previousSessionLock.unlock()
+                if launched { return }
+            }
+            if saveToQuest("sesion-anterior") != nil {
+                UserDefaults.standard.set(date.timeIntervalSince1970, forKey: savedDateKey)
+                return
+            }
+            log("Registros: la sesión anterior no se pudo copiar (intento \(attempt): carpeta QUEST \(VQFolder.shared.url == nil ? "no disponible" : "sin escritura"))")
+            if atStartup { Thread.sleep(forTimeInterval: 5) }
         }
     }
 

@@ -2,36 +2,31 @@
 
 Historial completo: `git log -p bitacora.md` (compactada el 2026-10-15; lo cerrado queda en una línea con referencia).
 
-## EMPEZAR AQUÍ — 2026-10-15 (14): pose del frame = última Update(Render), overlays por hilo, detector magenta — SIN PROBAR
-- Resultado de (13) (Registros 7/8): temblor al girar SIGUE; HUD AoT parpadea (R3 12:17:44); AC capas magenta (L3).
-  Log AoT 12:17:02–12:18:01: `render-thread pose vs BeginFrame record` NUNCA salió → el hilo de render no lee
-  poses; async frame end activo; AoT ~80 fps, compositor 11,11 ms estable; timewarp delta 1–2,7° girando.
-  Log AC NO llegó: la copia diferida (+10 s) copió los 4 primeros s del AC recién lanzado (carpeta 12-19-03).
-  El log completo de AC (12:18:58→) sigue en el visor: se copia al abrir la app (antes de lanzar juego).
-- CAUSA del temblor (orden por frame en el log): main WaitToBeginFrame(F) → Update(Render,F) → render
-  BeginFrame4(F) → main Update(Render,F) OTRA VEZ (BeforeRender) → render EndFrame4(F). Unity dibuja con la 2.ª
-  muestra; el anillo (12) fijaba la 1.ª y el registro de BeginFrame también → error = giro entre ambas.
-  `kl_ovrp.c`: `klovrp_pose_last()` (`KL_OVRP_POSE_LAST`, def. 1): el anillo guarda la ÚLTIMA muestra de F;
-  `klovrp_record_last_sample(F)` al inicio de `klovrp_end_frame_impl` reescribe la pose del registro pendiente
-  (respeta `g_pend_rr`). Log cada 300: `[ovrp] frame record -> last Update(Render) of its frame: worst/mean`.
-  App: Ajustes → «Pose del frame: última lectura del juego» (`VQSettings.poseLastSample`, `vq.poseLast`) para A/B.
-- HUD AoT: overlays Enqueue desde el hilo principal, EndFrame4 en el de render → conjuntos partidos. Ahora
-  `klovrp_enq_endframe` solo vacía si es el hilo que encola (`g_enq_tid`); si no, el conjunto se cierra en el hilo
-  que encola (id repetido o layerIndex vuelve a 0 tras subir) o tras 3 EndFrame4 sin encolar
-  (`g_enq_idle_endframes`). Log una vez: `overlays enqueued on thread X, EndFrame4 on Y`.
-- AC magenta: capas 100 % (255,0,255) también en la fuente; frame 869 salida 99 % magenta (quad head-locked).
-  VPVK_REPORT_GEOM no lo arregló. `kl_vulkan.c`: `klvk_spirv_const_magenta_fs` detecta FS con vec4 constante
-  (1,0,1,1) → `[vk] [magenta] fragment module …` y `[magenta] pipeline … uses that fragment module` (renderPass,
-  attachments, samples). Si salen: Unity sustituye un shader no soportado (siguiente: qué caps). Si no: buscar en otra
-  parte (clear/blit). AC además arranca en inglés (`Language set: English(US)`) con es_ES elegido — pendiente.
-- CRASH AC (log 12:18:59–12:19:23, build 13): `gpu.err what=native_stuck n=589 head=3 client=2` a las 12:19:20 tras
-  `ShaderWarmupManager.WarmUpShaders`, frames de ~1,2 s, y aborto `libc++abi … system_error: mutex lock failed:
-  Invalid argument` en `vpgpu::metal2::MetalBackend::Impl::err` desde el bloque de `encodeNative` (hilo guest).
-  Causa: el fin de frame asíncrono (13) vía `kl_vulkan_native_submit`. `KL_VK_FRAME_ASYNC` ahora def. 0 (vuelve el
-  vkQueueWaitIdle). Pendiente en VPKEngine: por qué se atasca la cola nativa y el mutex inválido en `err()`.
-  AC de ese log: entradas con es_ES pero `Language set: English(US)`; sin línea `[magenta]` (build 13 no la tenía).
-- `VQLog.savePreviousSessionToQuest(atStartup:)`: la copia diferida no hace nada si ya se lanzó un juego.
-- Pendiente: saturación del visor al iniciar AC; voces AC «Voice Starvation»; idioma AC.
+## EMPEZAR AQUÍ — 2026-10-15 (15): una sola pose por frame para TODAS las lecturas; registros al acabar el juego — SIN PROBAR
+- Resultado de (14) (Registros 9/10, builds e56af9c/c29ae8e): PEOR al girar («los ojos ni se sincronizan»). El log lo
+  mide: `frame record -> last Update(Render)` worst 2–7°, mean 0,7–1,2° girando, 22° en tirones = lo que el registro se
+  separó de la pose dibujada → Unity dibuja con la PRIMERA lectura del frame (el display provider lee los ojos justo tras
+  el primer Update), NO con la segunda. `KL_OVRP_POSE_LAST` def. 0 (variante «última» solo para A/B por env); ajuste
+  «Pose del frame» eliminado de la app. HUD AoT: salió `overlays enqueued on thread X, EndFrame4 on Y` (arreglo activo;
+  sin veredicto del usuario). AC: `[magenta] fragment module … returns the constant (1,0,1,1)` ×2 y 4 pipelines
+  (renderPass 0x13d764e40, 2 samples) → Unity SÍ sustituye un shader por el de error; falta saber cuál/por qué.
+- Cambio (15) `kl_ovrp.c`: el segundo Update(Render,F) ya no refresca `g_step_head` con una lectura nueva: reusa la
+  pose fijada de F. Las lecturas Render sin frame fijado/vivo (frameIndex 0 del C#, otros hilos) responden la del
+  frame más nuevo fijado (`g_fring_newest`) en vez de `g_step_head` fresco. BeginFrame4(F) sin Update previo fija F.
+  Censo cada 300 frames: `[ovrp] Render reads over 300 frames: … answered head vs pinned pose worst X deg`
+  (DEBE ser 0,00; si no, bug del latch). Si el temblor sigue con 0,00, las poses NO son la causa: mirar compositor
+  (kl_reproject / anchor / cadencia) — la matemática de kl_reproject_build se revisó en papel y es correcta.
+- Registros: `VQLog.saveSessionEnd` al cerrar el espacio inmersivo (`Lifecycle.immersiveEnded`): carpeta
+  `QUEST/Registros/<fecha>-fin-<juego>`, en segundo plano (espera ≤20 s solo antes de `_exit`). La copia al reabrir
+  (`savePreviousSessionToQuest`) queda para crashes: 12 reintentos ×5 s al arrancar, 1 intento al lanzar, se detiene
+  si ya se lanzó un juego; motivo en app.txt si falla.
+- Pendiente: shader magenta de AC (qué shader: registrar nombre/keywords del material? Unity no lo dice en Vulkan; opción:
+  volcar las features que Unity consulta — `vkGetPhysicalDeviceFeatures/Properties` — y comparar con Adreno 740);
+  saturación al iniciar AC; voces «Voice Starvation»; idioma AC (`Language set: English(US)` con es_ES).
+
+## 2026-10-15 (14) — cerrado en (15)
+- Pose «última» (revertida), overlays por hilo (`g_enq_tid`, `g_enq_idle_endframes`), detector magenta
+  (`klvk_spirv_const_magenta_fs`), `KL_VK_FRAME_ASYNC` def. 0 (AC: `native_stuck` + aborto en VPKEngine).
 
 ## 2026-10-15 (13) — cerrado en (14)
 - Fin de frame ASÍNCRONO (`KL_VK_FRAME_ASYNC`, def. 1; `frame end: ASYNC` en el log, funcionando); lectura del hilo de

@@ -125,7 +125,11 @@ enum Lifecycle {
     @MainActor static func immersiveEnded() {
         immersiveOpen = false
         NSLog("[app] immersive space ended (phase \(lastPhase))")
-        if lastPhase != .background, let open = reopenLauncher {
+        // The game's logs, complete, to QUEST/Registros before anything else can end the process
+        // (waited for only on the path that _exit()s below).
+        let reopening = lastPhase != .background && reopenLauncher != nil
+        VQLog.saveSessionEnd(VQLaunch.choice?.game.id, wait: !reopening)
+        if reopening, let open = reopenLauncher {
             VQModel.shared.ended = true
             open(id: VQMainWindow.id)
             NSLog("[app] launcher window reopened")
