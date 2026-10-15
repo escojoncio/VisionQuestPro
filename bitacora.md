@@ -20,6 +20,11 @@ Historial completo: `git log -p bitacora.md` (compactada el 2026-10-15; lo cerra
   `QUEST/Registros/<fecha>-fin-<juego>`, en segundo plano (espera ≤20 s solo antes de `_exit`). La copia al reabrir
   (`savePreviousSessionToQuest`) queda para crashes: 12 reintentos ×5 s al arrancar, 1 intento al lanzar, se detiene
   si ya se lanzó un juego; motivo en app.txt si falla.
+- AC magenta, dato nuevo (log 12:42): la capa 3 (quad de portada, head-locked 1024²) ya era 100 % magenta a las
+  12:42:06 y el PRIMER módulo de error de Unity se creó a las 12:42:19 → ese magenta NO viene del shader de error.
+  Añadido `[prov]` (kl_vulkan.c, `klvk_prov_*`): procedencia de la imagen fuente de cada capa (último escritor:
+  render pass + pipelines + fs MAGENTA/no, upload, clear [MAGENTA si (1,0,1)], blit, copia). Se imprime en el
+  `written by the guest` de cada capa. Siguiente: leer `[prov] layer N source …` en el log de AC.
 - Pendiente: shader magenta de AC (qué shader: registrar nombre/keywords del material? Unity no lo dice en Vulkan; opción:
   volcar las features que Unity consulta — `vkGetPhysicalDeviceFeatures/Properties` — y comparar con Adreno 740);
   saturación al iniciar AC; voces «Voice Starvation»; idioma AC (`Language set: English(US)` con es_ES).
