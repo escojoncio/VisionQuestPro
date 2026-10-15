@@ -18,7 +18,25 @@ Lo que hace falta del usuario: logs de juegos variados (cada uno destapa huecos 
 Vulkan CTS desde la app; el informe de capacidades (vulkaninfo) de un Quest 3 real para comparar con datos exactos
 (vulkan.gpuinfo.org bloquea la descarga automática).
 
-## EMPEZAR AQUÍ — 2026-10-15 (18): crash AMediaDataSource, panel 50→100 Hz, vertex SSBO (rosa), token offline — build 18
+## EMPEZAR AQUÍ — 2026-10-15 (19): paso 1 (GPU = Adreno 740) iniciado — SIN PUSH, SIN BUILD
+- VPKEngine, 4 commits locales (pendientes de push): `ced6226` memoria LAZILY_ALLOCATED sin RAM (tipo 3 sin host,
+  `DeviceMemory::lazy`, commitment 0; la ruta MSAA memoryless/MultisampleResolve ya existía en metal2); `ad18998`
+  STORAGE_IMAGE_ATOMIC/STORAGE_TEXEL_BUFFER_ATOMIC en R32_UINT/SINT (`MTLTextureUsageShaderAtomic`, sin probar en
+  visionOS); `e626ce4` bitácora VPKEngine; `5099bb3` driverVersion 512.744.0 (bit 31), `textureCompressionBC=FALSE`,
+  `vertexPipelineStoresAndAtomics=TRUE` fijo (entry.cpp:324, ya sin la puerta del CTS).
+- Revisión adversarial: sin bloqueantes. Pendiente: test de store/atomic en VS; BC1/3/7 siguen anunciados en
+  formatFeatures (physical_device.cpp:208-241) → quitar SAMPLED_IMAGE para forzar ruta ETC2/ASTC como el Adreno
+  (rompe test vk_tests.cpp:405, ajustarlo).
+- Fallos CTS de la lista: la mayoría ya resueltos en (8)/(12) según arneses en Linux; confirmar con CTS nuevo en el
+  visor. Queda B4G4R4A4_UNORM_PACK16 (obligatorio; Metal solo ABGR4 → swizzle).
+- Perfil Adreno comparado: `docs/perfil-adreno740.md` (copiado de progreso). Siguientes P0: añadir lo que obliga
+  VP_ANDROID_baseline_2022 (shaderInt16, shaderDrawParameters, KHR_maintenance2/3, storage_buffer_storage_class,
+  samplerYcbcrConversion, variablePointers), quitar `EXT_metal_objects` del listado al guest, apiVersion 1.3 con
+  structs VULKAN_1_1/1_2/1_3_FEATURES, ASTC no cuadrado, centralizar en VPKEngine y dejar `klvk_patch_features` no-op.
+  Falta vulkaninfo real de un Quest 3 para cerrar valores [B]/[C].
+- Volver a MSAA 4x en AC (`KL_VK_MAX_SAMPLES`) ahora que la MSAA transitoria no gasta RAM.
+
+## 2026-10-15 (18): crash AMediaDataSource, panel 50→100 Hz, vertex SSBO (rosa), token offline — build 18
 - Resultado de (17) (build 505b8dc, AC 21:24–21:32, primera vez que el juego arranca): 0 `Scheduler::dispatch` (reloj
   OK); `[nexus] SpaceWarp spin 18.89 ms -> 0`; memoria 3,9 GB; rosa sigue (cover quad + menús); fin por
   `[klepton] fatal: called unresolved import 'AMediaDataSource_new'` (VideoPlayer con fuente propia).
