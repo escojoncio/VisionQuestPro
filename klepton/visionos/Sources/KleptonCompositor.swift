@@ -238,6 +238,9 @@ final class KleptonCompositor {
     /// Always-pass, no write — for coplanar draws after the first. See where
     /// `depthState` is built for why the two cannot be one.
     private var depthPassState: MTLDepthStencilState?
+    /// The guest's quad layers in the order it submitted them: no test, and
+    /// depth still written. See `overlaysInSubmitOrder`.
+    private var overlayOrderState: MTLDepthStencilState?
     private var sampler: MTLSamplerState!
     /// Views this GPU can draw in one amplified pass. 2 everywhere real; 1
     /// forces the old per-view passes, and forces foveation off with them
@@ -388,6 +391,11 @@ final class KleptonCompositor {
     // Measured against the display period this run actually observed
     // (primeDisplay), not against an assumed 90 or 120 Hz.
     private var displayPeriod: TimeInterval = 0
+    private var cadenceMin: TimeInterval = .infinity   // shortest gap this window (panel re-latch)
+    private var fasterPanelSeen = 0
+    nonisolated(unsafe) private static var lastThermal: ProcessInfo.ThermalState = .nominal
+    nonisolated(unsafe) private static var thermalTick = 0
+    private var cadenceShort = 0   // gaps this window clearly shorter than the latched period
     private var lastPresentation: TimeInterval = 0
 
     // --- The boot rate SETTLE gate -------------------------------------------
@@ -465,6 +473,18 @@ final class KleptonCompositor {
     // thermal demotion produces; the closest pair is 96 and 100, 4.2% apart, so
     // half a percent has eight times the margin it needs.
     private static let canonicalHz: [Double] = [120, 100, 96, 90, 60]
+    /// Panel rates this hardware runs immersive content at (AVP build 34).
+    private static let panelHz: [Double] = [120, 100, 96, 90]
+    /// A measured period under 55 Hz: the period of the panel rate it is a x2/x3 hold of (within 6 %),
+    /// or nil. 55..85 Hz is left alone (a real 60 Hz demotion has been seen on this hardware).
+    private static func unheldPanelPeriod(_ period: TimeInterval) -> TimeInterval? {
+        let hz = 1.0 / period
+        guard hz < 55 else { return nil }
+        for k in 2...3 {
+            if let c = panelHz.first(where: { abs(hz * Double(k) - $0) <= 0.06 * $0 }) { return 1.0 / c }
+        }
+        return nil
+    }
 
     private var cadenceN = 0
     private var cadenceSum = 0.0
@@ -874,6 +894,11 @@ final class KleptonCompositor {
             dsdAlways.depthCompareFunction = .always
             dsdAlways.isDepthWriteEnabled = false
             depthPassState = device.makeDepthStencilState(descriptor: dsdAlways)
+
+            let dsdOrder = MTLDepthStencilDescriptor()
+            dsdOrder.depthCompareFunction = .always
+            dsdOrder.isDepthWriteEnabled = true
+            overlayOrderState = device.makeDepthStencilState(descriptor: dsdOrder)
 
             // The overlay pass — the guest's non-eye layers, which are the whole
             // of an Unreal title's UI. See encodeOverlays.
@@ -1507,6 +1532,22 @@ final class KleptonCompositor {
                       + (noFence ? " (NOFENCE)" : ""))
                 NSLog("[cp] \(cadenceSummary())")
                 NSLog("[cp] \(stageSummary())")
+                // The headset's thermal state (nominal / fair / serious / critical): logged on every
+                // change and every 30 s, so a slowdown can be told apart from thermal throttling.
+                let th = ProcessInfo.processInfo.thermalState
+                Self.thermalTick += 1
+                if th != Self.lastThermal || Self.thermalTick % 60 == 1 {
+                    let name: String
+                    switch th {
+                    case .nominal: name = "nominal"
+                    case .fair: name = "fair"
+                    case .serious: name = "SERIOUS"
+                    case .critical: name = "CRITICAL"
+                    @unknown default: name = "unknown"
+                    }
+                    NSLog("[cp] thermal state: \(name)\(th != Self.lastThermal ? " (changed)" : "")")
+                    Self.lastThermal = th
+                }
             }
         }
         NSLog("[cp] render loop ended after \(presented) presented frames, "
@@ -3063,6 +3104,15 @@ final class KleptonCompositor {
             // The equirect branch above may have swapped the depth state for
             // its behind-everything compare; restore the quad's before drawing.
             if writeDepth, let depthState { enc.setDepthStencilState(depthState) }
+            // ...or, where asked for, the state that lets each quad land over
+            // the ones before it whatever their distances.
+            // Depth WRITES only when the overlays are the frame (writeDepth): over a
+            // live eye picture a write would stamp the panel's near depth over the world
+            // (see encodeOverlays' doc), so there it is compare-always, no write.
+            if Self.overlaysInSubmitOrder {
+                if writeDepth, let overlayOrderState { enc.setDepthStencilState(overlayOrderState) }
+                else if let depthPassState { enc.setDepthStencilState(depthPassState) }
+            }
             enc.setRenderPipelineState(pipe)
             enc.setFragmentTexture(texture, index: 0)
             enc.setFragmentSamplerState(sampler, index: 0)
@@ -3133,6 +3183,20 @@ final class KleptonCompositor {
     /// V flips and sRGB decode differ by how the guest authored the panorama;
     /// both are one device run to settle, so they are env-switchable.
     private static let skipHeadLockedOverlays = klEnvOn("KL_OVERLAY_SKIP_HEADLOCKED", default: false)
+    /// KL_OVERLAY_SUBMIT_ORDER: quad layers are composited in the order the
+    /// guest submitted them, which is what a Quest's compositor does, instead of
+    /// being depth-tested against each other. With `.greater` and writes on, a
+    /// quad stamps its distance over its whole rectangle, transparent parts
+    /// included, and a quad submitted after it that lies farther away is cut off
+    /// along the nearer one's edge - where that edge falls moving with the head
+    /// (Alien: Rogue Incursion's labels, AC Nexus's panels).
+    /// Default on for AC Nexus only (package gate); read once,
+    /// when the compositor first draws, after the game has been configured.
+    private static let overlaysInSubmitOrder: Bool = {
+        let on = klEnvOn("KL_OVERLAY_SUBMIT_ORDER", default: kl_is_ac_nexus() != 0)
+        if on { NSLog("[cp] KL_OVERLAY_SUBMIT_ORDER on: quad layers composited in submit order") }
+        return on
+    }()
     private static let drawEquirectOverlays = klEnvOn("KL_OVERLAY_EQ", default: true)
     private static let eqFlipY = klEnvOn("KL_EQ_FLIP", default: false)
     private static let eqSrgbDecode = klEnvOn("KL_EQ_SRGB", default: false)
@@ -3813,7 +3877,9 @@ final class KleptonCompositor {
         cadenceN += 1
         cadenceSum += seconds
         cadenceMax = max(cadenceMax, seconds)
+        cadenceMin = min(cadenceMin, seconds)
         if gap >= 1.5 { cadenceRepeats += 1 }
+        if displayPeriod > 0 && seconds < 0.75 * displayPeriod { cadenceShort += 1 }
     }
 
     /// The cadence numbers, for the liveness line — which is the one report
@@ -3846,6 +3912,28 @@ final class KleptonCompositor {
         // same thing from scratch off a log that never remarked on it. Three
         // consecutive reports — six seconds — of the cadence disagreeing with
         // the latched period by more than 10% is not a hitch.
+        // The panel never runs FASTER than it is: a faster canonical rate seen as the shortest gap
+        // in three windows in a row means the boot latch was a held cadence — re-latch upward
+        // (AVP build 34). Only upward; a slower cadence is holds, never a slower panel.
+        // Only from a latch under 85 Hz (a held boot measurement — never 90 -> 96/100 on jitter),
+        // only when at least a quarter of the window's gaps are clearly shorter than the latched
+        // period, and six windows (~3 s) in a row.
+        if displayPeriod > 0, 1.0 / displayPeriod < 85, cadenceN >= 10,
+           Double(cadenceShort) >= 0.25 * Double(cadenceN),
+           cadenceMin.isFinite, cadenceMin > 0,
+           let c = Self.panelHz.first(where: { abs(1.0 / cadenceMin - $0) <= 0.06 * $0 }),
+           c > (1.0 / displayPeriod) * 1.06 {
+            fasterPanelSeen += 1
+            if fasterPanelSeen >= 6 {
+                NSLog(String(format: "[cp] PANEL RATE RE-LATCHED %.2f -> %.0f Hz (the boot measurement was a "
+                             + "held cadence); the guest is told %.0f Hz from now on", 1.0 / displayPeriod, c, c))
+                displayPeriod = 1.0 / c
+                kl_ovrp_set_display_frequency(Float(c))
+                fasterPanelSeen = 0
+            }
+        } else {
+            fasterPanelSeen = 0
+        }
         if displayPeriod > 0 && cadenceN >= 15 && abs(periods - 1.0) > 0.10 {
             cadenceDisagreed += 1
             if cadenceDisagreed == 3 {
@@ -3862,7 +3950,7 @@ final class KleptonCompositor {
         } else {
             cadenceDisagreed = 0
         }
-        cadenceN = 0; cadenceSum = 0; cadenceMax = 0
+        cadenceN = 0; cadenceSum = 0; cadenceMax = 0; cadenceMin = .infinity; cadenceShort = 0
         cadenceRepeats = 0; missedDeadline = 0
         anchorWalkedBack = 0; anchorHeld = 0; anchorUnknown = 0
         return out
@@ -4515,7 +4603,18 @@ final class KleptonCompositor {
                              hzSettleTimeoutMs, hzSettleMs, hzSettleTol * 100, gaps.count))
             }
         }
-        if let mid = chosen, mid > 0 {
+        if var mid = chosen, mid > 0 {
+            // (AVP build 34, seen here on AC Nexus 21:24:50: 50.03 Hz latched on a 100 Hz panel.) The
+            // priming frames can be HELD — each shown for two refreshes while the launch is busy — and
+            // 120 held frames look like a steady 50 Hz panel; the guest was then told 50 Hz for the whole
+            // run. This panel never runs under ~85 Hz: a settled rate under 55 Hz that is a x2/x3 hold of
+            // a canonical rate latches the canonical one. KL_CP_UNHOLD_RATE=0 keeps the measurement.
+            if klEnvOn("KL_CP_UNHOLD_RATE", default: true), let fixed = Self.unheldPanelPeriod(mid) {
+                NSLog(String(format: "[cp] display rate %.2f Hz is a HELD cadence of the panel (every priming "
+                             + "frame shown %.0fx): latching the panel's %.2f Hz instead",
+                             1.0 / mid, (mid / fixed).rounded(), 1.0 / fixed))
+                mid = fixed
+            }
             displayPeriod = mid          // what the cadence check measures against
             let hz = Float(1.0 / mid)
             NSLog(String(format: "[cp] display %.2f Hz measured over %d frames",

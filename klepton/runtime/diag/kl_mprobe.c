@@ -393,6 +393,78 @@ static void mprobe_resolve_offsets(void) {
     }
 }
 
+// ---- AC Nexus VR: the frame length the guest spins itself out to -------------
+//
+// Not a probe: the one place the runtime writes a managed value, kept here
+// because the il2cpp bindings are. AC Nexus runs with Application SpaceWarp and
+// paces ITSELF for it: NexusUtils.PhaseSyncHack.SpinWaitAtEndOfNexusFrame spins
+// every frame out to _nexusFrameTicksSpaceWarp, which its Awake sets from a
+// per-headset constant - 85% of two display periods, 21.25 ms for a Quest 2 at
+// 80 Hz (Q2_TARGET) and ~18.89 ms for a Quest 3 at 90 Hz (Q3_TARGET). On a
+// Quest the compositor then holds the app to half the display rate and
+// synthesises the frames between. Nothing synthesises frames here, so that spin
+// is half the frame rate given away for nothing (46.7 fps against a 100 Hz
+// display at the Quest 2 length).
+//
+// So the spin is taken out (0 ticks, the value the game itself uses outside
+// SpaceWarp - _nexusFrameTicksNormal is 0) and the game runs as fast as it can
+// (reported: 100 fps in menus, 70-98 in a level, where the spin held both
+// at 46.7). Only a value in the range Awake writes for a headset (15-26 ms:
+// Quest 2, Quest 3 and Quest Pro profiles) is replaced, so a value the game
+// set for another reason is left alone.
+// AC Nexus only (package gate). KL_NEXUS_FRAME_BUDGET=0 leaves it alone;
+// KL_NEXUS_FRAME_BUDGET_MS=<ms> spins to that length instead.
+void kl_mprobe_nexus_frame_budget(unsigned frame) {
+    static int on = -1;
+    static double ms;
+    if (on < 0) {
+        extern int kl_is_ac_nexus(void);
+        extern int kl_ac_nexus_known(void);
+        if (!kl_ac_nexus_known()) return;
+        on = kl_env_on("KL_NEXUS_FRAME_BUDGET", kl_is_ac_nexus());
+        const char *e = kl_env_str("KL_NEXUS_FRAME_BUDGET_MS", NULL);
+        ms = e ? strtod(e, NULL) : 0.0;
+        if (!(ms >= 0.0 && ms < 21.25)) ms = 0.0;
+        if (on) fprintf(stderr, "  [nexus] frame length: KL_NEXUS_FRAME_BUDGET on (target %.2f ms)\n", ms);
+    }
+    if (!on || frame < 300 || frame % 300) return;
+    if (!mprobe_init()) return;
+    static const MethodInfo *m_fo; static Il2CppObject *type; static size_t off; static int r;
+    if (!r) {
+        r = 1;
+        kl_image *img = kl_find_image("libil2cpp.so");
+        Il2CppClass *k = find_class("NexusUtils", "PhaseSyncHack");
+        typedef void *(*gfn_fn)(Il2CppClass *, const char *);
+        typedef size_t (*f_off_fn)(void *);
+        gfn_fn gfn = img ? (gfn_fn)kl_sym(img, "il2cpp_class_get_field_from_name") : NULL;
+        f_off_fn fo = img ? (f_off_fn)kl_sym(img, "il2cpp_field_get_offset") : NULL;
+        void *f = k && gfn ? gfn(k, "_nexusFrameTicksSpaceWarp") : NULL;
+        if (f && fo) off = fo(f);
+        if (k) type = il.type_get_object(il.class_get_type(k));
+        m_fo = find_method("UnityEngine", "Object", "FindObjectsOfType", 1);
+        if (!off || !type || !m_fo) {
+            fprintf(stderr, "  [nexus] frame length: PhaseSyncHack not found as expected - left alone\n");
+            on = 0;
+            return;
+        }
+    }
+    int64_t want = (int64_t)(ms * 1e4);                       // 100 ns ticks
+    void *ta[1] = { type };
+    Il2CppObject *arr = invoke(m_fo, ta, "FindObjectsOfType(PhaseSyncHack)");
+    unsigned n = arr ? il.array_length(arr) : 0;
+    for (unsigned i = 0; i < n; i++) {
+        Il2CppObject *o = ((Il2CppObject **)((uint8_t *)arr + ARR_DATA))[i];
+        if (!o) continue;
+        int64_t *p = (int64_t *)((uint8_t *)o + off);
+        // Awake's per-headset constant: Q2 212500, Q3 ~188889, Pro (72 Hz) ~236111.
+        if (*p != want && *p >= 150000 && *p <= 260000) {
+            fprintf(stderr, "  [nexus] frame length: the game's SpaceWarp spin of %.2f ms -> %.2f ms\n",
+                    (double)*p / 1e4, ms);
+            *p = want;
+        }
+    }
+}
+
 void kl_mprobe_tick(unsigned frame) {
     // Independent of KL_PROBE_INPUT and of KL_PROBE_FROM: this one has to land
     // BEFORE the throw it exists to describe, and the throw here is on the

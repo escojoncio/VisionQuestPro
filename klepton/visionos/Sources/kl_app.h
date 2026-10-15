@@ -137,6 +137,10 @@ const char *kl_app_target_name(void);
 // the build's compile-time default, honouring a KL_TARGET override. Lets the
 // launcher UI identify itself on the first render, not only after a boot.
 const char *kl_app_target_name_or_default(void);
+// 1 when the configured guest is Assassin's Creed Nexus VR (by its package,
+// com.Ubisoft.ACNexusVR; the target name here is the game folder's). 0 until the
+// game has been configured. Defined in kl_jni_services.c.
+int         kl_is_ac_nexus(void);
 int         kl_app_target_is_steamlink(void);
 // Whether this target should open the immersive space FULLY immersive by default
 // (no passthrough) rather than .mixed. True for the native OpenXR VR kind

@@ -1027,6 +1027,7 @@ static struct {
     pthread_cond_t  cv;
     uint64_t        published;    // poses the compositor has offered
     uint64_t        consumed;     // poses the guest has started a frame for
+    uint64_t        published_ns; // when the last one was offered (guest_now_ns)
     unsigned        limit;        // KL_FRAMES, or 0 for "until stopped"
     // volatile because the Steam Link pump reads it WITHOUT the lock: that loop
     // is inside kl_slink and is handed a plain flag, which is the honest shape
@@ -1070,6 +1071,26 @@ static void guest_finished(void) {
 // render against the last pose it had, not wedge it. A wedged guest is
 // indistinguishable from a crashed one in a device log, and this is exactly the
 // path a backgrounded app takes.
+static uint64_t guest_now_ns(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
+}
+
+// KL_GUEST_FRESH_POSE (see the frame loop). Default on for AC Nexus only, the
+// one title it was measured on; any guest can opt in or out by env. Not cached
+// until the guest package is known (kl_ac_nexus_known).
+static int guest_fresh_pose(void) {
+    static int v = -1;
+    if (v < 0) {
+        int r = kl_env_on("KL_GUEST_FRESH_POSE", kl_is_ac_nexus());
+        if (!kl_ac_nexus_known()) return r;
+        v = r;
+        if (v) printf("[guest] KL_GUEST_FRESH_POSE on: each frame starts on a fresh pose offer\n");
+    }
+    return v;
+}
+
 static void guest_pace_wait(void) {
     struct timespec ts;
     clock_gettime(CLOCK_REALTIME, &ts);
@@ -1154,6 +1175,23 @@ static void *guest_thread(void *unused) {
             fflush(NULL);
             break;
         }
+        // KL_GUEST_FRESH_POSE: start each frame ON a display frame. A pose
+        // that was offered while the frame was still running is not carried
+        // into the next one; the loop waits for the next offer, so a guest
+        // frame lasts a whole number of display frames and is rendered from a
+        // pose that is new when it starts. Without it a guest whose frames run
+        // a little over one display period starts each on a pose already most
+        // of a period old and its own period beats against the display's
+        // (measured on AC Nexus). A frame that ended only
+        // just after an offer (within 2.5 ms) keeps it, so one long frame costs
+        // a late start and not a whole period.
+        if (guest_fresh_pose()) {
+            pthread_mutex_lock(&g_guest.mu);
+            if (g_guest.published != g_guest.consumed &&
+                guest_now_ns() - g_guest.published_ns > 2500000ull)
+                g_guest.consumed = g_guest.published;
+            pthread_mutex_unlock(&g_guest.mu);
+        }
         if (limit && kl_driver_frames() >= limit) {
             printf("[guest] reached KL_FRAMES=%u\n", limit);
             fflush(NULL);
@@ -1222,6 +1260,7 @@ int kl_app_guest_start(void) {
 void kl_app_guest_publish(void) {
     pthread_mutex_lock(&g_guest.mu);
     g_guest.published++;
+    g_guest.published_ns = guest_now_ns();
     pthread_cond_signal(&g_guest.cv);
     pthread_mutex_unlock(&g_guest.mu);
 }

@@ -157,6 +157,12 @@ void kl_jni_guest_version(long *code, const char **name);
 // see klj_guest_package.
 const char *kl_jni_guest_package(void);
 
+// 1 when the guest is Assassin's Creed Nexus VR (package com.Ubisoft.ACNexusVR).
+// Answers 0 until the package is known; kl_ac_nexus_known() says when it is, so
+// callers that cache an env default derived from it can wait for that.
+int kl_is_ac_nexus(void);
+int kl_ac_nexus_known(void);
+
 // Beat Saber versions keeps one save/pairing profile instead of repeating first
 // setup — and deliberately OUTSIDE build/, which `make clean` deletes. Drivers
 // pass the result to kl_jni_set_files_dir; visionOS overrides it with the app
