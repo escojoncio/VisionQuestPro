@@ -3002,7 +3002,25 @@ void *kl_vulkan_mtl_for_handle(unsigned long long h) {
     }
 
     // Resolve on EVERY call (not just the first), so every frame samples fresh UI.
-    if (!kl_env_on("KL_OVERLAY_TEXL", 1)) return NULL;
+    //
+    // Default OFF for AC Nexus (package gate), on for every other game. This
+    // detour exists because the layer's own swapchain image used to be empty -
+    // and it was empty because ovrp_GetLayerTexturePtr handed Unity the raw
+    // VkImage instead of a VkImage* cell (now fixed: klovrp_texcell). With that
+    // answered properly AC Nexus copies each panel into its layer image, which
+    // is the picture OVRPlugin means to be shown; a capture
+    // of the layer image held its calibration panel intact while this path put
+    // fragments of unrelated textures on screen in the same frame (the
+    // submitted handle is a pooled render texture Unity has already handed to
+    // something else). Other games keep the detour until measured the same way.
+    static int texl = -1;
+    if (texl < 0) {
+        extern int kl_is_ac_nexus(void);
+        extern int kl_ac_nexus_known(void);
+        int r = kl_env_on("KL_OVERLAY_TEXL", !kl_is_ac_nexus());
+        if (kl_ac_nexus_known()) texl = r;
+        if (!r) return NULL;
+    } else if (!texl) return NULL;
     // Only a live, tracked, non-eye image. A wild or already-destroyed handle here
     // is exactly the stale-MVKImage crash that destroy-tracking now prevents:
     // klvk_img_reg_has() is true only for an image still alive in our registry.
@@ -5986,6 +6004,7 @@ static int klvk_imgfmt_log_ok(void) {
     return 0;
 }
 
+static uint32_t klvk_sample_mask(void);   // KL_VK_MAX_SAMPLES, below
 static VkResult VKAPI_CALL klvk_GetPhysicalDeviceImageFormatProperties(
         VkPhysicalDevice pd, VkFormat fmt, VkImageType type, VkImageTiling tiling,
         VkImageUsageFlags usage, VkImageCreateFlags flags,
@@ -5996,6 +6015,7 @@ static VkResult VKAPI_CALL klvk_GetPhysicalDeviceImageFormatProperties(
     pd = KLVK_PHYS_OR_SUB(pd, "GetPhysicalDeviceImageFormatProperties");
     VkResult r = real ? real(pd, fmt, type, tiling, usage, flags, out)
                       : VK_ERROR_FORMAT_NOT_SUPPORTED;
+    if (r == VK_SUCCESS && out) out->sampleCounts &= klvk_sample_mask();   // per-format too
     if ((r != VK_SUCCESS || (klvk_trace() && (usage & 0x30u))) && klvk_imgfmt_log_ok()) {
         fprintf(stderr, "[TRACE] [imgfmt] fmt %d type %d tiling %d usage %#x flags %#x -> %d%s\n",
             (int)fmt, (int)type, (int)tiling, usage, flags, (int)r,
@@ -6044,7 +6064,43 @@ static int klvk_spoof_gpu(void) {
     }
     return on;
 }
+// KL_VK_MAX_SAMPLES=<1|2|4>: the most samples per pixel the guest is told this
+// device can render with (0 tells it the truth). A guest's multisampled targets
+// are transient on a Quest's tiler and cost it nothing; here they are real
+// memory - AC Nexus's 4x colour and depth pair is 865 MB per eye stage at
+// 3072 px - so the sample count is what an eye size
+// is paid for with. Default 2 for AC Nexus only (package gate); 0 for every
+// other game. An explicit per-game MSAA choice in the app (VPVK_MSAA, applied
+// inside VPKEngine to the sample count the game asks for) still wins over this,
+// and VPVK_FORCE_1X still forces 1x: this only changes what the guest asks for.
+static uint32_t klvk_sample_mask(void) {
+    static int v = -1;
+    if (v < 0) {
+        extern int kl_is_ac_nexus(void);
+        extern int kl_ac_nexus_known(void);
+        int r = kl_env_int("KL_VK_MAX_SAMPLES", kl_is_ac_nexus() ? 2 : 0);
+        if (!kl_ac_nexus_known()) return r == 1 ? 0x1u : r == 2 ? 0x3u : r == 4 ? 0x7u : ~0u;
+        v = r;
+    }
+    return v == 1 ? 0x1u : v == 2 ? 0x3u : v == 4 ? 0x7u : ~0u;
+}
+static void klvk_cap_sample_limits(VkPhysicalDeviceProperties *p) {
+    uint32_t m = klvk_sample_mask();
+    if (!p || m == ~0u) return;
+    p->limits.framebufferColorSampleCounts &= m;
+    p->limits.framebufferDepthSampleCounts &= m;
+    p->limits.framebufferStencilSampleCounts &= m;
+    p->limits.framebufferNoAttachmentsSampleCounts &= m;
+    p->limits.sampledImageColorSampleCounts &= m;
+    p->limits.sampledImageIntegerSampleCounts &= m;
+    p->limits.sampledImageDepthSampleCounts &= m;
+    p->limits.sampledImageStencilSampleCounts &= m;
+    p->limits.storageImageSampleCounts &= m;
+    static int said;
+    if (!said++) VKI("KL_VK_MAX_SAMPLES: sample counts reported to the guest masked to %#x\n", m);
+}
 static void klvk_spoof_props(VkPhysicalDeviceProperties *p) {
+    klvk_cap_sample_limits(p);
     if (!p || !klvk_spoof_gpu()) return;
     p->vendorID = 0x5143;                 // Qualcomm
     p->deviceID = 0x43051401;             // an Adreno 740-class id (plausible)
@@ -6141,6 +6197,28 @@ static void VKAPI_CALL klvk_GetPhysicalDeviceQueueFamilyProperties(
 // The rest of the vkGetPhysicalDevice* family Unity's device init queries on the
 // same NULL handle — each substitutes the live device and passes through. Kept
 // terse; they share the resolve-once + guard shape.
+// Features as an Adreno 740 reports them where VPKEngine is more conservative than the
+// hardware (2026-10-15 (18), AC Nexus UI drawn with Unity's error shader). VPKEngine ties
+// vertexPipelineStoresAndAtomics to its conformance-only switch; with it 0 Unity reports
+// SystemInfo.maxComputeBufferInputsVertex = 0 and drops every subshader whose vertex program
+// reads a StructuredBuffer — the pink-material failure Unity is known for on such GPUs.
+// Adreno and MoltenVK (where AC's menus are fine) both report 1, and Metal vertex functions
+// read device buffers natively. KL_VK_VTX_SSBO=0 restores VPKEngine's answer;
+// KL_VK_IMG_NOFMT=1 also claims storage-image read/write without format (second suspect).
+static void klvk_patch_features(VkPhysicalDeviceFeatures *f) {
+    if (!f) return;
+    if (kl_env_on("KL_VK_VTX_SSBO", 1)) f->vertexPipelineStoresAndAtomics = VK_TRUE;
+    if (kl_env_on("KL_VK_IMG_NOFMT", 0)) {
+        f->shaderStorageImageReadWithoutFormat = VK_TRUE;
+        f->shaderStorageImageWriteWithoutFormat = VK_TRUE;
+    }
+    static int said;
+    if (!said++)
+        VKI("features to the guest: vertexStores=%u fragStores=%u geom=%u tess=%u int16=%u multiViewport=%u "
+            "imgNoFmt=%u/%u\n", f->vertexPipelineStoresAndAtomics, f->fragmentStoresAndAtomics,
+            f->geometryShader, f->tessellationShader, f->shaderInt16, f->multiViewport,
+            f->shaderStorageImageReadWithoutFormat, f->shaderStorageImageWriteWithoutFormat);
+}
 static void VKAPI_CALL klvk_GetPhysicalDeviceFeatures2(
         VkPhysicalDevice pd, VkPhysicalDeviceFeatures2 *f) {
     KLVK_WHO("vkGetPhysicalDeviceFeatures2");
@@ -6151,6 +6229,7 @@ static void VKAPI_CALL klvk_GetPhysicalDeviceFeatures2(
             real_gipa(g_instance, "vkGetPhysicalDeviceFeatures2KHR"); } }
     pd = KLVK_PHYS_OR_SUB(pd, "GetPhysicalDeviceFeatures2");
     if (real) real(pd, f);
+    if (real && f) klvk_patch_features(&f->features);
 }
 static void VKAPI_CALL klvk_GetPhysicalDeviceFeatures(
         VkPhysicalDevice pd, VkPhysicalDeviceFeatures *f) {
@@ -6160,6 +6239,7 @@ static void VKAPI_CALL klvk_GetPhysicalDeviceFeatures(
         real_gipa(g_instance, "vkGetPhysicalDeviceFeatures"); }
     pd = KLVK_PHYS_OR_SUB(pd, "GetPhysicalDeviceFeatures");
     if (real) real(pd, f);
+    if (real) klvk_patch_features(f);
 }
 static void VKAPI_CALL klvk_GetPhysicalDeviceMemoryProperties(
         VkPhysicalDevice pd, VkPhysicalDeviceMemoryProperties *m) {
@@ -6306,6 +6386,7 @@ static VkResult VKAPI_CALL klvk_GetPhysicalDeviceImageFormatProperties2(
             real_gipa(g_instance, "vkGetPhysicalDeviceImageFormatProperties2KHR");
     }
     VkResult r = real ? real(pd, info, props) : VK_ERROR_FORMAT_NOT_SUPPORTED;
+    if (r == VK_SUCCESS && props) props->imageFormatProperties.sampleCounts &= klvk_sample_mask();
     if (info && (r != VK_SUCCESS || (klvk_trace() && (info->usage & 0x30u))) && klvk_imgfmt_log_ok())
         fprintf(stderr, "[TRACE] [imgfmt2] fmt %d type %d tiling %d usage %#x flags %#x -> %d%s\n",
             (int)info->format, (int)info->type, (int)info->tiling, info->usage,

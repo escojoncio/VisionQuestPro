@@ -2,7 +2,75 @@
 
 Historial completo: `git log -p bitacora.md` (compactada el 2026-10-15; lo cerrado queda en una línea con referencia).
 
-## EMPEZAR AQUÍ — 2026-10-15 (15): una sola pose por frame para TODAS las lecturas; registros al acabar el juego — SIN PROBAR
+## SIGUIENTE PASO OBLIGATORIO — emulación perfecta de Quest 3 (antes de cualquier otra tarea)
+Objetivo: que ningún juego note diferencia con un Quest 3. Hacerlo en este orden:
+1. **GPU idéntica a la Adreno 740 del Quest 3.** VPKEngine debe declarar exactamente lo que declara la Adreno
+   (features, límites, extensiones, formatos) y cumplirlo. Herramienta: Vulkan CTS dentro de la app hasta 0 fallos en
+   lo que la Adreno soporta (base: Pass 8 567 / Fail 898 / NotSupported 26 622, perfil rápida). Incluye MSAA
+   transitorio `memoryless` en VPKEngine (como la memoria en chip del Adreno: sin RAM) y, hecho eso, volver a 4x en AC.
+2. **Runtime del Quest completo (OVRPlugin/OpenXR).** OpenXR CTS pasando en el visor; tiempos (predicted display time),
+   poses, capas y SpaceWarp como el sistema real.
+3. **Android completo.** Todas las APIs de sistema/NDK que piden los juegos: usar el «Escáner de APIs» por juego
+   (`VQApiScan.swift`) y cerrar lo que marque SIN IMPLEMENTAR (p. ej. AMediaDataSource_setGetAvailableSize/newUri).
+4. **Compositor.** Ritmo de panel fijo (100 Hz) y reproyección con profundidad por píxel (no solo giro).
+5. **Rendimiento.** Shaders precompilados sin tirones y paso a la traducción anticipada (AOT) de VPKEngine.
+Lo que hace falta del usuario: logs de juegos variados (cada uno destapa huecos distintos); tandas periódicas del
+Vulkan CTS desde la app; el informe de capacidades (vulkaninfo) de un Quest 3 real para comparar con datos exactos
+(vulkan.gpuinfo.org bloquea la descarga automática).
+
+## EMPEZAR AQUÍ — 2026-10-15 (18): crash AMediaDataSource, panel 50→100 Hz, vertex SSBO (rosa), token offline — build 18
+- Resultado de (17) (build 505b8dc, AC 21:24–21:32, primera vez que el juego arranca): 0 `Scheduler::dispatch` (reloj
+  OK); `[nexus] SpaceWarp spin 18.89 ms -> 0`; memoria 3,9 GB; rosa sigue (cover quad + menús); fin por
+  `[klepton] fatal: called unresolved import 'AMediaDataSource_new'` (VideoPlayer con fuente propia).
+- `kl_mediandk.c`: AMediaDataSource_* + `AMediaExtractor_setDataSourceCustom` (vuelca la fuente a
+  TMPDIR/klepton-media-ds-*.mp4 y abre con kl_avdemux; `spooled` → unlink al borrar; close() del guest al borrar).
+- Display: `display rate SETTLED at 50.028 Hz` en panel de 100 Hz (frames de arranque mostrados 2 veces) → al juego
+  se le dijo 50 Hz. `KleptonCompositor.swift`: `unheldPanelPeriod` en el latch de arranque (<55 Hz y x2/x3 de
+  90/96/100/120 → canónico; `KL_CP_UNHOLD_RATE`), y re-latch hacia arriba en `cadenceSummary` solo desde <85 Hz,
+  ≥25 % de huecos cortos (`cadenceShort`) y 6 ventanas (~3 s; la ventana es de 0,5 s).
+- Rosa: VPKEngine reporta `vertexPipelineStoresAndAtomics=0` (atado a VPVK_EXTRA_EXTENSIONS, entry.cpp:325); Adreno y
+  MoltenVK reportan 1 → Unity descarta subshaders con StructuredBuffer en vértice → shader de error.
+  `kl_vulkan.c` `klvk_patch_features` (Features y Features2): 1 para todos (`KL_VK_VTX_SSBO`, def. 1);
+  `KL_VK_IMG_NOFMT=1` (def. 0) reporta también storage image sin formato. Log: `features to the guest: …`.
+  Escrituras de vértice en el traductor sin validar (CTS) — vigilar `vk.err`.
+- UbiServices offline ~50 s (reintentos DNS de login con el token Oculus): `kl_ovrplat.c` `ovr_User_GetAccessToken`
+  → completion de ERROR para AC (`KL_PLAT_TOKEN_ERROR`, latch solo con paquete conocido).
+- Log `[cp] thermal state: nominal|fair|SERIOUS|CRITICAL` (al cambiar y cada 30 s), KleptonCompositor.swift.
+- Pendiente: MSAA memoryless en VPKEngine (MSAA transitorio sin RAM, como en Adreno) y volver a 4x en AC; paneles AC
+  girados 180° (`KL_OVERLAY_FLIP_X/Y`); idioma voces AC (menú del juego).
+
+## 2026-10-15 (16)-(17): etapa publicada tras la GPU (temblor al girar), clock_getres Linux (AC) — build 17
+- Resultado de (15) (Registros 11/12, build 8f080bf, AoT 20:21 a 100 Hz): censo `answered head vs pinned pose worst
+  0,06–0,07°` → las poses YA son una por frame; el temblor seguía → la causa NO eran las poses. Compositor sano
+  (cadencia 10,00 ms). Registros `fin-<juego>` funcionan.
+- CAUSA del temblor (también visto en Arkham Shadow, «flicker when I
+  look around»): `klovrp_end_frame_impl` publicaba `last_complete` ANTES de que `kl_vulkan_frame_done` esperara a
+  la GPU (~12 ms en AoT = un periodo entero) → el compositor reproyectaba con la pose del frame N una textura que
+  aún tenía (parcial o totalmente) el frame N-3. Arreglo `kl_ovrp.c`: `t_defer_complete` (EndFrame4, guest Vulkan,
+  `KL_OVRP_PUBLISH_AFTER_GPU`, def. 1) → `deferred_complete` + `r[stage].complete=0`; `klovrp_publish_deferred()` tras
+  `kl_vulkan_frame_done` (y al final de EndFrame4). Escaneos de VPKTAA en EndFrame4 aceptan la etapa diferida. Log
+  cada 600: `[ovrp] frame end waited for the GPU X ms mean … stage published AFTER the wait`.
+- AC ralentizaciones: 4464× `Scheduler::dispatch (1255 ms)` en 30 s. Causa: UbiServices usa
+  1e9/clock_getres(MONOTONIC); Darwin da 1000 ns → reloj 1000x rápido. `klb_clock_getres` (kl_libc.c) responde 1 ns
+  para ids 0/1/4/7 a TODOS los juegos (`KL_CLOCK_RES_LINUX`, def. 1).
+- AC magenta: `[prov] layer 3 source …: no write seen` (el quad de portada se copia de una textura que nada escribió).
+  Probado y DESCARTADO limpiar a cero (la tabla de procedencia es un anillo con pérdidas y no cubre resolve/compute/
+  dynamic rendering → borraría contenido legítimo). Queda solo el diagnóstico `[prov]`.
+- (17) Arreglos de AC — gate AC = `kl_is_ac_nexus()` (kl_jni_services.c, por
+  paquete com.Ubisoft.ACNexusVR; `klj_guest_package` ahora con mutex y sin fijar el fallback antes de tener manifest):
+  - AC: `KL_NEXUS_FRAME_BUDGET` (kl_mprobe.c, desde `kl_driver_frame`: pone a 0 `_nexusFrameTicksSpaceWarp` de
+    NexusUtils.PhaseSyncHack vía il2cpp; valores 150000–260000), `KL_GUEST_FRESH_POSE` (kl_app.c), `KL_VK_MAX_SAMPLES`=2
+    (límites + sampleCounts por formato), 2 etapas de ojo (`kl_ovrp_stage_count`), tope de ojo 3840 si MSAA≤2 y 2 etapas,
+    `KL_OVERLAY_TEXL`=0, `KL_OVERLAY_SUBMIT_ORDER` (Swift; escribe profundidad solo si writeDepth).
+  - Todos: `KL_OVRP_ENQ_OWNS_OVERLAYS` (EndFrame4 vacío no borra overlays encolados; contador solo con capas no-ojo),
+    AAudio burst 256 (Wwise 1024: AC o libAkSoundEngine.so; `KL_AAUDIO_WWISE_BURST`), `KL_FS_REL_SDCARD` (rutas
+    relativas "sdcard/…" como absolutas mientras el guest no haga chdir).
+  - Ya equivalentes: idiomas (.lang listados; la voz en español se elige en el menú del juego), SpaceWarp, texptr,
+    soft null-class, injectActivityJava, red offline, vídeo de carga.
+  - Fork, no portado: `klovrp_enq_age` (ruta EndFrame legada), usuarios offline por app id de otras tiendas,
+    `KL_OVERLAY_FLIP_X/Y` (los paneles de AC podrían salir girados 180°; comprobar).
+
+## 2026-10-15 (15): una sola pose por frame para TODAS las lecturas; registros al acabar el juego — SIN PROBAR
 - Resultado de (14) (Registros 9/10, builds e56af9c/c29ae8e): PEOR al girar («los ojos ni se sincronizan»). El log lo
   mide: `frame record -> last Update(Render)` worst 2–7°, mean 0,7–1,2° girando, 22° en tirones = lo que el registro se
   separó de la pose dibujada → Unity dibuja con la PRIMERA lectura del frame (el display provider lee los ojos justo tras

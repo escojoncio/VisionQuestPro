@@ -144,14 +144,58 @@ static int g_input_streams;     // INPUT streams sharing the one capture device
 static unsigned long g_short_writes;
 static int g_input_refusals;    // input opens declined because the mic was off
 
+// 1 when the guest mixes through Audiokinetic Wwise: AC Nexus by package, or any
+// Unity guest that ships Wwise's integration library (libAkSoundEngine.so) beside
+// its own. Unreal titles link Wwise statically and cannot be told apart from
+// here; KL_AAUDIO_BURST=1024 serves them by hand.
+static int klaa_guest_wwise(void) {
+    static int v = -1;
+    if (v >= 0) return v;
+    extern int kl_is_ac_nexus(void);
+    extern int kl_ac_nexus_known(void);
+    extern const char *g_native_lib_dir;
+    int r = kl_is_ac_nexus();
+    if (!r && g_native_lib_dir && *g_native_lib_dir) {
+        char p[1200];
+        snprintf(p, sizeof p, "%s/libAkSoundEngine.so", g_native_lib_dir);
+        r = access(p, F_OK) == 0;
+    }
+    if (kl_ac_nexus_known()) v = r;
+    return r;
+}
+
 static int klaa_burst_frames(void) {
     const char *e = getenv("KL_AAUDIO_BURST");
     int n = e ? atoi(e) : 0;
-    // 240 frames is 5 ms at 48 kHz and is what this guest's own jitter buffer
-    // is configured in multiples of. AAudio's real burst is the HAL's; the
-    // guest only uses it to size its buffer, so any sane value works and a
-    // small one keeps the callback rate close to Android's.
-    if (n < 32 || n > 8192) n = 240;
+    if (n < 32 || n > 8192) {
+        // 256 frames by default, not 240. The burst is the size of every pull
+        // the guest's mixer is asked to serve, and a mixer that renders in fixed
+        // blocks serves it out of the block it has: ask a 1024-frame block for
+        // 240 frames five times and the fifth pull comes back with 64 lit frames
+        // and 176 zeros, which are then played - a 40 Hz gate on the music, not
+        // a dropout (from a guest-side capture). A power of two
+        // divides every block size a real mixer uses, and 256 is the number the
+        // guest is already told through AudioManager.getProperty(
+        // OUTPUT_FRAMES_PER_BUFFER) (KLJ_AUDIO_FRAMES). All games;
+        // KL_AAUDIO_OLD_BURST=1 goes back to 240.
+        n = kl_env_on("KL_AAUDIO_OLD_BURST", 0) ? 240 : 256;
+        // Wwise (2019.x) mixes in larger blocks still, and its AAudio sink runs
+        // dry between them when asked for a small burst: "Voice Starvation"
+        // ~225 times a minute and a steady crackle in AC Nexus, with the device
+        // ring itself never underrunning. Asked for 1024 it logged one
+        // starvation in a 50 s run and the crackle was gone. The same crackle
+        // and the same cure are known in other Wwise titles (Saints &
+        // Sinners, Galaxy's Edge, Pistol Whip, Tetris Effect - the last heard
+        // crackling at 256 too), so it is the sound engine's block size, not a
+        // game's. KL_AAUDIO_WWISE_BURST=0 keeps the plain default for them.
+        if (kl_env_on("KL_AAUDIO_WWISE_BURST", 1) && klaa_guest_wwise()) n = 1024;
+        static int said = -1;
+        if (said != n) {
+            said = n;
+            fprintf(stderr, "  [aaudio] burst %d frames%s\n", n,
+                    n == 1024 ? " (Wwise guest: KL_AAUDIO_WWISE_BURST)" : "");
+        }
+    }
     return n;
 }
 

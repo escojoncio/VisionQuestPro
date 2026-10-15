@@ -1489,7 +1489,25 @@ void kl_ovrp_set_eye_texture_size(int w, int h) {
         w = (int)((float)w * scale + 0.5f);
         h = (int)((float)h * scale + 0.5f);
     }
-    int cap = kl_env_int("KL_OVRP_EYE_MAX", native ? 4096 : 3072);
+    int cap_dflt = native ? 4096 : 3072;
+    // AC Nexus: a quarter more (3840), paid for by rendering 2x multisampled
+    // instead of 4x (KL_VK_MAX_SAMPLES in kl_vulkan.c) and by two stages
+    // instead of three (kl_ovrp_stage_count). Arithmetic on the
+    // same headset: 4x at 3072 is 865 MB a stage (x3 here before), 2x at 3840
+    // is 676 MB a stage (x2), so the larger eye costs LESS than the old default.
+    // Only taken when that trade is actually in force: not when the sample
+    // mask or the stage count was overridden upwards, nor when the per-game
+    // MSAA choice (VPVK_MSAA) asks for more than 2x.
+    if (!native) {
+        extern int kl_is_ac_nexus(void);
+        const char *ms = getenv("KL_VK_MAX_SAMPLES");
+        const char *vm = getenv("VPVK_MSAA");
+        int samples_ok = !ms || (atoi(ms) >= 1 && atoi(ms) <= 2);
+        int msaa_ok = !vm || atoi(vm) <= 2;
+        if (kl_is_ac_nexus() && samples_ok && msaa_ok && kl_ovrp_stage_count() <= 2)
+            cap_dflt = 3840;
+    }
+    int cap = kl_env_int("KL_OVRP_EYE_MAX", cap_dflt);
     if (cap > 0 && (w > cap || h > cap)) {
         // Preserve the aspect ratio: clamping the axes independently would
         // change the shape of the picture, and the frustum tangents pushed
@@ -2974,8 +2992,10 @@ static struct {
     uint64_t            named_disagree;
     uint64_t            serial;         // frames begun
     int                 last_complete;  // stage of the last completed frame, -1 = none
+    int                 deferred_complete; // filed, GPU not done yet (Vulkan EndFrame4), -1 = none
+    uint64_t            refiled_shown;  // a frame filed onto the stage being shown
     pthread_mutex_t     mu;
-} g_frames = { .last_complete = -1, .last_named = -1,
+} g_frames = { .last_complete = -1, .deferred_complete = -1, .last_named = -1,
                .mu = PTHREAD_MUTEX_INITIALIZER };
 
 // How many swapchain stages the guest is told it has. KL_OVRP_STAGES is the
@@ -3009,8 +3029,20 @@ static struct {
 int kl_ovrp_stage_count(void) {
     static int n;
     if (!n) {
-        n = kl_env_int("KL_OVRP_STAGES", KLOVRP_STAGES_DEFAULT);
-        if (n < 1) n = 1;
+        // Two for AC Nexus (package gate). Unity keeps a 4x (2x with
+        // KL_VK_MAX_SAMPLES) multisampled colour and depth target per stage
+        // beside each eye image, transient on a Quest and real memory here
+        // (865 MB a stage at 3072 px and 4x). With three
+        // the level load peaked at 8.1 GB of an 8.2 GB limit and was killed
+        // once; with two it peaks at 7.1-7.6. Not latched until the guest
+        // package is known, so an early caller cannot fix the wrong count.
+        extern int kl_is_ac_nexus(void);
+        extern int kl_ac_nexus_known(void);
+        int r = kl_env_int("KL_OVRP_STAGES", kl_is_ac_nexus() ? 2 : KLOVRP_STAGES_DEFAULT);
+        if (r < 1) r = 1;
+        if (r > KLOVRP_MAX_STAGES) r = KLOVRP_MAX_STAGES;
+        if (!kl_ac_nexus_known()) return r;
+        n = r;
         if (n > KLOVRP_MAX_STAGES) n = KLOVRP_MAX_STAGES;
     }
     return n;
@@ -3196,6 +3228,24 @@ static void klovrp_record_overlays(const void *layer_submits, int count);
 // provider (8786 disagreements in a 9000-frame 1.40 run, see EndFrame4), and a
 // compositor keyed on kl_ovrp_last_complete_stage() would then sample the stage
 // the guest is drawing into NEXT — a torn picture with every counter healthy.
+// 2026-10-15 (16) — THE head-turn shake (the same bug shows on Arkham Shadow as
+// "flicker when I look around"). klovrp_end_frame_impl announced the stage as complete
+// (last_complete) before kl_vulkan_frame_done waited for the GPU, so for the whole GPU
+// frame (~12 ms in AoT, a full display period) the compositor reprojected with frame N's
+// pose a texture still holding — partly or wholly — the picture of frame N-3. Identical
+// pictures with the head still; several frames of rotation apart when turning, per eye
+// slice, i.e. eyes that do not line up. Now the stage is published only after the wait.
+static __thread int t_defer_complete;
+static void klovrp_publish_deferred(void) {
+    pthread_mutex_lock(&g_frames.mu);
+    if (g_frames.deferred_complete >= 0) {
+        g_frames.r[g_frames.deferred_complete].complete = 1;
+        g_frames.last_complete = g_frames.deferred_complete;
+        g_frames.deferred_complete = -1;
+    }
+    pthread_mutex_unlock(&g_frames.mu);
+}
+
 // EndFrame(F): the record takes the LAST Render sample filed for frame F (see
 // klovrp_pose_last) — the BeforeRender one Unity drew the picture with, which arrives
 // after BeginFrame4(F) and so was never in the record. A render-thread read during the
@@ -3387,8 +3437,16 @@ static uint64_t klovrp_end_frame_impl(int guest_frame_index, const int *viewport
             stage = (int)((g_frames.serial - 1) % (unsigned)stages);
         g_frames.pending.stage = stage;
         g_frames.pending.complete = 1;
+        if (t_defer_complete && stage == g_frames.last_complete) g_frames.refiled_shown++;
         g_frames.r[stage] = g_frames.pending;
-        g_frames.last_complete = stage;
+        // A Vulkan guest's EndFrame4 files the record BEFORE the GPU has drawn the
+        // picture (kl_vulkan_frame_done waits right after): the stage is announced to
+        // the compositor — last_complete AND the record's `complete`, which KleptonTAA
+        // scans r[] for — only once that wait is over (klovrp_publish_deferred).
+        if (t_defer_complete) {
+            g_frames.r[stage].complete = 0;
+            g_frames.deferred_complete = stage;
+        } else g_frames.last_complete = stage;
         g_frames.filed[stage]++;
         if (!binds) g_frames.guessed++;
 
@@ -3471,9 +3529,13 @@ static unsigned g_vk_frame;
 
 static void kl_loadvid_tick(void);
 static void klovrp_enq_endframe(void);
+// EndFrame4s since the guest last called ovrp_EnqueueSubmitLayer2 - see
+// klovrp_enq_owns_overlays.
+static volatile unsigned g_enq_frames_since = 1000000u;
 static uint64_t klovrp_EndFrame4(int guest_frame_index, const void *layer_submits,
                                  int layer_submit_count, void *sync) {
     ovrp_hit("ovrp_EndFrame4");
+    if (g_enq_frames_since < 1000000u) g_enq_frames_since++;
     klovrp_enq_endframe();   // the Enqueue'd overlay set of this frame is complete
     kl_loadvid_tick();
     { static unsigned n; if (n < 48 || n % 300 == 0) {
@@ -3520,8 +3582,10 @@ static uint64_t klovrp_EndFrame4(int guest_frame_index, const void *layer_submit
     pthread_mutex_lock(&g_frames.mu);
     uint64_t pend_serial = g_frames.pending.serial;
     pthread_mutex_unlock(&g_frames.mu);
+    t_defer_complete = kl_vulkan_guest_active() && kl_env_on("KL_OVRP_PUBLISH_AFTER_GPU", 1);
     uint64_t r = klovrp_end_frame_impl(guest_frame_index, have ? vp : NULL,
                                        have ? of : NULL, named);
+    t_defer_complete = 0;
 
     // BONELAB / the Vulkan path: this call IS the guest's assertion that it has
     // finished drawing the eye textures, so it is where they can be read back
@@ -3551,7 +3615,8 @@ static uint64_t klovrp_EndFrame4(int guest_frame_index, const void *layer_submit
             int filed = -1;
             pthread_mutex_lock(&g_frames.mu);
             for (int st = 0; pend_serial && st < KLOVRP_MAX_STAGES && filed < 0; st++)
-                if (g_frames.r[st].serial == pend_serial && g_frames.r[st].complete) filed = st;
+                if (g_frames.r[st].serial == pend_serial &&
+                    (g_frames.r[st].complete || st == g_frames.deferred_complete)) filed = st;
             pthread_mutex_unlock(&g_frames.mu);
             kl_vulkan_taa_frame_record(filed, filed >= 0 ? pend_serial : 0);
         }
@@ -3559,7 +3624,24 @@ static uint64_t klovrp_EndFrame4(int guest_frame_index, const void *layer_submit
         // the same queue, and a compositor let loose between the two would race
         // it. Ordinary runs write no captures at all, so this is the only
         // frame-completion point either way.
+        uint64_t t_wait = klovrp_mono_ns();
         kl_vulkan_frame_done(named < 0 ? 0 : named);
+        klovrp_publish_deferred();   // the picture exists now: the compositor may take it
+        {
+            static double sum_ms, worst_ms; static unsigned n;
+            double ms = (double)(klovrp_mono_ns() - t_wait) / 1e6;
+            sum_ms += ms; if (ms > worst_ms) worst_ms = ms;
+            if (++n % 600 == 0) {
+                pthread_mutex_lock(&g_frames.mu);
+                uint64_t refiled = g_frames.refiled_shown;
+                pthread_mutex_unlock(&g_frames.mu);
+                fprintf(stderr, "  [ovrp] frame end waited for the GPU %.1f ms mean, %.1f worst (600 frames); "
+                                "stage published AFTER the wait (KL_OVRP_PUBLISH_AFTER_GPU=1); frames filed onto "
+                                "the stage on screen: %llu\n", sum_ms / 600.0, worst_ms,
+                        (unsigned long long)refiled);
+                sum_ms = 0; worst_ms = 0;
+            }
+        }
         // The eye depth kl_vulkan just filed for this stage belongs to the frame
         // record filed above — tag it with that record's serial so VPKTAA never
         // pairs a picture with another frame's depth. 0 = this frame was not
@@ -3568,11 +3650,13 @@ static uint64_t klovrp_EndFrame4(int guest_frame_index, const void *layer_submit
             uint64_t tag = 0;
             pthread_mutex_lock(&g_frames.mu);
             for (int st = 0; pend_serial && st < KLOVRP_MAX_STAGES && !tag; st++)
-                if (g_frames.r[st].serial == pend_serial && g_frames.r[st].complete) tag = pend_serial;
+                if (g_frames.r[st].serial == pend_serial &&
+                    (g_frames.r[st].complete || st == g_frames.deferred_complete)) tag = pend_serial;
             pthread_mutex_unlock(&g_frames.mu);
             kl_vulkan_eye_depth_tag(named < 0 ? 0 : named, tag);
         }
     }
+    klovrp_publish_deferred();   // no-op unless a deferred stage is still pending
     ovrp_log_ret("EndFrame4", r, &nr_end);
     return r;
 }
@@ -6395,6 +6479,25 @@ static int klovrp_overlay_origin_top_left(const struct klovrp_layer *l) {
     return 0;
 }
 
+// KL_OVRP_ENQ_OWNS_OVERLAYS: a guest that files its panels through
+// ovrp_EnqueueSubmitLayer2 hands ovrp_EndFrame4 a list holding the eye layer and
+// nothing else (often on another thread). Read as "this frame has no overlays",
+// that list emptied the published set every KLOVRP_OVERLAY_TTL frames and the
+// panels were gone until the next enqueue put them back (AC Nexus's cards
+// blinking every few seconds). On a Quest the two paths
+// feed one compositor and an EndFrame list without overlays does not remove
+// enqueued ones, so while enqueue submits are arriving the enqueue path owns
+// the set; once they stop for KLOVRP_ENQ_LIVE_FRAMES EndFrame4s, an empty list
+// takes the panels down as before. A list that DOES carry overlays is recorded
+// as always. Default on for every game (correct OVRPlugin behaviour); KL_OVRP_ENQ_OWNS_OVERLAYS=0
+// restores the old behaviour.
+#define KLOVRP_ENQ_LIVE_FRAMES 6
+static int klovrp_enq_owns_overlays(void) {
+    static int v = -1;
+    if (v < 0) v = kl_env_on("KL_OVRP_ENQ_OWNS_OVERLAYS", 1);
+    return v && g_enq_frames_since < KLOVRP_ENQ_LIVE_FRAMES;
+}
+
 static void klovrp_record_overlays(const void *layer_submits, int count) {
     const ovrp_layer_submit *const *list = layer_submits;
     kl_ovrp_overlay tmp[KLOVRP_MAX_LAYERS];
@@ -6519,6 +6622,7 @@ static void klovrp_record_overlays(const void *layer_submits, int count) {
     // while a real removal still clears once the TTL lapses. The bridging above
     // handles a submit that NAMES a destroyed layer; this handles a frame that
     // omits it entirely. KL_OVRP_OVERLAY_PERSIST=0 restores strict per-frame.
+    if (n == 0 && klovrp_enq_owns_overlays()) return;
     static int persist = -1;
     if (persist < 0) persist = kl_env_on("KL_OVRP_OVERLAY_PERSIST", 1);
     enum { KLOVRP_OVERLAY_TTL = 12 };   // frames a dropped overlay is held for
@@ -7208,6 +7312,11 @@ static uint64_t klovrp_EnqueueSubmitLayer2(uint32_t flags, void *texL, void *tex
                                            int override_color, const float *color_scale,
                                            const float *color_offset) {
     ovrp_hit("ovrp_EnqueueSubmitLayer2");
+    {   // the enqueue path owns the overlay set (klovrp_enq_owns_overlays) — for OVERLAYS:
+        // an eye layer enqueued every frame must not keep an emptied set alive forever.
+        struct klovrp_layer *el = klovrp_layer(layer_id);
+        if (!el || !el->is_eye) g_enq_frames_since = 0;
+    }
     // Log the SUBMITTED texture handles per layer (once each): if texL differs
     // from the VkImage we handed out via GetLayerTexture2 for this layer, the
     // guest is drawing its UI into ITS OWN texture and we are sampling an empty

@@ -1084,8 +1084,23 @@ void kl_jni_guest_version(long *code, const char **name) {
 // <manifest> element.
  const char *klj_guest_package(void) {
     static char cached[192];
-    if (!*cached) {
-        snprintf(cached, sizeof cached, "com.beatgames.beatsaber");  // historical
+    static int latched;   // release-stored once cached holds the final answer
+    static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
+    if (__atomic_load_n(&latched, __ATOMIC_ACQUIRE)) return cached;
+    // Serialised: a second thread must never read `cached` mid-parse (it would see the
+    // historical fallback and kl_is_ac_nexus() would latch "not AC" for the whole run).
+    pthread_mutex_lock(&mu);
+    if (!__atomic_load_n(&latched, __ATOMIC_ACQUIRE)) {
+        static char fallback[] = "com.beatgames.beatsaber";  // historical
+        snprintf(cached, sizeof cached, "%s", fallback);
+        // Asked before the driver pointed g_assets_dir at the game (it still
+        // holds the built-in default): answer the fallback WITHOUT latching it,
+        // so a later call reads the real manifest instead of keeping the
+        // historical package for the whole run.
+        if (!g_assets_dir || !strcmp(g_assets_dir, "beatsaber/assets")) {
+            pthread_mutex_unlock(&mu);
+            return fallback;
+        }
         char path[1024];
         snprintf(path, sizeof path, "%s/../AndroidManifest.xml", g_assets_dir);
         FILE *f = fopen(path, "rb");
@@ -1109,11 +1124,35 @@ void kl_jni_guest_version(long *code, const char **name) {
                     "A split-binary guest builds its OBB NAME from this.",
                     g_assets_dir, cached);
         }
+        __atomic_store_n(&latched, 1, __ATOMIC_RELEASE);
     }
+    pthread_mutex_unlock(&mu);
     return cached;
 }
 
 const char *kl_jni_guest_package(void) { return klj_guest_package(); }
+
+// Per-game gate for Assassin's Creed Nexus VR. Here the target name is the game
+// folder's, so the package from the manifest is the stable identity.
+//
+// kl_ac_nexus_known() is 1 once the answer is final: the driver has pointed
+// g_assets_dir at the game, so klj_guest_package has read (and latched) the
+// real manifest. Before that it answers the historical Beat Saber default,
+// which must not latch "not AC" here or in any caller's own cache.
+int kl_ac_nexus_known(void) {
+    return g_assets_dir && strcmp(g_assets_dir, "beatsaber/assets") != 0;
+}
+
+int kl_is_ac_nexus(void) {
+    static volatile int cached = -1;
+    int c = cached;
+    if (c >= 0) return c;
+    if (!kl_ac_nexus_known()) return 0;
+    const char *p = klj_guest_package();
+    c = p && strcmp(p, "com.Ubisoft.ACNexusVR") == 0;
+    cached = c;
+    return c;
+}
 
  klj_val klj_PackageInfo_packageName(void) {
     return (klj_val){.l = kl_jni_new_string(klj_guest_package())};

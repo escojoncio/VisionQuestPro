@@ -1576,6 +1576,28 @@ static int kl_gd_find(const char *tail, char *out, size_t cap, int basename_ok) 
     return 1;
 }
 
+// KL_FS_REL_SDCARD: read a RELATIVE path that spells external storage from the
+// root - "sdcard/Android/obb/..." - as the absolute one. An Android app's working
+// directory is "/", so on a device the two are the same file; here the working
+// directory is the app's own and the relative spelling names nothing. AC Nexus
+// builds exactly one asset-bundle path this way (its animator controllers:
+// "Unable to open archive file: sdcard/Android/obb/..." at every level load,
+// then the Addressables failures that depend on it), and Premium Bowling names
+// every hall's scene bundle this way. Kept per title elsewhere
+// only because a guest that has chdir'd somewhere of its own means something
+// else by a relative path; so here it is the default for every game while the
+// guest has never called chdir (its cwd is still Android's "/"), and stops
+// applying once it has. KL_FS_REL_SDCARD=1 forces it on regardless, =0 off.
+static volatile int g_guest_chdir;
+static int kl_fs_rel_sdcard(void) {
+    static int v = -1;
+    if (v < 0) {
+        const char *e = getenv("KL_FS_REL_SDCARD");
+        v = e ? (kl_env_on("KL_FS_REL_SDCARD", 1) ? 2 : 0) : 1;
+    }
+    return v == 2 || (v == 1 && !g_guest_chdir);
+}
+
 static const char *kl_guest_path_inner(const char *path, char *buf, size_t cap) {
     if (!path) return path;
     // Windows-heritage guests (reVC / GTA Vice City) build paths with '\'
@@ -1622,6 +1644,24 @@ static const char *kl_guest_path_inner(const char *path, char *buf, size_t cap) 
     // picked "portal2" and force-loaded the Portal 2 map sp_a1_intro2, which is
     // absent from Portal 1 data -> black. There is no portal2 content; letting the
     // probe fail makes the launcher honor SOURCE_GAME=portal and load Portal 1.
+    // A relative external-storage spelling is the absolute one (KL_FS_REL_SDCARD).
+    if (path[0] != '/' && g_ext_target[0] && kl_fs_rel_sdcard()) {
+        for (size_t i = 0; i < sizeof g_ext_prefix / sizeof *g_ext_prefix; i++) {
+            size_t n = strlen(g_ext_prefix[i]) - 1;          // without its leading '/'
+            if (strncmp(path, g_ext_prefix[i] + 1, n) != 0 || path[n] != '/') continue;
+            char rooted[1024];
+            snprintf(rooted, sizeof rooted, "/%s", path);
+            snprintf(tmp, sizeof tmp, "%s", rooted);
+            path = tmp;
+            static int said;
+            if (said < 8) {
+                said++;
+                fprintf(stderr, "  [path] relative %s read as the absolute one "
+                                "(KL_FS_REL_SDCARD)\n", rooted + 1);
+            }
+            break;
+        }
+    }
     if (path[0] != '/') return KL_GP_PASS();
     size_t alen = strlen(g_apk_prefix);
     if (alen && strncmp(path, g_apk_prefix, alen) == 0 && path[alen] == '/') {
@@ -2072,6 +2112,7 @@ int klb_unlink(const char *path) {
 int klb_chdir(const char *path) {
     KL_GUEST_PATH(path);
     int r = chdir(_p);
+    if (r == 0) g_guest_chdir = 1;   // relative paths are the guest's own from here (KL_FS_REL_SDCARD)
     kl_fs_trace("chdir", path, NULL, r != 0);
     return r;
 }
@@ -3451,7 +3492,21 @@ static int kl_clock_to_darwin(int clk) {
 
 int klb_clock_getres(int clk, struct timespec *ts) {
     int dclk = kl_clock_to_darwin(clk);
-    return dclk < 0 ? (errno = EINVAL, -1) : clock_getres(dclk, ts);
+    if (dclk < 0) return errno = EINVAL, -1;
+    // As an Android kernel answers (2026-10-15 (16), found on
+    // AC Nexus): CLOCK_REALTIME/MONOTONIC/MONOTONIC_RAW/BOOTTIME have 1 ns resolution on
+    // Linux, 1000 ns on Darwin. UbiServices derives its steady clock's frequency as
+    // 1e9 / clock_getres(MONOTONIC), so with Darwin's answer its clock ran 1000x fast:
+    // its scheduler logged "long delay between two calls to Scheduler::dispatch (1255 ms)"
+    // thousands of times (4464 in 30 s, log 20:05) and its periodic jobs ran nonstop.
+    // KL_CLOCK_RES_LINUX=0 restores Darwin's value.
+    static int linux_res = -1;
+    if (linux_res < 0) linux_res = kl_env_on("KL_CLOCK_RES_LINUX", 1);
+    if (linux_res && (clk == 0 || clk == 1 || clk == 4 || clk == 7)) {
+        if (ts) { ts->tv_sec = 0; ts->tv_nsec = 1; }
+        return 0;
+    }
+    return clock_getres(dclk, ts);
 }
 
 int klb_clock_gettime(int clk, struct timespec *ts) {

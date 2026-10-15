@@ -669,6 +669,8 @@ int kl_driver_frame(void) {
     // pump). Between frames on the thread that just ran one, which is where
     // managed calls are safe.
     kl_mprobe_tick(g_frames);
+    // AC Nexus's own half-rate SpaceWarp spin, taken out (self-gated on the package).
+    kl_mprobe_nexus_frame_budget(g_frames);
     if (g_alarm) alarm(0);
     g_frames++;
     return r;
