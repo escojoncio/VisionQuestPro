@@ -1495,6 +1495,88 @@ static int klvk_layer_image_key(VkImage img) {
 // writes its layer image.
 static int klvk_img_info_get(VkImage img, VkFormat *fmt, uint32_t *w, uint32_t *h);
 static void klvk_layer_mark_written_how(VkImage img, const char *how, VkImage src);
+// ---- image provenance (2026-10-15 (15), AC Nexus's magenta overlays) --------------------
+// Who last wrote each image the guest later copies into an overlay layer: a render pass
+// (which pipelines were bound inside it, and whether their fragment module is the
+// constant-magenta one), a buffer upload, a clear, a blit or a copy. The cover quad was
+// magenta at 12:42:06 while the first magenta fragment module only appeared at 12:42:19,
+// so the colour does NOT come from Unity's error shader for that layer — this says what
+// it does come from. Rings, no frees: handles are compared, never dereferenced.
+#define KLVK_PROV_MAX 1024
+#define KLVK_PROV_PIPES 6
+typedef struct { VkImage img; const char *kind; uint64_t pipes[KLVK_PROV_PIPES]; unsigned npipes, serial;
+                 VkImage from; } klvk_prov;
+static klvk_prov g_prov[KLVK_PROV_MAX];
+static unsigned g_prov_n, g_prov_serial;
+static pthread_mutex_t g_prov_mu = PTHREAD_MUTEX_INITIALIZER;
+#define KLVK_PROV_CB_MAX 64
+static struct { VkCommandBuffer cb; VkImage img; } g_prov_cb[KLVK_PROV_CB_MAX];   // cb -> att0 of its open pass
+#define KLVK_PIPE_FS_MAX 8192
+static struct { uint64_t pipe, fs; } g_pipe_fs[KLVK_PIPE_FS_MAX];
+static unsigned g_pipe_fs_n;
+static klvk_prov *klvk_prov_slot(VkImage img) {   // under g_prov_mu
+    for (unsigned i = 0; i < g_prov_n && i < KLVK_PROV_MAX; i++) if (g_prov[i].img == img) return &g_prov[i];
+    klvk_prov *e = &g_prov[g_prov_n % KLVK_PROV_MAX];
+    if (g_prov_n < 0xffffffffu) g_prov_n++;
+    memset(e, 0, sizeof *e); e->img = img;
+    return e;
+}
+static void klvk_prov_note(VkImage img, const char *kind, VkImage from) {
+    if (!img) return;
+    pthread_mutex_lock(&g_prov_mu);
+    klvk_prov *e = klvk_prov_slot(img);
+    e->kind = kind; e->npipes = 0; e->from = from; e->serial = ++g_prov_serial;
+    pthread_mutex_unlock(&g_prov_mu);
+}
+static void klvk_prov_pass_begin(VkCommandBuffer cb, VkImage att0) {
+    if (!cb) return;
+    pthread_mutex_lock(&g_prov_mu);
+    int slot = -1;
+    for (int i = 0; i < KLVK_PROV_CB_MAX; i++) { if (g_prov_cb[i].cb == cb) { slot = i; break; } if (slot < 0 && !g_prov_cb[i].cb) slot = i; }
+    if (slot < 0) slot = (int)(((uintptr_t)cb >> 4) % KLVK_PROV_CB_MAX);
+    g_prov_cb[slot].cb = cb; g_prov_cb[slot].img = att0;
+    if (att0) { klvk_prov *e = klvk_prov_slot(att0); e->kind = "render pass"; e->npipes = 0; e->from = 0; e->serial = ++g_prov_serial; }
+    pthread_mutex_unlock(&g_prov_mu);
+}
+static void klvk_prov_bind(VkCommandBuffer cb, uint64_t pipe) {
+    if (!cb || !pipe) return;
+    pthread_mutex_lock(&g_prov_mu);
+    VkImage att0 = 0;
+    for (int i = 0; i < KLVK_PROV_CB_MAX; i++) if (g_prov_cb[i].cb == cb) { att0 = g_prov_cb[i].img; break; }
+    if (att0) {
+        klvk_prov *e = klvk_prov_slot(att0);
+        int dup = 0; for (unsigned i = 0; i < e->npipes; i++) if (e->pipes[i] == pipe) dup = 1;
+        if (!dup && e->npipes < KLVK_PROV_PIPES) e->pipes[e->npipes++] = pipe;
+    }
+    pthread_mutex_unlock(&g_prov_mu);
+}
+static void klvk_prov_pipe_fs(uint64_t pipe, uint64_t fs) {
+    pthread_mutex_lock(&g_prov_mu);
+    unsigned i = g_pipe_fs_n % KLVK_PIPE_FS_MAX; g_pipe_fs[i].pipe = pipe; g_pipe_fs[i].fs = fs; g_pipe_fs_n++;
+    pthread_mutex_unlock(&g_prov_mu);
+}
+static int klvk_module_is_magenta(uint64_t fs);   // the constant-(1,0,1,1) set, defined with the pipeline hook
+static void klvk_prov_report(VkImage src, int layer_key) {
+    pthread_mutex_lock(&g_prov_mu);
+    klvk_prov e; int have = 0;
+    for (unsigned i = 0; i < g_prov_n && i < KLVK_PROV_MAX; i++) if (g_prov[i].img == src) { e = g_prov[i]; have = 1; break; }
+    pthread_mutex_unlock(&g_prov_mu);
+    if (!have) { VKI("[prov] layer %d source %#llx: no write seen (never a pass target, upload, clear, blit or copy — undefined content)\n",
+                     layer_key, (unsigned long long)(uintptr_t)src); return; }
+    char line[640]; int o = snprintf(line, sizeof line, "[prov] layer %d source %#llx last written by %s (#%u)",
+                                     layer_key, (unsigned long long)(uintptr_t)src, e.kind ? e.kind : "?", e.serial);
+    if (e.from) o += snprintf(line + o, sizeof line - o, " from %#llx", (unsigned long long)(uintptr_t)e.from);
+    for (unsigned i = 0; i < e.npipes && o < (int)sizeof line - 80; i++) {
+        uint64_t fs = 0;
+        pthread_mutex_lock(&g_prov_mu);
+        for (unsigned k = 0; k < g_pipe_fs_n && k < KLVK_PIPE_FS_MAX; k++) if (g_pipe_fs[k].pipe == e.pipes[i]) fs = g_pipe_fs[k].fs;
+        pthread_mutex_unlock(&g_prov_mu);
+        o += snprintf(line + o, sizeof line - o, "%s pipeline %#llx fs %#llx%s", i ? "," : ";",
+                      (unsigned long long)e.pipes[i], (unsigned long long)fs, klvk_module_is_magenta(fs) ? " MAGENTA" : "");
+    }
+    if (e.kind && !strcmp(e.kind, "render pass") && !e.npipes) o += snprintf(line + o, sizeof line - o, "; no pipeline bound (clear-only pass)");
+    VKI("%s\n", line);
+}
 static void klvk_layer_mark_written(VkImage img) { klvk_layer_mark_written_how(img, "render target", VK_NULL_HANDLE); }
 static void klvk_layer_mark_written_how(VkImage img, const char *how, VkImage src) {
     if (!img) return;
@@ -1511,6 +1593,7 @@ static void klvk_layer_mark_written_how(VkImage img, const char *how, VkImage sr
                     VKI("layer %d image %#llx written by the guest (%s) — compositor samples it; "
                         "source fmt %d %ux%u\n", g_layer_img[i].key, (unsigned long long)(uintptr_t)img,
                         how, (int)sf, sw, sh);
+                    if (src) klvk_prov_report(src, g_layer_img[i].key);
                 }
                 return;
             }
@@ -4295,6 +4378,7 @@ static void VKAPI_CALL klvk_CmdCopyImage(VkCommandBuffer cb, VkImage src,
     if (!real) real = (PFN_vkCmdCopyImage)mvk_sym("vkCmdCopyImage");
     src = klvk_img_fix(src); dst = klvk_img_fix(dst);   // VkImage* cells -> their image
     klvk_retire_touch(src, "copy source"); klvk_retire_touch(dst, "copy destination");
+    if (dst) klvk_prov_note(dst, "vkCmdCopyImage", src);
     if (dst) klvk_layer_mark_written_how(dst, "vkCmdCopyImage", src);
     if (dst) klvk_asw_note_write(dst, "vkCmdCopyImage");
     if (klvk_trace() && klvk_trace_once((unsigned long long)(uintptr_t)src,(unsigned long long)(uintptr_t)dst)) {
@@ -4430,6 +4514,7 @@ static void VKAPI_CALL klvk_CmdBlitImage(VkCommandBuffer cb, VkImage src,
     if (!real) real = (PFN_vkCmdBlitImage)mvk_sym("vkCmdBlitImage");
     src = klvk_img_fix(src); dst = klvk_img_fix(dst);   // VkImage* cells -> their image
     klvk_retire_touch(src, "blit source"); klvk_retire_touch(dst, "blit destination");
+    if (dst) klvk_prov_note(dst, "vkCmdBlitImage", src);
     if (dst) klvk_layer_mark_written_how(dst, "vkCmdBlitImage", src);
     if (dst) klvk_asw_note_write(dst, "vkCmdBlitImage");
     if (KLVK_IMG_BAD(src) || KLVK_IMG_BAD(dst)) {
@@ -4459,6 +4544,8 @@ static void VKAPI_CALL klvk_CmdClearColorImage(VkCommandBuffer cb, VkImage img,
     if (!real) real = (PFN_vkCmdClearColorImage)mvk_sym("vkCmdClearColorImage");
     if (KLVK_IMG_BAD(img)) { VKI("vkCmdClearColorImage: REFUSING (img %#llx unknown)\n",
         (unsigned long long)(uintptr_t)img); return; }
+    klvk_prov_note(img, (c && c->float32[0] > 0.9f && c->float32[1] < 0.1f && c->float32[2] > 0.9f)
+                        ? "vkCmdClearColorImage MAGENTA" : "vkCmdClearColorImage", 0);
     if (real) real(cb, img, l, c, n, r);
 }
 static int emu_on(void);    // defined below (target/env gate for the mirror + probes)
@@ -4470,6 +4557,7 @@ static void VKAPI_CALL klvk_CmdCopyBufferToImage(VkCommandBuffer cb, VkBuffer bu
     if (!real) real = (PFN_vkCmdCopyBufferToImage)mvk_sym("vkCmdCopyBufferToImage");
     if (KLVK_IMG_BAD(img)) { VKI("vkCmdCopyBufferToImage: REFUSING (img %#llx unknown)\n",
         (unsigned long long)(uintptr_t)img); return; }
+    klvk_prov_note(img, "vkCmdCopyBufferToImage (upload)", 0);
     // KL_VK_ASTC_RGBA8 test: this image was created RGBA8 in place of ASTC. The
     // guest's ASTC-block upload would overrun the RGBA8 store (4x the bytes), so SKIP
     // it and clear to solid GREEN. World turns green => the ASTC albedo reaches
@@ -5040,9 +5128,22 @@ static void klvk_note_magenta_module(const VkShaderModuleCreateInfo *ci, VkShade
         VKI("[magenta] fragment module %p returns the constant (1,0,1,1) — Unity's error "
             "shader or an equivalent (%zu SPIR-V words, #%d)\n", (void *)m, ci->codeSize / 4, idx);
 }
+static int klvk_module_is_magenta(uint64_t fs) {
+    if (!fs || !__atomic_load_n(&g_magenta_n, __ATOMIC_ACQUIRE)) return 0;
+    int hit = 0;
+    pthread_mutex_lock(&g_magenta_mu);
+    for (int m = 0; m < g_magenta_n && !hit; m++) hit = (uint64_t)(uintptr_t)g_magenta_mod[m] == fs;
+    pthread_mutex_unlock(&g_magenta_mu);
+    return hit;
+}
 static void klvk_note_magenta_pipelines(uint32_t n, const VkGraphicsPipelineCreateInfo *ci,
                                         const VkPipeline *out) {
-    if (!__atomic_load_n(&g_magenta_n, __ATOMIC_ACQUIRE) || !ci || !out) return;
+    if (!ci || !out) return;
+    for (uint32_t i = 0; i < n; i++)
+        for (uint32_t s = 0; s < ci[i].stageCount && ci[i].pStages; s++)
+            if (ci[i].pStages[s].stage == VK_SHADER_STAGE_FRAGMENT_BIT)
+                klvk_prov_pipe_fs((uint64_t)(uintptr_t)out[i], (uint64_t)(uintptr_t)ci[i].pStages[s].module);
+    if (!__atomic_load_n(&g_magenta_n, __ATOMIC_ACQUIRE)) return;
     static unsigned said, total;
     for (uint32_t i = 0; i < n; i++) {
         for (uint32_t s = 0; s < ci[i].stageCount && ci[i].pStages; s++) {
@@ -5381,6 +5482,7 @@ static void VKAPI_CALL klvk_CmdBeginRenderPass(VkCommandBuffer cb,
     }
     klvk_asw_note_pass(bi, "render pass");
     klvk_ed_note_pass(bi);
+    if (bi) klvk_prov_pass_begin(cb, klvk_fb_image0(bi->framebuffer));
     VkRenderPassBeginInfo tmp; VkClearValue *inj = klvk_probe_inject_clears(bi, &tmp);
     if (real) real(cb, inj ? &tmp : bi, c);
     free(inj);
@@ -5398,6 +5500,7 @@ static void VKAPI_CALL klvk_CmdBeginRenderPass2(VkCommandBuffer cb,
             bi->renderArea.extent.width, bi->renderArea.extent.height);
     }
     klvk_asw_note_pass(bi, "render pass 2");
+    if (bi) klvk_prov_pass_begin(cb, klvk_fb_image0(bi->framebuffer));
     klvk_ed_note_pass(bi);
     VkRenderPassBeginInfo tmp; VkClearValue *inj = klvk_probe_inject_clears(bi, &tmp);
     if (real) real(cb, inj ? &tmp : bi, sbi);
@@ -6499,6 +6602,7 @@ static void VKAPI_CALL klvk_CmdBindPipeline(void *cb, uint32_t bindPoint, uint64
     if (!pipeline) { static int said; if (said < 8) { said++;
         VKI("vkCmdBindPipeline: NULL pipeline bound (bindPoint %u) — a following "
             "draw will dereference null in MoltenVK\n", bindPoint); } }
+    if (bindPoint == 0) klvk_prov_bind((VkCommandBuffer)cb, pipeline);
     if (real) real(cb, bindPoint, pipeline);
 }
 // Defined in the 2D-mirror block below; used here to record the bind-time GPU copy.
