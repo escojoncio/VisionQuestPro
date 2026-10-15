@@ -1134,11 +1134,18 @@ static int cap_image_layer(klvk_device *d, VkQueue q, VkImage img, uint32_t w, u
     // Is there anything in it? A dark frame and a never-written frame look the
     // same in a file browser, and this is the whole question the arc is asking.
     uint64_t sum = 0;
-    size_t lit = 0;
+    size_t lit = 0, magenta = 0;
     for (size_t i = 0; i < n; i++) {
         unsigned v = px[i * 4] + px[i * 4 + 1] + px[i * 4 + 2];
         sum += v;
         if (v) lit++;
+        if (px[i * 4] > 240 && px[i * 4 + 1] < 16 && px[i * 4 + 2] > 240) magenta++;
+    }
+    {   // The pink-layer question (AC Nexus): is the picture pure magenta, and what
+        // sits at its centre — the guest's content or Unity's error colour.
+        size_t c = ((size_t)(h / 2) * w + w / 2) * 4;
+        VKI("   %s: centre rgb %u,%u,%u, magenta %zu / %zu\n", path,
+            n ? px[c] : 0, n ? px[c + 1] : 0, n ? px[c + 2] : 0, magenta, n);
     }
 
     int ok = png_write_rgba(path, px, (int)w, (int)h);
@@ -1223,6 +1230,9 @@ static struct {
     unsigned      seq;                        // claim order, for recycling oldest
     klvk_img_slot s[KLVK_EYE_STAGES][2];
     volatile int  written;                    // the guest copied/rendered into it (see klvk_layer_mark_written)
+    VkImage       src;                        // the image the guest's first copy/blit read from
+    uint32_t      src_w, src_h;
+    VkFormat      src_fmt;
 } g_layer_img[KLVK_MAX_LAYERS];
 static VkImage g_wild_scratch;   // wild-handle stand-in (see klvk_wild_scratch); defined lazily
 static VkImage g_content_rt; static uint32_t g_content_rt_w, g_content_rt_h, g_content_rt_area; // KL_RT_DEBUG: largest UI render target
@@ -1494,6 +1504,8 @@ static void klvk_layer_mark_written_how(VkImage img, const char *how, VkImage sr
                     g_layer_img[i].written = 1;
                     VkFormat sf = 0; uint32_t sw = 0, sh = 0;
                     if (src) klvk_img_info_get(src, &sf, &sw, &sh);
+                    g_layer_img[i].src = src; g_layer_img[i].src_w = sw;
+                    g_layer_img[i].src_h = sh; g_layer_img[i].src_fmt = sf;
                     VKI("layer %d image %#llx written by the guest (%s) — compositor samples it; "
                         "source fmt %d %ux%u\n", g_layer_img[i].key, (unsigned long long)(uintptr_t)img,
                         how, (int)sf, sw, sh);
@@ -3141,6 +3153,21 @@ void kl_vulkan_capture_layers(void) {
         snprintf(path, sizeof path, "%s/vk_layer%02d.png", dir, g_layer_img[i].key);
         cap_image_layer(d, d->queue, sl->img, sl->w, sl->h, sl->fmt,
                         VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, 0, path, NULL, 0);
+        // ...and the guest texture it was copied from, if it is still registered and
+        // uncompressed: a magenta layer over a magenta source is the guest's content
+        // (Unity's error colour); a magenta layer over a real picture is the copy.
+        VkImage src = g_layer_img[i].src;
+        if (src && klvk_img_reg_has(src) && g_layer_img[i].src_w && g_layer_img[i].src_h &&
+            g_layer_img[i].src_w <= 4096 && g_layer_img[i].src_h <= 4096 &&
+            (g_layer_img[i].src_fmt == VK_FORMAT_R8G8B8A8_UNORM ||
+             g_layer_img[i].src_fmt == VK_FORMAT_R8G8B8A8_SRGB ||
+             g_layer_img[i].src_fmt == VK_FORMAT_B8G8R8A8_UNORM ||
+             g_layer_img[i].src_fmt == VK_FORMAT_B8G8R8A8_SRGB)) {
+            snprintf(path, sizeof path, "%s/vk_layer%02d_src.png", dir, g_layer_img[i].key);
+            cap_image_layer(d, d->queue, src, g_layer_img[i].src_w, g_layer_img[i].src_h,
+                            g_layer_img[i].src_fmt, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                            0, path, NULL, 0);
+        }
     }
     VKI("wild-handle reroute census: %u copies + %u blits redirected, scratch=%#llx\n",
         g_wild_copy_redir, g_wild_blit_redir,

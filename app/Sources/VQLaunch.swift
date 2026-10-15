@@ -48,7 +48,8 @@ enum VQLaunch {
         // The conformance tests compile their own pipelines; a prewarm of earlier runs' recipes
         // would only slow every vkCreateDevice down (prepareRun turns it off in the driver too).
         if !VQConformance.isConformance(game) { VQPrewarm.run(gameFolder: game.folder, cache: psoCache) }
-        VQLanguage.apply(game, useSystem: VQSettings.shared.systemLanguage)
+        VQLanguage.apply(game, useSystem: VQSettings.shared.systemLanguage,
+                         fixed: VQSettings.shared.gameLanguage)
         VQOVRPluginVersion.apply(apk: game.apk)
         VQLog.log("Arranque: \(game.id) (\(game.package)) tree=\(choice.prepared.tree.path) dylibs=\(choice.prepared.dylibs.path) "
                   + "files=\(files.path) obb=\(obbRel)")
@@ -124,6 +125,9 @@ final class VQSettings: ObservableObject {
     @Published var passthrough: String { didSet { save() } }
     /// Run the game in the system language when it ships it, else English (LANG for Klepton's Locale/AConfiguration).
     @Published var systemLanguage: Bool { didSet { save() } }
+    /// Fixed game language (LANG), overriding the system one: "auto" | "es_ES" | "es_MX" | "en_US".
+    /// Spain and Mexico differ only by region, which games read through java.util.Locale.
+    @Published var gameLanguage: String { didSet { save() } }
     /// Compile the game's known shaders/pipelines before it starts (VPVulkan recipe store).
     @Published var precompileShaders: Bool { didSet { save() } }
     /// Conformance runs (Vulkan CTS): minutes per session and the memory limit between batches.
@@ -166,6 +170,7 @@ final class VQSettings: ObservableObject {
             passthrough = pt
         } else { passthrough = "auto" }
         systemLanguage = d.object(forKey: "vq.sysLang") as? Bool ?? true
+        gameLanguage = d.string(forKey: "vq.gameLang") ?? "auto"
         precompileShaders = d.object(forKey: "vq.precompile") as? Bool ?? true
         conformanceMinutes = d.object(forKey: "vq.ctsMinutes") as? Double ?? 15
         conformanceMemoryMB = d.object(forKey: "vq.ctsMemMB") as? Int ?? 3000
@@ -211,6 +216,7 @@ final class VQSettings: ObservableObject {
         d.set(posture, forKey: "vq.posture")
         d.set(passthrough, forKey: "vq.passthrough")
         d.set(systemLanguage, forKey: "vq.sysLang")
+        d.set(gameLanguage, forKey: "vq.gameLang")
         d.set(precompileShaders, forKey: "vq.precompile")
         d.set(conformanceMinutes, forKey: "vq.ctsMinutes")
         d.set(conformanceMemoryMB, forKey: "vq.ctsMemMB")
@@ -404,7 +410,12 @@ struct VQGameAA: Equatable {
 /// Game language: the system language if the game ships it (APK entries or data files name it),
 /// otherwise English. Klepton answers java.util.Locale and AConfiguration from LANG.
 enum VQLanguage {
-    static func apply(_ game: VQGame, useSystem: Bool) {
+    static func apply(_ game: VQGame, useSystem: Bool, fixed: String = "auto") {
+        if fixed != "auto", !fixed.isEmpty {
+            setenv("LANG", fixed + ".UTF-8", 1)
+            VQLog.log("Idioma: \(fixed) (elegido en Ajustes)")
+            return
+        }
         // The user's preferred system language, not Locale.current (that one follows the app's own
         // localizations, English only here).
         let pref = Locale(identifier: Locale.preferredLanguages.first ?? "en-US")
@@ -416,7 +427,7 @@ enum VQLanguage {
             reason = "opción desactivada"
         } else if code == "en" {
             lang = "en_" + (region.isEmpty ? "US" : region); reason = "sistema en inglés"
-        } else if let hit = match(code, game.contentNames) {
+        } else if let hit = match(code, game.contentNames) ?? matchCode(code, apk: game.apk) {
             lang = code + "_" + (region.isEmpty ? code.uppercased() : region)
             reason = "el juego lo incluye (\(hit))"
         } else {
@@ -424,6 +435,39 @@ enum VQLanguage {
         }
         setenv("LANG", lang + ".UTF-8", 1)
         VQLog.log("Idioma: \(lang) (\(reason))")
+    }
+
+    /// The game's own CODE names the language: an il2cpp identifier that carries the English
+    /// language name plus more (WwiseLanguageSpanish, OculusPackageSpanish, SpanishSubtitles).
+    /// A bare "Spanish" does not count: that is Unity's SystemLanguage enum, present in every
+    /// game. Needed for titles whose text is internal and whose voice packs are downloadable
+    /// (AC Nexus: only en.lang on disk, Spanish UI in the code, LanguagePack/AssetFile for audio).
+    static func matchCode(_ code: String, apk: URL) -> String? {
+        guard let en = Locale(identifier: "en").localizedString(forLanguageCode: code), en.count > 3 else { return nil }
+        var err = [CChar](repeating: 0, count: 256)
+        guard let zip = vq_zip_open(apk.path, &err, err.count) else { return nil }
+        defer { vq_zip_close(zip) }
+        let i = vq_zip_find(zip, "assets/bin/Data/Managed/Metadata/global-metadata.dat")
+        var len = 0
+        guard i >= 0, let raw = vq_zip_read(zip, i, 256 << 20, &len, &err, err.count) else { return nil }
+        defer { free(raw) }
+        let needle = Array(en.utf8)
+        let bytes = UnsafeBufferPointer(start: raw, count: len)
+        var start = 0
+        for j in 0...len {
+            if j == len || bytes[j] == 0 {
+                let n = j - start
+                if n > needle.count && n < 80 {
+                    let tok = bytes[start..<j]
+                    if tok.allSatisfy({ ($0 >= 65 && $0 <= 90) || ($0 >= 97 && $0 <= 122) || ($0 >= 48 && $0 <= 57) || $0 == 95 }),
+                       tok.firstRange(of: needle) != nil {
+                        return String(decoding: tok, as: UTF8.self)
+                    }
+                }
+                start = j + 1
+            }
+        }
+        return nil
     }
 
     /// First content name that names the language: the ISO code as a token (es, es-ES, es_419,

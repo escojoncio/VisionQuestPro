@@ -1919,6 +1919,28 @@ static void *kl_android_create_namespace(const char *n, const char *a, const cha
 static int kl_android_link_namespaces(void *a, void *b, const char *l) { (void)a;(void)b;(void)l; return 0; }
 
 // ---------- externs ----------
+// Fortify / misc entries the API scanner listed as unserved in AC Nexus and AoT
+// (2026-10-15): fortified poll/pread/pwrite, fread_unlocked, sched_getparam,
+// sched_getcpu, tgkill. The _chk forms only add a buffer-size check the guest's
+// compiler already proved; they forward to the plain calls.
+#include <poll.h>
+static int klb___poll_chk(struct pollfd *fds, nfds_t n, int timeout, size_t fds_len) {
+    (void)fds_len;
+    return poll(fds, n, timeout);
+}
+static int klb_sched_getparam(int pid, void *param) {
+    (void)pid;
+    if (param) *(int *)param = 0;          // SCHED_OTHER, priority 0
+    return 0;
+}
+static int klb_sched_getcpu(void) { return 0; }
+static int klb_tgkill(int tgid, int tid, int sig) {
+    (void)tgid; (void)tid;
+    if (sig == 0) return 0;                 // "is it alive" probe
+    errno = EPERM;                          // no cross-thread raw signals here
+    return -1;
+}
+
 #define X(n) extern int n(void);
 X(klv_printf) X(klv_fprintf) X(klv_sprintf) X(klv_snprintf) X(klv_asprintf)
 X(klv_dprintf) X(klv_syslog) X(klv_warnx) X(klv_android_log_print) X(klv_android_log_buf_print) X(klv_android_log_assert) X(klv_sscanf) X(klv_fscanf)
@@ -2233,7 +2255,10 @@ static const kl_entry g_shim[] = {
     // fallback for. None is a silent success.
     E("eventfd", klb_eventfd),
     E("eventfd_read", klb_eventfd_read), E("eventfd_write", klb_eventfd_write),
-    E("ppoll", klb_ppoll),
+    E("ppoll", klb_ppoll), E("__poll_chk", klb___poll_chk),
+    E("__pread_chk", klb___pread64_chk), E("__pwrite_chk", klb___pwrite64_chk),
+    E("fread_unlocked", kl_fread), E("sched_getparam", klb_sched_getparam),
+    E("sched_getcpu", klb_sched_getcpu), E("tgkill", klb_tgkill),
     E("accept4", klb_accept4), E("pipe2", klb_pipe2), E("dup3", klb_dup3),
     E("dup2", klb_dup2),
     E("memfd_create", klb_memfd_create),

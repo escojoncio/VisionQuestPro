@@ -5401,9 +5401,16 @@ static uint32_t klovrp_gl_format(int ovrp_fmt, const char **name) {
 #define KLOVRP_LAYERFLAG_SPACEWARP_DEPTH ((1 << 9) | (1 << 13))
 #define KLOVRP_FMT_NONE 10
 
+// Served whether or not VPKTAA consumes it. libOculusXRPlugin's
+// CreateEyeTextureStage (+0x137ec) calls CreateMotionVectorTexture whenever the
+// GAME's OculusSettings enable SpaceWarp (a global, not our desc), and a failed
+// ovrp_GetLayerTextureSpaceWarp fails the whole eye stage: the provider then
+// DestroyLayers the eye layer after one frame and Unity renders with no XR target
+// (AoT, 2026-10-15: no picture at all, `RenderPass: Missing resolve surface`).
+// A real Quest always serves it, so we do too. KL_VPKTAA_ASW=0 is the old refusal.
 static int klovrp_asw_on(void) {
     static int on = -1;
-    if (on < 0) on = kl_env_on("KL_VPKTAA", 0) && kl_env_on("KL_VPKTAA_ASW", 1);
+    if (on < 0) on = kl_env_on("KL_VPKTAA_ASW", 1);
     return on;
 }
 
@@ -6515,8 +6522,8 @@ static uint64_t klovrp_CalculateEyeLayerDesc3(int layout, int mip_levels,
                     mv_format, klovrp_fmt_name(mv_format),
                     mv_depth_format, klovrp_fmt_name(mv_depth_format),
                     out->mv_texture_size.w, out->mv_texture_size.h,
-                    klovrp_asw_on() ? " (VPKTAA on: SpaceWarp storage will be served)"
-                                    : " (VPKTAA off: left 0x0, SpaceWarp refused as before)");
+                    klovrp_asw_on() ? " (SpaceWarp storage will be served)"
+                                    : " (KL_VPKTAA_ASW=0: left 0x0, SpaceWarp refused)");
     }
     return OVRP_SUCCESS;
 }

@@ -11,7 +11,33 @@ Historial completo: `git log -p bitacora.md` (compactada el 2026-10-14; lo cerra
 - Los cambios de (4) (621d102..6fe05ab) y VPKEngine 1f246f1 están reintroducidos íntegros; la reversión intermedia
   (6476c93, VPKEngine 07c79f3) fue innecesaria.
 
-## EMPEZAR AQUÍ — 2026-10-15 (10): x18 en código GCC (Wwise) + ABI de SpaceWarp — SIN PROBAR
+## EMPEZAR AQUÍ — 2026-10-15 (11): SpaceWarp siempre servido, QoS RT, latencia adaptativa, idioma — SIN PROBAR
+- Resultado de (10): AC ya no crashea (audio suena, x18 OK). AoT SIN IMAGEN: con KL_VPKTAA=0 se rechazaba
+  GetLayerTextureSpaceWarp → libOculusXRPlugin CreateEyeTextureStage (+0x137ec) llama CreateMotionVectorTexture si
+  el SETTING global del juego (OculusSettings SpaceWarp, `ldrh [x8,#0x28]`) está activo, NO por el desc → falla la
+  etapa → `ovrp_DestroyLayer(1)` tras 1 frame → Unity sin destino XR (`Missing resolve surface`, `Not inside a
+  Renderpass`). Arreglo: `klovrp_asw_on()` = `KL_VPKTAA_ASW` (def. 1), independiente de VPKTAA (kl_ovrp.c).
+- AC audio «petardea»: 334× Wwise `Voice Starvation`. `kl_pthread.c`: hilo guest creado con SCHED_FIFO/RR →
+  QOS USER_INTERACTIVE en el trampolín (`KL_GUEST_RT_QOS`); `pthread_setschedparam` FIFO/RR → `kl_pthread_boost_qos`.
+  `kl_audio.c`: objetivo de llenado +10 ms por underrun nuevo (máx. 120, `KL_AUDIO_ADAPT`); la línea periódica
+  `[au] guest PCM so far` ahora incluye underruns y objetivo.
+- Cuadrados magenta de AC = capas OVROverlay Quad 1875x1500 flags 0x205 que siguen a cada mano (#33/#34, luego
+  #43/#44); NUNCA escritas por el guest (sin «written by the guest») → el compositor muestra el texL del guest.
+  Diagnóstico añadido: compositor registra de qué peldaño sale cada overlay (own/texL/fallback, tamaño, formato,
+  flags); `kl_vulkan_capture_layers` captura también la textura fuente (`vk_layerNN_src.png`) y loguea píxel
+  central + nº de píxeles magenta. Requiere «capturas de diagnóstico» activado.
+- Botón PS: el censo de elementos Sense en visionOS solo tiene "Button Menu" (Create/Options); el PS no se expone
+  (el sistema lo reserva). Sonda `probeHomeButtonAPI` (KleptonControllers.swift) lista selectores home/system/gesture
+  de las clases GameController en el visor real (el SDK de la CI es XROS 26.5).
+- Idioma: AC usa LanguagePack/AssetFile de Meta (voces descargables; en la carpeta solo hay en.lang). Texto
+  interno: `VQLanguage.matchCode` busca en global-metadata.dat identificadores con el nombre inglés del idioma
+  (WwiseLanguageSpanish, MexicanSpanish…; «Spanish» a secas = enum de Unity, no cuenta). Ajuste nuevo «Idioma del
+  juego»: Automático / Español (España) es_ES / Español (México) es_MX / Inglés (VQSettings.gameLanguage, vq.gameLang).
+- Shims nuevos (kl_shim.c): __poll_chk, __pread_chk, __pwrite_chk, fread_unlocked, sched_getparam, sched_getcpu, tgkill.
+- Auditoría ABI heurística ovrp (args leídos por la export real vs nuestras firmas, OVRPlugin 1.88/1.89): solo
+  SpaceWarp (ya arreglado) era real; resto falsos positivos del parser.
+
+## 2026-10-15 (10): x18 en código GCC (Wwise) + ABI de SpaceWarp — probado: AC arranca con audio
 - Resultado de (9) (logs 2026-10-15 09:55 AC / 10:02 AoT): AC ya pasa del Wwise (bancos cargan) y muere en el 1.er
   frame de audio: SIGSEGV 0x0, `ldr q4,[x18]` veneered en libResonanceAudio+0x1f40c tras `adr x18,+0x1f5f0`
   (+0x1f3fc) REFUSADO (KLX_PC_ADR) → ranura TSD = 0. AoT: parpadeo + rayas rojas al inicio.
