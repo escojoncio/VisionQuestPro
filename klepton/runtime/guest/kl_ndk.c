@@ -19,6 +19,7 @@
 #include <unistd.h>
 #include "kl_ndk.h"
 #include "kl_obbmap.h"
+#include "klepton.h"      // kl_guest_path, for assets named by absolute path
 // For kl_jni_locale_parts — AConfiguration and java.util.Locale are two doors
 // onto one fact and must not answer differently.
 #include "kl_jni.h"
@@ -378,17 +379,51 @@ static void *kl_AAssetManager_fromJava(void *env, void *jmgr) {
 // one directory.
 void *kl_ndk_asset_manager(void) { return &g_asset_manager; }
 
+// An asset name is relative to the APK's assets/ on Android. Middleware that
+// ports one file layer to every platform (Wwise's Android low-level IO, AC
+// Nexus) also hands this door an ABSOLUTE path — "/sdcard/Android/obb/<pkg>/
+// Init.bnk" — and Android's AssetManager2 resolves such a name against the
+// filesystem rather than the APK. Gluing it under the assets root made
+// "<assets>//sdcard/..." and every bank was a MISS. An absolute name goes
+// through kl_guest_path (the same mapping fopen/open/stat use) and is served
+// as a plain file; the handle is the same kl_asset, so read/seek/length/
+// getBuffer/openFileDescriptor behave identically for both kinds.
+static const char *kl_asset_resolve(const char *fname, char *path, size_t cap) {
+    if (!fname) return NULL;
+    if (fname[0] == '/') {
+        const char *q = kl_guest_path(fname, path, cap);
+        if (q != path) snprintf(path, cap, "%s", q);
+        return path;
+    }
+    snprintf(path, cap, "%s/%s", g_asset_root, fname);
+    return path;
+}
+
 static void *kl_AAssetManager_open(void *mgr, const char *fname, int mode) {
     (void)mgr; (void)mode;
     char path[1200];
-    snprintf(path, sizeof path, "%s/%s", g_asset_root, fname);
+    if (!kl_asset_resolve(fname, path, sizeof path)) return NULL;
     FILE *f = fopen(path, "rb");
     if (!f) f = kl_obbmap_fopen(path, "rb");   // audio banks live only in the OBB
+    if (!f && fname[0] == '/') {
+        // A leading '/' that is NOT a real path: some engines prefix asset names
+        // with it. Fall back to the APK's assets as before.
+        char ap[1200];
+        snprintf(ap, sizeof ap, "%s%s", g_asset_root, fname);
+        f = fopen(ap, "rb");
+        if (!f) f = kl_obbmap_fopen(ap, "rb");
+        if (f) snprintf(path, sizeof path, "%s", ap);
+    }
     if (!f) {
         // Always on, capped: an asset the guest asks for and the APK lacks is how
         // "file not found" from a middleware (Wwise, FMOD) looks from here.
         static int n;
-        if (n < 32) { n++; fprintf(stderr, "[asset] AAssetManager_open(\"%s\") MISS (%d/32)\n", fname ? fname : "(null)", n); }
+        if (n < 32) { n++;
+            if (fname && fname[0] == '/')
+                fprintf(stderr, "[asset] AAssetManager_open(\"%s\") MISS -> %s (%d/32)\n", fname, path, n);
+            else
+                fprintf(stderr, "[asset] AAssetManager_open(\"%s\") MISS (%d/32)\n", fname ? fname : "(null)", n);
+        }
         return NULL;
     }
     kl_asset *a = calloc(1, sizeof *a);
@@ -435,6 +470,11 @@ static const void *kl_AAsset_getBuffer(kl_asset *a) {
 static int kl_AAsset_openFileDescriptor(kl_asset *a, int64_t *out_start, int64_t *out_len) {
     if (!a || !a->path[0]) return -1;
     int fd = open(a->path, O_RDONLY | O_CLOEXEC);
+    // An asset served from the OBB (kl_obbmap_fopen above) has no file at its
+    // path: hand out the OBB read-through descriptor instead, whose guest
+    // read/pread/lseek are translated into the entry's byte window, so the
+    // window seen through it starts at 0 exactly like a loose file's.
+    if (fd < 0) fd = kl_obbmap_open(a->path, O_RDONLY);
     if (fd < 0) return -1;
     if (out_start) *out_start = 0;
     if (out_len)   *out_len   = a->len;
@@ -492,7 +532,9 @@ typedef struct { DIR *d; char name[256]; } kl_assetdir;
 static void *kl_AAssetManager_openDir(void *mgr, const char *dirname) {
     (void)mgr;
     char path[1200];
-    snprintf(path, sizeof path, "%s/%s", g_asset_root, dirname && *dirname ? dirname : ".");
+    // Same rule as AAssetManager_open: an absolute directory is a filesystem
+    // path (mapped like opendir's), a relative one lives under assets/.
+    if (!kl_asset_resolve(dirname && *dirname ? dirname : ".", path, sizeof path)) return NULL;
     DIR *d = opendir(path);
     if (!d) return NULL;
     kl_assetdir *ad = calloc(1, sizeof *ad);
@@ -710,6 +752,27 @@ static void kl_ANativeActivity_showSoftInput(void *act, unsigned flags) {
                     "keyboard here\n", flags);
 }
 
+// ================================================================ AInputQueue
+// native_app_glue (OpenXR CTS, every NativeActivity sample) imports the input
+// queue family and calls it only from onInputQueueCreated — which nothing here
+// ever sends: input reaches a VR guest through OpenXR/OVRPlugin, not through an
+// Android InputQueue. So these are the answers for a queue that never has an
+// event, and they exist so that a guest built against the glue binds by name
+// instead of carrying unresolved imports. getEvent < 0 is "no event"; the event
+// accessors can only be reached with an event this queue never handed out.
+static void    kl_AInputQueue_attachLooper(void *q, void *looper, int ident, void *cb, void *data) {
+    (void)q; (void)looper; (void)ident; (void)cb; (void)data;
+}
+static void    kl_AInputQueue_detachLooper(void *q) { (void)q; }
+static int32_t kl_AInputQueue_getEvent(void *q, void **out) { (void)q; if (out) *out = NULL; return -1; }
+static int32_t kl_AInputQueue_preDispatchEvent(void *q, void *ev) { (void)q; (void)ev; return 0; }
+static void    kl_AInputQueue_finishEvent(void *q, void *ev, int handled) { (void)q; (void)ev; (void)handled; }
+static int32_t kl_AInputEvent_getType(const void *ev) { (void)ev; return 0; }
+static int32_t kl_AKeyEvent_getAction(const void *ev) { (void)ev; return 0; }
+static int32_t kl_AKeyEvent_getKeyCode(const void *ev) { (void)ev; return 0; }
+static float   kl_AMotionEvent_getRawX(const void *ev, size_t i) { (void)ev; (void)i; return 0.0f; }
+static float   kl_AMotionEvent_getRawY(const void *ev, size_t i) { (void)ev; (void)i; return 0.0f; }
+
 // ================================================================== dispatch
 static const struct { const char *name; void *fn; } g_ndk[] = {
 #define N(sym, fn) {sym, (void *)(fn)}
@@ -774,6 +837,17 @@ static const struct { const char *name; void *fn; } g_ndk[] = {
     N("AConfiguration_fromAssetManager", kl_AConfiguration_fromAssetManager),
     N("AConfiguration_getLanguage",      kl_AConfiguration_getLanguage),
     N("AConfiguration_getCountry",       kl_AConfiguration_getCountry),
+
+    N("AInputQueue_attachLooper",      kl_AInputQueue_attachLooper),
+    N("AInputQueue_detachLooper",      kl_AInputQueue_detachLooper),
+    N("AInputQueue_getEvent",          kl_AInputQueue_getEvent),
+    N("AInputQueue_preDispatchEvent",  kl_AInputQueue_preDispatchEvent),
+    N("AInputQueue_finishEvent",       kl_AInputQueue_finishEvent),
+    N("AInputEvent_getType",           kl_AInputEvent_getType),
+    N("AKeyEvent_getAction",           kl_AKeyEvent_getAction),
+    N("AKeyEvent_getKeyCode",          kl_AKeyEvent_getKeyCode),
+    N("AMotionEvent_getRawX",          kl_AMotionEvent_getRawX),
+    N("AMotionEvent_getRawY",          kl_AMotionEvent_getRawY),
 
     N("ANativeActivity_finish",        kl_ANativeActivity_finish),
     N("ANativeActivity_setWindowFormat", kl_ANativeActivity_setWindowFormat),

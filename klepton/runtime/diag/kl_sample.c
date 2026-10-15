@@ -650,5 +650,9 @@ void kl_sample_snapshot(FILE *out, const char *why) {
         mach_port_deallocate(mach_task_self(), list[i]);
     vm_deallocate(mach_task_self(), (vm_address_t)list, nlist * sizeof list[0]);
     mach_port_deallocate(mach_task_self(), self);
+    // Threads parked in a futex wait show the same frames whichever word they
+    // wait on; which word, its value, and whether anybody ever woke it is what
+    // tells a lost wakeup from a waker that never ran.
+    kl_futex_dump(out);
     fflush(out);
 }

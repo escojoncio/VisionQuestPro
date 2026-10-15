@@ -1991,6 +1991,15 @@ X(klb_inotify_init) X(klb_inotify_init1)
 X(klb_inotify_add_watch) X(klb_inotify_rm_watch)
 X(klb___assert2) X(klb___FD_CLR_chk) X(klb___fgets_chk)
 X(klb___pthread_cleanup_push) X(klb___pthread_cleanup_pop)
+// kl_libc.c — the path family behind kl_guest_path (*at, utime*, pathconf, walks).
+X(klb_fstatat) X(klb_faccessat) X(klb_mkdirat) X(klb_rmdir) X(klb_remove)
+X(klb_unlinkat) X(klb_renameat) X(klb_readlink) X(klb_readlinkat) X(klb_truncate)
+X(klb_chmod) X(klb_fchmodat) X(klb_chown) X(klb_lchown) X(klb_fchownat)
+X(klb_link) X(klb_linkat) X(klb_symlink) X(klb_symlinkat) X(klb_mkfifo)
+X(klb_utime) X(klb_utimes) X(klb_utimensat) X(klb_futimens)
+X(klb_pathconf) X(klb_fpathconf) X(klb_creat) X(klb___realpath_chk) X(klb___getcwd_chk)
+X(klb_ftw) X(klb_nftw) X(klb_glob) X(klb_globfree) X(klb_fstatfs)
+X(klb___openat_2) X(klb_freopen) X(klb___libc_init)
 #undef X
 extern char **environ;
 // A VARIABLE, not a function, so it cannot ride the X() macro above.
@@ -2250,6 +2259,36 @@ static const kl_entry g_shim[] = {
     // bionic's LP64 stat aliases must land on the translating shim, never on
     // Darwin's stat — same struct divergence as `stat` itself.
     E("stat64", klb_stat), E("lstat64", klb_lstat), E("fstat64", klb_fstat),
+
+    // The rest of the path family (kl_libc.c): every guest path through
+    // kl_guest_path, Linux *at constants (AT_FDCWD -100 ...), UTIME_NOW/OMIT,
+    // _PC_* numbering and the bionic stat/statfs/statvfs/glob_t layouts
+    // translated. The `64` names are bionic's LP64 aliases of the same calls.
+    E("fstatat", klb_fstatat), E("fstatat64", klb_fstatat),
+    E("faccessat", klb_faccessat),
+    E("open64", klv_open), E("openat64", klb_openat), E("__openat_2", klb___openat_2),
+    E("creat", klb_creat), E("creat64", klb_creat),
+    E("freopen", klb_freopen), E("freopen64", klb_freopen),
+    E("mkdirat", klb_mkdirat), E("rmdir", klb_rmdir), E("remove", klb_remove),
+    E("unlinkat", klb_unlinkat), E("renameat", klb_renameat),
+    E("readlink", klb_readlink), E("readlinkat", klb_readlinkat),
+    E("truncate", klb_truncate), E("truncate64", klb_truncate),
+    E("chmod", klb_chmod), E("fchmodat", klb_fchmodat),
+    E("chown", klb_chown), E("lchown", klb_lchown), E("fchownat", klb_fchownat),
+    E("link", klb_link), E("linkat", klb_linkat),
+    E("symlink", klb_symlink), E("symlinkat", klb_symlinkat), E("mkfifo", klb_mkfifo),
+    E("utime", klb_utime), E("utimes", klb_utimes),
+    E("utimensat", klb_utimensat), E("futimens", klb_futimens),
+    E("statfs64", klb_statfs), E("fstatfs", klb_fstatfs), E("fstatfs64", klb_fstatfs),
+    E("statvfs64", klb_statvfs), E("fstatvfs64", klb_fstatvfs),
+    E("pathconf", klb_pathconf), E("fpathconf", klb_fpathconf),
+    E("__realpath_chk", klb___realpath_chk), E("__getcwd_chk", klb___getcwd_chk),
+    E("ftw", klb_ftw), E("ftw64", klb_ftw), E("nftw", klb_nftw), E("nftw64", klb_nftw),
+    E("glob", klb_glob), E("globfree", klb_globfree),
+    // <math.h>, same signature on both; the generated table never picked it up
+    // (OpenXR CTS imports it — Escáner de APIs, log 63).
+    E("nextafterf", nextafterf),
+    E("__libc_init", klb___libc_init),   // an executable's _start (kl_libc_slink.c)
 
     // setjmp/longjmp forward directly: bionic's jmp_buf (256B) is LARGER than
     // Darwin's (192B), so the guest's buffer is safe, and registering the host

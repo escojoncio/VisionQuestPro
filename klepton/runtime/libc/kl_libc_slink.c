@@ -424,6 +424,9 @@ int klb_openat(int dirfd, const char *path, int flags, int mode) {
             }
         }
     }
+    // Linux's AT_FDCWD is -100, Darwin's -2: untranslated, every RELATIVE
+    // openat was EBADF (an absolute path ignores dirfd, which hid it).
+    if (dirfd == -100) dirfd = AT_FDCWD;
     GUEST_PATH(path);
     // A UE4 guest asks for its paks by their loose name; the bytes live,
     // uncompressed, inside an OBB. Serve the read straight from the archive —
@@ -436,6 +439,33 @@ int klb_openat(int dirfd, const char *path, int flags, int mode) {
     int fd = openat(dirfd, _p, kl_open_flags(flags), (mode_t)mode);
     kl_fs_trace_open(_p, flags, fd);
     return fd;
+}
+
+// FORTIFY's openat without a mode — the *at twin of __open_2 below.
+int klb___openat_2(int dirfd, const char *path, int flags) {
+    return klb_openat(dirfd, path, flags, 0);
+}
+
+// freopen: a path (mapped like fopen's) and a GUEST FILE* (through
+// kl_host_file). Reopening one of the standard streams is declined for the
+// dup2 reason below: our stderr IS the log, and a guest that redirects its
+// stdout/stderr into a file under /sdcard wanted it in a log anyway. The guest
+// keeps its stream, which still works, and is told the call succeeded.
+void *klb_freopen(const char *path, const char *mode, void *stream) {
+    FILE *hf = kl_host_file(stream);
+    if (!hf) { errno = EBADF; return NULL; }
+    if (hf == stdout || hf == stderr || hf == stdin) {
+        static int said;
+        if (!said++)
+            fprintf(stderr, "  [klepton] declining the guest's freopen(\"%s\") of a standard "
+                            "stream — our diagnostics live there\n", path ? path : "(null)");
+        return stream;
+    }
+    if (!path) return freopen(NULL, mode, hf);
+    GUEST_PATH(path);
+    FILE *f = freopen(_p, mode, hf);
+    kl_fs_trace_open(_p, 0, f ? fileno(f) : -1);
+    return f;
 }
 
 // bionic's __open_2 is FORTIFY's non-variadic open: it exists precisely to
@@ -1015,6 +1045,26 @@ int klb_inotify_rm_watch(int fd, int wd)  { (void)fd; (void)wd; errno = ENOSYS; 
 // shared) has no honest Darwin translation, and getting it half right would
 // produce a process whose memory sharing is not what the caller asked for.
 int klb_clone(void) { errno = ENOSYS; return -1; }
+
+// ---- __libc_init ----
+// An Android EXECUTABLE's _start (crtbegin_dynamic) calls this with the
+// kernel's argument block and main; bionic runs the program's constructors and
+// then exit(main(argc, argv, envp)). Here an executable guest is entered at
+// main() directly (kl_exe.c) after our loader has run its init arrays, so this
+// door is only reached if a guest jumps to its own _start: it then does what
+// bionic does minus the constructors, which have already run once.
+// raw_args is the kernel layout: argc, argv[0..argc-1], NULL, envp..., NULL.
+void klb_exit(int status);   // kl_libc.c — reports who exited, then exits
+void klb___libc_init(void *raw_args, void (*onexit)(void),
+                     int (*slingshot)(int, char **, char **), void *structors) {
+    (void)onexit; (void)structors;
+    long *a = raw_args;
+    int argc = a ? (int)a[0] : 0;
+    char **argv = a ? (char **)(a + 1) : NULL;
+    char **envp = argv ? argv + argc + 1 : NULL;
+    fprintf(stderr, "  [klepton] guest called __libc_init (its own _start): running main\n");
+    klb_exit(slingshot ? slingshot(argc, argv, envp) : 0);
+}
 
 // ---- __assert2 ----
 // bionic's assert. Fatal by definition, so it goes through kl_fatal_prepare:

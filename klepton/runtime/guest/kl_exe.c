@@ -253,6 +253,7 @@ static int run_line(char *line, int index) {
         }
         // Back from a crash inside main(): a fault, a lost GPU device, or the case watchdog.
         atomic_store(&g_in_main, 0);
+        kl_futex_forget_thread();      // a hung case is often parked in a futex wait
         kl_fault_set_recovery(NULL);   // kl_fault_try_recover already disarmed it (one jump per point)
         const int sig = kl_fault_recovered_signal();
         const int timed_out = atomic_exchange(&g_interrupted, 0);

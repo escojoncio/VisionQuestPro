@@ -23,6 +23,9 @@
 #include <mach/mach.h>
 #include <dispatch/dispatch.h>
 #include <sys/utsname.h>
+#include <sys/time.h>    // utimes (klb_utimes)
+#include <utime.h>       // struct utimbuf (klb_utime)
+#include <glob.h>        // klb_glob runs the host glob over the mapped prefix
 // getentropy, behind klb_getrandom. <sys/random.h> is a macOS-SDK header: XROS
 // and XRSimulator (26.0, checked) do not ship it, and getentropy has no public
 // declaration anywhere in those SDKs — but libSystem exports it there just the
@@ -707,6 +710,7 @@ typedef struct {
 } bionic_statfs;
 _Static_assert(sizeof(bionic_statfs) == 120, "bionic statfs is 120 bytes on LP64");
 
+static void statfs_to_bionic(const struct statfs *dp, void *out);
 int klb_statfs(const char *path, void *out) {
     struct statfs d;
     // Guest paths (/sdcard/Android/obb/<pkg>, /storage/emulated/0/...) do not
@@ -715,21 +719,30 @@ int klb_statfs(const char *path, void *out) {
     char kp[1024];
     const char *q = kl_guest_path(path, kp, sizeof kp);
     if (statfs(q, &d) != 0) { kl_fs_trace("statfs", path, q, 1); return -1; }
-    if (!out) return 0;
+    if (out) statfs_to_bionic(&d, out);
+    return 0;
+}
+// The descriptor form, same translation. (fstatfs64 is the LP64 alias.)
+int klb_fstatfs(int fd, void *out) {
+    struct statfs d;
+    if (fstatfs(fd, &d) != 0) return -1;
+    if (out) statfs_to_bionic(&d, out);
+    return 0;
+}
+static void statfs_to_bionic(const struct statfs *dp, void *out) {
     bionic_statfs *b = out;
     memset(b, 0, sizeof *b);
     b->f_type    = 0xEF53;          // EXT4_SUPER_MAGIC — what /data reports on a Quest
-    b->f_bsize   = d.f_bsize;
-    b->f_frsize  = d.f_bsize;
-    b->f_blocks  = d.f_blocks;
-    b->f_bfree   = d.f_bfree;
-    b->f_bavail  = d.f_bavail;
-    b->f_files   = d.f_files;
-    b->f_ffree   = d.f_ffree;
-    b->f_fsid[0] = d.f_fsid.val[0];
-    b->f_fsid[1] = d.f_fsid.val[1];
+    b->f_bsize   = dp->f_bsize;
+    b->f_frsize  = dp->f_bsize;
+    b->f_blocks  = dp->f_blocks;
+    b->f_bfree   = dp->f_bfree;
+    b->f_bavail  = dp->f_bavail;
+    b->f_files   = dp->f_files;
+    b->f_ffree   = dp->f_ffree;
+    b->f_fsid[0] = dp->f_fsid.val[0];
+    b->f_fsid[1] = dp->f_fsid.val[1];
     b->f_namelen = 255;
-    return 0;
 }
 
 // ---------- getrandom ----------
@@ -2135,6 +2148,629 @@ int klb_rename(const char *a, const char *b) {
     return r;
 }
 
+// ---------- the rest of the path family ----------
+// Everything below used to be a direct forward (or was missing), which means the
+// guest's literal path — /sdcard/..., /storage/emulated/0/..., <apk>/assets/... —
+// reached Darwin unmapped, and the *at() calls carried Linux constants Darwin
+// reads as something else. errno needs no work here: klb_errno translates
+// Darwin's value at the moment the guest reads it.
+//
+//                       bionic (Linux)   Darwin
+//   AT_FDCWD               -100            -2
+//   AT_SYMLINK_NOFOLLOW    0x100          0x20
+//   AT_REMOVEDIR           0x200          0x80
+//   AT_EACCESS             0x200          0x10   (same bit as REMOVEDIR: per call)
+//   AT_SYMLINK_FOLLOW      0x400          0x40
+//   AT_EMPTY_PATH          0x1000          —     (served here: fstat of the fd)
+//
+// AT_FDCWD is the one that bites silently: -100 is not a descriptor on Darwin,
+// so every relative *at() call was EBADF while every absolute one worked.
+#define LX_AT_FDCWD            (-100)
+#define LX_AT_SYMLINK_NOFOLLOW 0x100
+#define LX_AT_REMOVEDIR        0x200
+#define LX_AT_EACCESS          0x200
+#define LX_AT_SYMLINK_FOLLOW   0x400
+#define LX_AT_NO_AUTOMOUNT     0x800    // a hint; nothing automounts here
+#define LX_AT_EMPTY_PATH       0x1000
+
+static int kl_at_fd(int dirfd) { return dirfd == LX_AT_FDCWD ? AT_FDCWD : dirfd; }
+
+// Translate the flag word of one *at() call. `allowed` is the set of Linux bits
+// that call accepts; anything else is EINVAL, as the kernel answers. REMOVEDIR
+// and EACCESS share 0x200, so `host200` is the Darwin flag that bit means for
+// THIS call (AT_REMOVEDIR for unlinkat, AT_EACCESS for faccessat, 0 otherwise).
+// AT_EMPTY_PATH has no Darwin flag; callers that accept it handle it first.
+static int kl_at_flags(int lx, int allowed, int host200, int *out) {
+    if (lx & ~allowed) { errno = EINVAL; return -1; }
+    int d = 0;
+    if (lx & LX_AT_SYMLINK_NOFOLLOW) d |= AT_SYMLINK_NOFOLLOW;
+    if (lx & LX_AT_SYMLINK_FOLLOW)   d |= AT_SYMLINK_FOLLOW;
+    if ((lx & 0x200) && host200)     d |= host200;
+    *out = d;
+    return 0;
+}
+
+// "Resolves like a plain path call": an absolute path (dirfd is ignored) or one
+// relative to the cwd. Those take the same door as the non-*at spelling, so
+// every special case there (OBB entries, synthetic cfgs, the EEXIST fix) holds
+// for both.
+static int kl_at_is_plain(int dirfd, const char *path) {
+    return path && (path[0] == '/' || dirfd == LX_AT_FDCWD);
+}
+
+int klb_fstatat(int dirfd, const char *path, bionic_stat *b, int flags) {
+    if (!path) { errno = EFAULT; return -1; }
+    int df;
+    if (kl_at_flags(flags, LX_AT_SYMLINK_NOFOLLOW | LX_AT_EMPTY_PATH | LX_AT_NO_AUTOMOUNT, 0, &df) != 0)
+        return -1;
+    if ((flags & LX_AT_EMPTY_PATH) && path && !path[0]) {
+        if (dirfd == LX_AT_FDCWD) { struct stat s; if (stat(".", &s) != 0) return -1;
+                                    stat_to_bionic(&s, b); return 0; }
+        return klb_fstat(dirfd, b);
+    }
+    if (kl_at_is_plain(dirfd, path))
+        return (flags & LX_AT_SYMLINK_NOFOLLOW) ? klb_lstat(path, b) : klb_stat(path, b);
+    KL_GUEST_PATH(path);
+    struct stat s;
+    int r = fstatat(kl_at_fd(dirfd), _p, &s, df);
+    kl_fs_trace("fstatat", path, NULL, r != 0);
+    if (!r) stat_to_bionic(&s, b);
+    return r;
+}
+
+int klb_faccessat(int dirfd, const char *path, int mode, int flags) {
+    if (!path) { errno = EFAULT; return -1; }
+    int df;
+    if (kl_at_flags(flags, LX_AT_EACCESS | LX_AT_SYMLINK_NOFOLLOW, AT_EACCESS, &df) != 0) return -1;
+    // R_OK/W_OK/X_OK/F_OK are 4/2/1/0 on both. EACCESS (effective ids) is the
+    // same question as access() here: the app's real and effective ids agree.
+    if (kl_at_is_plain(dirfd, path) && !(flags & LX_AT_SYMLINK_NOFOLLOW))
+        return klb_access(path, mode);
+    KL_GUEST_PATH(path);
+    int r = faccessat(kl_at_fd(dirfd), _p, mode, df);
+    kl_fs_trace("faccessat", path, NULL, r != 0);
+    return r;
+}
+
+int klb_mkdirat(int dirfd, const char *path, mode_t mode) {
+    if (!path) { errno = EFAULT; return -1; }
+    if (kl_at_is_plain(dirfd, path)) return klb_mkdir(path, mode);
+    KL_GUEST_PATH(path);
+    int r = mkdirat(kl_at_fd(dirfd), _p, mode);
+    kl_fs_trace("mkdirat", path, NULL, r != 0);
+    return r;
+}
+
+int klb_rmdir(const char *path) {
+    KL_GUEST_PATH(path);
+    int r = rmdir(_p);
+    kl_fs_trace("rmdir", path, NULL, r != 0);
+    return r;
+}
+
+int klb_remove(const char *path) {
+    KL_GUEST_PATH(path);
+    int r = remove(_p);
+    kl_fs_trace("remove", path, NULL, r != 0);
+    return r;
+}
+
+int klb_unlinkat(int dirfd, const char *path, int flags) {
+    int df;
+    if (kl_at_flags(flags, LX_AT_REMOVEDIR, AT_REMOVEDIR, &df) != 0) return -1;
+    KL_GUEST_PATH(path);
+    int r = unlinkat(kl_at_fd(dirfd), _p, df);
+    kl_fs_trace((flags & LX_AT_REMOVEDIR) ? "unlinkat(dir)" : "unlinkat", path, NULL, r != 0);
+    return r;
+}
+
+int klb_renameat(int olddirfd, const char *a, int newdirfd, const char *b) {
+    char ka[1024], kb[1024];
+    const char *pa = kl_guest_path(a, ka, sizeof ka);
+    const char *pb = kl_guest_path(b, kb, sizeof kb);
+    int r = renameat(kl_at_fd(olddirfd), pa, kl_at_fd(newdirfd), pb);
+    kl_fs_trace("renameat", a, b, r != 0);
+    return r;
+}
+
+ssize_t klb_readlink(const char *path, char *buf, size_t n) {
+    KL_GUEST_PATH(path);
+    ssize_t r = readlink(_p, buf, n);
+    kl_fs_trace("readlink", path, NULL, r < 0);
+    return r;
+}
+
+ssize_t klb_readlinkat(int dirfd, const char *path, char *buf, size_t n) {
+    KL_GUEST_PATH(path);
+    ssize_t r = readlinkat(kl_at_fd(dirfd), _p, buf, n);
+    kl_fs_trace("readlinkat", path, NULL, r < 0);
+    return r;
+}
+
+int klb_truncate(const char *path, off_t len) {
+    KL_GUEST_PATH(path);
+    int r = truncate(_p, len);
+    kl_fs_trace("truncate", path, NULL, r != 0);
+    return r;
+}
+
+// S_I* permission and file-type bits are the same octal values on both.
+int klb_chmod(const char *path, mode_t mode) {
+    KL_GUEST_PATH(path);
+    int r = chmod(_p, mode);
+    kl_fs_trace("chmod", path, NULL, r != 0);
+    return r;
+}
+
+int klb_fchmodat(int dirfd, const char *path, mode_t mode, int flags) {
+    int df;
+    if (kl_at_flags(flags, LX_AT_SYMLINK_NOFOLLOW, 0, &df) != 0) return -1;
+    KL_GUEST_PATH(path);
+    int r = fchmodat(kl_at_fd(dirfd), _p, mode, df);
+    kl_fs_trace("fchmodat", path, NULL, r != 0);
+    return r;
+}
+
+int klb_chown(const char *path, uid_t u, gid_t g) {
+    KL_GUEST_PATH(path);
+    return chown(_p, u, g);
+}
+int klb_lchown(const char *path, uid_t u, gid_t g) {
+    KL_GUEST_PATH(path);
+    return lchown(_p, u, g);
+}
+int klb_fchownat(int dirfd, const char *path, uid_t u, gid_t g, int flags) {
+    int df;
+    if (kl_at_flags(flags, LX_AT_SYMLINK_NOFOLLOW | LX_AT_EMPTY_PATH, 0, &df) != 0) return -1;
+    if ((flags & LX_AT_EMPTY_PATH) && path && !path[0]) return fchown(dirfd, u, g);
+    KL_GUEST_PATH(path);
+    return fchownat(kl_at_fd(dirfd), _p, u, g, df);
+}
+
+// The link family takes two paths; a symlink's TARGET is stored text, but an
+// absolute guest target (/sdcard/...) names a place that only exists through
+// the mapping, so it is mapped too — an unmapped one is a link that dangles.
+int klb_link(const char *a, const char *b) {
+    char ka[1024], kb[1024];
+    int r = link(kl_guest_path(a, ka, sizeof ka), kl_guest_path(b, kb, sizeof kb));
+    kl_fs_trace("link", a, b, r != 0);
+    return r;
+}
+int klb_linkat(int afd, const char *a, int bfd, const char *b, int flags) {
+    int df;
+    if (kl_at_flags(flags, LX_AT_SYMLINK_FOLLOW, 0, &df) != 0) return -1;
+    char ka[1024], kb[1024];
+    int r = linkat(kl_at_fd(afd), kl_guest_path(a, ka, sizeof ka),
+                   kl_at_fd(bfd), kl_guest_path(b, kb, sizeof kb), df);
+    kl_fs_trace("linkat", a, b, r != 0);
+    return r;
+}
+int klb_symlink(const char *target, const char *path) {
+    char kt[1024], kp[1024];
+    int r = symlink(kl_guest_path(target, kt, sizeof kt), kl_guest_path(path, kp, sizeof kp));
+    kl_fs_trace("symlink", path, target, r != 0);
+    return r;
+}
+int klb_symlinkat(const char *target, int dirfd, const char *path) {
+    char kt[1024], kp[1024];
+    int r = symlinkat(kl_guest_path(target, kt, sizeof kt), kl_at_fd(dirfd),
+                      kl_guest_path(path, kp, sizeof kp));
+    kl_fs_trace("symlinkat", path, target, r != 0);
+    return r;
+}
+int klb_mkfifo(const char *path, mode_t mode) {
+    KL_GUEST_PATH(path);
+    return mkfifo(_p, mode);
+}
+
+// ---- timestamps ----
+// struct utimbuf (two int64 time_t) and struct timespec (int64, long) have the
+// same layout on both. struct timeval does NOT: bionic's tv_usec is 64-bit,
+// Darwin's a 32-bit suseconds_t, so it is copied field by field. And the two
+// timespec sentinels differ:
+//                 bionic          Darwin
+//   UTIME_NOW   (1<<30) - 1        -1
+//   UTIME_OMIT  (1<<30) - 2        -2
+// Forwarded raw, "leave the mtime alone" set it to 1 073 741 822 ns past 1970.
+#define LX_UTIME_NOW  ((1L << 30) - 1)
+#define LX_UTIME_OMIT ((1L << 30) - 2)
+typedef struct { int64_t tv_sec; int64_t tv_usec; } bionic_timeval;
+
+static const struct timespec *kl_utimens_in(const struct timespec *in, struct timespec out[2]) {
+    if (!in) return NULL;
+    for (int i = 0; i < 2; i++) {
+        out[i] = in[i];
+        if (in[i].tv_nsec == LX_UTIME_NOW)  out[i].tv_nsec = UTIME_NOW;
+        if (in[i].tv_nsec == LX_UTIME_OMIT) out[i].tv_nsec = UTIME_OMIT;
+    }
+    return out;
+}
+
+int klb_utime(const char *path, const struct utimbuf *t) {
+    KL_GUEST_PATH(path);
+    int r = utime(_p, t);
+    kl_fs_trace("utime", path, NULL, r != 0);
+    return r;
+}
+int klb_utimes(const char *path, const bionic_timeval *t) {
+    KL_GUEST_PATH(path);
+    struct timeval h[2];
+    if (t) for (int i = 0; i < 2; i++) {
+        h[i].tv_sec = (time_t)t[i].tv_sec; h[i].tv_usec = (suseconds_t)t[i].tv_usec;
+    }
+    int r = utimes(_p, t ? h : NULL);
+    kl_fs_trace("utimes", path, NULL, r != 0);
+    return r;
+}
+int klb_utimensat(int dirfd, const char *path, const struct timespec *t, int flags) {
+    int df;
+    if (kl_at_flags(flags, LX_AT_SYMLINK_NOFOLLOW, 0, &df) != 0) return -1;
+    struct timespec h[2];
+    // Linux extension: a NULL path means "the file dirfd itself" (futimens).
+    if (!path) return futimens(dirfd, kl_utimens_in(t, h));
+    KL_GUEST_PATH(path);
+    int r = utimensat(kl_at_fd(dirfd), _p, kl_utimens_in(t, h), df);
+    kl_fs_trace("utimensat", path, NULL, r != 0);
+    return r;
+}
+int klb_futimens(int fd, const struct timespec *t) {
+    struct timespec h[2];
+    return futimens(fd, kl_utimens_in(t, h));
+}
+
+// ---- pathconf ----
+// Same story as sysconf: the _PC_ numbers are bionic's 0..19 against Darwin's
+// own order (_PC_NAME_MAX is 4 on both, _PC_FILESIZEBITS is 0 vs 18), so a
+// forwarded call asks another question. Guest literals, host macros.
+static int kl_pc_name(int lx) {
+    switch (lx) {
+    case 0:  return _PC_FILESIZEBITS;
+    case 1:  return _PC_LINK_MAX;
+    case 2:  return _PC_MAX_CANON;
+    case 3:  return _PC_MAX_INPUT;
+    case 4:  return _PC_NAME_MAX;
+    case 5:  return _PC_PATH_MAX;
+    case 6:  return _PC_PIPE_BUF;
+    case 7:  return _PC_2_SYMLINKS;
+    case 8:  return _PC_ALLOC_SIZE_MIN;
+    case 9:  return _PC_REC_INCR_XFER_SIZE;
+    case 10: return _PC_REC_MAX_XFER_SIZE;
+    case 11: return _PC_REC_MIN_XFER_SIZE;
+    case 12: return _PC_REC_XFER_ALIGN;
+    case 13: return _PC_SYMLINK_MAX;
+    case 14: return _PC_CHOWN_RESTRICTED;
+    case 15: return _PC_NO_TRUNC;
+    case 16: return _PC_VDISABLE;
+    case 17: return _PC_ASYNC_IO;
+    case 18: return _PC_PRIO_IO;
+    case 19: return _PC_SYNC_IO;
+    }
+    return -1;
+}
+long klb_pathconf(const char *path, int name) {
+    int h = kl_pc_name(name);
+    if (h < 0) { errno = EINVAL; return -1; }
+    KL_GUEST_PATH(path);
+    return pathconf(_p, h);
+}
+long klb_fpathconf(int fd, int name) {
+    int h = kl_pc_name(name);
+    if (h < 0) { errno = EINVAL; return -1; }
+    return fpathconf(fd, h);
+}
+
+// ---- open's remaining spellings ----
+// creat() is open(O_CREAT|O_WRONLY|O_TRUNC) — the same door, so the trace and
+// the mapping are the same ones open() uses.
+int klb_creat(const char *path, mode_t mode) {
+    KL_GUEST_PATH(path);
+    int fd = open(_p, O_CREAT | O_WRONLY | O_TRUNC, mode);
+    kl_fs_trace_open(path, 0x241 /* Linux O_WRONLY|O_CREAT|O_TRUNC */, fd);
+    return fd;
+}
+
+// ---- FORTIFY spellings of two path calls ----
+// bionic aborts when the destination is smaller than the call may write:
+// realpath writes up to PATH_MAX, getcwd up to the size the caller names.
+char *klb___realpath_chk(const char *path, char *resolved, size_t cap) {
+    if (resolved && cap < 4096 /* bionic PATH_MAX */) {
+        fprintf(stderr, "[klepton] fatal: __realpath_chk: %zu-byte buffer < PATH_MAX "
+                        "(bionic FORTIFY would have aborted here too)\n", cap);
+        kl_fatal_prepare();
+        abort();
+    }
+    return klb_realpath(path, resolved);
+}
+char *klb___getcwd_chk(char *buf, size_t size, size_t cap) {
+    if (buf && size > cap) {
+        fprintf(stderr, "[klepton] fatal: __getcwd_chk: %zu bytes into a %zu-byte buffer "
+                        "(bionic FORTIFY would have aborted here too)\n", size, cap);
+        kl_fatal_prepare();
+        abort();
+    }
+    return klb_getcwd(buf, size);
+}
+
+// ---- ftw / nftw ----
+// Darwin has both, and neither can be forwarded: the callback receives a
+// struct stat, and a guest callback reads bionic's layout (st_size at 48,
+// Darwin's at 96). So the walk is ours, over the MAPPED path, while the callback
+// is handed the GUEST's spelling of every path — the one it started from — so
+// base offsets and string compares in the guest stay meaningful.
+//
+// Semantics follow bionic (fts underneath): the starting path is always
+// followed; FTW_PHYS walks symlinks as links; FTW_MOUNT stays on the start's
+// device; FTW_DEPTH reports a directory (FTW_DP) after its children instead of
+// FTW_D before them; a non-zero callback return stops the walk and is returned.
+// FTW_CHDIR is not honoured (it would move OUR cwd under the whole process);
+// the callback still gets a usable full path, which is what every caller uses.
+#define LX_FTW_F    0
+#define LX_FTW_D    1
+#define LX_FTW_DNR  2
+#define LX_FTW_DP   3
+#define LX_FTW_NS   4
+#define LX_FTW_SL   5
+#define LX_FTW_SLN  6
+#define LX_FTW_PHYS  0x01
+#define LX_FTW_MOUNT 0x02
+#define LX_FTW_DEPTH 0x04
+#define LX_FTW_CHDIR 0x08
+
+typedef struct { int base; int level; } bionic_FTW;
+typedef int (*kl_ftw_fn)(const char *, const bionic_stat *, int);
+typedef int (*kl_nftw_fn)(const char *, const bionic_stat *, int, bionic_FTW *);
+
+// The directories on the current descent, for the cycle check: a logical walk
+// (no FTW_PHYS) follows directory symlinks, and a link to an ancestor would
+// recurse until the stack ran out. fts reports such a node as FTS_DC and
+// bionic's nftw skips it; so does this.
+#define KL_WALK_DEPTH 128
+typedef struct {
+    kl_ftw_fn  ftw;
+    kl_nftw_fn nftw;
+    int        flags;
+    dev_t      dev;
+    struct { dev_t dev; ino_t ino; } up[KL_WALK_DEPTH];
+} kl_walk;
+
+static int kl_walk_report(kl_walk *w, const char *gpath, const bionic_stat *b, int type,
+                          int level) {
+    if (w->ftw) {
+        if (type == LX_FTW_SLN) type = LX_FTW_NS;   // ftw() has no SLN (bionic agrees)
+        return w->ftw(gpath, b, type);
+    }
+    const char *slash = strrchr(gpath, '/');
+    bionic_FTW f = { slash && slash[1] ? (int)(slash + 1 - gpath) : 0, level };
+    return w->nftw(gpath, b, type, &f);
+}
+
+static int kl_walk_one(kl_walk *w, char *real, size_t rlen, char *gpath, size_t glen,
+                       int level) {
+    struct stat s;
+    bionic_stat b;
+    memset(&b, 0, sizeof b);
+    int follow = level == 0 || !(w->flags & LX_FTW_PHYS);
+    int sr = follow ? stat(real, &s) : lstat(real, &s);
+    if (sr != 0) {
+        // A followed path that cannot be stat'ed but can be lstat'ed is a
+        // dangling symlink; anything else is FTW_NS with an unspecified stat.
+        int type = LX_FTW_NS;
+        if (follow && lstat(real, &s) == 0 && S_ISLNK(s.st_mode)) {
+            stat_to_bionic(&s, &b);
+            type = LX_FTW_SLN;
+        }
+        return kl_walk_report(w, gpath, &b, type, level);
+    }
+    stat_to_bionic(&s, &b);
+    if (level == 0) w->dev = s.st_dev;
+    if (S_ISLNK(s.st_mode)) return kl_walk_report(w, gpath, &b, LX_FTW_SL, level);
+    if (!S_ISDIR(s.st_mode)) return kl_walk_report(w, gpath, &b, LX_FTW_F, level);
+    // FTW_MOUNT (fts' FTS_XDEV): a directory on another device is reported but
+    // not entered. Same for one past the depth bound.
+    if (((w->flags & LX_FTW_MOUNT) && s.st_dev != w->dev) || level >= KL_WALK_DEPTH)
+        return kl_walk_report(w, gpath, &b, (w->flags & LX_FTW_DEPTH) ? LX_FTW_DP : LX_FTW_D,
+                              level);
+    for (int i = 0; i < level; i++)
+        if (w->up[i].dev == s.st_dev && w->up[i].ino == s.st_ino) return 0;   // cycle
+    w->up[level].dev = s.st_dev;
+    w->up[level].ino = s.st_ino;
+
+    DIR *d = opendir(real);
+    if (!d) return kl_walk_report(w, gpath, &b, LX_FTW_DNR, level);
+    int rc = 0;
+    if (!(w->flags & LX_FTW_DEPTH)) rc = kl_walk_report(w, gpath, &b, LX_FTW_D, level);
+    for (struct dirent *e; !rc && (e = readdir(d)) != NULL; ) {
+        if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
+        size_t nl = strlen(e->d_name);
+        int rsep = rlen && real[rlen - 1] != '/', gsep = glen && gpath[glen - 1] != '/';
+        if (rlen + rsep + nl + 1 > 1024 || glen + gsep + nl + 1 > 1024) continue;
+        if (rsep) real[rlen] = '/';
+        memcpy(real + rlen + rsep, e->d_name, nl + 1);
+        if (gsep) gpath[glen] = '/';
+        memcpy(gpath + glen + gsep, e->d_name, nl + 1);
+        rc = kl_walk_one(w, real, rlen + rsep + nl, gpath, glen + gsep + nl, level + 1);
+        real[rlen] = '\0';
+        gpath[glen] = '\0';
+    }
+    closedir(d);
+    if (!rc && (w->flags & LX_FTW_DEPTH)) rc = kl_walk_report(w, gpath, &b, LX_FTW_DP, level);
+    return rc;
+}
+
+static int kl_walk_start(const char *path, kl_walk *w, int nfds) {
+    if (!path || nfds < 1) { errno = EINVAL; return -1; }
+    if (w->flags & LX_FTW_CHDIR) {
+        static int said;
+        if (!said++) fprintf(stderr, "  [klepton] nftw: FTW_CHDIR not honoured (the walk "
+                                     "passes full paths instead)\n");
+    }
+    char real[1024], gpath[1024];
+    const char *q = kl_guest_path(path, real, sizeof real);
+    if (q != real) snprintf(real, sizeof real, "%s", q);
+    snprintf(gpath, sizeof gpath, "%s", path);
+    return kl_walk_one(w, real, strlen(real), gpath, strlen(gpath), 0);
+}
+
+int klb_ftw(const char *path, kl_ftw_fn fn, int nfds) {
+    kl_walk w;
+    memset(&w, 0, sizeof w);
+    w.ftw = fn;
+    return kl_walk_start(path, &w, nfds);
+}
+int klb_nftw(const char *path, kl_nftw_fn fn, int nfds, int flags) {
+    kl_walk w;
+    memset(&w, 0, sizeof w);
+    w.nftw = fn;
+    w.flags = flags;
+    return kl_walk_start(path, &w, nfds);
+}
+
+// ---- glob ----
+// bionic's glob_t is { size_t pathc, matchc, offs; int flags; char **pathv;
+// 6 function pointers } — Darwin's has an int gl_matchc and different
+// callbacks, so gl_pathv sits at another offset. The flag numbers agree except
+// GLOB_LIMIT (bionic 0x1000, Darwin 0x4000); the error returns agree
+// (NOSPACE -1, ABORTED -2, NOMATCH -3).
+//
+// The pattern is mapped by its fixed directory prefix (everything before the
+// first component holding a metacharacter), and every result has that prefix
+// put back in the guest's spelling. The guest's glob_t is filled by us and
+// freed by klb_globfree, so its allocation is ours on both ends.
+typedef struct {
+    size_t gl_pathc, gl_matchc, gl_offs;
+    int    gl_flags;
+    char **gl_pathv;
+    int  (*gl_errfunc)(const char *, int);
+    void  *gl_closedir, *gl_readdir, *gl_opendir, *gl_lstat, *gl_stat;
+} bionic_glob_t;
+
+#define LX_GLOB_APPEND      0x0001
+#define LX_GLOB_DOOFFS      0x0002
+#define LX_GLOB_ERR         0x0004
+#define LX_GLOB_MARK        0x0008
+#define LX_GLOB_NOCHECK     0x0010
+#define LX_GLOB_NOSORT      0x0020
+#define LX_GLOB_ALTDIRFUNC  0x0040
+#define LX_GLOB_BRACE       0x0080
+#define LX_GLOB_MAGCHAR     0x0100
+#define LX_GLOB_NOMAGIC     0x0200
+#define LX_GLOB_QUOTE       0x0400
+#define LX_GLOB_TILDE       0x0800
+#define LX_GLOB_LIMIT       0x1000
+#define LX_GLOB_NOESCAPE    0x2000
+
+static const struct { int lx, host; } g_glob_flags[] = {
+    {LX_GLOB_ERR, GLOB_ERR}, {LX_GLOB_MARK, GLOB_MARK}, {LX_GLOB_NOCHECK, GLOB_NOCHECK},
+    {LX_GLOB_NOSORT, GLOB_NOSORT}, {LX_GLOB_BRACE, GLOB_BRACE}, {LX_GLOB_MAGCHAR, GLOB_MAGCHAR},
+    {LX_GLOB_NOMAGIC, GLOB_NOMAGIC}, {LX_GLOB_QUOTE, GLOB_QUOTE}, {LX_GLOB_TILDE, GLOB_TILDE},
+    {LX_GLOB_LIMIT, GLOB_LIMIT}, {LX_GLOB_NOESCAPE, GLOB_NOESCAPE},
+};
+
+static _Thread_local int (*g_glob_errfunc)(const char *, int);
+static _Thread_local const char *g_glob_hpre, *g_glob_gpre;
+
+// Host paths in, guest spelling out: "<mapped prefix>rest" -> "<guest prefix>rest".
+static char *kl_glob_unmap(const char *host) {
+    size_t hl = g_glob_hpre ? strlen(g_glob_hpre) : 0;
+    if (hl && strncmp(host, g_glob_hpre, hl) == 0) {
+        size_t gl = strlen(g_glob_gpre), rl = strlen(host + hl);
+        char *s = malloc(gl + rl + 1);
+        if (s) { memcpy(s, g_glob_gpre, gl); memcpy(s + gl, host + hl, rl + 1); }
+        return s;
+    }
+    return strdup(host);
+}
+
+static int kl_glob_err_tramp(const char *path, int err) {
+    if (!g_glob_errfunc) return 0;
+    char *g = kl_glob_unmap(path);
+    int r = g_glob_errfunc(g ? g : path, kl_errno_to_linux(err));
+    free(g);
+    return r;
+}
+
+int klb_glob(const char *pattern, int flags, int (*errfunc)(const char *, int),
+             bionic_glob_t *g) {
+    if (!pattern || !g) { errno = EINVAL; return GLOB_NOSPACE; }
+    int hf = 0;
+    for (size_t i = 0; i < sizeof g_glob_flags / sizeof *g_glob_flags; i++)
+        if (flags & g_glob_flags[i].lx) hf |= g_glob_flags[i].host;
+    if (flags & LX_GLOB_ALTDIRFUNC) {
+        // The guest's directory callbacks would be handed Darwin's dirent/stat;
+        // the real filesystem through our mapping is what they would read anyway.
+        static int said;
+        if (!said++) fprintf(stderr, "  [klepton] glob: GLOB_ALTDIRFUNC ignored "
+                                     "(guest callbacks expect bionic structs)\n");
+    }
+
+    // Fixed prefix: up to the last '/' before the first metacharacter.
+    size_t meta = strcspn(pattern, "*?[{\\~");
+    size_t cut = 0;
+    for (size_t i = 0; i < meta; i++) if (pattern[i] == '/') cut = i + 1;
+    if (!pattern[meta]) {                 // no metacharacter at all: map it whole
+        cut = strlen(pattern);
+    }
+    char gpre[1024], hpre[1024], hpat[2048];
+    if (cut >= sizeof gpre) cut = sizeof gpre - 1;
+    memcpy(gpre, pattern, cut); gpre[cut] = '\0';
+    const char *m = cut ? kl_guest_path(gpre, hpre, sizeof hpre) : gpre;
+    if (m != hpre) snprintf(hpre, sizeof hpre, "%s", m);
+    // Keep the separator the pattern had, so the mapped prefix and the rest of
+    // the pattern still join (a mapping is free to answer without it).
+    size_t hl = strlen(hpre);
+    if (cut && gpre[cut - 1] == '/' && (!hl || hpre[hl - 1] != '/') && hl + 1 < sizeof hpre) {
+        hpre[hl++] = '/'; hpre[hl] = '\0';
+    }
+    snprintf(hpat, sizeof hpat, "%s%s", hpre, pattern + cut);
+
+    glob_t h;
+    memset(&h, 0, sizeof h);
+    g_glob_errfunc = errfunc;
+    g_glob_hpre = hpre; g_glob_gpre = gpre;
+    int r = glob(hpat, hf, errfunc ? kl_glob_err_tramp : NULL, &h);
+
+    // The guest's vector is rebuilt whole: [gl_offs NULLs][previous results if
+    // GLOB_APPEND][this call's results][NULL]. Partial results of a failed walk
+    // (GLOB_ABORTED) are kept, as glob(3) keeps them.
+    size_t offs   = (flags & LX_GLOB_DOOFFS) ? g->gl_offs : 0;
+    size_t oldc   = (flags & LX_GLOB_APPEND) && g->gl_pathv ? g->gl_pathc : 0;
+    size_t newc   = h.gl_pathc;
+    if (!(flags & LX_GLOB_APPEND) || newc) {
+        char **v = malloc((offs + oldc + newc + 1) * sizeof *v);
+        if (!v) { globfree(&h); g_glob_hpre = g_glob_gpre = NULL; return GLOB_NOSPACE; }
+        for (size_t i = 0; i < offs; i++) v[i] = NULL;
+        for (size_t i = 0; i < oldc; i++) v[offs + i] = g->gl_pathv[offs + i];
+        size_t n = 0;
+        for (size_t i = 0; i < newc; i++) {
+            char *s = kl_glob_unmap(h.gl_pathv[h.gl_offs + i]);
+            if (s) v[offs + oldc + n++] = s;
+        }
+        v[offs + oldc + n] = NULL;
+        if (oldc) free(g->gl_pathv);
+        g->gl_pathv  = v;
+        g->gl_pathc  = oldc + n;
+        g->gl_matchc = (size_t)h.gl_matchc;
+    }
+    int back = 0;
+    for (size_t i = 0; i < sizeof g_glob_flags / sizeof *g_glob_flags; i++)
+        if (h.gl_flags & g_glob_flags[i].host) back |= g_glob_flags[i].lx;
+    g->gl_flags = back | (flags & (LX_GLOB_APPEND | LX_GLOB_DOOFFS));
+    globfree(&h);
+    g_glob_errfunc = NULL;
+    g_glob_hpre = g_glob_gpre = NULL;
+    kl_fs_trace("glob", pattern, NULL, r != 0 && r != GLOB_NOMATCH);
+    return r;
+}
+
+void klb_globfree(bionic_glob_t *g) {
+    if (!g || !g->gl_pathv) return;
+    size_t offs = (g->gl_flags & LX_GLOB_DOOFFS) ? g->gl_offs : 0;
+    for (size_t i = 0; i < g->gl_pathc; i++) free(g->gl_pathv[offs + i]);
+    free(g->gl_pathv);
+    g->gl_pathv = NULL;
+    g->gl_pathc = 0;
+}
+
 // ---------- struct dirent ----------
 typedef struct { uint64_t d_ino; int64_t d_off; uint16_t d_reclen;
                  uint8_t d_type; char d_name[256]; } bionic_dirent;
@@ -2481,10 +3117,11 @@ int    klb_system(const char *cmd) { (void)cmd; warn_once("system"); return 127;
 #define KL_SYS_gettid 178               // ...and the third, via libc++'s guards
 
 enum {
-    KL_FUTEX_WAIT = 0, KL_FUTEX_WAKE = 1, KL_FUTEX_WAKE_OP = 5,
-    KL_FUTEX_WAIT_BITSET = 9, KL_FUTEX_WAKE_BITSET = 10,
+    KL_FUTEX_WAIT = 0, KL_FUTEX_WAKE = 1, KL_FUTEX_REQUEUE = 3, KL_FUTEX_CMP_REQUEUE = 4,
+    KL_FUTEX_WAKE_OP = 5, KL_FUTEX_WAIT_BITSET = 9, KL_FUTEX_WAKE_BITSET = 10,
     KL_FUTEX_PRIVATE_FLAG = 128, KL_FUTEX_CLOCK_REALTIME = 256,
 };
+#define KL_FUTEX_BITSET_ANY 0xffffffffu
 
 // FUTEX_WAKE_OP's `val3` packs a whole little instruction:
 //   op(4) | cmp(4) | oparg(12) | cmparg(12)
@@ -2499,22 +3136,292 @@ enum {
     KL_FUTEX_OP_CMP_LE = 3, KL_FUTEX_OP_CMP_GT = 4, KL_FUTEX_OP_CMP_GE = 5,
 };
 
+// Exact futex semantics over a bucket table: each bucket is a mutex, one
+// condition variable and the list of the threads waiting in it (one record per
+// waiter). A wake marks exactly the waiters it releases
+// — matching address, overlapping bitset, at most the count asked for — and
+// returns how many that was, which is the kernel's answer. The guest is entitled
+// to read that number: a "did I wake anyone?" test that is told yes when nobody
+// was waiting keeps a token for a waiter that does not exist. The waiter loops
+// until its own record is marked (or its deadline passes), so a broadcast meant
+// for a neighbouring address in the same bucket is absorbed rather than handed
+// to the guest as a wakeup.
+//
+// The lost-wakeup argument is unchanged: the waiter compares the futex word and
+// links its record (per-thread, see futex_rec_get) while holding the bucket lock, and every waker takes that
+// lock before looking at the list, so a store + wake can never fall between the
+// compare and the sleep.
 #define KL_FUTEX_BUCKETS 256
-static struct { pthread_mutex_t m; pthread_cond_t c; } g_futex[KL_FUTEX_BUCKETS];
+#define KL_FUTEX_STATS   4   // per bucket: the addresses most recently waited/woken on
+
+typedef struct kl_futex_waiter {
+    struct kl_futex_waiter *next;
+    const int32_t *addr;
+    uint32_t       bitset;
+    int            woken;
+    int            tid;
+    unsigned       act;           // mach thread port: what the [snap] stacks are labelled by
+    void          *ra;            // the guest's call site, for the [snap] dump
+    uint64_t       since_ns;
+    int            bucket;        // where it is linked, while `linked`
+    int            linked;
+    int            in_wait;       // between linking and returning (futex_rec_get)
+} kl_futex_waiter;
+
+// Per-address counters for the [snap] dump: what a frozen run needs to see is
+// whether anybody ever woke the word everyone is parked on, and when.
+typedef struct {
+    const int32_t *addr;
+    uint64_t waits, timeouts, wakes, wakes_empty, woken;
+    uint64_t last_wait_ns, last_wake_ns;
+    uint32_t last_wake_n;
+    int      last_wake_tid;
+} kl_futex_stat;
+
+static struct {
+    pthread_mutex_t  m;
+    pthread_cond_t   c;
+    kl_futex_waiter *head;
+    kl_futex_stat    st[KL_FUTEX_STATS];
+} g_futex[KL_FUTEX_BUCKETS];
+static _Atomic int g_futex_ready;
 
 static void futex_init(void) {
     for (int i = 0; i < KL_FUTEX_BUCKETS; i++) {
         pthread_mutex_init(&g_futex[i].m, NULL);
         pthread_cond_init(&g_futex[i].c, NULL);
+        g_futex[i].head = NULL;
+        memset(g_futex[i].st, 0, sizeof g_futex[i].st);
     }
+    atomic_store(&g_futex_ready, 1);
 }
 static unsigned futex_bucket(const void *a) {
     uint64_t v = (uint64_t)(uintptr_t)a >> 2;
     return (unsigned)((v * 0x9E3779B97F4A7C15ULL) >> 56) & (KL_FUTEX_BUCKETS - 1);
 }
-static void ts_normalise(struct timespec *t) {
-    while (t->tv_nsec >= 1000000000L) { t->tv_nsec -= 1000000000L; t->tv_sec++; }
-    while (t->tv_nsec < 0)            { t->tv_nsec += 1000000000L; t->tv_sec--; }
+// The guest's CLOCK_MONOTONIC is Darwin's CLOCK_MONOTONIC (kl_clock_to_darwin),
+// so an absolute FUTEX_WAIT_BITSET deadline is already in this base.
+static uint64_t futex_now_ns(void) {
+    struct timespec t;
+    clock_gettime(CLOCK_MONOTONIC, &t);
+    return (uint64_t)t.tv_sec * 1000000000ULL + (uint64_t)t.tv_nsec;
+}
+#define KL_FUTEX_FOREVER (UINT64_MAX / 2)
+// A timespec as nanoseconds, saturating (a guest that means "forever" may pass
+// a huge tv_sec, and now + that must not wrap into the past).
+static uint64_t futex_ts_ns(const struct timespec *t) {
+    if ((uint64_t)t->tv_sec >= KL_FUTEX_FOREVER / 1000000000ULL) return KL_FUTEX_FOREVER;
+    return (uint64_t)t->tv_sec * 1000000000ULL + (uint64_t)t->tv_nsec;
+}
+static uint64_t futex_add_sat(uint64_t a, uint64_t b) {
+    return a >= KL_FUTEX_FOREVER || b >= KL_FUTEX_FOREVER - a ? KL_FUTEX_FOREVER : a + b;
+}
+
+// Bucket lock held.
+static kl_futex_stat *futex_stat(unsigned b, const int32_t *addr) {
+    kl_futex_stat *st = g_futex[b].st, *pick = NULL;
+    for (int i = 0; i < KL_FUTEX_STATS; i++) if (st[i].addr == addr) return &st[i];
+    for (int i = 0; i < KL_FUTEX_STATS && !pick; i++) if (!st[i].addr) pick = &st[i];
+    if (!pick) {                              // recycle the least recently used
+        pick = &st[0];
+        for (int i = 1; i < KL_FUTEX_STATS; i++) {
+            uint64_t ti = st[i].last_wait_ns > st[i].last_wake_ns ? st[i].last_wait_ns : st[i].last_wake_ns;
+            uint64_t tp = pick->last_wait_ns > pick->last_wake_ns ? pick->last_wait_ns : pick->last_wake_ns;
+            if (ti < tp) pick = &st[i];
+        }
+    }
+    memset(pick, 0, sizeof *pick);
+    pick->addr = addr;
+    return pick;
+}
+
+static void futex_unlink(unsigned b, kl_futex_waiter *w) {
+    for (kl_futex_waiter **pp = &g_futex[b].head; *pp; pp = &(*pp)->next)
+        if (*pp == w) { *pp = w->next; break; }
+    w->linked = 0;
+}
+
+// The waiter records are per-thread HEAP objects, never stack ones, because a
+// wait can be left without returning: the CTS case watchdog and the fault
+// recovery siglongjmp a hung thread out of wherever it is (kl_exe.c,
+// kl_fault.c), and a thread hung in a guest lock is very often inside this wait.
+// A stack record would stay linked to a dead frame and the next wake on that
+// word would write into whatever reuses the stack.
+//
+// A few per thread, for a wait inside a signal handler that interrupted a wait
+// on the same thread: a new wait takes the first record not `in_wait` and never
+// touches the others (taking another bucket's lock from inside a handler could
+// deadlock against the interrupted wait holding it). A record left `in_wait` by
+// a jump out of the wait is unlinked by kl_futex_forget_thread() from the
+// recovery point, and at thread exit; until then it can absorb at most one wake.
+#define KL_FUTEX_NEST 4
+// The per-thread table lives in a pthread key, not a _Thread_local: its
+// destructor must reach it at thread exit, when a _Thread_local's storage may
+// already be gone, and a guest TLS destructor that runs after ours and waits on
+// a lock simply gets a fresh table (and our destructor runs again).
+typedef struct { kl_futex_waiter *rec[KL_FUTEX_NEST]; } kl_futex_tls;
+static pthread_key_t  g_futex_key;
+static pthread_once_t g_futex_key_once = PTHREAD_ONCE_INIT;
+
+// Called with NO bucket lock held, only for records whose wait is over (a jump
+// out of it, or the thread is exiting). The thread may have been jumped out
+// while it HELD that bucket's lock — then the lock is never coming back, and a
+// blocking lock here would hang this thread too — so it is only tried for a
+// while; a record that cannot be reached stays linked and allocated (heap
+// memory, so harmless beyond absorbing one wake).
+static void futex_rec_evict(kl_futex_waiter *w) {
+    if (!w || !w->in_wait) return;
+    if (w->bucket >= 0) {
+        pthread_mutex_t *m = &g_futex[w->bucket].m;
+        int got = 0;
+        for (int i = 0; i < 100 && !got; i++) {
+            got = pthread_mutex_trylock(m) == 0;
+            if (!got) usleep(1000);
+        }
+        if (!got) return;
+        if (w->linked) futex_unlink((unsigned)w->bucket, w);
+        pthread_mutex_unlock(m);
+    }
+    w->in_wait = 0;
+}
+
+static void futex_thread_exit(void *p) {
+    kl_futex_tls *t = p;
+    for (int i = 0; i < KL_FUTEX_NEST; i++) {
+        kl_futex_waiter *w = t->rec[i];
+        if (!w) continue;
+        futex_rec_evict(w);
+        if (!w->in_wait) free(w);     // else still linked: leak it rather than free it
+    }
+    free(t);
+}
+static void futex_key_init(void) { pthread_key_create(&g_futex_key, futex_thread_exit); }
+
+void kl_futex_forget_thread(void) {
+    if (!atomic_load(&g_futex_ready)) return;
+    pthread_once(&g_futex_key_once, futex_key_init);
+    kl_futex_tls *t = pthread_getspecific(g_futex_key);
+    if (t) for (int i = 0; i < KL_FUTEX_NEST; i++) futex_rec_evict(t->rec[i]);
+}
+
+// Called with NO bucket lock held. NULL when every record is in use, or without
+// memory (the caller then uses a stack record: only unsafe if that wait is
+// jumped out of without kl_futex_forget_thread).
+static kl_futex_waiter *futex_rec_get(void) {
+    pthread_once(&g_futex_key_once, futex_key_init);
+    kl_futex_tls *t = pthread_getspecific(g_futex_key);
+    if (!t) {
+        t = calloc(1, sizeof *t);
+        if (!t) return NULL;
+        if (pthread_setspecific(g_futex_key, t) != 0) { free(t); return NULL; }
+    }
+    for (int i = 0; i < KL_FUTEX_NEST; i++) {
+        if (!t->rec[i]) {
+            t->rec[i] = calloc(1, sizeof *t->rec[i]);
+            if (!t->rec[i]) return NULL;
+            t->rec[i]->bucket = -1;
+        }
+        if (!t->rec[i]->in_wait) return t->rec[i];
+    }
+    return NULL;
+}
+
+// Bucket lock held. Releases up to `limit` waiters on `addr` whose bitset
+// overlaps, oldest first; returns how many.
+static long futex_wake_locked(unsigned b, const int32_t *addr, uint32_t bitset, long limit) {
+    long n = 0;
+    for (kl_futex_waiter **pp = &g_futex[b].head; *pp && n < limit; ) {
+        kl_futex_waiter *w = *pp;
+        if (w->addr == addr && (w->bitset & bitset)) {
+            *pp = w->next;
+            w->linked = 0;
+            w->woken = 1;
+            n++;
+        } else {
+            pp = &w->next;
+        }
+    }
+    if (n) pthread_cond_broadcast(&g_futex[b].c);
+    kl_futex_stat *s = futex_stat(b, addr);
+    s->wakes++;
+    if (!n) s->wakes_empty++;
+    s->woken += (uint64_t)n;
+    s->last_wake_ns = futex_now_ns();
+    s->last_wake_n = (uint32_t)n;
+    s->last_wake_tid = klb_gettid();
+    return n;
+}
+
+// FUTEX_WAKE's count is an int, and the kernel wakes at least one even for 0 or
+// a negative count (its loop tests the count after the first wake).
+static long futex_wake_limit(uint32_t v) { return (int32_t)v <= 0 ? 1 : (long)(int32_t)v; }
+
+// One-shot dump for the [snap] watchdog. Never blocks: a bucket whose lock is
+// held is reported as busy rather than waited for.
+void kl_futex_dump(FILE *out) {
+    if (!atomic_load(&g_futex_ready)) return;
+    uint64_t now = futex_now_ns();
+    int lines = 0, busy = 0, addrs_with_waiters = 0;
+    fprintf(out, "  [snap] futex words (waited on now, or woken in the last 10 s):\n");
+    for (unsigned b = 0; b < KL_FUTEX_BUCKETS && lines < 64; b++) {
+        if (pthread_mutex_trylock(&g_futex[b].m) != 0) { busy++; continue; }
+        // The addresses this bucket knows: its counters plus anything waited on.
+        const int32_t *seen[KL_FUTEX_STATS + 16];
+        int ns = 0;
+        for (int i = 0; i < KL_FUTEX_STATS; i++)
+            if (g_futex[b].st[i].addr) seen[ns++] = g_futex[b].st[i].addr;
+        for (kl_futex_waiter *w = g_futex[b].head; w && ns < (int)(sizeof seen / sizeof *seen); w = w->next) {
+            int dup = 0;
+            for (int i = 0; i < ns; i++) if (seen[i] == w->addr) { dup = 1; break; }
+            if (!dup) seen[ns++] = w->addr;
+        }
+        for (int i = 0; i < ns && lines < 64; i++) {
+            const int32_t *a = seen[i];
+            int nw = 0;
+            for (kl_futex_waiter *w = g_futex[b].head; w; w = w->next) if (w->addr == a) nw++;
+            kl_futex_stat *s = NULL;
+            for (int k = 0; k < KL_FUTEX_STATS; k++) if (g_futex[b].st[k].addr == a) s = &g_futex[b].st[k];
+            int recent = s && s->last_wake_ns && now - s->last_wake_ns < 10000000000ULL;
+            if (!nw && !recent) continue;
+            if (nw) addrs_with_waiters++;
+            // The word may belong to memory already freed when nobody waits on
+            // it; read it without faulting.
+            int32_t v = 0; vm_size_t got = 0;
+            int ok = vm_read_overwrite(mach_task_self(), (vm_address_t)(uintptr_t)a, sizeof v,
+                                       (vm_address_t)&v, &got) == KERN_SUCCESS && got == sizeof v;
+            char val[24];
+            if (ok) snprintf(val, sizeof val, "%d (0x%x)", v, (unsigned)v); else snprintf(val, sizeof val, "?");
+            if (s)
+                fprintf(out, "    %p val=%s waiters=%d | waits=%llu timeouts=%llu wakes=%llu "
+                             "empty=%llu woken=%llu | last wake %s%.1f s ago (woke %u, tid %d)\n",
+                        (const void *)a, val, nw, (unsigned long long)s->waits,
+                        (unsigned long long)s->timeouts, (unsigned long long)s->wakes,
+                        (unsigned long long)s->wakes_empty, (unsigned long long)s->woken,
+                        s->last_wake_ns ? "" : "never ",
+                        s->last_wake_ns ? (double)(now - s->last_wake_ns) / 1e9 : 0.0,
+                        s->last_wake_n, s->last_wake_tid);
+            else
+                fprintf(out, "    %p val=%s waiters=%d | (counters recycled)\n",
+                        (const void *)a, val, nw);
+            lines++;
+            int shown = 0;
+            for (kl_futex_waiter *w = g_futex[b].head; w && shown < 4; w = w->next) {
+                if (w->addr != a) continue;
+                size_t off = 0;
+                const char *img = kl_addr_image(w->ra, &off);
+                fprintf(out, "        thread %#x (tid %d) waiting %.1f s, bitset 0x%x, from %s%s0x%zx\n",
+                        w->act, w->tid, (double)(now - w->since_ns) / 1e9, w->bitset,
+                        img ? img : "", img ? "+" : "pc ",
+                        img ? off : (size_t)(uintptr_t)w->ra);
+                shown++;
+            }
+        }
+        pthread_mutex_unlock(&g_futex[b].m);
+    }
+    fprintf(out, "  [snap] futex: %d word(s) with waiters%s", addrs_with_waiters,
+            lines >= 64 ? " (list cut at 64)" : "");
+    if (busy) fprintf(out, ", %d bucket(s) busy (skipped)", busy);
+    fputc('\n', out);
 }
 
 // KL_TRACE_TIME=1: log the guest-visible answers of the wall-clock family.
@@ -2587,9 +3494,9 @@ int klb_gettimeofday(struct klb_timeval *tv, void *tz) {
 // overloads them: `ts` is a timeout for the WAIT family and the second wake
 // count (val2) for WAKE_OP, and uaddr2/val3 are only read by WAKE_OP.
 static long kl_futex_impl(int32_t *uaddr, int op, uint32_t val, const struct timespec *ts,
-                          int32_t *uaddr2, uint32_t val3);
+                          int32_t *uaddr2, uint32_t val3, void *ra);
 static long kl_futex(int32_t *uaddr, int op, uint32_t val, const struct timespec *ts,
-                     int32_t *uaddr2, uint32_t val3) {
+                     int32_t *uaddr2, uint32_t val3, void *ra) {
     static pthread_once_t once = PTHREAD_ONCE_INIT;
     pthread_once(&once, futex_init);
     // KL_TRACE_FUTEX=1: once a second, waits (split by timeout expiry vs
@@ -2610,14 +3517,14 @@ static long kl_futex(int32_t *uaddr, int op, uint32_t val, const struct timespec
                     w, (unsigned long long)atomic_load(&timeouts),
                     (unsigned long long)atomic_load(&woken), wk);
         // Result accounting happens on the way out below via these two.
-        long r = kl_futex_impl(uaddr, op, val, ts, uaddr2, val3);
+        long r = kl_futex_impl(uaddr, op, val, ts, uaddr2, val3, ra);
         if (is_wait) {
             if (r == 0) atomic_fetch_add(&woken, 1);
             else if (errno == ETIMEDOUT) atomic_fetch_add(&timeouts, 1);
         }
         return r;
     }
-    return kl_futex_impl(uaddr, op, val, ts, uaddr2, val3);
+    return kl_futex_impl(uaddr, op, val, ts, uaddr2, val3, ra);
 }
 
 // The read-modify-write half of FUTEX_WAKE_OP, returning the value uaddr2 held
@@ -2648,55 +3555,122 @@ static int futex_op_cmp(int cmp, int32_t oldval, int32_t cmparg) {
 }
 
 static long kl_futex_impl(int32_t *uaddr, int op, uint32_t val, const struct timespec *ts,
-                          int32_t *uaddr2, uint32_t val3) {
+                          int32_t *uaddr2, uint32_t val3, void *ra) {
+    // PRIVATE vs shared makes no difference here: one process, one address space.
     int      base = op & ~(KL_FUTEX_PRIVATE_FLAG | KL_FUTEX_CLOCK_REALTIME);
+    if (!uaddr || ((uintptr_t)uaddr & 3)) { errno = uaddr ? EINVAL : EFAULT; return -1; }
     unsigned b    = futex_bucket(uaddr);
 
     switch (base) {
     case KL_FUTEX_WAIT:
     case KL_FUTEX_WAIT_BITSET: {
+        uint32_t bitset = base == KL_FUTEX_WAIT ? KL_FUTEX_BITSET_ANY : val3;
+        if (!bitset) { errno = EINVAL; return -1; }
+        // The deadline, on our monotonic clock. FUTEX_WAIT's timeout is
+        // RELATIVE (even with FUTEX_CLOCK_REALTIME, which only picks the clock it
+        // is measured on); FUTEX_WAIT_BITSET's is an ABSOLUTE time on
+        // CLOCK_MONOTONIC, or on CLOCK_REALTIME with that flag.
+        uint64_t deadline = KL_FUTEX_FOREVER;
+        if (ts) {
+            if (ts->tv_sec < 0 || ts->tv_nsec < 0 || ts->tv_nsec >= 1000000000L) {
+                errno = EINVAL; return -1;
+            }
+            uint64_t t = futex_ts_ns(ts), now = futex_now_ns();
+            if (base == KL_FUTEX_WAIT) {
+                deadline = futex_add_sat(now, t);
+            } else if (op & KL_FUTEX_CLOCK_REALTIME) {
+                struct timespec rt;
+                clock_gettime(CLOCK_REALTIME, &rt);
+                uint64_t rnow = futex_ts_ns(&rt);
+                deadline = t > rnow ? futex_add_sat(now, t - rnow) : now;
+            } else {
+                deadline = t;
+            }
+        }
+        kl_futex_waiter wstack, *w = futex_rec_get();
+        if (!w) { memset(&wstack, 0, sizeof wstack); w = &wstack; }   // past the pool
         pthread_mutex_lock(&g_futex[b].m);
         if ((uint32_t)__atomic_load_n(uaddr, __ATOMIC_SEQ_CST) != val) {
             pthread_mutex_unlock(&g_futex[b].m);
             errno = EAGAIN;
             return -1;
         }
-        int r;
-        if (!ts) {
-            r = pthread_cond_wait(&g_futex[b].c, &g_futex[b].m);
-        } else {
-            // FUTEX_WAIT's timeout is relative; FUTEX_WAIT_BITSET's is an
-            // absolute deadline, on CLOCK_MONOTONIC unless FUTEX_CLOCK_REALTIME
-            // is set. pthread_cond_timedwait only speaks CLOCK_REALTIME, so a
-            // monotonic deadline is carried across as the interval that remains.
-            struct timespec now, abs;
-            clock_gettime(CLOCK_REALTIME, &now);
-            if (base == KL_FUTEX_WAIT) {
-                abs.tv_sec  = now.tv_sec  + ts->tv_sec;
-                abs.tv_nsec = now.tv_nsec + ts->tv_nsec;
-            } else if (op & KL_FUTEX_CLOCK_REALTIME) {
-                abs = *ts;
-            } else {
-                struct timespec mono;
-                clock_gettime(CLOCK_MONOTONIC, &mono);
-                abs.tv_sec  = now.tv_sec  + (ts->tv_sec  - mono.tv_sec);
-                abs.tv_nsec = now.tv_nsec + (ts->tv_nsec - mono.tv_nsec);
+        w->next = NULL;
+        w->addr = uaddr; w->bitset = bitset; w->woken = 0; w->tid = klb_gettid(); w->ra = ra;
+        w->act = (unsigned)pthread_mach_thread_np(pthread_self());
+        w->since_ns = futex_now_ns();
+        w->bucket = (int)b;
+        kl_futex_waiter **pp = &g_futex[b].head;      // FIFO: append
+        while (*pp) pp = &(*pp)->next;
+        *pp = w;
+        w->linked = 1;
+        w->in_wait = 1;
+        kl_futex_stat *s = futex_stat(b, uaddr);
+        s->waits++;
+        s->last_wait_ns = w->since_ns;
+        while (!w->woken) {
+            if (deadline >= KL_FUTEX_FOREVER) {
+                pthread_cond_wait(&g_futex[b].c, &g_futex[b].m);
+                continue;
             }
-            ts_normalise(&abs);
-            r = pthread_cond_timedwait(&g_futex[b].c, &g_futex[b].m, &abs);
+            uint64_t now = futex_now_ns();
+            if (now >= deadline) break;
+            // pthread_cond_timedwait speaks CLOCK_REALTIME only: convert what is
+            // LEFT of the monotonic deadline each round, so a wall-clock change
+            // costs at most one round, never the whole wait.
+            uint64_t left = deadline - now;
+            if (left > 86400ULL * 1000000000ULL) left = 86400ULL * 1000000000ULL;
+            struct timespec abs;
+            clock_gettime(CLOCK_REALTIME, &abs);
+            abs.tv_sec  += (time_t)(left / 1000000000ULL);
+            abs.tv_nsec += (long)(left % 1000000000ULL);
+            if (abs.tv_nsec >= 1000000000L) { abs.tv_nsec -= 1000000000L; abs.tv_sec++; }
+            pthread_cond_timedwait(&g_futex[b].c, &g_futex[b].m, &abs);
         }
+        // A wake that marked us is a wake, even if the deadline passed while the
+        // lock was being reacquired: the waker already counted us as woken.
+        int woken = w->woken;
+        if (!woken) {
+            futex_unlink(b, w);
+            futex_stat(b, uaddr)->timeouts++;
+        }
+        w->in_wait = 0;
         pthread_mutex_unlock(&g_futex[b].m);
-        if (r == ETIMEDOUT) { errno = ETIMEDOUT; return -1; }
+        if (!woken) { errno = ETIMEDOUT; return -1; }
         return 0;
     }
     case KL_FUTEX_WAKE:
-    case KL_FUTEX_WAKE_BITSET:
+    case KL_FUTEX_WAKE_BITSET: {
+        uint32_t bitset = base == KL_FUTEX_WAKE ? KL_FUTEX_BITSET_ANY : val3;
+        if (!bitset) { errno = EINVAL; return -1; }
         pthread_mutex_lock(&g_futex[b].m);
-        pthread_cond_broadcast(&g_futex[b].c);
+        long n = futex_wake_locked(b, uaddr, bitset, futex_wake_limit(val));
         pthread_mutex_unlock(&g_futex[b].m);
-        // A broadcast makes the true count unobservable. Every caller uses this
-        // only as "at least one was woken", so the requested count is returned.
-        return (long)val;
+        return n;
+    }
+
+    // Wake `val` waiters and move up to `val2` more onto uaddr2 (CMP_ only if
+    // *uaddr still equals val3). The ones to move are WOKEN instead: a moved
+    // waiter's only next step is to sleep on uaddr2 anyway, a woken one
+    // re-checks and goes there itself, and futex allows the early return. The
+    // count returned is what the kernel's is, woken + "requeued".
+    case KL_FUTEX_REQUEUE:
+    case KL_FUTEX_CMP_REQUEUE: {
+        int32_t nwake = (int32_t)val, nreq = (int32_t)(intptr_t)ts;
+        if (nwake < 0 || nreq < 0) { errno = EINVAL; return -1; }
+        pthread_mutex_lock(&g_futex[b].m);
+        if (base == KL_FUTEX_CMP_REQUEUE &&
+            (uint32_t)__atomic_load_n(uaddr, __ATOMIC_SEQ_CST) != val3) {
+            pthread_mutex_unlock(&g_futex[b].m);
+            errno = EAGAIN;
+            return -1;
+        }
+        long limit = (long)nwake + (long)nreq;
+        long n = limit ? futex_wake_locked(b, uaddr, KL_FUTEX_BITSET_ANY, limit) : 0;
+        pthread_mutex_unlock(&g_futex[b].m);
+        (void)uaddr2;
+        return n;
+    }
 
     // "Modify a second word, wake on the first, and conditionally wake on the
     // second too" — one syscall so the release side of a semaphore needs no
@@ -2706,37 +3680,44 @@ static long kl_futex_impl(int32_t *uaddr, int op, uint32_t val, const struct tim
     // joins on a QSemaphore) while constructing its very first panel. Nothing
     // in the hang mentions futex — see the trap record.
     case KL_FUTEX_WAKE_OP: {
-        if (!uaddr2) { errno = EFAULT; return -1; }
+        if (!uaddr2 || ((uintptr_t)uaddr2 & 3)) { errno = uaddr2 ? EINVAL : EFAULT; return -1; }
         // `ts` is not a pointer for this op — the kernel reuses the timeout
         // slot as the second wake count.
         uint32_t val2   = (uint32_t)(uintptr_t)ts;
         int      opcode = (int)((val3 >> 28) & 0xf);
         int      cmp    = (int)((val3 >> 24) & 0xf);
-        int32_t  oparg  = (int32_t)((val3 >> 12) & 0xfff);
-        int32_t  cmparg = (int32_t)(val3 & 0xfff);
+        // Both 12-bit fields are SIGNED (the kernel sign-extends them): an
+        // oparg of 0xfff is -1, so FUTEX_OP_ADD with it is a decrement, not
+        // +4095, and a cmparg of 0xfff compares against -1.
+        int32_t  oparg  = (int32_t)(((val3 >> 12) & 0xfff) ^ 0x800) - 0x800;
+        int32_t  cmparg = (int32_t)((val3 & 0xfff) ^ 0x800) - 0x800;
         if (opcode & KL_FUTEX_OP_OPARG_SHIFT) {
             opcode &= ~KL_FUTEX_OP_OPARG_SHIFT;
             oparg = (int32_t)(1u << (oparg & 31));
         }
+        if (opcode > KL_FUTEX_OP_XOR || cmp > KL_FUTEX_OP_CMP_GE) { errno = ENOSYS; return -1; }
         unsigned b2 = futex_bucket(uaddr2);
 
         // The RMW and the wake of uaddr2's own waiters share one critical
         // section, because a waiter on uaddr2 compares and sleeps holding this
         // same lock — that is what closes the gap the futex contract otherwise
-        // leaves. Broadcasting unconditionally (rather than only when the
-        // comparison holds) costs a recheck in threads that then sleep again,
-        // and futex explicitly permits spurious wakeups.
+        // leaves.
+        long n = 0;
         pthread_mutex_lock(&g_futex[b2].m);
         int32_t oldval = futex_op_apply(opcode, uaddr2, oparg);
-        pthread_cond_broadcast(&g_futex[b2].c);
-        pthread_mutex_unlock(&g_futex[b2].m);
-
-        if (b != b2) {
+        int hit = futex_op_cmp(cmp, oldval, cmparg);
+        if (b == b2) {
+            n += futex_wake_locked(b, uaddr, KL_FUTEX_BITSET_ANY, futex_wake_limit(val));
+            if (hit) n += futex_wake_locked(b2, uaddr2, KL_FUTEX_BITSET_ANY, futex_wake_limit(val2));
+            pthread_mutex_unlock(&g_futex[b2].m);
+        } else {
+            if (hit) n += futex_wake_locked(b2, uaddr2, KL_FUTEX_BITSET_ANY, futex_wake_limit(val2));
+            pthread_mutex_unlock(&g_futex[b2].m);
             pthread_mutex_lock(&g_futex[b].m);
-            pthread_cond_broadcast(&g_futex[b].c);
+            n += futex_wake_locked(b, uaddr, KL_FUTEX_BITSET_ANY, futex_wake_limit(val));
             pthread_mutex_unlock(&g_futex[b].m);
         }
-        return (long)val + (futex_op_cmp(cmp, oldval, cmparg) ? (long)val2 : 0);
+        return n;
     }
     default: {
         // A silent refusal at its most expensive: a futex op we do not
@@ -2778,7 +3759,8 @@ long klb_syscall(long n, long a1, long a2, long a3, long a4, long a5, long a6) {
     if (n == KL_SYS_futex)
         return kl_futex((int32_t *)(uintptr_t)a1, (int)a2, (uint32_t)a3,
                         (const struct timespec *)(uintptr_t)a4,
-                        (int32_t *)(uintptr_t)a5, (uint32_t)a6);
+                        (int32_t *)(uintptr_t)a5, (uint32_t)a6,
+                        __builtin_return_address(0));
     // getrandom, and it is FATAL to refuse rather than merely unimplemented:
     // VRChat loads libpython3.12.so, and CPython seeds its hash randomization
     // from this before it will run at all — a refusal here is
