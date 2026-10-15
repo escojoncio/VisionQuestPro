@@ -70,7 +70,13 @@ enum VQLog {
             return nil
         }
         var copied = 0
-        for src in shareable {
+        // A crash report older than the boot log belongs to an earlier session: copying it next to
+        // a newer log reads as "this session crashed" (2026-10-15: the 09:55 Wwise fault kept
+        // reappearing in every later folder).
+        let bootDate = (try? fm.attributesOfItem(atPath: bootLog.path))?[.modificationDate] as? Date
+        let crashDate = (try? fm.attributesOfItem(atPath: crashLog.path))?[.modificationDate] as? Date
+        let staleCrash = bootDate != nil && crashDate != nil && crashDate! < bootDate!.addingTimeInterval(-60)
+        for src in shareable where !(staleCrash && src == crashLog) {
             let to = dest.appendingPathComponent(src.lastPathComponent)
             try? fm.removeItem(at: to)
             if (try? fm.copyItem(at: src, to: to)) != nil { copied += 1 }

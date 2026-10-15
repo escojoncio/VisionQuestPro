@@ -11,7 +11,30 @@ Historial completo: `git log -p bitacora.md` (compactada el 2026-10-14; lo cerra
 - Los cambios de (4) (621d102..6fe05ab) y VPKEngine 1f246f1 están reintroducidos íntegros; la reversión intermedia
   (6476c93, VPKEngine 07c79f3) fue innecesaria.
 
-## EMPEZAR AQUÍ — 2026-10-15 (11): SpaceWarp siempre servido, QoS RT, latencia adaptativa, idioma — SIN PROBAR
+## EMPEZAR AQUÍ — 2026-10-15 (12): poses por índice de frame (temblor al girar), registros completos — SIN PROBAR
+- Resultado de (11) (capturas 11:25–11:29): AoT CON imagen y en español (HUD: juego 55 fps / visor 90 Hz, VPKTAA off);
+  AoT log de z7: fps del juego mayormente 90, con caídas a 35–85. AC: capas OVROverlay 100 % magenta (255,0,255)
+  en la captura del compositor, incluida la capa 3 (Quad head-locked 1024², «own image (guest wrote it)», escrita por
+  vkCmdCopyImage desde RGBA8 1024²) → la FUENTE ya es magenta. Hipótesis: OVROverlay hace Graphics.Blit con
+  material «Oculus/Texture2D Blit» a un RT temporal y luego CopyTexture → shader de error de Unity. Pendiente la
+  captura de la fuente (`vk_layerNN_src.png`).
+- Usuario: imagen temblorosa al girar la cabeza (quieta OK), todos los juegos. Causa (kl_ovrp.c): Unity tiene dos
+  hilos; WaitToBeginFrame(N+1)+Update(Render) del hilo principal llegan ENTRE BeginFrame4(N) y EndFrame4(N) del de
+  render; `g_step_head` era una sola muestra compartida e ignoraba el frameIndex de Update2/3 y de
+  GetNodePoseState3(step, frameIndex, node) → frame N podía dibujarse con la pose de N+1 mientras el registro de
+  timewarp llevaba otra → error ∝ velocidad angular. Arreglo: anillo `g_fring[16]` por frameIndex: primera muestra
+  Render de cada frame fijada en Update2/3, GetNodePoseState3(Render,F) responde de ella (t_req_frame), y
+  BeginFrame4(F) registra esa misma. Protecciones: índice repetido en BeginFrame → anillo off; índice que retrocede →
+  anillo limpio; solo índices en [begin-4, begin+8]. `KL_OVRP_FRAME_RING=0` = comportamiento anterior. Log: 24
+  líneas `[ovrp] Update(Render) frameIndex=… tid=… -> pinned|kept` y 12 `GetNodePoseState3(Render) frameIndex=…`.
+- Registros: la copia «sesion-anterior» se hacía a los 10 s de abrir la app, DENTRO de la sesión nueva si se lanzaba
+  un juego rápido (las carpetas traían 10 s de la sesión nueva). Ahora `VQLauncher.play` llama
+  `VQLog.savePreviousSessionToQuest()` antes de preparar el juego. `saveToQuest` omite klepton-crash.log si es >60 s
+  más viejo que el boot log (el fault de Wwise de las 09:55 se copiaba en todas las carpetas).
+- `kl_vulkan_capture_layers`: con «capturas de diagnóstico» (KL_CAPTURE=1) captura capas + fuentes 2 veces en
+  QUEST/Registros (vk_layerNN.png / vk_layerNN_src.png; log: centro y nº de píxeles magenta).
+
+## 2026-10-15 (11): SpaceWarp siempre servido, QoS RT, latencia adaptativa, idioma — probado: AoT con imagen
 - Resultado de (10): AC ya no crashea (audio suena, x18 OK). AoT SIN IMAGEN: con KL_VPKTAA=0 se rechazaba
   GetLayerTextureSpaceWarp → libOculusXRPlugin CreateEyeTextureStage (+0x137ec) llama CreateMotionVectorTexture si
   el SETTING global del juego (OculusSettings SpaceWarp, `ldrh [x8,#0x28]`) está activo, NO por el desc → falla la
