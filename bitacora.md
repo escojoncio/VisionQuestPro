@@ -28,6 +28,10 @@ Vulkan CTS desde la app; el informe de capacidades (vulkaninfo) de un Quest 3 re
   (faltan maintenance4, BDA, memory model…), B4G4R4A4. MSL nuevo sin compilar en Apple: vigilar errores de pipeline.
 - VisionQuestPro: AC vuelve a MSAA 4x (`KL_VK_MAX_SAMPLES` def. 0 para todos); ojo 3840 de AC solo si se pide 2x
   explícito (kl_ovrp.c). Vigilar memoria en AC.
+- Parches solo-AC (`kl_is_ac_nexus()`) a revisar al cerrar pasos 2 y 4: probar AC con cada uno apagado y quitar los
+  que ya no hagan falta. Muletas de tiempos/compositor: `KL_NEXUS_FRAME_BUDGET`, `KL_GUEST_FRESH_POSE`, 2 etapas
+  (`kl_ovrp_stage_count`), `KL_OVERLAY_TEXL`=0, `KL_OVERLAY_SUBMIT_ORDER`. Se quedan (no son muletas): token offline
+  `KL_PLAT_TOKEN_ERROR`, burst Wwise. Arreglos globales (clock_getres, publicar tras GPU…) son emulación correcta.
 
 ## 2026-10-15 (19): paso 1 (GPU = Adreno 740) iniciado
 - VPKEngine, 4 commits locales (pendientes de push): `ced6226` memoria LAZILY_ALLOCATED sin RAM (tipo 3 sin host,
