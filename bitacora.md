@@ -23,6 +23,33 @@ Todos estos pasos son OBLIGATORIOS y van en este orden.
 REGLA del paso 1: toda capacidad nueva del perfil Adreno entra primero tras la puerta del CTS (`VPVK_EXTRA_EXTENSIONS`)
 y solo se expone a los juegos tras una tanda del Vulkan CTS limpia en sus grupos (ej. vertex stores: dEQP-VK.robustness.*,
 dEQP-VK.binding_model.*, dEQP-VK.memory_model.*). Motivo: vertex stores expuesto sin CTS → cuelgue de GPU en el warmup de AC (2026-10-16).
+Plan acordado: implementar TODOS los pasos 1-7 tras la puerta del CTS (los juegos no lo ven; el CTS sí), y al final
+pasadas completas del Vulkan/OpenXR/GLES CTS en el visor → arreglar fallos → abrir la puerta por grupos a los juegos.
+
+### Estado del paso 1 (2026-10-16) — lo YA tocado
+- VPKEngine en main: `ced6226` memoria LAZILY_ALLOCATED sin RAM; `ad18998` atómicos R32; `5099bb3` driverVersion
+  512.744.0, sin BC, vertexPipelineStoresAndAtomics=1 FIJO; `1495086` sin formatos BC, ASTC no cuadrados, R4G4B4A4,
+  sin EXT_metal_objects; `1e6d988` shaderInt16, shaderDrawParameters (buffer 29 `VpDrawParams`), maintenance2/3,
+  storage_buffer_storage_class, driver_properties Qualcomm, structs Vulkan11/12/13, extensiones 1.2/1.3 visibles;
+  `f836aeb` host_query_reset; `1e483b2` baseVertex no indexado, spec int16, ext16; `ce43429` README crédito.
+- VisionQuestPro: `288e73c` AC a MSAA 4x (`KL_VK_MAX_SAMPLES` def. 0); Klepton `KL_VK_VTX_SSBO`=1 (build 18).
+- Build 288e73c probada (log 02:37 AC): cuelgue de GPU (`device_lost`, ningún command buffer en 20 s) en
+  `ShaderWarmupManager.WarmUpShaders` tras 1700 pipelines. Sospecha: SSBO en vértice sin robustez real (OOB) ahora que
+  Unity incluye esas variantes; 2ª: VpDrawParams buffer 29. Agente trabajando: robustBufferAccess real en todas las
+  etapas + diagnóstico de cuelgue (pipelines del command buffer colgado). Progreso: `/home/claude/progreso/agente-cuelgue-gpu.md`
+  (local de la sesión) y bitácora de VPKEngine.
+
+### TODO domingo (en orden)
+1. Cerrar el cuelgue de AC: revisión adversarial del arreglo → build (con visto bueno) → AC pasa el warmup.
+2. Poner tras la puerta del CTS lo expuesto sin validar: vertex stores (VPKEngine entry.cpp y Klepton `KL_VK_VTX_SSBO`),
+   shaderInt16, shaderDrawParameters, extensiones 1.2/1.3 recién visibles. OJO: sin vertex stores vuelve el rosa en AC
+   (aceptado hasta validar).
+3. Paso 1 restante: samplerYcbcrConversion, variablePointers, 16/8-bit storage, apiVersion 1.3 (maintenance4, BDA,
+   memory model, imageless framebuffer, extended_dynamic_state, private data, inline uniform blocks, subgroup size
+   control), B4G4R4A4 (ABGR4 + swizzle), fallos conocidos del CTS (texel buffers sint/snorm/16-bit, fragment output
+   int/snorm, blits 1D). Valores [B]/[C] de `docs/perfil-adreno740.md` pendientes de un vulkaninfo real de Quest 3.
+4. Pasos 2-7 en orden, todo tras la puerta.
+5. Pasadas CTS completas (Vulkan, OpenXR, GLES) en el visor → arreglar → abrir puerta por grupos.
 
 ## DESPUÉS de los pasos obligatorios — SSAO propio en VPKEngine
 - Pase de oclusión ambiental en pantalla propio, a partir del buffer de profundidad del juego (el mismo que captura
