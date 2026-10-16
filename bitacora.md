@@ -39,8 +39,13 @@ pasadas completas del Vulkan/OpenXR/GLES CTS en el visor → arreglar fallos →
   etapas + diagnóstico de cuelgue (pipelines del command buffer colgado). Progreso: `/home/claude/progreso/agente-cuelgue-gpu.md`
   (local de la sesión) y bitácora de VPKEngine.
 
+- Arreglo del cuelgue en VPKEngine main: `d0df859` robustBufferAccess real (EmitOptions::robustBuffers, `bs<slot>`
+  BufferSize, lecturas OOB=0, escrituras/atómicos OOB descartados, traductor v9 → caché retraducida), `5934065`
+  informe `gpu.err what=hang_report` + líneas `gpu.hang` (pipelines por command buffer en vuelo), `e5d9dfd` arreglos de
+  revisión. Build lanzada sobre ese VPKEngine; resultado pendiente.
+
 ### TODO domingo (en orden)
-1. Cerrar el cuelgue de AC: revisión adversarial del arreglo → build (con visto bueno) → AC pasa el warmup.
+1. Cerrar el cuelgue de AC: comprobar con el log de la build nueva que AC pasa el warmup; si no, leer `gpu.hang`.
 2. Poner tras la puerta del CTS lo expuesto sin validar: vertex stores (VPKEngine entry.cpp y Klepton `KL_VK_VTX_SSBO`),
    shaderInt16, shaderDrawParameters, extensiones 1.2/1.3 recién visibles. El rosa de AC NO venía de vertex stores: con
    vertexStores=1 (log 02:37) siguen `[magenta] fragment module … (1,0,1,1)` y el rosa visible. Hipótesis descartada.
