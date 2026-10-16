@@ -20,6 +20,9 @@ Objetivo: que ningún juego note diferencia con un Quest 3. Hacerlo en este orde
    el CTS de GLES (dEQP-GLES2/3/31, ya incluido en VK-GL-CTS). Quitar el bloqueo «solo Vulkan» del launcher al terminar.
 7. **Limpieza de muletas de AC** (al cerrar pasos 2 y 4): ver entrada (20).
 Todos estos pasos son OBLIGATORIOS y van en este orden.
+REGLA del paso 1: toda capacidad nueva del perfil Adreno entra primero tras la puerta del CTS (`VPVK_EXTRA_EXTENSIONS`)
+y solo se expone a los juegos tras una tanda del Vulkan CTS limpia en sus grupos (ej. vertex stores: dEQP-VK.robustness.*,
+dEQP-VK.binding_model.*, dEQP-VK.memory_model.*). Motivo: vertex stores expuesto sin CTS → cuelgue de GPU en el warmup de AC (2026-10-16).
 
 ## DESPUÉS de los pasos obligatorios — SSAO propio en VPKEngine
 - Pase de oclusión ambiental en pantalla propio, a partir del buffer de profundidad del juego (el mismo que captura
