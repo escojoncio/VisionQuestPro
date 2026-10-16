@@ -45,7 +45,14 @@ pasadas completas del Vulkan/OpenXR/GLES CTS en el visor → arreglar fallos →
   revisión. Build lanzada sobre ese VPKEngine; resultado pendiente.
 
 ### TODO domingo (en orden)
-1. Cerrar el cuelgue de AC: comprobar con el log de la build nueva que AC pasa el warmup; si no, leer `gpu.hang`.
+1. Cerrar el cuelgue de AC. Build 709566a (robustez real) NO lo arregla (log 03:08): `gpu.hang cb=vpgpu.f662
+   age_ms=20010 draws=4630 dispatches=0 pipelines=1576`, un solo encoder, todos los VS `ssbo_r robust` (pipelines de la
+   caché de recetas, etiqueta `vk.prewarm` de recipes.cpp:313) = los draws de `ShaderVariantCollection.WarmUp` de Unity.
+   No es el reloj (clock_getres solo afecta a UbiServices; el bloqueo es la GPU). Siguiente: (a) loguear por draw del CB
+   colgado vertexCount/instanceCount/indexCount/indirect, tamaño del render target y muestras; (b) partir el CB en
+   trozos (p. ej. 256 draws) con fence propio para que el cuelgue señale el pipeline exacto y descartar timeout de
+   Metal por CB enorme frente a cuelgue real; (c) volcar el MSL del VS culpable a QUEST/Registros; (d) A/B: ajuste en la
+   app «Escritura en buffers desde vértice» (off = como build 17, que sí pasaba el warmup).
 2. Poner tras la puerta del CTS lo expuesto sin validar: vertex stores (VPKEngine entry.cpp y Klepton `KL_VK_VTX_SSBO`),
    shaderInt16, shaderDrawParameters, extensiones 1.2/1.3 recién visibles. El rosa de AC NO venía de vertex stores: con
    vertexStores=1 (log 02:37) siguen `[magenta] fragment module … (1,0,1,1)` y el rosa visible. Hipótesis descartada.
