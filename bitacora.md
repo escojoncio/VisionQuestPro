@@ -42,8 +42,11 @@ pasadas completas del Vulkan/OpenXR/GLES CTS en el visor → arreglar fallos →
 ### TODO domingo (en orden)
 1. Cerrar el cuelgue de AC: revisión adversarial del arreglo → build (con visto bueno) → AC pasa el warmup.
 2. Poner tras la puerta del CTS lo expuesto sin validar: vertex stores (VPKEngine entry.cpp y Klepton `KL_VK_VTX_SSBO`),
-   shaderInt16, shaderDrawParameters, extensiones 1.2/1.3 recién visibles. OJO: sin vertex stores vuelve el rosa en AC
-   (aceptado hasta validar).
+   shaderInt16, shaderDrawParameters, extensiones 1.2/1.3 recién visibles. El rosa de AC NO venía de vertex stores: con
+   vertexStores=1 (log 02:37) siguen `[magenta] fragment module … (1,0,1,1)` y el rosa visible. Hipótesis descartada.
+   Siguiente para el rosa: comparar TODO lo que Unity consulta (features, límites, formatos con sus flags, extensiones)
+   contra el perfil Adreno real y loguear qué subshader/variante cae al error shader (Unity no lo dice en Vulkan:
+   identificar el material por el hash del pipeline y el render pass); revisar también `[prov] layer 3 … no write seen`.
 3. Paso 1 restante: samplerYcbcrConversion, variablePointers, 16/8-bit storage, apiVersion 1.3 (maintenance4, BDA,
    memory model, imageless framebuffer, extended_dynamic_state, private data, inline uniform blocks, subgroup size
    control), B4G4R4A4 (ABGR4 + swizzle), fallos conocidos del CTS (texel buffers sint/snorm/16-bit, fragment output
