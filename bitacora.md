@@ -65,6 +65,12 @@ pasadas completas del Vulkan/OpenXR/GLES CTS en el visor → arreglar fallos →
    int/snorm, blits 1D). Valores [B]/[C] de `docs/perfil-adreno740.md` pendientes de un vulkaninfo real de Quest 3.
 4. Pasos 2-7 en orden, todo tras la puerta.
 5. Pasadas CTS completas (Vulkan, OpenXR, GLES) en el visor → arreglar → abrir puerta por grupos.
+6. Launcher: carátula de cada juego en el selector, como la biblioteca de Quest. Sin servidores de Meta, por orden:
+   (a) imagen que el usuario ponga en la carpeta del juego (`cover.jpg/png`, también `*.jpg/png` suelto de releases
+   VRP); (b) arte del APK: `application android:icon/banner` del AndroidManifest (AXML, `vq_apk.c`) resuelto por
+   `resources.arsc` a la mayor densidad (mipmap-xxxhdpi, adaptive icon foreground+background, WebP/PNG); (c) fondo
+   generado con nombre. Caché en `QUEST/Cache/<j>/cover.png`; formato horizontal tipo tienda (recorte/relleno con
+   desenfoque si es icono cuadrado).
 
 ## DESPUÉS de los pasos obligatorios — SSAO propio en VPKEngine
 - Pase de oclusión ambiental en pantalla propio, a partir del buffer de profundidad del juego (el mismo que captura
