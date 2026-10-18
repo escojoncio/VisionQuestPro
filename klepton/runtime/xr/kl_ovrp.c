@@ -3030,21 +3030,9 @@ static struct {
 int kl_ovrp_stage_count(void) {
     static int n;
     if (!n) {
-        // Two for AC Nexus (package gate). Unity keeps a 4x (2x with
-        // KL_VK_MAX_SAMPLES) multisampled colour and depth target per stage
-        // beside each eye image, transient on a Quest and real memory here
-        // (865 MB a stage at 3072 px and 4x). With three
-        // the level load peaked at 8.1 GB of an 8.2 GB limit and was killed
-        // once; with two it peaks at 7.1-7.6. Not latched until the guest
-        // package is known, so an early caller cannot fix the wrong count.
-        extern int kl_is_ac_nexus(void);
-        extern int kl_ac_nexus_known(void);
-        int r = kl_env_int("KL_OVRP_STAGES", kl_is_ac_nexus() ? 2 : KLOVRP_STAGES_DEFAULT);
+        int r = kl_env_int("KL_OVRP_STAGES", KLOVRP_STAGES_DEFAULT);
         if (r < 1) r = 1;
-        if (r > KLOVRP_MAX_STAGES) r = KLOVRP_MAX_STAGES;
-        if (!kl_ac_nexus_known()) return r;
-        n = r;
-        if (n > KLOVRP_MAX_STAGES) n = KLOVRP_MAX_STAGES;
+        n = r > KLOVRP_MAX_STAGES ? KLOVRP_MAX_STAGES : r;
     }
     return n;
 }
