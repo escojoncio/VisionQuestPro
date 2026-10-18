@@ -321,3 +321,14 @@ Vulkan CTS desde la app; el informe de capacidades (vulkaninfo) de un Quest 3 re
 - Test host: `libc/test/t_bionic_extra.c` (`clang -DKL_EXTRA_TEST -I.. ... -lm`) -> "all ok".
 - NO verificado en Darwin (no se compiló nada): kl_bionic_extra2.c, adiciones de kl_pthread.c, ensamblado de los thunks, posibles choques de símbolos klb_timer_* con los static de kl_shim.c.
 - Pendiente: ~300 nombres aún sin servir (ver lista de escáner: regex/regcomp, hsearch/tsearch, res_*, iconv, getopt_long, mkstemps/mkostemp, timerfd, signalfd, tcgetattr extra, utmp, getmntent, pselect/ppoll64, preadv/pwritev, pthread_cancel...), inotify ENOSYS, posix_spawn ENOSYS, getcpuclockid solo propio hilo.
+
+## Paso 3 (agente 15): Android completo
+
+- libc/kl_bionic_extra3.c (portable, test host en libc/test/t_bionic_extra3.c, contrastado con glibc): regex, tsearch/hsearch/lsearch, rand48 exacto, getopt_long, iconv (UTF-8/16/32, Latin-1), C11 threads, complejos, utmp/mntent, red offline (gethostby*_r, protocolos, res_*, ns_*), sig2str, termios cf*.
+- libc/kl_bionic_extra4.c (solo Darwin): timerfd, signalfd, inotify sobre kqueue, termios bionic, stdio_ext, statx, renameat2, mkstemps, preadv2, pselect, epoll_pwait, sendmmsg/recvmmsg, pidfd (solo pid propio), sigqueue/sigtimedwait, negativas honestas (exec*, SysV IPC, openpty).
+- Orden de resolucion: kl_shim_lookup, kl_bionic_extra_lookup, extra3, extra4. Las entradas inotify de extra4 ganan a los ENOSYS de kl_shim.c.
+- Riesgos del agente 13: timers renombrados a kl_xt_timer_*, rlimit NOFILE sin bajar el hard, mbsinit con estado.
+- Inotify: IN_MODIFY/ATTRIB/DELETE_SELF/MOVE_SELF por EVFILT_VNODE; en directorios CREATE/DELETE/MOVED por diff (max 128 hijos). IN_ACCESS/OPEN/CLOSE_* no existen en kqueue.
+- Sin servir a proposito (bionic no los exporta): pthread_cancel, pthread_setcancelstate, wordexp, strfmon.
+- Sensores: solo giroscopio (kl_ovrp_head_motion rotado al marco de la cabeza, ticker por cola). Acelerometro, magnetometro y proximidad sin fuente real: no se listan.
+- Sin compilar ni probar en Darwin: extra2, extra4, thunks, internals de FILE, kqueue.
