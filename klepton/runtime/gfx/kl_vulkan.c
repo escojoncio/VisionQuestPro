@@ -6207,7 +6207,7 @@ static void VKAPI_CALL klvk_GetPhysicalDeviceQueueFamilyProperties(
 // KL_VK_IMG_NOFMT=1 also claims storage-image read/write without format (second suspect).
 static void klvk_patch_features(VkPhysicalDeviceFeatures *f) {
     if (!f) return;
-    if (kl_env_on("KL_VK_VTX_SSBO", 1)) f->vertexPipelineStoresAndAtomics = VK_TRUE;
+    if (kl_env_on("KL_VK_VTX_SSBO", 0)) f->vertexPipelineStoresAndAtomics = VK_TRUE;
     if (kl_env_on("KL_VK_IMG_NOFMT", 0)) {
         f->shaderStorageImageReadWithoutFormat = VK_TRUE;
         f->shaderStorageImageWriteWithoutFormat = VK_TRUE;

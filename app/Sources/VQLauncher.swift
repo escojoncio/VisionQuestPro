@@ -163,6 +163,7 @@ struct VQGameCard: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
+            VQCoverView(game: game)
             Text(game.name).font(.title2.bold()).lineLimit(2)
             Text("\(game.package) · v\(game.version)").font(.caption).foregroundStyle(.secondary)
             HStack(spacing: 8) {

@@ -1144,6 +1144,9 @@ int kl_ac_nexus_known(void) {
 }
 
 int kl_is_ac_nexus(void) {
+    // Per-title AC Nexus workarounds retired (2026-10-18): every gate keyed on
+    // this answers "not AC", so the game runs on the generic emulation only.
+    { const char *e = getenv("KL_AC_NEXUS_PATCHES"); if (!e || *e != '1') return 0; }
     static volatile int cached = -1;
     int c = cached;
     if (c >= 0) return c;

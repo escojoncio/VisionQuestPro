@@ -44,6 +44,16 @@ pasadas completas del Vulkan/OpenXR/GLES CTS en el visor → arreglar fallos →
   informe `gpu.err what=hang_report` + líneas `gpu.hang` (pipelines por command buffer en vuelo), `e5d9dfd` arreglos de
   revisión. Build lanzada sobre ese VPKEngine; resultado pendiente.
 
+### 2026-10-18 — parches de AC retirados, carátulas — build lanzada
+- `kl_is_ac_nexus()` (kl_jni_services.c) devuelve 0 salvo `KL_AC_NEXUS_PATCHES=1`: todos los parches solo-AC apagados
+  (2 etapas, token error, SpaceWarp spin, pose fresca, overlay texl/orden, burst AC, MSAA/ojo). Riesgo: con 3 etapas AC
+  llegó a OOM (8,1 GB) en su día; vigilar memoria. JNI LoadingScreen de nexusvr se queda (emulación de clase).
+- `KL_VK_VTX_SSBO` def. 0 y VPKEngine `vertexPipelineStoresAndAtomics` tras `VPVK_EXTRA_EXTENSIONS` otra vez (cuelgue del
+  warmup). Efecto conocido: Unity vuelve a usar el shader de error en variantes con StructuredBuffer en vértice (rosa).
+- Carátulas: `app/Sources/VQCover.swift` (imagen de la carpeta: nombre cover/banner/poster o la mayor; si no, arte del
+  APK res/*: banner > ic_launcher/app_icon > round/foreground, mayor tamaño = mayor densidad → `Cache/<j>/cover-apk.<ext>`;
+  si no, degradado con nombre). `VQCoverView` 16:9 arriba de `VQGameCard` (VQLauncher.swift). Sin probar en el visor.
+
 ### TODO domingo (en orden)
 1. Cerrar el cuelgue de AC. Build 709566a (robustez real) NO lo arregla (log 03:08): `gpu.hang cb=vpgpu.f662
    age_ms=20010 draws=4630 dispatches=0 pipelines=1576`, un solo encoder, todos los VS `ssbo_r robust` (pipelines de la
