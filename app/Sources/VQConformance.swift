@@ -456,6 +456,7 @@ enum VQConformance {
     /// scale) may change what they render. Overrides what applyToEnvironment set for this launch.
     static func neutralGraphics() {
         setenv("VPVK_ANISO", "0", 1)
+        setenv("VPVK_FORCE_ANISO", "0", 1)
         setenv("VPVK_TAA_JITTER", "0", 1)
         setenv("VPVK_FORCE_1X", "0", 1)
         setenv("VPVK_MSAA", "0", 1)

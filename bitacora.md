@@ -289,3 +289,11 @@ Vulkan CTS desde la app; el informe de capacidades (vulkaninfo) de un Quest 3 re
   `VQConformance*`; `app/Native/vq_apk.c` (ZIP + AXML), `vq_config.c` (reenvío `vpvk_config_set_*`).
 - CI `visionos.yml`: solo `[build]` o manual; release `visionos` (`VisionQuestPro.ipa`, bundle `com.kdt.livecontainer`);
   log de CI en rama `ci-logs` (`visionos.txt`; `gh run view --log-failed` da 403 desde aquí).
+
+## 2026-10-18 — resolución y anisotrópico por juego (rama paso-a10)
+- `VQLaunch.swift`: `VQGameRes` (`vq.resMode/resBase/resScale.<aaKey>`; por defecto «usar la global») y `VQGameAniso`
+  (`vq.aniso.<aaKey>`; ausente = global). `applyToEnvironment` aplica por juego `KL_OVRP_EYE_BASE/SCALE`, `c.render_scale`,
+  `VPVK_ANISO` y `VPVK_FORCE_ANISO`; logs «Gráficos: resolución…» y «anisotrópico por juego…». kl_ovrp.c NO tocado.
+- `VQLauncher.swift` `VQGameSettingsView`: secciones Resolución (muestra ≈ px por ojo; «Vision Pro» depende del visor) y Filtrado
+  anisotrópico (Global/Del juego/2x…16x). `VQConformance.neutralGraphics`: `VPVK_FORCE_ANISO=0`.
+- Requiere VPKEngine con `VPVK_FORCE_ANISO` (rama paso-a10 de VPKEngine). Swift sin compilar (no hay Mac), sin validar en visor.
