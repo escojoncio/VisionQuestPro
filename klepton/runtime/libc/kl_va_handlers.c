@@ -217,6 +217,18 @@ int klh_swprintf(wchar_t *s, size_t n, const wchar_t *fmt, kl_va *va) { return k
 void klh_err(int eval, const char *fmt, kl_va *va)  { klx2_verr(eval, fmt, va, 1, 1); }
 void klh_errx(int eval, const char *fmt, kl_va *va) { klx2_verr(eval, fmt, va, 0, 1); }
 void klh_warn(const char *fmt, kl_va *va)           { klx2_verr(0, fmt, va, 1, 0); }
+// glibc's error()/error_at_line() and the wide scanf entry points (bodies in kl_bionic_extra2.c)
+void klx2_error(int status, int errnum, const char *file, unsigned line, int with_loc, const char *fmt, kl_va *va);
+int klx2_vswscanf(const wchar_t *s, const wchar_t *fmt, kl_va *va);
+int klx2_vfwscanf(void *f, const wchar_t *fmt, kl_va *va);
+int klx2_vwscanf(const wchar_t *fmt, kl_va *va);
+void klh_error(int status, int errnum, const char *fmt, kl_va *va) { klx2_error(status, errnum, NULL, 0, 0, fmt, va); }
+void klh_error_at_line(int status, int errnum, const char *file, unsigned line, const char *fmt, kl_va *va) {
+    klx2_error(status, errnum, file, line, 1, fmt, va);
+}
+int klh_wscanf(const wchar_t *fmt, kl_va *va)                    { return klx2_vwscanf(fmt, va); }
+int klh_fwscanf(void *f, const wchar_t *fmt, kl_va *va)          { return klx2_vfwscanf(f, fmt, va); }
+int klh_swscanf(const wchar_t *s, const wchar_t *fmt, kl_va *va) { return klx2_vswscanf(s, fmt, va); }
 
 // ---- non-printf variadics: exactly one trailing argument, no format string ----
 int kl_open_flags(int lx);          // kl_libc.c

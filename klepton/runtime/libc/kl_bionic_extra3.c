@@ -32,6 +32,10 @@
 #include <netdb.h>
 #include <regex.h>
 #include <wchar.h>
+#include <locale.h>
+#ifdef __APPLE__
+#include <xlocale.h>
+#endif
 #include <netinet/in.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
@@ -1507,7 +1511,45 @@ static const struct { const char *name, *target; } g_alias3[] = {
     {"lockf64", "lockf"}, {"funopen64", "funopen"}, {"sendfile64", "sendfile"},
     {"readdir64_r", "readdir_r"}, {"scandirat64", "scandirat"},
     {"epoll_pwait64", "epoll_pwait"},
+    {"posix_spawnattr_getsigdefault64", "posix_spawnattr_getsigdefault"}, {"posix_spawnattr_setsigdefault64", "posix_spawnattr_setsigdefault"},
+    {"posix_spawnattr_getsigmask64", "posix_spawnattr_getsigmask"}, {"posix_spawnattr_setsigmask64", "posix_spawnattr_setsigmask"},
 };
+
+// ======================================================================
+// termios helpers that touch only the struct (bionic's kernel-shaped termios: c_cflag holds the
+// baud rate in CBAUD; there is no separate input speed), message catalogs, qsort_r, bindresvport
+// ======================================================================
+typedef struct { uint32_t c_iflag, c_oflag, c_cflag, c_lflag; uint8_t c_line; uint8_t c_cc[19]; } kl3_termios;
+#define LXT_CBAUD 0x100Fu
+static unsigned kl3_cfgetispeed(const kl3_termios *t) { return t->c_cflag & LXT_CBAUD; }
+static unsigned kl3_cfgetospeed(const kl3_termios *t) { return t->c_cflag & LXT_CBAUD; }
+static int kl3_cfsetspeed(kl3_termios *t, unsigned sp) { t->c_cflag = (t->c_cflag & ~LXT_CBAUD) | (sp & LXT_CBAUD); return 0; }
+static int kl3_cfsetispeed(kl3_termios *t, unsigned sp) { return kl3_cfsetspeed(t, sp); }
+static int kl3_cfsetospeed(kl3_termios *t, unsigned sp) { return kl3_cfsetspeed(t, sp); }
+static void kl3_cfmakeraw(kl3_termios *t) {
+    t->c_iflag &= ~(0x1u | 0x2u | 0x8u | 0x20u | 0x40u | 0x80u | 0x100u | 0x400u);      // IGNBRK BRKINT PARMRK ISTRIP INLCR IGNCR ICRNL IXON
+    t->c_oflag &= ~0x1u;                                                                // OPOST
+    t->c_lflag &= ~(0x8u | 0x40u | 0x2u | 0x1u | 0x8000u);                              // ECHO ECHONL ICANON ISIG IEXTEN
+    t->c_cflag &= ~(0x30u | 0x100u);                                                    // CSIZE PARENB
+    t->c_cflag |= 0x30u;                                                                // CS8
+}
+// <nl_types.h>: bionic's catalogs open a file; none exist for an app, and catgets then answers its default.
+static void *kl3_catopen(const char *name, int flag) { (void)name; (void)flag; errno = ENOENT; return (void *)-1; }
+static char *kl3_catgets(void *cat, int set, int msg, const char *dflt) { (void)cat; (void)set; (void)msg; return (char *)dflt; }
+static int kl3_catclose(void *cat) { (void)cat; errno = EBADF; return -1; }
+// qsort_r takes the context LAST in glibc/bionic; Darwin's takes it first.
+struct kl3_qr { int (*cmp)(const void *, const void *, void *); void *arg; };
+#ifdef __APPLE__
+static int kl3_qr_tramp(void *t, const void *a, const void *b) { struct kl3_qr *q = t; return q->cmp(a, b, q->arg); }
+static void kl3_qsort_r(void *base, size_t n, size_t w, int (*cmp)(const void *, const void *, void *), void *arg) {
+    struct kl3_qr q = { cmp, arg };
+    qsort_r(base, n, w, &q, kl3_qr_tramp);
+}
+#else
+static void kl3_qsort_r(void *base, size_t n, size_t w, int (*cmp)(const void *, const void *, void *), void *arg) { qsort_r(base, n, w, cmp, arg); }
+#endif
+// Binding a reserved port needs privilege an app does not have.
+static int kl3_bindresvport(int sd, void *sin) { (void)sd; (void)sin; errno = EACCES; return -1; }
 
 // ======================================================================
 // the table
@@ -1584,6 +1626,8 @@ static const kl3_entry g_extra3[] = {
     K3(sig2str), K3(str2sig), K3(psignal), K3(psiginfo), K3(ctermid), K3(ttyname), K3(getlogin_r),
     K3(_tolower), K3(_toupper), K3(__gnu_basename), K3(__mempcpy_chk), K3(android_reset_stack_guards),
     K3(strerror_l), K3(strptime_l), K3(wcsftime_l), K3(wcstold_l), K3(timelocal),
+    K3(cfgetispeed), K3(cfgetospeed), K3(cfsetispeed), K3(cfsetospeed), K3(cfsetspeed), K3(cfmakeraw),
+    K3(catopen), K3(catgets), K3(catclose), K3(qsort_r), K3(bindresvport), X3(duplocale),
 };
 
 void *kl_bionic_extra4_lookup(const char *name);            // kl_bionic_extra4.c (Darwin only)

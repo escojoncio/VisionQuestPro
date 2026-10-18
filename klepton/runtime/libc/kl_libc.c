@@ -3224,7 +3224,9 @@ off_t  klb_lseek(int fd, off_t o, int w)   { int handled; off_t r = kl_obbmap_ls
                                              return handled ? r : lseek(fd, o, w); }
 // ...and close, so an OBB read-through fd is unregistered before its number can
 // be recycled by an unrelated open (or the table would misroute that open).
+void   kl_extra4_fd_closed(int fd);        // kl_bionic_extra4.c: stops the feeder of a timerfd/signalfd/inotify/pidfd
 int    klb_close(int fd)                   { int handled; int r = kl_obbmap_close(fd, &handled);
+                                             if (!handled) kl_extra4_fd_closed(fd);
                                              return handled ? r : close(fd); }
 // bare-name pread (libUE4 uses it): interpose the read-through window.
 ssize_t klb_pread(int fd, void *buf, size_t n, off_t off) {

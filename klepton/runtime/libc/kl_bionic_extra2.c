@@ -436,6 +436,7 @@ ssize_t klb_process_vm_writev(int pid, const struct iovec *l, unsigned long ln, 
 
 FILE *kl_host_file(void *guest);
 void klb_exit(int status);
+void *kl_shim_lookup(const char *name);
 
 #define KL_MARSHAL2(fmt, va, mode, fail)                                     \
     char _m[512] __attribute__((aligned(16)));                               \
@@ -526,6 +527,62 @@ void klx2_verr_(int eval, const char *fmt, kl_va *va) { klx2_verr(eval, fmt, va,
 void klx2_verrx_(int eval, const char *fmt, kl_va *va) { klx2_verr(eval, fmt, va, 0, 1); }
 void klx2_vwarn_(const char *fmt, kl_va *va) { klx2_verr(0, fmt, va, 1, 0); }
 void klx2_vwarnx_(const char *fmt, kl_va *va) { klx2_verr(0, fmt, va, 0, 0); }
+
+// glibc's error() / error_at_line() (bionic exports both with their three globals):
+//   <prog>: <message>[: <strerror(errnum)>]\n          and, with a location,   <prog>:<file>:<line>: <message>...
+// error_print_progname replaces the "<prog>: " prefix when set; a non-zero status ends the process.
+unsigned int kl_error_message_count;
+int kl_error_one_per_line;
+void (*kl_error_print_progname)(void);
+void klx2_error(int status, int errnum, const char *file, unsigned line, int with_loc, const char *fmt, kl_va *va) {
+    static const char *last_file; static unsigned last_line;
+    fflush(stdout);
+    if (with_loc && kl_error_one_per_line) {
+        if (last_line == line && last_file && file && !strcmp(last_file, file)) return;
+        last_file = file; last_line = line;
+    }
+    if (kl_error_print_progname) kl_error_print_progname(); else fputs(klb_getprogname_for_err(), stderr);
+    if (with_loc) fprintf(stderr, ":%s:%u: ", file ? file : "", line); else fputs(": ", stderr);
+    if (fmt) {
+        char m[512] __attribute__((aligned(16)));
+        if (kl_va_marshal(fmt, va, m, sizeof m, KL_VA_PRINTF) != (size_t)-1) vfprintf(stderr, fmt, (va_list)m);
+    }
+    if (errnum) {
+        static void *se; if (!se) se = kl_shim_lookup("strerror");
+        fprintf(stderr, ": %s", se ? ((char *(*)(int))se)(errnum) : "error");
+    }
+    fputc('\n', stderr);
+    kl_error_message_count++;
+    if (status) klb_exit(status);
+}
+
+// The wide scanf family. As for wide printf, a narrowed copy of the format drives the argument
+// walk (every conversion takes a pointer) and Darwin parses from the original wide format.
+static int wmarshal_scan(const wchar_t *wfmt, kl_va *va, char *out, size_t cap) {
+    size_t n = wcslen(wfmt);
+    char *nf = malloc(n + 1);
+    if (!nf) return -1;
+    for (size_t i = 0; i < n; i++) nf[i] = (wfmt[i] > 0 && wfmt[i] < 0x80) ? (char)wfmt[i] : '?';
+    nf[n] = 0;
+    size_t r = kl_va_marshal(nf, va, out, cap, KL_VA_SCANF);
+    free(nf);
+    return r == (size_t)-1 ? -1 : 0;
+}
+int klx2_vswscanf(const wchar_t *s, const wchar_t *fmt, kl_va *va) {
+    char m[512] __attribute__((aligned(16)));
+    if (wmarshal_scan(fmt, va, m, sizeof m) != 0) return -1;
+    return vswscanf(s, fmt, (va_list)m);
+}
+int klx2_vfwscanf(void *f, const wchar_t *fmt, kl_va *va) {
+    char m[512] __attribute__((aligned(16)));
+    if (wmarshal_scan(fmt, va, m, sizeof m) != 0) return -1;
+    return vfwscanf(kl_host_file(f), fmt, (va_list)m);
+}
+int klx2_vwscanf(const wchar_t *fmt, kl_va *va) {
+    char m[512] __attribute__((aligned(16)));
+    if (wmarshal_scan(fmt, va, m, sizeof m) != 0) return -1;
+    return vfwscanf(stdin, fmt, (va_list)m);
+}
 
 // ---------------------------------------------------------------- clocks and sleeping
 int kl_clock_to_darwin(int clk);            // kl_libc.c
