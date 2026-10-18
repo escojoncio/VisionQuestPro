@@ -446,3 +446,15 @@ Vulkan CTS desde la app; el informe de capacidades (vulkaninfo) de un Quest 3 re
 - Sin servir a proposito (bionic no los exporta): pthread_cancel, pthread_setcancelstate, wordexp, strfmon.
 - Sensores: solo giroscopio (kl_ovrp_head_motion rotado al marco de la cabeza, ticker por cola). Acelerometro, magnetometro y proximidad sin fuente real: no se listan.
 - Sin compilar ni probar en Darwin: extra2, extra4, thunks, internals de FILE, kqueue.
+## 2026-10-18 — Ajuste «Caché de shaders en QUEST» (commit a4234e6)
+- `VQLaunch.swift`: `VQSettings.shaderCacheInQuest` (`vq.psoInQuest`, false por defecto); si activo,
+  `VP_PIPELINE_CACHE_DIR` = `QUEST/Cache/<juego>/Pipelines` (recetas, msl_index, .metalar sobreviven a reinstalar).
+  Log `Shaders: caché de pipelines en …`. Toggle en `VQLauncher.swift`. Sin probar en visor.
+- VPKEngine a6c0f02: `gpu.shader.lib` ya cuenta aciertos de recetas (`recipe_hit=`).
+
+## 2026-10-18 — Ajuste «Shaders AOT» (experimental, apagado por defecto)
+- `VQSettings.aotShaders` (`vq.aot`) → `VPVK_AOT=1` en `applyToEnvironment`. Toggle en `VQLauncher.swift`.
+- `VQPrewarm.aot()` (`VQLaunch.swift`): con el ajuste sustituye a firstRun+prewarm: harvest a `<caché>/spirv` si
+  falta, `vq_aot_run` (`app/Native/vq_config.c/h` → `vpvk_aot_build`), sello `aot.v<N>.<fp>.r<recetas>`: se repite
+  si cambia el traductor o hay recetas nuevas (variantes vistas en partida). Log `Shaders AOT: …`.
+- En partida mirar `gpu.aot device`, `gpu.pso.aot archived= hot= hot_ms_*`, `gpu.pso.hot`. Swift sin compilar.
