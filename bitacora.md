@@ -42,6 +42,22 @@ Logs: `…-fin-Attack_on_Titan…` y `…-fin-Assassins_Creed_Nexus_VR` (19:55-2
 - Pendiente rosa: ¿salía con los parches de AC? Si no, bisecar los parches retirados (b495801: 2 etapas, pose fresca,
   SpaceWarp spin, MSAA/ojo, overlay texl) con `KL_AC_NEXUS_PATCHES=1`.
 
+### 2026-10-18 (noche, 3.er log AC) y carátulas
+- Con quads en orden de envío (5cf8922) vuelve la imagen de calibración de mandos y se entra al juego. `isHmdPresent=1`,
+  OVRManager vivo, `OVRInput connected=0x0` sigue (el juego lee mandos por otra vía; no bloquea).
+- `[magenta]` (f200a95 añade estado): 2 pipelines con writeMask 0xf, blend 0, depth test/write, op 6 → se crean en
+  `ShaderWarmupManager.WarmUpShaders` (Unity siempre calienta su shader de error); no prueba que sean los cuadrados.
+  Muchos cuadrados rosas en el 3.er log, uno sigue la mirada: candidato capa #5 Quad/head 512x512 a 0,5 m (fuente
+  «clear-only pass») ahora visible por el orden de envío. Siguiente: log con «capturas de diagnóstico».
+- Corrupción ~1 s + corte del inmersivo al iniciar: sin cierre de espacio en el log (lo hace visionOS; probable espera
+  del sistema por fotogramas tardíos en la carga). Sin investigar.
+- Carátulas: los APK NO traen la 16:9 (solo app_icon 48-192 px; `assets/vr_splash.png` = logo: AC/B&S 3840x2160, Batman
+  2048x435, AoT ninguno; sin android:banner). `VQCover.swift`: cadena carpeta del juego → `cover-store.*` (OculusDB
+  `oculusdb.rui2015.me/api/v1/search/<package>`, `imageLink` o imágenes 16:9 de la descripción; aspecto 1.6-1.95; ≤8 MB;
+  marcador `cover-store.none` `absent` sin reintento / `net` 7 días) → `cover-splash.*` (vr_splash 16:9) → `cover-apk.*`.
+  Ajuste «Descargar carátulas de la tienda de Meta» (`vq.storeCovers`, def. sí). Refresco por `vqCoverUpdated`. Sin
+  probar: OculusDB no verificado byte a byte (CDN no accesible desde aquí); log «Carátula de tienda: … guardada».
+
 ### Pruebas pedidas con la build nueva
 - AoT y AC por defecto: audio de AC (sin Voice Starvation, burst 1024), `[magenta]` (¿desaparecen?), `vk.caps`,
   `vk.err what=varyings`, líneas `[cp] HALF RATE`/`minimumFrameRepeatCount`.

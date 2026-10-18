@@ -141,6 +141,8 @@ final class VQSettings: ObservableObject {
     @Published var passthrough: String { didSet { save() } }
     /// Run the game in the system language when it ships it, else English (LANG for Klepton's Locale/AConfiguration).
     @Published var systemLanguage: Bool { didSet { save() } }
+    /// Let the app (never the games) download each game's cover from the Meta store listing, once.
+    @Published var storeCovers: Bool { didSet { save() } }
     /// Fixed game language (LANG), overriding the system one: "auto" | "es_ES" | "es_MX" | "en_US".
     /// Spain and Mexico differ only by region, which games read through java.util.Locale.
     @Published var gameLanguage: String { didSet { save() } }
@@ -194,6 +196,7 @@ final class VQSettings: ObservableObject {
             passthrough = pt
         } else { passthrough = "auto" }
         systemLanguage = d.object(forKey: "vq.sysLang") as? Bool ?? true
+        storeCovers = d.object(forKey: "vq.storeCovers") as? Bool ?? true
         gameLanguage = d.string(forKey: "vq.gameLang") ?? "auto"
         precompileShaders = d.object(forKey: "vq.precompile") as? Bool ?? true
         shaderCacheInQuest = d.object(forKey: "vq.psoInQuest") as? Bool ?? false
@@ -245,6 +248,7 @@ final class VQSettings: ObservableObject {
         d.set(posture, forKey: "vq.posture")
         d.set(passthrough, forKey: "vq.passthrough")
         d.set(systemLanguage, forKey: "vq.sysLang")
+        d.set(storeCovers, forKey: "vq.storeCovers")
         d.set(gameLanguage, forKey: "vq.gameLang")
         d.set(precompileShaders, forKey: "vq.precompile")
         d.set(shaderCacheInQuest, forKey: "vq.psoInQuest")

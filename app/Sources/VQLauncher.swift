@@ -274,6 +274,10 @@ struct VQSettingsView: View {
                              "Antialiasing: chosen per game (the “Game settings” button on its card). Automatic by default: VPKTAA for games without MSAA, the game's own MSAA for those that use it. Here, VPKTAA's fine tuning for all of them."))
                         .font(.caption)
                     VQVPKTAATuning(settings: settings)
+                    Toggle(VQL("Descargar carátulas de la tienda de Meta", "Download covers from the Meta store"), isOn: $settings.storeCovers)
+                    Text(VQL("Solo descarga la imagen de la ficha de cada juego, una vez y sin cuenta. Los juegos siguen sin conexión.",
+                             "It only downloads the picture of each game's listing, once and without an account. Games stay offline."))
+                        .font(.caption)
                     Toggle(VQL("Idioma del sistema si el juego lo incluye (si no, inglés)", "System language if the game ships it (else English)"), isOn: $settings.systemLanguage)
                     Picker(VQL("Idioma del juego", "Game language"), selection: $settings.gameLanguage) {
                         Text(VQL("Automático (sistema)", "Automatic (system)")).tag("auto")
