@@ -119,6 +119,9 @@ final class VQSettings: ObservableObject {
     @Published var diagCaptures: Bool { didSet { save() } }
     /// Vulkan driver: VPKEngine's own (VPVulkan) or MoltenVK (to compare, or if VPKEngine fails).
     @Published var useVPKEngine: Bool { didSet { save() } }
+    /// Experimental: GLES games through VPKEngine's own OpenGL ES (vpgles in VPVulkan). Off by default:
+    /// while off, GLES-only games stay marked incompatible ("solo Vulkan").
+    @Published var glesVPK: Bool { didSet { save() } }
     /// Initial posture for the OVRPlugin eye height (KL_OVRP_POSTURE); auto re-measure always on.
     @Published var posture: String { didSet { save() } }   // "auto" | "seated" | "standing"
     /// Passthrough (KL_PASSTHROUGH): "auto" follows the game, "off" always VR, "on" always mixed.
@@ -165,6 +168,7 @@ final class VQSettings: ObservableObject {
         diagCaptures = d.object(forKey: "vq.diagCaptures2") as? Bool ?? false
         // Saved as "vq.vpengine" before the engine was renamed VPKEngine.
         useVPKEngine = (d.object(forKey: "vq.vpkengine") ?? d.object(forKey: "vq.vpengine")) as? Bool ?? true
+        glesVPK = d.object(forKey: "vq.glesVPK") as? Bool ?? false
         posture = d.string(forKey: "vq.posture") ?? "auto"
         if let pt = d.string(forKey: "vq.passthrough"), ["auto", "off", "on"].contains(pt) {
             passthrough = pt
@@ -213,6 +217,7 @@ final class VQSettings: ObservableObject {
         d.set(forceVulkan, forKey: "vq.forceVulkan")
         d.set(diagCaptures, forKey: "vq.diagCaptures2")
         d.set(useVPKEngine, forKey: "vq.vpkengine")
+        d.set(glesVPK, forKey: "vq.glesVPK")
         d.set(posture, forKey: "vq.posture")
         d.set(passthrough, forKey: "vq.passthrough")
         d.set(systemLanguage, forKey: "vq.sysLang")
@@ -264,6 +269,10 @@ final class VQSettings: ObservableObject {
         // device detection would fall back to GLES, which has no driver here.
         if forceVulkan { setenv("KL_UNITY_ARGS", "-force-vulkan", 1) } else { unsetenv("KL_UNITY_ARGS") }
         VQLog.log("Gráficos: forzar Vulkan en Unity \(forceVulkan)")
+        // VPKEngine's own GLES (Klepton kl_gles.c): needs VPVulkan, so only with the VPKEngine driver.
+        let gles = glesVPK && useVPKEngine && VQSettings.vpvulkanPath != nil
+        setenv("KL_GLES_VPK", gles ? "1" : "0", 1)
+        VQLog.log("Gráficos: OpenGL ES con VPKEngine \(gles)")
         // Frame captures (PNG in Documents/Registros) at compositor frames 120/600/1200.
         setenv("KL_CAPTURE", diagCaptures ? "1" : "0", 1)
         if let quest = VQFolder.shared.url {

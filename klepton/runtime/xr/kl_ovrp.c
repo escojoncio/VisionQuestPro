@@ -23,6 +23,7 @@
 // kl_glfb_last_render_stage (which stage the guest actually drew into — see
 // klovrp_EndFrame). Up here rather than beside SetupEyeTexture2 now that the
 // timewarp bookkeeping needs it too.
+#include "kl_gles.h"
 #include "kl_glfb.h"
 // kl_egl_sym (the GL gateway the eye textures are allocated through) and
 // kl_egl_swap_count (whether eglSwapBuffers is this guest's presentation
@@ -945,7 +946,8 @@ int kl_ovrp_multiview(void) {
     // path, and the guest spins forever recalculating the layer it can never get.
     // Only the Vulkan path serves Array. (Dropping this guard once regressed twd2
     // into exactly that non-booting CalculateLayerDesc loop.)
-    if (!kl_vulkan_guest_active()) return 0;
+    // VPKEngine's own GLES (kl_gles.h, gated) implements GL_OVR_multiview2 and serves Array.
+    if (!kl_vulkan_guest_active() && !kl_gles_enabled()) return 0;
     return kl_env_on("KL_OVRP_MULTIVIEW", 1);
 }
 
@@ -3288,6 +3290,7 @@ static void klovrp_record_last_sample(int frame) {
 
 static uint64_t klovrp_end_frame_impl(int guest_frame_index, const int *viewports,
                                       const int *viewport_of, int named_stage) {
+    kl_gles_frame_end();   // gated (kl_gles.h): the frame's GL work is on the GPU before compositing
     klovrp_record_last_sample(guest_frame_index);
 // Close the observation window opened at BeginFrame. `observed` is still
     // the sticky answer; `mask`/`binds` are what say whether it belongs to this
@@ -7522,7 +7525,7 @@ static uint64_t klovrp_GetLayerTexture2(int layer_id, int stage, int eye,
     // kl_ovrp_multiview() said yes, so a refusal here would be the two answers
     // disagreeing — it is kept as the guard for exactly that.
     if (l->is_eye && l->desc.layout == KLOVRP_LAYOUT_ARRAY &&
-        kl_vulkan_guest_active() && kl_ovrp_multiview()) {
+        (kl_vulkan_guest_active() || kl_gles_enabled()) && kl_ovrp_multiview()) {
         /* served below */
     } else if (l->is_eye && l->desc.layout != KLOVRP_LAYOUT_STEREO &&
                l->desc.layout != KLOVRP_LAYOUT_DOUBLEWIDE) {
@@ -7591,6 +7594,31 @@ static uint64_t klovrp_GetLayerTexture2(int layer_id, int stage, int eye,
                 l->is_eye ? "eye layer " : "layer ", layer_id, eye, stage, img, w, h,
                 fname ? fname : "?",
                 layers > 1 ? ", array slice — both eyes share this image" : "");
+        return OVRP_SUCCESS;
+    }
+
+    // VPKEngine's own GLES (kl_gles.h, gated): the storage is a VkImage of vpgles' device wrapped
+    // as a GL name — Array (both eyes as slices, multiview), Stereo or DoubleWide alike.
+    if (kl_gles_enabled() && !kl_vulkan_guest_active()) {
+        int canon_g = (l->is_eye && l->desc.layout == KLOVRP_LAYOUT_DOUBLEWIDE) ? 0 : eye;
+        int array_g = l->is_eye && l->desc.layout == KLOVRP_LAYOUT_ARRAY;
+        if (array_g) canon_g = 0;
+        uint32_t *slot_g = &l->tex[stage][canon_g];
+        if (!*slot_g) {
+            const char *fname_g = NULL;
+            uint32_t glfmt_g = klovrp_gl_format(l->desc.format, &fname_g);
+            if (!glfmt_g) glfmt_g = KL_OVRP_TEXFMT_EYE;
+            *slot_g = kl_gles_layer_texture(l->is_eye, canon_g, stage, l->desc.texture_size.w,
+                                            l->desc.texture_size.h, glfmt_g, array_g ? 2 : 1);
+            if (!*slot_g) return OVRP_FAIL_NOT_INITIALIZED;
+            if (l->is_eye) {
+                g_eye_storage_w = l->desc.texture_size.w;
+                g_eye_storage_h = l->desc.texture_size.h;
+            }
+        }
+        l->tex[stage][eye] = *slot_g;
+        if (color) *color = *slot_g;
+        if (depth) *depth = 0;
         return OVRP_SUCCESS;
     }
 
