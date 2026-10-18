@@ -1160,6 +1160,26 @@ static double klovrp_pred_frame_offset(int on, int idx, int cur, float hz) {
     return (double)k / (double)hz;
 }
 static int g_fring_begin;
+// Extrapolate an ovrpPoseStatef (floats: q xyzw 0-3, p 4-6, v 7-9, w 13-15)
+// by dt seconds: p += v*dt; q = exp(w*dt/2) * q (OVRPlugin velocities are in
+// tracking space, so the rotation pre-multiplies). dt clamped to 0..50 ms.
+// Pure, tested by tests/pred_frame_offset_test.c.
+static void klovrp_extrapolate_pose(float *f, double dt) {
+    if (!(dt > 0.0)) return;
+    if (dt > 0.05) dt = 0.05;
+    float t = (float)dt;
+    f[4] += f[7] * t; f[5] += f[8] * t; f[6] += f[9] * t;
+    float wx = f[13] * t, wy = f[14] * t, wz = f[15] * t;
+    float ang = sqrtf(wx * wx + wy * wy + wz * wz);
+    if (ang < 1e-9f) return;
+    float sh = sinf(ang * 0.5f) / ang, dw = cosf(ang * 0.5f);
+    float dx = wx * sh, dy = wy * sh, dz = wz * sh;
+    float qx = f[0], qy = f[1], qz = f[2], qw = f[3];
+    f[0] = dw * qx + dx * qw + dy * qz - dz * qy;
+    f[1] = dw * qy - dx * qz + dy * qw + dz * qx;
+    f[2] = dw * qz + dx * qy - dy * qx + dz * qw;
+    f[3] = dw * qw - dx * qx - dy * qy - dz * qz;
+}
 // The time (seconds, monotonic) the guest is told the next frame will be shown,
 // for its timewarp pose prediction. Real signature (0x171fd0) is
 // ovrpResult + double* out — s0 is NOT the return, the value goes through the
@@ -4568,10 +4588,14 @@ uint64_t klovrp_GetNodePoseState_impl(int step, int node, void *out) {
         {
             static int on = -1;
             if (on < 0) on = kl_env_on("KL_OVRP_PRED_FRAMEIDX", 0);
-            if (t_req_frame >= 0)
-                tm += klovrp_pred_frame_offset(on, t_req_frame,
+            if (t_req_frame >= 0) {
+                double dt = klovrp_pred_frame_offset(on, t_req_frame,
                           __atomic_load_n(&g_fring_begin, __ATOMIC_ACQUIRE),
                           kl_ovrp_display_frequency());
+                tm += dt;
+                // The pose answered must BE the pose at Time, not the pinned one.
+                klovrp_extrapolate_pose(f, dt);
+            }
         }
         memcpy((char *)out + 0x50, &tm, sizeof tm);
     }
@@ -9169,7 +9193,8 @@ static const char *const g_ovrp_result_ok[] = {
     "ovrp_SetControllerLocalizedVibration",
     // Eye tracking (Quest Pro) — wanderer starts/stops it per session. No eye
     // tracker on this path; accept the start/stop, and gaze reads stay zeroed.
-    "ovrp_StartEyeTracking", "ovrp_StopEyeTracking",
+    // (StartEyeTracking/StopEyeTracking moved to Unsupported: a Quest 3 has no
+    // eye tracker and its plugin answers ovrpFailure_Unsupported there.)
     // Per-frame eye-gaze poll (wanderer, right after StartEyeTracking). Success +
     // a pre-zeroed EyeGazesState reads as "no gaze this frame", which the guest
     // treats as gaze unavailable rather than a fault.
@@ -9512,6 +9537,8 @@ static const char *const g_ovrp_result_unsupported[] = {
     "ovrp_GetActionStateVector2", "ovrp_GetActionStatePose",
     "ovrp_GetCurrentInteractionProfileName", "ovrp_GetCurrentDetachedInteractionProfile",
     "ovrp_TriggerVibrationAction",
+    // eye tracking: Quest Pro only; a Quest 3 answers Unsupported
+    "ovrp_StartEyeTracking", "ovrp_StopEyeTracking",
     // performance telemetry this host cannot measure
     "ovrp_GetGPUUtilLevel2", "ovrp_GetPassthroughPreferences",
     "ovrp_GetLayerOcclusionMesh",

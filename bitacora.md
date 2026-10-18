@@ -268,7 +268,10 @@ Vulkan CTS desde la app; el informe de capacidades (vulkaninfo) de un Quest 3 re
      (Render) suman k/hz por frame futuro respecto a `g_fring_begin` (k≤3). Arnés `klepton/runtime/xr/tests/
      pred_frame_offset_test.c` OK. `KL_OVRP_LATENCY` (def. 0): GetAppLatencyTimings2 implementado (Render = EMA
      BeginFrame→GPU done + 1 periodo; Timewarp = 1 periodo; resto 0); apagado sigue Unsupported.
-     Sin cambiar (no verificable sin OVR_Plugin_Types.h, GitHub raw bloqueado): flags SpaceWarp (1<<8|1<<12, 1<<9|1<<13),
+     5d. GetNodePoseState3(Render) con `KL_OVRP_PRED_FRAMEIDX`: `klovrp_extrapolate_pose` (p+=v·dt, q=exp(ω·dt/2)·q,
+     dt≤50 ms) al mismo Time; caso en el arnés OK. `ovrp_Start/StopEyeTracking` → Unsupported (sin puerta: Quest 3
+     no tiene eye tracking).
+     Sin cambiar (no verificable sin OVR_Plugin_Types.h: raw.githubusercontent y repos de Oculus-VR no accesibles): flags SpaceWarp (1<<8|1<<12, 1<<9|1<<13),
      aceleraciones de pose a 0 (velocidades sí), listas bool_yes/result_ok (no mienten sobre passthrough/anclas).
 
 ## Juegos: problemas abiertos (resto)
