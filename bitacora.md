@@ -289,3 +289,9 @@ Vulkan CTS desde la app; el informe de capacidades (vulkaninfo) de un Quest 3 re
   `VQConformance*`; `app/Native/vq_apk.c` (ZIP + AXML), `vq_config.c` (reenvío `vpvk_config_set_*`).
 - CI `visionos.yml`: solo `[build]` o manual; release `visionos` (`VisionQuestPro.ipa`, bundle `com.kdt.livecontainer`);
   log de CI en rama `ci-logs` (`visionos.txt`; `gh run view --log-failed` da 403 desde aquí).
+
+## 2026-10-18 — Ajuste «Caché de shaders en QUEST» (commit a4234e6)
+- `VQLaunch.swift`: `VQSettings.shaderCacheInQuest` (`vq.psoInQuest`, false por defecto); si activo,
+  `VP_PIPELINE_CACHE_DIR` = `QUEST/Cache/<juego>/Pipelines` (recetas, msl_index, .metalar sobreviven a reinstalar).
+  Log `Shaders: caché de pipelines en …`. Toggle en `VQLauncher.swift`. Sin probar en visor.
+- VPKEngine a6c0f02: `gpu.shader.lib` ya cuenta aciertos de recetas (`recipe_hit=`).
