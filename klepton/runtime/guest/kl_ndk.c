@@ -18,6 +18,7 @@
 #include <time.h>
 #include <unistd.h>
 #include "kl_ndk.h"
+#include "kl_android.h"
 #include "kl_obbmap.h"
 #include "klepton.h"      // kl_guest_path, for assets named by absolute path
 // For kl_jni_locale_parts — AConfiguration and java.util.Locale are two doors
@@ -95,6 +96,12 @@ void kl_ndk_prepare_looper(void) { (void)kl_ALooper_prepare(0); }
 
 int kl_ndk_thread_has_looper(void) { return kl_ALooper_forThread() != NULL; }
 
+// The calling thread's looper as an opaque handle, and a wake for one — what an
+// AChoreographer needs to deliver a frame callback to the thread that asked.
+void *kl_ndk_looper_current(void) { return kl_ALooper_forThread(); }
+static void kl_ALooper_wake(kl_looper *l);
+void kl_ndk_looper_wake(void *l) { kl_ALooper_wake(l); }
+
 static int kl_looper_poll(int timeoutMillis, int *outFd, int *outEvents, void **outData);
 
 // ...and running it, which is the other half and is just as much ours to do.
@@ -160,6 +167,10 @@ static int kl_looper_poll(int timeoutMillis, int *outFd, int *outEvents, void **
     kl_looper *l = kl_ALooper_forThread();
     if (!l) return ALOOPER_POLL_ERROR;
 
+    // Frame callbacks the vsync clock has made due for this thread run first, as
+    // the Choreographer's own fd callback would: they are "a callback ran".
+    if (kl_android_choreo_dispatch()) return ALOOPER_POLL_CALLBACK;
+
     struct pollfd pfd[KL_LOOPER_MAX_FDS + 1];
     int           ident[KL_LOOPER_MAX_FDS + 1];
     kl_looper_cb  cb[KL_LOOPER_MAX_FDS + 1];
@@ -184,6 +195,7 @@ static int kl_looper_poll(int timeoutMillis, int *outFd, int *outEvents, void **
     if (pfd[0].revents & POLLIN) {         // drain the wake pipe
         char buf[64];
         while (read(l->wake_r, buf, sizeof buf) > 0) { }
+        if (kl_android_choreo_dispatch()) return ALOOPER_POLL_CALLBACK;   // the wake was a vsync
         return ALOOPER_POLL_WAKE;
     }
     for (int i = 1; i < n; i++) {
@@ -240,13 +252,16 @@ typedef struct kl_native_window {
     // AImageReader's output surface (kl_mediandk.c). Opaque here deliberately;
     // see kl_ndk.h.
     void   *owner;
+    // Recorded for the getters; the surface the guest renders into is ANGLE's
+    // and takes its transform/dataspace from the EGL config, as for the format.
+    int32_t transform, dataspace;
 } kl_native_window;
 
 // Quest 2 per-eye geometry, which is what this title was built against. Only a
 // placeholder: in VR the eye buffers come from the XR runtime, and this
 // surface exists mainly to give Unity a non-zero Screen size at startup. The
 // host overrides it via kl_ndk_set_window once a real drawable exists.
-static kl_native_window g_window = {1, 1832, 1920, 1 /* RGBA_8888 */, NULL};
+static kl_native_window g_window = {1, 1832, 1920, 1 /* RGBA_8888 */, NULL, 0, 0};
 
 void kl_ndk_set_window(int32_t w, int32_t h, int32_t format) {
     g_window.width = w; g_window.height = h; g_window.format = format;
@@ -326,6 +341,36 @@ static int32_t kl_ANativeWindow_setBuffersGeometry(kl_native_window *w,
     if (format > 0) w->format = format;
     return 0;
 }
+
+static int32_t kl_ANativeWindow_setBuffersTransform(kl_native_window *w, int32_t t) {
+    if (!w) return -EINVAL;
+    if (t < 0 || t > 7) return -EINVAL;           // ANATIVEWINDOW_TRANSFORM_* are the low 3 bits
+    w->transform = t;
+    return 0;
+}
+static int32_t kl_ANativeWindow_setBuffersDataSpace(kl_native_window *w, int32_t ds) {
+    if (!w) return -EINVAL;
+    w->dataspace = ds;
+    return 0;
+}
+static int32_t kl_ANativeWindow_getBuffersDataSpace(kl_native_window *w) {
+    return w ? w->dataspace : -EINVAL;
+}
+// setFrameRate is a hint to the display; compatibility is DEFAULT(0) or
+// FIXED_SOURCE(1) and a change strategy is ONLY_IF_SEAMLESS(0) or ALWAYS(1).
+// The headset's refresh rate is the compositor's, so the hint is validated and
+// recorded as accepted, which is the "no preference honoured" Android allows.
+static int32_t kl_ANativeWindow_setFrameRate(kl_native_window *w, float fps, int8_t compat) {
+    if (!w || !(fps >= 0.0f) || fps > 1e6f || (compat != 0 && compat != 1)) return -EINVAL;
+    return 0;
+}
+static int32_t kl_ANativeWindow_setFrameRateWithChangeStrategy(kl_native_window *w, float fps,
+                                                               int8_t compat, int8_t strategy) {
+    if (strategy != 0 && strategy != 1) return -EINVAL;
+    return kl_ANativeWindow_setFrameRate(w, fps, compat);
+}
+static void kl_ANativeWindow_clearFrameRate(kl_native_window *w) { (void)w; }
+static void kl_ANativeWindow_tryAllocateBuffers(kl_native_window *w) { (void)w; }
 
 // The software path: SDL3's renderer is GLES2, but the lock/unlockAndPost pair
 // is what a canvas renderer would paint through, and libmain imports both.
@@ -577,6 +622,8 @@ typedef struct kl_sensor {
     const char *name, *vendor;
     int         type, min_delay_us;
     float       resolution;
+    const char *string_type;
+    int         fifo_max, fifo_reserved, reporting_mode, wake_up, handle;
 } kl_sensor;
 
 static const kl_sensor  *g_sensors[]  = { NULL };   // C forbids a zero-length array
@@ -646,6 +693,46 @@ static ssize_t kl_ASensorEventQueue_getEvents(void *q, void *events, size_t coun
     return 0;
 }
 
+// Everything an ASensor can be asked, for a list that is empty today: when a
+// Quest sensor table is filled in, these already answer from it. A NULL sensor
+// gets the NDK's own "unknown" values (Android would fault; -1/0 is kinder and
+// can only be reached by a guest that ignored a NULL from getDefaultSensor).
+static const char *kl_ASensor_getStringType(const kl_sensor *s) { return s && s->string_type ? s->string_type : ""; }
+static int kl_ASensor_getFifoMaxEventCount(const kl_sensor *s)      { return s ? s->fifo_max : 0; }
+static int kl_ASensor_getFifoReservedEventCount(const kl_sensor *s) { return s ? s->fifo_reserved : 0; }
+static int kl_ASensor_getReportingMode(const kl_sensor *s)          { return s ? s->reporting_mode : -1; }
+static int kl_ASensor_isWakeUpSensor(const kl_sensor *s)            { return s ? s->wake_up : 0; }
+static int kl_ASensor_getHandle(const kl_sensor *s)                 { return s ? s->handle : -1; }
+// Direct channels (ashmem/hardware-buffer sensor streams) need a sensor that
+// advertises them; none does here.
+static int kl_ASensor_isDirectChannelTypeSupported(const kl_sensor *s, int type) { (void)s; (void)type; return 0; }
+static int kl_ASensor_getHighestDirectReportRateLevel(const kl_sensor *s) { (void)s; return 0; /* ASENSOR_DIRECT_RATE_STOP */ }
+static const kl_sensor *kl_ASensorManager_getDefaultSensorEx(void *mgr, int type, int wakeUp) {
+    (void)mgr;
+    for (unsigned i = 0; i < g_nsensors; i++)
+        if (g_sensors[i]->type == type && (!!g_sensors[i]->wake_up == !!wakeUp)) return g_sensors[i];
+    return NULL;
+}
+static int kl_ASensorManager_createSharedMemoryDirectChannel(void *mgr, int fd, size_t size) {
+    (void)mgr; (void)fd; (void)size; return -EINVAL;
+}
+static int kl_ASensorManager_createHardwareBufferDirectChannel(void *mgr, const void *hb, size_t size) {
+    (void)mgr; (void)hb; (void)size; return -EINVAL;
+}
+static void kl_ASensorManager_destroyDirectChannel(void *mgr, int channel) { (void)mgr; (void)channel; }
+static int kl_ASensorManager_configureDirectReport(void *mgr, const kl_sensor *s, int channel, int rate) {
+    (void)mgr; (void)s; (void)channel; (void)rate; return -EINVAL;
+}
+// registerSensor needs a sensor to register; with none, the answer is the same
+// -EINVAL enableSensor gives. requestAdditionalInfoEvents on a live queue is
+// accepted (no sensor will ever send one).
+static int kl_ASensorEventQueue_registerSensor(void *q, const void *s, int32_t period_us, int64_t latency_us) {
+    (void)q; (void)s; (void)period_us; (void)latency_us; return -EINVAL;
+}
+static int kl_ASensorEventQueue_requestAdditionalInfoEvents(void *q, int enable) {
+    (void)enable; return q ? 0 : -EINVAL;
+}
+
 static const char *kl_ASensor_getName(const kl_sensor *s)   { return s ? s->name   : ""; }
 static const char *kl_ASensor_getVendor(const kl_sensor *s) { return s ? s->vendor : ""; }
 static int   kl_ASensor_getType(const kl_sensor *s)         { return s ? s->type : -1 /* ASENSOR_TYPE_INVALID */; }
@@ -653,66 +740,9 @@ static float kl_ASensor_getResolution(const kl_sensor *s)   { return s ? s->reso
 static int   kl_ASensor_getMinDelay(const kl_sensor *s)     { return s ? s->min_delay_us : 0; }
 
 // ============================================================ AConfiguration
-// An AConfiguration is Android's ResTable_config — locale, orientation, density,
-// screen size, the fields resource selection is done with. The VR guest imports
-// exactly three of the family, and none of them is a getter:
-//
-//   AConfiguration_new / _fromAssetManager / _delete
-//
-// which is native_app_glue's boilerplate verbatim. So nothing ever reads a field
-// back, and the honest answer is a zeroed block: every ACONFIGURATION_*_ANY
-// constant is 0, so "all defaults, nothing specified" is what the guest sees.
-// That is also true — we have no Android resource configuration to report.
-//
-// Sized generously and not from a transcribed struct, deliberately: the layout
-// is private to the platform, we hand out the only pointers, and the moment a
-// getter appears in an import list it becomes an unresolved name that stops the
-// run BY NAME rather than a field read off the end of a struct we guessed at.
-#define KL_ACONFIG_BYTES 128
-
-static void *kl_AConfiguration_new(void) { return calloc(1, KL_ACONFIG_BYTES); }
-static void  kl_AConfiguration_delete(void *c) { free(c); }
-static void  kl_AConfiguration_fromAssetManager(void *c, void *mgr) {
-    // Android fills the config from the asset manager's current device state.
-    // Ours has none, so this stays all-defaults; it is not a no-op standing in
-    // for something, it is the whole answer.
-    (void)mgr;
-    if (c) memset(c, 0, KL_ACONFIG_BYTES);
-}
-
-// ...and the getters, which the note above predicted would arrive one day and
-// stop a run BY NAME. **Unreal Engine 4 is that day**: native_app_glue's
-// android_main reads the locale straight out of the configuration, and RE4 dies
-// in ANativeActivity_onCreate without them.
-//
-// The answer is kl_jni's, not a second opinion — java.util.Locale and
-// AConfiguration are two doors onto one fact, and UE4 reads both (Locale for
-// FInternationalization, this for its resource configuration). See
-// kl_jni_locale_parts.
-//
-// THE OUTPUT IS NOT A C STRING. `AConfiguration_getLanguage` fills exactly two
-// characters and writes no terminator — the NDK header's own wording is "the
-// two-character array", and callers pass a `char[2]` on the stack. Writing a
-// third byte is a stack smash in the guest, and it would be silent on the
-// happy path and lethal on an unlucky frame layout. Zero-filled when there is
-// no language, which is what Android does and what every ACONFIGURATION_*_ANY
-// default already says.
-static void kl_AConfiguration_getLanguage(void *c, char *out) {
-    (void)c;
-    if (!out) return;
-    char lang[16], country[16];
-    kl_jni_locale_parts(lang, sizeof lang, country, sizeof country);
-    out[0] = lang[0] ? lang[0] : 0;
-    out[1] = lang[0] && lang[1] ? lang[1] : 0;
-}
-static void kl_AConfiguration_getCountry(void *c, char *out) {
-    (void)c;
-    if (!out) return;
-    char lang[16], country[16];
-    kl_jni_locale_parts(lang, sizeof lang, country, sizeof country);
-    out[0] = country[0] ? country[0] : 0;
-    out[1] = country[0] && country[1] ? country[1] : 0;
-}
+// Moved to kl_android.c with the rest of the family: the headset's configuration
+// (xhdpi, landscape, SDK 32, the system locale) and every getter/setter. A new
+// AConfiguration is still all-ANY; fromAssetManager fills it.
 
 // ========================================================== ANativeActivity
 // The two calls the guest makes back INTO the activity. Both are requests to
@@ -793,6 +823,13 @@ static const struct { const char *name; void *fn; } g_ndk[] = {
     N("ANativeWindow_getHeight",          kl_ANativeWindow_getHeight),
     N("ANativeWindow_getFormat",          kl_ANativeWindow_getFormat),
     N("ANativeWindow_setBuffersGeometry", kl_ANativeWindow_setBuffersGeometry),
+    N("ANativeWindow_setBuffersTransform",  kl_ANativeWindow_setBuffersTransform),
+    N("ANativeWindow_setBuffersDataSpace",  kl_ANativeWindow_setBuffersDataSpace),
+    N("ANativeWindow_getBuffersDataSpace",  kl_ANativeWindow_getBuffersDataSpace),
+    N("ANativeWindow_setFrameRate",         kl_ANativeWindow_setFrameRate),
+    N("ANativeWindow_setFrameRateWithChangeStrategy", kl_ANativeWindow_setFrameRateWithChangeStrategy),
+    N("ANativeWindow_clearFrameRate",       kl_ANativeWindow_clearFrameRate),
+    N("ANativeWindow_tryAllocateBuffers",   kl_ANativeWindow_tryAllocateBuffers),
     N("ANativeWindow_lock",               kl_ANativeWindow_lock),
     N("ANativeWindow_unlockAndPost",      kl_ANativeWindow_unlockAndPost),
 
@@ -831,12 +868,21 @@ static const struct { const char *name; void *fn; } g_ndk[] = {
     N("ASensor_getType",                      kl_ASensor_getType),
     N("ASensor_getResolution",                kl_ASensor_getResolution),
     N("ASensor_getMinDelay",                  kl_ASensor_getMinDelay),
-
-    N("AConfiguration_new",              kl_AConfiguration_new),
-    N("AConfiguration_delete",           kl_AConfiguration_delete),
-    N("AConfiguration_fromAssetManager", kl_AConfiguration_fromAssetManager),
-    N("AConfiguration_getLanguage",      kl_AConfiguration_getLanguage),
-    N("AConfiguration_getCountry",       kl_AConfiguration_getCountry),
+    N("ASensor_getStringType",                kl_ASensor_getStringType),
+    N("ASensor_getFifoMaxEventCount",         kl_ASensor_getFifoMaxEventCount),
+    N("ASensor_getFifoReservedEventCount",    kl_ASensor_getFifoReservedEventCount),
+    N("ASensor_getReportingMode",             kl_ASensor_getReportingMode),
+    N("ASensor_isWakeUpSensor",               kl_ASensor_isWakeUpSensor),
+    N("ASensor_getHandle",                    kl_ASensor_getHandle),
+    N("ASensor_isDirectChannelTypeSupported", kl_ASensor_isDirectChannelTypeSupported),
+    N("ASensor_getHighestDirectReportRateLevel", kl_ASensor_getHighestDirectReportRateLevel),
+    N("ASensorManager_getDefaultSensorEx",    kl_ASensorManager_getDefaultSensorEx),
+    N("ASensorManager_createSharedMemoryDirectChannel", kl_ASensorManager_createSharedMemoryDirectChannel),
+    N("ASensorManager_createHardwareBufferDirectChannel", kl_ASensorManager_createHardwareBufferDirectChannel),
+    N("ASensorManager_destroyDirectChannel",  kl_ASensorManager_destroyDirectChannel),
+    N("ASensorManager_configureDirectReport", kl_ASensorManager_configureDirectReport),
+    N("ASensorEventQueue_registerSensor",     kl_ASensorEventQueue_registerSensor),
+    N("ASensorEventQueue_requestAdditionalInfoEvents", kl_ASensorEventQueue_requestAdditionalInfoEvents),
 
     N("AInputQueue_attachLooper",      kl_AInputQueue_attachLooper),
     N("AInputQueue_detachLooper",      kl_AInputQueue_detachLooper),
@@ -858,5 +904,5 @@ static const struct { const char *name; void *fn; } g_ndk[] = {
 void *kl_ndk_lookup(const char *name) {
     for (size_t i = 0; i < sizeof g_ndk / sizeof g_ndk[0]; i++)
         if (strcmp(g_ndk[i].name, name) == 0) return g_ndk[i].fn;
-    return NULL;
+    return kl_android_lookup(name);       // the rest of libandroid (kl_android.c); NULL if not served
 }

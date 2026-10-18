@@ -48,7 +48,7 @@ RUNTIME_JNI := runtime/kl_jni.c \
 RUNTIME_SHIP := runtime/kl_env.c runtime/kl_image.c runtime/kl_stub_cells.S runtime/libc/kl_shim.c runtime/libc/kl_va.c \
            runtime/libc/kl_va_handlers.c runtime/libc/kl_va_thunks.S \
            runtime/libc/kl_libc.c runtime/libc/kl_libc_slink.c runtime/libc/kl_pthread.c runtime/kl_dl.c \
-           runtime/guest/kl_ndk.c runtime/kl_x18.c runtime/kl_target.c \
+           runtime/guest/kl_ndk.c runtime/guest/kl_android.c runtime/media/kl_thermal.m runtime/kl_x18.c runtime/kl_target.c \
            $(RUNTIME_JNI) \
            runtime/gfx/kl_egl.c runtime/media/kl_opensl.c runtime/media/kl_audio.c runtime/xr/kl_ovrp.c \
            runtime/xr/kl_ovrp_sret.S runtime/gfx/kl_reproject.c runtime/gfx/kl_present.c \
