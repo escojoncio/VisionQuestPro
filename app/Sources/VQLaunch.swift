@@ -38,8 +38,15 @@ enum VQLaunch {
         setenv("KL_MVK_DIR", frameworks, 1)
         setenv("KL_ANGLE_DIR", frameworks, 1)
         VQSettings.shared.applyToEnvironment(game: game)
-        let psoCache = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+        // Optional (setting, off by default): QUEST/Cache/<game>/Pipelines, so recipes, the MSL index
+        // and the Metal binary archives survive reinstalling the app (Caches/ is wiped then).
+        let appCache = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("VisionQuestPro/PipelineCache/\(game.id)", isDirectory: true)
+        var psoCache = appCache
+        if VQSettings.shared.shaderCacheInQuest, let q = VQFolder.shared.cache(for: game.id) {
+            psoCache = q.appendingPathComponent("Pipelines", isDirectory: true)
+        }
+        VQLog.log("Shaders: caché de pipelines en \(psoCache.path)")
         // The conformance tests: no Metal binary archive. Their pipelines are one-off (nothing to
         // reuse) and log 60 had every archive save fail with MTLCompilerService unreachable from
         // 2 s into the run while blit libraries failed to compile in the same windows — the
@@ -130,6 +137,8 @@ final class VQSettings: ObservableObject {
     @Published var gameLanguage: String { didSet { save() } }
     /// Compile the game's known shaders/pipelines before it starts (VPVulkan recipe store).
     @Published var precompileShaders: Bool { didSet { save() } }
+    /// Keep the shader/pipeline cache in QUEST/Cache (survives reinstalls) instead of the app's Caches.
+    @Published var shaderCacheInQuest: Bool { didSet { save() } }
     /// Conformance runs (Vulkan CTS): minutes per session and the memory limit between batches.
     @Published var conformanceMinutes: Double { didSet { save() } }
     @Published var conformanceMemoryMB: Int { didSet { save() } }
@@ -172,6 +181,7 @@ final class VQSettings: ObservableObject {
         systemLanguage = d.object(forKey: "vq.sysLang") as? Bool ?? true
         gameLanguage = d.string(forKey: "vq.gameLang") ?? "auto"
         precompileShaders = d.object(forKey: "vq.precompile") as? Bool ?? true
+        shaderCacheInQuest = d.object(forKey: "vq.psoInQuest") as? Bool ?? false
         conformanceMinutes = d.object(forKey: "vq.ctsMinutes") as? Double ?? 15
         conformanceMemoryMB = d.object(forKey: "vq.ctsMemMB") as? Int ?? 3000
     }
@@ -218,6 +228,7 @@ final class VQSettings: ObservableObject {
         d.set(systemLanguage, forKey: "vq.sysLang")
         d.set(gameLanguage, forKey: "vq.gameLang")
         d.set(precompileShaders, forKey: "vq.precompile")
+        d.set(shaderCacheInQuest, forKey: "vq.psoInQuest")
         d.set(conformanceMinutes, forKey: "vq.ctsMinutes")
         d.set(conformanceMemoryMB, forKey: "vq.ctsMemMB")
     }

@@ -317,6 +317,7 @@ struct VQSettingsView: View {
                     .pickerStyle(.segmented)
                     Toggle(VQL("ASW desactivado (todos los frames reales)", "ASW off (every frame real)"), isOn: $settings.aswDisabled)
                     Toggle(VQL("Precompilar shaders antes de jugar", "Precompile shaders before playing"), isOn: $settings.precompileShaders)
+                    Toggle(VQL("Caché de shaders en QUEST (sobrevive a reinstalar)", "Shader cache in QUEST (survives reinstall)"), isOn: $settings.shaderCacheInQuest)
                     Toggle(VQL("Perfil Quest 3", "Quest 3 profile"), isOn: $settings.quest3Profile)
                     Toggle(VQL("Forzar Vulkan en juegos Unity", "Force Vulkan in Unity games"), isOn: $settings.forceVulkan)
                     Toggle(VQL("Capturas de diagnóstico", "Diagnostic captures"), isOn: $settings.diagCaptures)
