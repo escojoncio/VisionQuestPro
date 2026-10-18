@@ -224,3 +224,11 @@ VPKEngine `main` = e6c3f3b.
 - VPKEngine: fix de capturas colgadas en completion handlers Metal (crash de TRIANGLE y probablemente SIGBUS de AC). Auditado runtime C de 650083e (eye hold, kl_wait, ledger, rings, fb_map): sin escrituras fuera de rango.
 - `app/Sources/VQCover.swift`: imagen de carpeta solo si el nombre contiene cover/banner/poster/caratula; marcadores `<unix> <absent|net> v2` (reintento 3/7 días, antiguos ignorados); log por candidato; rechazo html/json/text; máx 16 MB; downscale >1920 px u >8 MB a JPEG 0.85; borra caché de otra extensión.
 - Pendiente: si AC sigue cayendo probar VPVK_MAX_DRAWS_PER_CB=0, VPVK_ZERO_NEW_IMAGES=0, KL_SNAP_GAME_STALL_S=0. Pausa con la corona en la siguiente build.
+
+## Lote 2026-10-19: memoria, rwlocks, carátulas, diagnóstico de cierres
+- Diagnóstico de los 3 cierres (build fc4492c): AC = jetsam a ~6.5 GB (aviso de memoria nunca saltaba); TRIANGLE = deadlock en `klb_pthread_rwlock_wrlock` (no crash); Demeo = muerte silenciosa a los 3 s tras cargar libUnityARFoundationMeta (sin fault ni presión de memoria; causa desconocida).
+- `klepton/runtime/libc/kl_libc.c`: `kl_mem_pressure_poll` avisa si avail<=384 MB o footprint>=80 % de 6144 MB; histéresis `g_lowmem_armed` (rearma <70 % y avail>=1.5×floor); logs `[mem] threshold …` y `[mem] OS pressure …`.
+- `klepton/runtime/libc/kl_pthread.c`: eliminado SYNC_TABLE; rwlocks por dirección (`g_rwl_map` 65536, tombstones), implementación propia mutex+cond (preferencia lectores bionic, kind 2 prefer-writer, EDEADLK/EBUSY/EPERM), destroy EBUSY si tomado; `kl_pthread_report` vuelca `-- rwlock holders --`.
+- `app/Sources/VQCover.swift`: ficha `/api/v1/id/<id>` (formato no verificado: el log lista sus claves; ajustar `detailImages` si difiere), candidatos apaisados primero, 401/403 de URL firmada no marca net, fallback a cuadrada, marcadores v3.
+- `app/Sources/VQLog.swift` (+VQLaunch/VQLauncher/VQConformanceView, KleptonApp.swift): centinela `Registros/sesion-en-curso.txt` (VQSession) y MetricKit `VQMetrics` volcando MXCrashDiagnostic al log.
+- Pendiente: verificar en visor AC (memoria), TRIANGLE (rwlock), Demeo (MetricKit/.ips); pausa con corona.

@@ -4,6 +4,9 @@
 
 import Foundation
 import Metal
+#if canImport(MetricKit)
+import MetricKit
+#endif
 
 enum VQLog {
     private static let lock = NSLock()
@@ -213,3 +216,64 @@ enum VQCompilerProbe {
 func VQL(_ spanish: String, _ english: String) -> String {
     (Locale.preferredLanguages.first ?? "en").lowercased().hasPrefix("es") ? spanish : english
 }
+
+/// Closes that leave no trace in the log (jetsam, a crash in the first seconds): a sentinel file in
+/// Registros/ written when a game is launched and removed on a clean close; if it is still there at
+/// the next launch, the previous session did not end cleanly. MetricKit adds the system's own view
+/// (crash/hang/CPU/disk diagnostics, delivered on a later launch) to the same log.
+enum VQSession {
+    private static var sentinel: URL { VQLog.directory.appendingPathComponent("sesion-en-curso.txt") }
+
+    /// Call right after VQLog.start(): reports a leftover sentinel, then subscribes to MetricKit.
+    static func startup() {
+        if let text = try? String(contentsOf: sentinel, encoding: .utf8) {
+            let parts = text.split(separator: "\n", maxSplits: 1).map(String.init)
+            let when = parts.count > 1 ? Double(parts[1]).map { ISO8601DateFormatter().string(from: Date(timeIntervalSince1970: $0)) } : nil
+            VQLog.log("Sesión anterior: terminó sin cierre limpio (juego \(parts.first ?? "?"), iniciada \(when ?? "hora desconocida"))")
+            try? FileManager.default.removeItem(at: sentinel)
+        }
+        #if canImport(MetricKit)
+        MXMetricManager.shared.add(VQMetrics.shared)
+        VQLog.log("MetricKit: suscrito")
+        #endif
+    }
+
+    static func begin(game: String) {
+        try? "\(game)\n\(Int(Date().timeIntervalSince1970))".write(to: sentinel, atomically: true, encoding: .utf8)
+    }
+
+    static func end() {
+        try? FileManager.default.removeItem(at: sentinel)
+    }
+}
+
+#if canImport(MetricKit)
+final class VQMetrics: NSObject, MXMetricManagerSubscriber {
+    static let shared = VQMetrics()
+
+    func didReceive(_ payloads: [MXDiagnosticPayload]) {
+        for p in payloads {
+            VQLog.log("MetricKit: diagnóstico \(p.timeStampBegin) - \(p.timeStampEnd): "
+                      + "\(p.crashDiagnostics?.count ?? 0) cierre(s), \(p.hangDiagnostics?.count ?? 0) bloqueo(s), "
+                      + "\(p.cpuExceptionDiagnostics?.count ?? 0) CPU, \(p.diskWriteExceptionDiagnostics?.count ?? 0) disco")
+            for c in p.crashDiagnostics ?? [] {
+                let tree = String(decoding: c.callStackTree.jsonRepresentation(), as: UTF8.self)
+                VQLog.log("MetricKit: CIERRE exceptionType=\(c.exceptionType.map { "\($0)" } ?? "?") exceptionCode=\(c.exceptionCode.map { "\($0)" } ?? "?") "
+                          + "signal=\(c.signal.map { "\($0)" } ?? "?") terminationReason=\(c.terminationReason ?? "?") "
+                          + "versión=\(c.applicationVersion)\nvirtualMemoryRegionInfo=\(c.virtualMemoryRegionInfo ?? "?")\ncallStackTree=\(tree)")
+            }
+            for h in p.hangDiagnostics ?? [] {
+                VQLog.log("MetricKit: BLOQUEO duración=\(h.hangDuration)\ncallStackTree=\(String(decoding: h.callStackTree.jsonRepresentation(), as: UTF8.self))")
+            }
+            for c in p.cpuExceptionDiagnostics ?? [] {
+                VQLog.log("MetricKit: EXCESO DE CPU total=\(c.totalCPUTime) muestreado=\(c.totalSampledTime)\ncallStackTree=\(String(decoding: c.callStackTree.jsonRepresentation(), as: UTF8.self))")
+            }
+            for d in p.diskWriteExceptionDiagnostics ?? [] {
+                VQLog.log("MetricKit: EXCESO DE ESCRITURA totalEscrito=\(d.totalWritesCaused)")
+            }
+        }
+    }
+
+    func didReceive(_ payloads: [MXMetricPayload]) {}
+}
+#endif

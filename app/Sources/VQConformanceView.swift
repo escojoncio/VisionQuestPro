@@ -70,6 +70,7 @@ struct VQConformanceView: View {
                 if finished {
                     Button {
                         VQLog.log("Cerrar app tras los tests")
+                        VQSession.end()
                         fflush(nil)
                         exit(0)
                     } label: { Label(VQL("Cerrar app", "Close app"), systemImage: "xmark.circle") }

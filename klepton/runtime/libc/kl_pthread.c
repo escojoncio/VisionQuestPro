@@ -47,51 +47,8 @@
 //   pthread_mutex_t    40 B / 4    (int32_t[10])
 //   pthread_cond_t     48 B / 4    (int32_t[12])
 //   pthread_rwlock_t   56 B / 4    (int32_t[14])
-#define KL_MAX_SYNC 65536
-// Table slots recycle: with the JNI pool leak fixed, long runs otherwise die
-// here — Unity creates and destroys a mutex or two per frame, and a leaked
-// slot per destroy is 65536 creates at ~frame 40k (observed). The kind object
-// behind a recycled slot is replaced, not shared; the old one leaks (a
-// destroy is the guest saying nobody holds it).
-#define SYNC_TABLE(kind, tab, count, init_expr)                                  \
-    static kind *tab[KL_MAX_SYNC];                                               \
-    static _Atomic uint32_t count = 1;              /* 0 means uninitialised */  \
-    static uint32_t tab##_free[KL_MAX_SYNC];                                     \
-    static _Atomic uint32_t tab##_nfree;                                         \
-    static kind *tab##_get(void *g) {                                            \
-        _Atomic uint32_t *slot = (_Atomic uint32_t *)(g);                        \
-        uint32_t idx = atomic_load(slot);                                        \
-        if (idx) return tab[idx];                                                \
-        kind *fresh = malloc(sizeof *fresh);                                     \
-        init_expr;                                                               \
-        uint32_t mine;                                                           \
-        uint32_t nf = atomic_load(&tab##_nfree);                                 \
-        if (nf && atomic_compare_exchange_strong(&tab##_nfree, &nf, nf - 1))     \
-            mine = tab##_free[nf - 1];                                           \
-        else {                                                                   \
-            mine = atomic_fetch_add(&count, 1);                                  \
-            if (mine >= KL_MAX_SYNC) abort();                                    \
-        }                                                                        \
-        tab[mine] = fresh;                                                       \
-        uint32_t expect = 0;                                                     \
-        if (!atomic_compare_exchange_strong(slot, &expect, mine)) {              \
-            /* lost the race; leak this slot rather than free a live object */   \
-            return tab[expect];                                                  \
-        }                                                                        \
-        return fresh;                                                            \
-    }                                                                            \
-    static void tab##_recycle(void *g) {                                         \
-        _Atomic uint32_t *slot = (_Atomic uint32_t *)(g);                        \
-        uint32_t idx = atomic_exchange(slot, 0);                                 \
-        if (!idx || idx >= count) return;                                        \
-        uint32_t nf = atomic_fetch_add(&tab##_nfree, 1);                         \
-        if (nf < KL_MAX_SYNC) tab##_free[nf] = idx;                              \
-    }
-
-SYNC_TABLE(pthread_rwlock_t, g_rwl, g_rwl_n, pthread_rwlock_init(fresh, NULL))
-
 // ---------- mutexes: address-keyed map ----------
-// The slot-in-guest-storage design (shared SYNC_TABLE above) aliases two
+// The slot-in-guest-storage design (the former shared slot table) aliases two
 // logical mutexes onto one host object whenever guest storage carries a
 // stale slot index — memory freed without pthread_mutex_destroy and reused,
 // or a live 40-byte bionic mutex memcpy'd into a moved struct. Both were
@@ -129,6 +86,23 @@ typedef struct {
     _Atomic(int)         depth;
 } mtx_entry;
 static mtx_entry g_mtx_map[MTX_MAP_SIZE];
+
+// rwlock table (implementation in the rwlock section below)
+#define RWL_MAP_SIZE 65536          // power of two
+typedef struct {
+    _Atomic(uintptr_t) key;         // guest address; 0 empty, MTX_TOMB destroyed
+    pthread_mutex_t mu;             // initialised once, when the slot is first claimed
+    pthread_cond_t  cv;
+    int  ready;                     // mu/cv initialised
+    int  readers;                   // guarded by mu
+    int  wwait;                     // writers waiting, guarded by mu
+    int  kind;                      // 0 reader pref, 1 writer pref (bionic: same as 0), 2 nonrecursive writer pref
+    _Atomic(void *) writer;         // pthread_self() of the holder; report reads it unlocked
+    _Atomic(void *) wsite;
+    _Atomic(int)    nreaders;       // mirror of readers for the report
+} rwl_entry;
+static rwl_entry g_rwl_map[RWL_MAP_SIZE];
+static pthread_mutex_t g_rwl_insert_mu = PTHREAD_MUTEX_INITIALIZER;
 
 static unsigned mtx_hash(uintptr_t a) {
     return (unsigned)(((a >> 4) * 0x9E3779B97F4A7C15ULL) >> 46);   // 18 bits = MTX_MAP_SIZE
@@ -355,7 +329,6 @@ static mtx_entry *mtx_find(void *g) {
     }
 }
 
-static pthread_rwlock_t *rwl(void *g) { return g_rwl_get(g); }
 
 // KL_TRACE_MUTEX=1: lifecycle of translated mutexes — init, destroy, and
 // lazy creation — so aliasing (two guest addresses, one host object) can be
@@ -787,6 +760,22 @@ void kl_pthread_report(FILE *out) {
         shown++;
     }
     if (!shown) fprintf(out, "  (no tracked holders)\n");
+    fprintf(out, "-- rwlock holders (kl_pthread address map) --\n");
+    shown = 0;
+    for (uint32_t i = 0; i < RWL_MAP_SIZE; i++) {
+        uintptr_t k = atomic_load(&g_rwl_map[i].key);
+        if (k <= MTX_TOMB) continue;
+        void *w = atomic_load(&g_rwl_map[i].writer);
+        int nr = atomic_load(&g_rwl_map[i].nreaders);
+        if (!w && !nr) continue;
+        const char *nm = w ? thread_name_of(w) : NULL;
+        fprintf(out, "  guest %p: writer tid %p%s%s%s%s, %d reader(s) (wrlocked from %p)\n",
+                (void *)k, w, nm ? " [" : "", nm ? nm : "", nm ? "]" : "",
+                w && !thread_is_alive(w) ? "  ** EXITED **" : "", nr, atomic_load(&g_rwl_map[i].wsite));
+        if (w) dump_thread_stack(out, w);
+        shown++;
+    }
+    if (!shown) fprintf(out, "  (no rwlock held)\n");
     for (int i = 0; i < 64; i++) {
         void *tid = atomic_load(&g_mtx_waiters[i].tid);
         if (!tid) continue;
@@ -1023,16 +1012,146 @@ int klb_pthread_condattr_setpshared(long *a, int ps) {
 int klb_pthread_condattr_getpshared(const long *a, int *ps)  { *ps = (int)(*a & 1); return 0; }
 
 // ---------- rwlock ----------
-int klb_pthread_rwlock_init(void *l, const void *a) { (void)a; g_rwl_recycle(l); rwl(l); return 0; }
-int klb_pthread_rwlock_destroy(void *p) { g_rwl_recycle(p); return 0; }
-int klb_pthread_rwlock_rdlock(void *l) { return px(pthread_rwlock_rdlock(rwl(l))); }
-int klb_pthread_rwlock_wrlock(void *l) { return px(pthread_rwlock_wrlock(rwl(l))); }
-int klb_pthread_rwlock_unlock(void *l) { return px(pthread_rwlock_unlock(rwl(l))); }
-// SDL3 reaches for the try- forms; Beat Saber never did. Same side-table
-// indirection as the blocking pair — a bionic rwlock is 56 bytes of 4-byte
-// aligned int32, so what lives in it is an index, not a handle.
-int klb_pthread_rwlock_tryrdlock(void *l) { return px(pthread_rwlock_tryrdlock(rwl(l))); }
-int klb_pthread_rwlock_trywrlock(void *l) { return px(pthread_rwlock_trywrlock(rwl(l))); }
+// Address-keyed like the mutexes (guest storage is never read or written), so a
+// zero-filled PTHREAD_RWLOCK_INITIALIZER, a memcpy'd struct and freed-without-destroy
+// storage all behave. The old slot-index-in-guest-storage design hit the same aliasing
+// the mutex comment above describes, and rwlock_init recycled the slot under live users
+// (TRIANGLE STRATEGY / UE4: a wrlock blocked forever with no other rwlock holder).
+// Own implementation (host mutex + condvar), bionic semantics: readers are preferred
+// by default (a waiting writer does not block new readers) unless the attribute kind is
+// PTHREAD_RWLOCK_PREFER_WRITER_NONRECURSIVE_NP (2); relocking by the writer is EDEADLK.
+static rwl_entry *rwl_probe(uintptr_t want, unsigned *slot, int *full) {
+    unsigned probes = 0, tomb = ~0u;
+    unsigned i = mtx_hash(want) & (RWL_MAP_SIZE - 1);
+    *full = 0;
+    for (;; i = (i + 1) & (RWL_MAP_SIZE - 1)) {
+        uintptr_t k = atomic_load(&g_rwl_map[i].key);
+        if (k == want) return &g_rwl_map[i];
+        if (!k) break;
+        if (k == MTX_TOMB && tomb == ~0u) tomb = i;
+        if (++probes >= RWL_MAP_SIZE) { *full = (tomb == ~0u); break; }
+    }
+    *slot = tomb != ~0u ? tomb : i;
+    return NULL;
+}
+// kind < 0: keep the entry's kind if it exists (lazy static init => kind 0).
+static rwl_entry *rwl_for(void *g, int kind) {
+    uintptr_t want = (uintptr_t)g;
+    unsigned at; int full;
+    rwl_entry *e = rwl_probe(want, &at, &full);
+    if (e) return e;
+    pthread_mutex_lock(&g_rwl_insert_mu);
+    e = rwl_probe(want, &at, &full);
+    if (!e && !full) {
+        e = &g_rwl_map[at];
+        if (!e->ready) {
+            pthread_mutex_init(&e->mu, NULL);
+            pthread_cond_init(&e->cv, NULL);
+            e->ready = 1;
+        }
+        e->readers = 0; e->wwait = 0; e->kind = kind < 0 ? 0 : kind;
+        atomic_store(&e->writer, NULL);
+        atomic_store(&e->wsite, NULL);
+        atomic_store(&e->nreaders, 0);
+        atomic_store(&e->key, want);         // published last: lookups see an initialised entry
+    }
+    pthread_mutex_unlock(&g_rwl_insert_mu);
+    return e;                                // NULL only if the table is full
+}
+static rwl_entry *rwl_find(void *g) {
+    uintptr_t want = (uintptr_t)g;
+    unsigned probes = 0;
+    for (unsigned i = mtx_hash(want) & (RWL_MAP_SIZE - 1); ; i = (i + 1) & (RWL_MAP_SIZE - 1)) {
+        uintptr_t k = atomic_load(&g_rwl_map[i].key);
+        if (k == want) return &g_rwl_map[i];
+        if (!k || ++probes >= RWL_MAP_SIZE) return NULL;
+    }
+}
+#define RWL_ENT(e, l) rwl_entry *e = rwl_for((l), -1); if (!e) return kl_errno_to_linux(EAGAIN)
+
+int klb_pthread_rwlock_init(void *l, const void *a) {
+    if (!l) return kl_errno_to_linux(EINVAL);
+    int kind = a ? (((*(const int *)a) >> 1) & 3) : 0;
+    rwl_entry *e = rwl_for(l, kind);
+    if (!e) return kl_errno_to_linux(EAGAIN);
+    // Re-init of a known address: reset like a fresh lock (init on a live lock is the guest's UB).
+    pthread_mutex_lock(&e->mu);
+    e->readers = 0; e->wwait = 0; e->kind = kind;
+    atomic_store(&e->writer, NULL); atomic_store(&e->nreaders, 0);
+    pthread_cond_broadcast(&e->cv);
+    pthread_mutex_unlock(&e->mu);
+    return 0;
+}
+int klb_pthread_rwlock_destroy(void *p) {
+    // Tombstone, never an empty slot, so probe chains stay intact (see MTX_TOMB).
+    // bionic returns EBUSY for a held lock; we only drop the slot when it is free.
+    rwl_entry *e = rwl_find(p);
+    if (!e) return 0;
+    pthread_mutex_lock(&g_rwl_insert_mu);
+    if (atomic_load(&e->key) == (uintptr_t)p) {
+        pthread_mutex_lock(&e->mu);
+        int busy = e->readers || atomic_load(&e->writer);
+        pthread_mutex_unlock(&e->mu);
+        if (busy) { pthread_mutex_unlock(&g_rwl_insert_mu); return kl_errno_to_linux(EBUSY); }
+        atomic_store(&e->key, MTX_TOMB);
+    }
+    pthread_mutex_unlock(&g_rwl_insert_mu);
+    return 0;
+}
+static int rwl_rd(rwl_entry *e, void *p, int block, void *ra) {
+    void *self = (void *)pthread_self();
+    pthread_mutex_lock(&e->mu);
+    if (atomic_load(&e->writer) == self) { pthread_mutex_unlock(&e->mu); return kl_errno_to_linux(EDEADLK); }
+    while (atomic_load(&e->writer) || (e->kind == 2 && e->wwait)) {
+        if (!block) { pthread_mutex_unlock(&e->mu); return kl_errno_to_linux(EBUSY); }
+        kl_wait_enter(KLW_MUTEX, p, 0, ra);
+        pthread_cond_wait(&e->cv, &e->mu);
+        kl_wait_leave();
+    }
+    e->readers++;
+    atomic_store(&e->nreaders, e->readers);
+    pthread_mutex_unlock(&e->mu);
+    return 0;
+}
+static int rwl_wr(rwl_entry *e, void *p, int block, void *ra) {
+    void *self = (void *)pthread_self();
+    pthread_mutex_lock(&e->mu);
+    if (atomic_load(&e->writer) == self) { pthread_mutex_unlock(&e->mu); return kl_errno_to_linux(EDEADLK); }
+    if (!block && (atomic_load(&e->writer) || e->readers)) {
+        pthread_mutex_unlock(&e->mu); return kl_errno_to_linux(EBUSY);
+    }
+    e->wwait++;
+    while (atomic_load(&e->writer) || e->readers) {
+        kl_wait_enter(KLW_MUTEX, p, 0, ra);
+        pthread_cond_wait(&e->cv, &e->mu);
+        kl_wait_leave();
+    }
+    e->wwait--;
+    atomic_store(&e->writer, self);
+    atomic_store(&e->wsite, ra);
+    pthread_mutex_unlock(&e->mu);
+    return 0;
+}
+int klb_pthread_rwlock_rdlock(void *l)    { RWL_ENT(e, l); return rwl_rd(e, l, 1, __builtin_return_address(0)); }
+int klb_pthread_rwlock_wrlock(void *l)    { RWL_ENT(e, l); return rwl_wr(e, l, 1, __builtin_return_address(0)); }
+int klb_pthread_rwlock_tryrdlock(void *l) { RWL_ENT(e, l); return rwl_rd(e, l, 0, __builtin_return_address(0)); }
+int klb_pthread_rwlock_trywrlock(void *l) { RWL_ENT(e, l); return rwl_wr(e, l, 0, __builtin_return_address(0)); }
+int klb_pthread_rwlock_unlock(void *l) {
+    RWL_ENT(e, l);
+    int r = 0;
+    pthread_mutex_lock(&e->mu);
+    if (atomic_load(&e->writer) == (void *)pthread_self()) {
+        atomic_store(&e->writer, NULL);
+        atomic_store(&e->wsite, NULL);
+        pthread_cond_broadcast(&e->cv);
+    } else if (e->readers > 0 && !atomic_load(&e->writer)) {
+        e->readers--;
+        atomic_store(&e->nreaders, e->readers);
+        if (!e->readers) pthread_cond_broadcast(&e->cv);
+    } else r = kl_errno_to_linux(EPERM);
+    pthread_mutex_unlock(&e->mu);
+    return r;
+}
 
 // ---------- attributes ----------
 // bionic pthread_attr_t: { uint32 flags; void* stack_base; size_t stack_size;

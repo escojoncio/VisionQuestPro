@@ -181,15 +181,20 @@ enum VQCover {
 /// answers JSON with the matching apps (objects with `packageName`, `id`, `imageLink` = "/cdn/images/<id>"
 /// (relative to the same host) and `display_long_description_unprocessed`, a markdown text whose
 /// images look like `![{"height":720,"type":"image","width":1280}](https://scontent-….oculuscdn.com/…png?…)`).
-/// Candidates, in order: `imageLink`, then those 1280x720 store images; the first that really decodes as
-/// ~16:9 is kept. Result file: cover-store.<ext>; marker cover-store.none = "<unix time> <absent|net> v2"
-/// (absent: the store does not know the package, retry after 3 days; net: retry after 7 days; a marker
+/// Candidates, in order: the detail record GET /api/v1/id/<id> (landscape/hero/cover/banner/screenshot
+/// image fields, or {width,height,uri} objects that are ~16:9; its fields are guessed generically because
+/// the schema is not documented), its markdown images, then the search's `imageLink` and 1280x720 images;
+/// the first that really decodes as ~16:9 is kept. Signed oculuscdn URLs expire: 401/403 on them is an
+/// "expired candidate", not a network failure. With no 16:9 picture, the best square one (>= 256 px) is
+/// kept as the store cover (VQCoverView centres it over a blur). Result file: cover-store.<ext>;
+/// marker cover-store.none = "<unix time> <absent|net> v3"
+/// (absent: the store does not know the package or has no picture, retry after 3 days; net: retry after 7 days; a marker
 /// without the current version tag was written by older code and counts as missing).
 enum VQCoverStore {
     private static let host = "https://oculusdb.rui2015.me"
     private static let retryAfter: TimeInterval = 7 * 24 * 3600
     private static let retryAbsentAfter: TimeInterval = 3 * 24 * 3600
-    private static let markerVersion = "v2"
+    private static let markerVersion = "v3"
     private static let maxBytes = 16 << 20
     private static let maxWidth = 1920
     private static let lock = NSLock()
@@ -259,7 +264,23 @@ enum VQCoverStore {
                 mark("absent"); return
             }
             var netFailure = false
-            let list2 = candidates(app)
+            var square: (data: Data, px: Int)?
+            var detail: [String: Any]?
+            if let appId = (app["id"] as? String) ?? (app["id"] as? NSNumber)?.stringValue,
+               let encId = appId.addingPathComponentEncoded, let durl = URL(string: "\(host)/api/v1/id/\(encId)") {
+                do {
+                    let (d, r) = try await session.data(from: durl)
+                    let code = (r as? HTTPURLResponse)?.statusCode ?? -1
+                    detail = (try? JSONSerialization.jsonObject(with: d)) as? [String: Any]
+                    VQLog.log("Carátula de tienda: \(package): ficha /api/v1/id/\(appId): HTTP \(code), \(d.count) bytes, " + (detail.map { "campos: " + $0.keys.sorted().prefix(40).joined(separator: ",") } ?? "no es un objeto JSON"))
+                    if code != 200 { detail = nil }
+                } catch {
+                    VQLog.log("Carátula de tienda: \(package): ficha /api/v1/id/\(appId): error de red: \(error.localizedDescription)")
+                }
+            } else {
+                VQLog.log("Carátula de tienda: \(package): la búsqueda no trae id; sin consulta de la ficha")
+            }
+            let list2 = candidates(app, detail: detail)
             VQLog.log("Carátula de tienda: \(package): \(list2.count) candidato(s)")
             for candidate in list2 {
                 let short = shortURL(candidate)
@@ -270,12 +291,20 @@ enum VQCoverStore {
                     let type = http?.value(forHTTPHeaderField: "Content-Type") ?? "?"
                     let size = VQCover.dimensions(d).map { "\($0.w)x\($0.h)" } ?? "sin dimensiones"
                     func verdict(_ why: String) { VQLog.log("Carátula de tienda: candidato \(short): HTTP \(http?.statusCode ?? -1), \(d.count) bytes, \(size), \(type): descartado, \(why)") }
+                    if let code = http?.statusCode, code == 401 || code == 403, isSigned(candidate) {
+                        verdict("URL firmada caducada"); continue   // not a network failure: no 7-day retry
+                    }
                     guard http?.statusCode == 200 else { netFailure = true; verdict("código HTTP"); continue }
                     let t = type.lowercased()
                     if t.contains("html") || t.contains("json") || t.hasPrefix("text/") { verdict("Content-Type no es imagen"); continue }
                     guard d.count <= maxBytes else { verdict("más de 16 MB"); continue }
                     guard fileExtension(d) != nil else { verdict("formato no reconocido"); continue }
-                    guard VQCover.isLandscape(d) else { verdict("no es ~16:9"); continue }
+                    guard VQCover.isLandscape(d) else {
+                        if let dim = VQCover.dimensions(d), min(dim.w, dim.h) >= 256,
+                           Double(max(dim.w, dim.h)) / Double(min(dim.w, dim.h)) <= 1.25,
+                           dim.w > (square?.px ?? 0) { square = (d, dim.w) }
+                        verdict("no es ~16:9" + (square?.data == d ? " (queda como carátula cuadrada de reserva)" : "")); continue
+                    }
                     data = d
                 } catch {
                     VQLog.log("Carátula de tienda: candidato \(short): error de red: \(error.localizedDescription)")
@@ -295,6 +324,17 @@ enum VQCoverStore {
                 await MainActor.run { NotificationCenter.default.post(name: .vqCoverUpdated, object: id) }
                 return
             }
+            if let sq = square {
+                var data = sq.data
+                var ext = fileExtension(data) ?? "jpg"
+                if sq.px > maxWidth || data.count > 8 << 20, let small = VQCover.downscaledJPEG(data, maxWidth: maxWidth) { data = small; ext = "jpg" }
+                for e in ["png", "jpg", "jpeg", "webp"] { try? FileManager.default.removeItem(at: cache.appendingPathComponent("cover-store.\(e)")) }
+                try data.write(to: cache.appendingPathComponent("cover-store.\(ext)"), options: .atomic)
+                try? FileManager.default.removeItem(at: marker)
+                VQLog.log("Carátula de tienda: \(package): sin imagen apaisada vigente; guardada la cuadrada (\(data.count / 1024) KB, \(ext))")
+                await MainActor.run { NotificationCenter.default.post(name: .vqCoverUpdated, object: id) }
+                return
+            }
             if netFailure {
                 VQLog.log("Carátula de tienda: \(package): fallo al descargar alguna imagen; se reintentará")
                 mark("net")
@@ -308,11 +348,37 @@ enum VQCoverStore {
         }
     }
 
-    private static func candidates(_ app: [String: Any]) -> [URL] {
-        var out: [URL] = []
-        if let link = app["imageLink"] as? String,
-           let u = URL(string: link, relativeTo: URL(string: host))?.absoluteURL { out.append(u) }
-        let text = app["display_long_description_unprocessed"] as? String ?? ""
+    /// Signed CDN links (expire): the Meta CDN host or a signature/expiry query item.
+    private static func isSigned(_ u: URL) -> Bool {
+        let q = u.query ?? ""
+        return (u.host ?? "").contains("oculuscdn") || q.contains("oh=") || q.contains("oe=") || q.contains("_nc_")
+    }
+
+    /// Image URLs found anywhere in the detail JSON, best first: ~16:9 {width,height,uri} objects and
+    /// landscape/hero/cover/banner/wide keys, then screenshot/image/background keys. Icons and
+    /// square/portrait keys are left out (the search's imageLink covers the square fallback).
+    private static func detailImages(_ node: Any, key: String = "", into out: inout [(rank: Int, w: Int, u: URL)]) {
+        func url(_ s: String) -> URL? {
+            guard s.hasPrefix("http") || s.hasPrefix("/cdn/") else { return nil }
+            return URL(string: s, relativeTo: URL(string: host))?.absoluteURL
+        }
+        if let d = node as? [String: Any] {
+            if let w = (d["width"] as? NSNumber)?.intValue, let h = (d["height"] as? NSNumber)?.intValue, h > 0,
+               Double(w) / Double(h) >= 1.6, Double(w) / Double(h) <= 1.95,
+               let s = ["uri", "url", "src", "link", "image"].lazy.compactMap({ d[$0] as? String }).first, let u = url(s) {
+                out.append((0, w, u))
+            }
+            for (k, v) in d { detailImages(v, key: k.lowercased(), into: &out) }
+        } else if let a = node as? [Any] {
+            for v in a { detailImages(v, key: key, into: &out) }
+        } else if let s = node as? String, let u = url(s) {
+            if ["icon", "square", "portrait", "logo", "avatar", "trailer", "video"].contains(where: { key.contains($0) }) { return }
+            if ["landscape", "hero", "cover", "banner", "wide"].contains(where: { key.contains($0) }) { out.append((0, 0, u)) }
+            else if ["screenshot", "image", "poster", "background", "thumb", "promo"].contains(where: { key.contains($0) }) { out.append((1, 0, u)) }
+        }
+    }
+
+    private static func markdownImages(_ text: String) -> [URL] {
         let re = try? NSRegularExpression(pattern: #"!\[(\{[^\]]*\})\]\((https?://[^)\s]+)\)"#)
         var wide: [(w: Int, u: URL)] = []
         for m in re?.matches(in: text, range: NSRange(text.startIndex..., in: text)) ?? [] {
@@ -323,7 +389,22 @@ enum VQCoverStore {
                   let u = URL(string: String(text[b])) else { continue }
             wide.append((w, u))
         }
-        return out + wide.sorted { $0.w > $1.w }.map(\.u)
+        return wide.sorted { $0.w > $1.w }.map(\.u)
+    }
+
+    private static func candidates(_ app: [String: Any], detail: [String: Any]?) -> [URL] {
+        var out: [URL] = []
+        if let detail {
+            var found: [(rank: Int, w: Int, u: URL)] = []
+            detailImages(detail, into: &found)
+            out += found.enumerated().sorted { ($0.element.rank, -$0.element.w, $0.offset) < ($1.element.rank, -$1.element.w, $1.offset) }.map(\.element.u)
+            out += markdownImages(detail["display_long_description_unprocessed"] as? String ?? "")
+        }
+        if let link = app["imageLink"] as? String,
+           let u = URL(string: link, relativeTo: URL(string: host))?.absoluteURL { out.append(u) }
+        out += markdownImages(app["display_long_description_unprocessed"] as? String ?? "")
+        var seen = Set<URL>()
+        return Array(out.filter { seen.insert($0).inserted }.prefix(14))
     }
 
     /// host + path (no query), at most 70 characters.

@@ -1280,23 +1280,33 @@ void kl_mem_pressure_poll(void) {
     // the OS says fewer than KL_LOWMEM_FREE_MB (default 384) bytes remain, so
     // Unity runs UnloadUnusedAssets before the kill rather than after it.
     uint64_t avail = kl_proc_available();
+    uint64_t total = kl_mem_total(), used = kl_mem_footprint();
+    int pct = (total && used) ? (int)((used * 100) / total) : -1;
+    // Two independent triggers share ONE armed flag so the guest is asked once per
+    // episode: the OS headroom (below) and the footprint fraction of the budget. The
+    // old code returned after the headroom test whenever the OS gave a value, so the
+    // 80% test never ran and AC Nexus was jetsammed at ~6.5 GB with ~1.6 GB "available".
+    int hot = 0, cold = 1;
+    const char *why = "footprint";
     if (avail) {
         uint64_t floor = (uint64_t)kl_env_int("KL_LOWMEM_FREE_MB", 384) << 20;
         uint64_t clearf = floor + (floor >> 1);          // re-arm at 1.5x the floor
-        if (avail <= floor) {
-            if (atomic_exchange(&g_lowmem_armed, 0)) kl_mem_pressure_fire("headroom");
-        } else if (avail >= clearf) {
-            atomic_store(&g_lowmem_armed, 1);
-        }
-        return;
+        if (avail <= floor) { hot = 1; why = "headroom"; }
+        if (avail < clearf) cold = 0;
     }
-
-    uint64_t total = kl_mem_total(), used = kl_mem_footprint();
-    if (!total || !used) return;
-    int pct = (int)((used * 100) / total);
-    if (pct >= at) {
-        if (atomic_exchange(&g_lowmem_armed, 0)) kl_mem_pressure_fire("footprint");
-    } else if (pct < clear) {
+    if (pct >= 0) {
+        if (pct >= at) hot = 1;
+        if (pct >= clear) cold = 0;
+    }
+    if (hot) {
+        if (atomic_exchange(&g_lowmem_armed, 0)) {
+            fprintf(stderr, "  [mem] threshold (%s): footprint %llu MiB of %llu MiB budget "
+                            "(%d%%), OS headroom %llu MiB\n", why,
+                    (unsigned long long)(used >> 20), (unsigned long long)(total >> 20),
+                    pct, (unsigned long long)(avail >> 20));
+            kl_mem_pressure_fire(why);
+        }
+    } else if (cold) {
         atomic_store(&g_lowmem_armed, 1);
     }
 }
@@ -1311,10 +1321,14 @@ void kl_mem_pressure_init(void) {
     if (!src) return;
     dispatch_source_set_event_handler(src, ^{
         // The OS asked, so it is delivered whatever the hysteresis says — this
-        // source only fires when the system means it.
-        kl_mem_pressure_fire(
-            dispatch_source_get_data(src) & DISPATCH_MEMORYPRESSURE_CRITICAL
-                ? "system critical" : "system warning");
+        // source only fires when the system means it. WARN notifies the guest too
+        // (kl_mem_pressure_fire -> onLowMemory/onTrimMemory), not just CRITICAL.
+        int crit = (dispatch_source_get_data(src) & DISPATCH_MEMORYPRESSURE_CRITICAL) != 0;
+        uint64_t av = kl_proc_available();
+        fprintf(stderr, "  [mem] OS pressure %s: footprint %llu MiB, OS headroom %llu MiB\n",
+                crit ? "critical" : "warning",
+                (unsigned long long)(kl_mem_footprint() >> 20), (unsigned long long)(av >> 20));
+        kl_mem_pressure_fire(crit ? "system critical" : "system warning");
         atomic_store(&g_lowmem_armed, 0);
     });
     dispatch_resume(src);   // deliberately never cancelled: it lives as long as

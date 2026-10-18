@@ -17,12 +17,13 @@ final class VQModel: ObservableObject {
     @Published var progress: Double = 0
     @Published var progressText = ""
     @Published var running = false        // BootView is showing
-    @Published var ended = false          // the game's immersive space has closed
+    @Published var ended = false { didSet { if ended { VQSession.end() } }}   // the game's immersive space has closed
     @Published var endMessage: String?    // why it closed when the engine asked to quit
     @Published var certificate: String? = VQSigner.current
 
     private init() {
         VQLog.start()
+        VQSession.startup()
         refresh()
         // Off the main thread and well after the UI is up: copying the previous session's logs
         // into the QUEST folder (File Provider storage, tens of MB) must never hold up the launch.
@@ -464,6 +465,7 @@ struct VQEndedView: View {
                     .buttonStyle(.bordered)
                 Button {
                     VQLog.log("Cerrar app tras la partida")
+                    VQSession.end()
                     fflush(nil)
                     exit(0)
                 } label: { Label(VQL("Cerrar app", "Close app"), systemImage: "xmark.circle") }

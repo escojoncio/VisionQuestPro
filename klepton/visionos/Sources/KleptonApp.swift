@@ -145,6 +145,7 @@ enum Lifecycle {
     @MainActor static func immersiveEnded() {
         immersiveOpen = false
         NSLog("[app] immersive space ended (phase \(lastPhase))")
+        VQSession.end()   // the run ended through the normal path (also before the _exit(0) below)
         // The game's logs, complete, to QUEST/Registros before anything else can end the process
         // (waited for only on the path that _exit()s below).
         let reopening = lastPhase != .background && reopenLauncher != nil
@@ -204,6 +205,7 @@ enum Lifecycle {
         // stdio, but it also runs atexit handlers and static destructors inside
         // a guest whose threads are still live, and one of those blocking would
         // turn a clean exit into a watchdog kill with a truncated log.
+        VQSession.end()   // deliberate exit, not a jetsam: no "unclean close" report next launch
         fflush(nil)
         exit(0)
     }
