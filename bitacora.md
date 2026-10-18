@@ -3,9 +3,10 @@
 Historial completo: `git log -p bitacora.md` (compactada el 2026-10-18; detalle de cada paso en los commits
 «Integrar paso-aN» y en las ramas `paso-aN` de GitHub).
 
-## EMPEZAR AQUÍ — 2026-10-18: pasos 1-7 implementados e integrados — primera build pendiente
-Rama `integ` en VisionQuestPro y en VPKEngine (las dos con todo unido). Antes de la build: fusionar `integ` → `main`
-en VPKEngine (la CI de esta app clona VPKEngine `main`) y luego aquí, commit con `[build]`.
+## EMPEZAR AQUÍ — 2026-10-18: pasos 1-7 implementados e integrados — build lanzada (resultado pendiente)
+`integ` fusionada en `main` en los dos repos (VPKEngine `main` = e6c3f3b; aquí merge 12090b2 `[build]`, run
+39150059344 de `visionos`). Primer paso del siguiente chat: estado de esa build (`gh run list -R
+escojoncio/VisionQuestPro -L 2`; log en rama `ci-logs`, `visionos.txt`) y corregir errores de compilación.
 Nada de hoy se ha compilado para visionOS: Swift, `.m/.mm`, MSL, `.S` y el C con cabeceras de Darwin solo están
 revisados a mano (VPKEngine 203/203 tests en Linux; arneses C de Klepton en Linux OK). Esperar errores de compilación
 en la primera build: leer el log de CI (rama `ci-logs`) y corregir antes de cualquier prueba.
@@ -70,13 +71,13 @@ en la primera build: leer el log de CI (rama `ci-logs`) y corregir antes de cual
   (AHardwareBuffer); no viable en Metal: variablePointers completo, LogicOp/PatchControlPoints dinámicos,
   availability/visibility, BDA capture/replay, inline uniform update-after-bind. EDS × máscara de UI no combinan.
 - GLES: sin transform feedback, SSBO/imágenes/atómicos, geometry/tess, program binary; occlusion query = 1;
-  gl_PointCoord fijo; window surfaces planas sin conectar; DestroyContext con contexto actual en otro hilo (UAF);
-  MakeCurrent permite el mismo contexto en dos hilos; GLboolean sin extensión garantizada (teórico);
+  gl_PointCoord fijo; window surfaces planas sin conectar; GLboolean sin extensión garantizada (teórico);
   `kl_gles_sym` NULL cae a la pasarela GL vieja (estados mezclados).
 - Android: AObb sin montaje real; AImage solo YUV_420_888; OpenSL sin efectos/3D/MIDI; posix_spawn/exec/SysV ENOSYS;
   inotify sin IN_ACCESS/OPEN/CLOSE. Sin validar en Darwin: kl_bionic_extra2/4.c (campos internos de FILE), thunks `.S`.
-- Menores VPKEngine: jitter consume fase aunque falle el encode; handler de taa_native_metal capturando `Impl*` al
-  cerrar; `vkCmdSet{Viewport,Scissor}WithCount` ignoran el contador.
+- VPKEngine (arreglado 498bc9f/e6c3f3b, `taa_native_metal.mm` sin compilar): fase de jitter solo si se codificó,
+  handler con `shared_ptr<Stats>`, `*WithCount` con min(n,1), requisitos de memoria sin handle nulo, uiMask bajo
+  submitMutex; EGL BAD_ACCESS y destrucción diferida de contexto/surface. Queda: hilo que muere sin soltar su contexto.
 - Después de los pasos: SSAO propio en VPKEngine (media resolución, profundidad compartida con VPKTAA, toggle por
   juego desactivado por defecto; origen: AoT no trae el SSAO de URP).
 
