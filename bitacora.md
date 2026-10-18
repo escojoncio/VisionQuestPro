@@ -2,6 +2,17 @@
 
 Historial completo: `git log -p bitacora.md` (compactada el 2026-10-15; lo cerrado queda en una línea con referencia).
 
+## 2026-10-18 — VPKTAA nativo: máscara de UI/2D (VPKEngine paso-a12; sin cambios de código en esta app)
+- La máscara vive entera en VPKEngine (ver su bitácora): los draws de UI/2D del pase de ojo (sin escritura de
+  profundidad, tras lo opaco, con mezcla o sin test) no llevan jitter y marcan un R8 que el pase nativo usa para
+  no mezclar historia ni afilar ahí (menús y textos nítidos). Va bajo el ajuste «VPKTAA nativo» y la variable
+  `VPVK_TAA_UI_MASK` (def. 1 con el nativo; `=0` para comparar). `vpvk_taa_native_frame` no cambia: Klepton/
+  `KleptonTAA.swift` no necesitan tocarse.
+- Cómo comprobarlo en el visor: log `vk.taa uimask … draws_3d= draws_ui= masked_passes=` y `vk.taa native gpu_ms …
+  uimask_eyes=2`; con `VPVK_TAA_UI_MASK=0` el texto debe volver a emborronarse.
+- Pendiente: probar en visor (ver «Sin validar» de la bitácora de VPKEngine); si algún juego pinta la UI antes
+  de lo opaco, ajustar la heurística o añadir un ajuste en la app.
+
 ## 2026-10-18 — VPKTAA nativo (VPKEngine paso-a8) + profundidad de ojo para PTW (sin probar en el visor)
 - Ajuste «VPKTAA nativo» (`VQLaunch.swift` `vpktaaNative`, clave `vq.vpktaaNative`, def. off; toggle en
   `VQLauncher.swift` `VQVPKTAATuning`) → `vq_gfx_config.taa_native` (`vq_config.{h,c}`, dlsym
