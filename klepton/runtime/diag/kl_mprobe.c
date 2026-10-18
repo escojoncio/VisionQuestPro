@@ -447,6 +447,7 @@ void kl_mprobe_tick(unsigned frame) {
     // measurement — this title reaches poses through OVRInput, below.
     static const MethodInfo *m_axis;
     static const MethodInfo *m_cpos, *m_crot, *m_conn, *m_pvalid, *m_ptracked;
+    static const MethodInfo *m_active, *m_ldev, *m_ovrpver, *m_verstr;
     static Il2CppObject *axis_str[N_AXES];
     static int resolved;
     if (!resolved) {
@@ -461,6 +462,13 @@ void kl_mprobe_tick(unsigned frame) {
         m_conn     = find_method("", "OVRInput", "GetConnectedControllers", 0);
         m_pvalid   = find_method("", "OVRInput", "GetControllerPositionValid", 1);
         m_ptracked = find_method("", "OVRInput", "GetControllerPositionTracked", 1);
+        // Diagnostics only: which controller OVRInput considers active, which
+        // XR device OVRManager thinks is loaded, and the OVRPlugin version the
+        // managed side parsed. Any of these may be stripped; "?" then.
+        m_active   = find_method("", "OVRInput", "GetActiveController", 0);
+        m_ldev     = find_method("", "OVRManager", "get_loadedXRDevice", 0);
+        m_ovrpver  = find_method("", "OVRPlugin", "get_version", 0);
+        m_verstr   = find_method("System", "Version", "ToString", 0);
         for (unsigned i = 0; i < N_AXES; i++) axis_str[i] = il.string_new(AXES[i]);
     }
 
@@ -691,6 +699,23 @@ void kl_mprobe_tick(unsigned frame) {
     fprintf(stderr, "  [mprobe f%u] OVRInput: connected=", frame);
     if (c) fprintf(stderr, "0x%x", *(uint32_t *)il.object_unbox(c));
     else   fprintf(stderr, "?");
+    {
+        Il2CppObject *ac = invoke(m_active, NULL, "OVRInput.GetActiveController");
+        Il2CppObject *ld = invoke(m_ldev, NULL, "OVRManager.loadedXRDevice");
+        Il2CppObject *vo = invoke(m_ovrpver, NULL, "OVRPlugin.version");
+        char vs[64] = "?";
+        if (vo) {
+            Il2CppObject *s = invoke_on(vo, m_verstr, NULL, "Version.ToString");
+            if (s) str_ascii(s, vs, sizeof vs);
+        }
+        fprintf(stderr, " active=");
+        if (ac) fprintf(stderr, "0x%x", *(uint32_t *)il.object_unbox(ac));
+        else    fprintf(stderr, "?");
+        fprintf(stderr, " loadedXRDevice=");
+        if (ld) fprintf(stderr, "%d", *(int32_t *)il.object_unbox(ld));
+        else    fprintf(stderr, "?");
+        fprintf(stderr, " ovrpVersion=%s", vs);
+    }
 
     // OVRInput.Controller: LTouch = 0x01, RTouch = 0x02.
     static const struct { const char *name; int ctrl; } HANDS[] = {

@@ -150,13 +150,20 @@ static int g_input_refusals;    // input opens declined because the mic was off
 // its own. Unreal titles link Wwise statically and cannot be told apart from
 // here; KL_AAUDIO_BURST=1024 serves them by hand.
 static int klaa_guest_wwise(void) {
-    static int v = -1;
-    if (v >= 0) return v;
+    // Only a positive answer is cached: the library is loaded after the first
+    // call can happen, and a 0 cached before then would stick for good.
+    static int v = 0;
+    if (v) return v;
+    // The loader's own registry: on device the .so is never on disk (the
+    // translated dylib is loaded from elsewhere), so an access() on the native
+    // lib dir cannot see it.
+    if (kl_find_image("libAkSoundEngine.so")) return v = 1;
+    // Fallback for a plain ELF tree (running outside the app).
     extern const char *g_native_lib_dir;
-    if (!g_native_lib_dir || !*g_native_lib_dir) return 0;   // not configured yet: ask again later
+    if (!g_native_lib_dir || !*g_native_lib_dir) return 0;
     char p[1200];
     snprintf(p, sizeof p, "%s/libAkSoundEngine.so", g_native_lib_dir);
-    v = access(p, F_OK) == 0;
+    if (access(p, F_OK) == 0) v = 1;
     return v;
 }
 

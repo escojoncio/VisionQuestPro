@@ -765,6 +765,10 @@ static const char *klovrp_version(void) {
 
 static const char *klovrp_GetVersion(void) {
     ovrp_hit("ovrp_GetVersion");
+    static int logged;
+    if (!__atomic_exchange_n(&logged, 1, __ATOMIC_RELAXED))
+        fprintf(stderr, "  [ovrp] ovrp_GetVersion() -> const char* %p \"%s\"\n",
+                (const void *)KLOVRP_VERSION, KLOVRP_VERSION);
     return KLOVRP_VERSION;
 }
 
@@ -786,6 +790,10 @@ static uint64_t klovrp_GetVersion2(const char **out) {
     ovrp_hit("ovrp_GetVersion2");
     if (!out) return OVRP_FAIL_INVALID_PARAM;
     *out = KLOVRP_VERSION;
+    static int logged;
+    if (!__atomic_exchange_n(&logged, 1, __ATOMIC_RELAXED))
+        fprintf(stderr, "  [ovrp] ovrp_GetVersion2(out=%p) -> 0 (ovrpResult), *out = %p \"%s\"\n",
+                (void *)out, (const void *)*out, *out);
     return OVRP_SUCCESS;
 }
 
@@ -806,6 +814,10 @@ static uint64_t klovrp_GetVersion2(const char **out) {
 // logging, where an unimplemented entry point is an abort.
 static const char *klovrp_GetNativeSDKVersion(void) {
     ovrp_hit("ovrp_GetNativeSDKVersion");
+    static int logged;
+    if (!__atomic_exchange_n(&logged, 1, __ATOMIC_RELAXED))
+        fprintf(stderr, "  [ovrp] ovrp_GetNativeSDKVersion() -> const char* %p \"%s\"\n",
+                (const void *)KLOVRP_VERSION, KLOVRP_VERSION);
     return KLOVRP_VERSION;
 }
 
@@ -813,6 +825,10 @@ static uint64_t klovrp_GetNativeSDKVersion2(const char **out) {
     ovrp_hit("ovrp_GetNativeSDKVersion2");
     if (!out) return OVRP_FAIL_INVALID_PARAM;
     *out = KLOVRP_VERSION;
+    static int logged;
+    if (!__atomic_exchange_n(&logged, 1, __ATOMIC_RELAXED))
+        fprintf(stderr, "  [ovrp] ovrp_GetNativeSDKVersion2(out=%p) -> 0 (ovrpResult), *out = %p \"%s\"\n",
+                (void *)out, (const void *)*out, *out);
     return OVRP_SUCCESS;
 }
 
@@ -4875,16 +4891,29 @@ static void fill_controller_state(int mask, void *out, int version) {
 // hand back for each mask. The connection bug hunt (Liminal falls to its GearVR
 // gaze profile because it reads no hands connected) needs the frequency AND the
 // value, and the guest's own log only shows first-seen.
+//
+// Without the env var the first 24 calls of EACH GetControllerState* version
+// (mask + Connected returned) are still logged, so one ordinary run shows what
+// every OVRPlugin generation was asked and answered.
 static void ctrl_state_log(const char *name, int mask, void *out) {
     static int verbose = -1;
     if (verbose < 0) verbose = (int)kl_env_uint("KL_OVRP_VERBOSE", 0);
-    if (!verbose) return;
     static unsigned total;
-    unsigned n = __atomic_add_fetch(&total, 1, __ATOMIC_RELAXED);
+    static unsigned per_ver[7];
+    // name is "GetControllerState" + optional version digit.
+    unsigned ver = (name[18] >= '0' && name[18] <= '6') ? (unsigned)(name[18] - '0') : 1;
+    unsigned n = 0;
+    if (verbose) {
+        n = __atomic_add_fetch(&total, 1, __ATOMIC_RELAXED);
+    } else {
+        unsigned k = __atomic_add_fetch(&per_ver[ver], 1, __ATOMIC_RELAXED);
+        if (k > 24) return;
+        n = k;
+    }
     const uint32_t *w = (const uint32_t *)out;
     // First 24 calls in full, then one line every 600 so a per-frame poll shows
     // as a rising counter without flooding.
-    if (n <= 24 || (n % 600) == 0)
+    if (n <= 24 || (verbose && (n % 600) == 0))
         fprintf(stderr, "  [ctrl] #%u %s(mask=0x%x) -> Connected=0x%x Buttons=0x%x "
                 "LIdxTrig=%.2f RIdxTrig=%.2f\n",
                 n, name, (unsigned)mask, w[0], w[1],

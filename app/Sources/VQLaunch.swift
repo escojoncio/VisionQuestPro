@@ -132,6 +132,9 @@ final class VQSettings: ObservableObject {
     /// Experimental: GLES games through VPKEngine's own OpenGL ES (vpgles in VPVulkan). Off by default:
     /// while off, GLES-only games stay marked incompatible ("solo Vulkan").
     @Published var glesVPK: Bool { didSet { save() } }
+    /// Experimental: exposes to games every capability of the Adreno 740 profile, even those the CTS has not
+    /// validated yet (VPVK_EXTRA_EXTENSIONS). Off by default; the CTS forces it on by itself (VQConformance).
+    @Published var vkFullProfile: Bool { didSet { save() } }
     /// Initial posture for the OVRPlugin eye height (KL_OVRP_POSTURE); auto re-measure always on.
     @Published var posture: String { didSet { save() } }   // "auto" | "seated" | "standing"
     /// Passthrough (KL_PASSTHROUGH): "auto" follows the game, "off" always VR, "on" always mixed.
@@ -185,6 +188,7 @@ final class VQSettings: ObservableObject {
         // Saved as "vq.vpengine" before the engine was renamed VPKEngine.
         useVPKEngine = (d.object(forKey: "vq.vpkengine") ?? d.object(forKey: "vq.vpengine")) as? Bool ?? true
         glesVPK = d.object(forKey: "vq.glesVPK") as? Bool ?? false
+        vkFullProfile = d.object(forKey: "vq.vkFullProfile") as? Bool ?? false
         posture = d.string(forKey: "vq.posture") ?? "auto"
         if let pt = d.string(forKey: "vq.passthrough"), ["auto", "off", "on"].contains(pt) {
             passthrough = pt
@@ -237,6 +241,7 @@ final class VQSettings: ObservableObject {
         d.set(diagCaptures, forKey: "vq.diagCaptures2")
         d.set(useVPKEngine, forKey: "vq.vpkengine")
         d.set(glesVPK, forKey: "vq.glesVPK")
+        d.set(vkFullProfile, forKey: "vq.vkFullProfile")
         d.set(posture, forKey: "vq.posture")
         d.set(passthrough, forKey: "vq.passthrough")
         d.set(systemLanguage, forKey: "vq.sysLang")
@@ -398,13 +403,14 @@ final class VQSettings: ObservableObject {
         if aotShaders { setenv("VPVK_AOT", "1", 1) } else { unsetenv("VPVK_AOT") }
         // Games keep going after a single hung or faulting GPU frame (conformance runs set it to 1).
         unsetenv("VPVK_DEVICE_LOST_STRICT")
-        unsetenv("VPVK_EXTRA_EXTENSIONS")  // the conformance runs set it again (VQConformance)
+        // «Perfil Vulkan completo»; the conformance runs set it again either way (VQConformance).
+        if vkFullProfile { setenv("VPVK_EXTRA_EXTENSIONS", "1", 1) } else { unsetenv("VPVK_EXTRA_EXTENSIONS") }
         // Games: report geometry/tessellation like Adreno so Unity keeps subshaders that need
         // them (AC Nexus's magenta UI). The CTS unsets it (VQConformance).
         setenv("VPVK_REPORT_GEOM", "1", 1)
         unsetenv("VPVK_TAA_JITTER")  // set to 0 by the conformance runs only (VQConformance.neutralGraphics)
         let detText = detected.map { "\($0)x" } ?? "no"
-        VQLog.log("Gráficos: foveado Quest siempre apagado; foveado propio \(foveation), AA: modo \(aa.mode.rawValue), MSAA override \(msaaOverride), detectado \(detText) (juego \(aaKey.isEmpty ? "?" : aaKey)\(aa.stored ? "" : ", por defecto")), VPKTAA permitido \(vpktaa) nativo \(vpktaaNative) \(Int(vpktaaPercent)) % nitidez \(vpktaaSharpness), forzar 1x \(c.force_single_sample != 0), anisotrópico x\(anisoLevel), diagnóstico de rendimiento \(perfDiag), diagnóstico de ficheros \(fsDiag), escala \(effScale), ASW apagado \(aswDisabled), perfil Quest 3 \(quest3Profile), FPS en pantalla \(showFps)")
+        VQLog.log("Gráficos: foveado Quest siempre apagado; foveado propio \(foveation), AA: modo \(aa.mode.rawValue), MSAA override \(msaaOverride), detectado \(detText) (juego \(aaKey.isEmpty ? "?" : aaKey)\(aa.stored ? "" : ", por defecto")), VPKTAA permitido \(vpktaa) nativo \(vpktaaNative) \(Int(vpktaaPercent)) % nitidez \(vpktaaSharpness), forzar 1x \(c.force_single_sample != 0), anisotrópico x\(anisoLevel), diagnóstico de rendimiento \(perfDiag), diagnóstico de ficheros \(fsDiag), escala \(effScale), ASW apagado \(aswDisabled), perfil Quest 3 \(quest3Profile), perfil Vulkan completo \(vkFullProfile), FPS en pantalla \(showFps)")
         VQLog.log("Ajustes: sin red \(offline), log del juego \(guestLog), vigilante \(Int(watchdogSeconds)) s")
     }
 }
