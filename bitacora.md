@@ -49,7 +49,9 @@ pasadas completas del Vulkan/OpenXR/GLES CTS en el visor → arreglar fallos →
   (2 etapas, token error, SpaceWarp spin, pose fresca, overlay texl/orden, burst AC, MSAA/ojo). Riesgo: con 3 etapas AC
   llegó a OOM (8,1 GB) en su día; vigilar memoria. JNI LoadingScreen de nexusvr se queda (emulación de clase).
 - `KL_VK_VTX_SSBO` def. 0 y VPKEngine `vertexPipelineStoresAndAtomics` tras `VPVK_EXTRA_EXTENSIONS` otra vez (cuelgue del
-  warmup). Efecto conocido: Unity vuelve a usar el shader de error en variantes con StructuredBuffer en vértice (rosa).
+  warmup). El rosa de AC NUNCA se fue: siguió con vertexStores=1
+  en todas las builds (16-17/10), así que NO es la causa del rosa (ni apagarlo lo empeora). Causa del rosa sin
+  identificar: ver punto «Siguiente para el rosa» del TODO.
 - Carátulas: `app/Sources/VQCover.swift` (imagen de la carpeta: nombre cover/banner/poster o la mayor; si no, arte del
   APK res/*: banner > ic_launcher/app_icon > round/foreground, mayor tamaño = mayor densidad → `Cache/<j>/cover-apk.<ext>`;
   si no, degradado con nombre). `VQCoverView` 16:9 arriba de `VQGameCard` (VQLauncher.swift). Sin probar en el visor.
