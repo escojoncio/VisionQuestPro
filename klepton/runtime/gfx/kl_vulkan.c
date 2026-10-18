@@ -6264,7 +6264,8 @@ static void VKAPI_CALL klvk_GetPhysicalDeviceQueueFamilyProperties(
 // SystemInfo.maxComputeBufferInputsVertex = 0 and drops every subshader whose vertex program
 // reads a StructuredBuffer — the pink-material failure Unity is known for on such GPUs.
 // Adreno and MoltenVK (where AC's menus are fine) both report 1, and Metal vertex functions
-// read device buffers natively. KL_VK_VTX_SSBO=0 restores VPKEngine's answer;
+// read device buffers natively. Default 0 (VPKEngine's answer, behind its CTS gate): exposed to
+// AC it hung the shader warmup (2026-10-16); KL_VK_VTX_SSBO=1 forces it for A/B tests only;
 // KL_VK_IMG_NOFMT=1 also claims storage-image read/write without format (second suspect).
 static void klvk_patch_features(VkPhysicalDeviceFeatures *f) {
     if (!f) return;

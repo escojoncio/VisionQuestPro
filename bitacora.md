@@ -103,6 +103,22 @@ pasadas completas del Vulkan/OpenXR/GLES CTS en el visor → arreglar fallos →
   APK res/*: banner > ic_launcher/app_icon > round/foreground, mayor tamaño = mayor densidad → `Cache/<j>/cover-apk.<ext>`;
   si no, degradado con nombre). `VQCoverView` 16:9 arriba de `VQGameCard` (VQLauncher.swift). Sin probar en el visor.
 
+### 2026-10-18 — paso 1: puerta del CTS y diagnóstico de cuelgue (VPKEngine rama paso-a7) — SIN BUILD
+- VPKEngine: `612b2dd` puerta (shaderInt16, shaderDrawParameters, extensiones/structs 1.2/1.3 solo con
+  `VPVK_EXTRA_EXTENSIONS=1`); `0c5d701` `gpu.hang draw` por draw + `VPVK_HANG_SPLIT` (def. 256, encoders >2048 draws
+  en CBs de 256 → `chunks_done` señala el trozo) + MSL del trozo colgado en QUEST/Registros (`gpu-hang-<id>.metal`,
+  vía `KL_CAPTURE_DIR`: solo si «capturas de diagnóstico» está activo; si no, Documents/Registros);
+  `c986c5a` traductor v10: bucles anidados acotados como nido (antes 65536² vueltas posibles → candidato del cuelgue
+  del warmup de AC); `c58c56c` private_data, maintenance4, imageless, subgroup_size_control, B4G4R4A4 (tras puerta);
+  `607b1dc` traductor v11 16-bit storage (tras puerta).
+- Klepton `kl_vulkan.c`: comentario de `KL_VK_VTX_SSBO` (def. 0 confirmado).
+- Probar en el visor: AC con el warmup → si cuelga, leer `gpu.hang   chunks=… chunks_done=…` y las líneas
+  `gpu.hang   draw` del trozo; si no cuelga, era el guard de bucles anidados (v10).
+- Grupos CTS para abrir la puerta: dEQP-VK.spirv_assembly.*int16*, *16bit_storage*, compute.*;
+  draw.shader_draw_parameters.*; api.info.format_properties / texture.* (B4G4R4A4); api.private_data.*,
+  api.maintenance4 / memory.requirements.*, renderpass*.*imageless*, subgroups.size_control.*;
+  synchronization2.*, dynamic_rendering.*, timeline_semaphore (synchronization.timeline_semaphore.*), multi_draw.*.
+
 ### TODO domingo (en orden)
 1. Cerrar el cuelgue de AC. Build 709566a (robustez real) NO lo arregla (log 03:08): `gpu.hang cb=vpgpu.f662
    age_ms=20010 draws=4630 dispatches=0 pipelines=1576`, un solo encoder, todos los VS `ssbo_r robust` (pipelines de la
