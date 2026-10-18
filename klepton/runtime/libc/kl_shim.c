@@ -1889,8 +1889,19 @@ static void kl_openlog(const char *a, int b, int c) { (void)a; (void)b; (void)c;
 static void kl_closelog(void) {}
 static int  kl_cxa_atexit(void (*f)(void *), void *a, void *d) { (void)f;(void)a;(void)d; return 0; }
 static void kl_cxa_finalize(void *d) { (void)d; }
+struct kl_android_log_message { size_t size; int32_t buffer_id; int32_t priority;
+    const char *tag; const char *file; uint32_t line; const char *message; };
+// __android_log_set_logger / __android_log_set_default_tag (kl_bionic_extra.c)
+extern void (*kl_log_custom_logger)(const struct kl_android_log_message *);
+extern const char *kl_log_default_tag;
 static void kl_android_log_write(int p, const char *t, const char *m) {
     extern void kl_openxr_status_log(const char *, const char *);
+    if (!t && kl_log_default_tag) t = kl_log_default_tag;
+    if (kl_log_custom_logger) {          // the guest replaced liblog's logger: every write goes through it
+        struct kl_android_log_message msg = { sizeof msg, 1 /* LOG_ID_MAIN */, p, t, NULL, 0, m };
+        kl_log_custom_logger(&msg);
+        return;
+    }
     kl_openxr_status_log(t, m);   // OpenXR CTS progress (HUD); ignores every other tag
     fprintf(stderr, "[%d/%s] %s\n", p, t ? t : "", m ? m : ""); }
 // liblog: everything at INFO or above is loggable (Oboe gates its verbose output on this).
@@ -1904,8 +1915,6 @@ static int kl_android_log_buf_write(int buf, int p, const char *t, const char *m
     (void)buf; kl_android_log_write(p, t, m); return 1; }
 static int kl_android_log_set_minimum_priority(int p) { int o = g_log_min_prio; g_log_min_prio = p; return o; }
 static int kl_android_log_get_minimum_priority(void) { return g_log_min_prio; }
-struct kl_android_log_message { size_t size; int32_t buffer_id; int32_t priority;
-    const char *tag; const char *file; uint32_t line; const char *message; };
 static void kl_android_log_write_log_message(struct kl_android_log_message *m) {
     if (m) kl_android_log_write(m->priority, m->tag, m->message); }
 // libdl linker namespaces: none on this platform. NULL/false makes callers

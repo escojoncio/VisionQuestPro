@@ -29,6 +29,7 @@
 #include <math.h>
 #include <pthread.h>
 #include <stdarg.h>
+#include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -39,6 +40,7 @@
 #include <wchar.h>
 #include <wctype.h>
 #include "kl_ld128.h"
+void *kl_shim_lookup(const char *name);        // kl_shim.c
 
 #ifndef __APPLE__
 // Linux build (harness for the translation logic): the Darwin-only pieces are
@@ -645,6 +647,354 @@ static char *klx_nl_langinfo_l(int item, void *l) { (void)l; return klx_nl_langi
 #define XE(guest, sym)
 #define DECLX(sym)
 #endif
+
+// ======================================================================
+// Android-only libc: device level, fdsan, liblog extras, fortify, small libc leftovers
+// ======================================================================
+#include <signal.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+#ifdef KL_EXTRA_TEST
+static int kl_jni_build_int(const char *f, int d) { (void)f; return d; }
+#else
+#include "kl_jni.h"
+#endif
+
+// One answer for "how new is this device": ro.build.version.sdk, which follows the JNI
+// Build.VERSION.SDK_INT (and KL_SDK_INT).
+// Quest 3 runs Android 12L (API 32); the JNI table currently presents 29, so this follows
+// the table rather than inventing a second answer.
+extern int klb_sysprop_get(const char *name, char *value);
+static int klx_android_get_device_api_level(void) {
+    char v[92] = "";
+    klb_sysprop_get("ro.build.version.sdk", v);        // the property, so both doors agree (KL_SDK_INT included)
+    int api = atoi(v);
+    return api > 0 ? api : kl_jni_build_int("SDK_INT", 32);
+}
+static int klx_android_get_application_target_sdk_version(void) { return 34; }  // ApplicationInfo.targetSdkVersion in kl_jni.c
+
+// ---- fdsan (API 29+) ----------------------------------------------------
+// Tags: type in the top byte, value in the low 56 bits. The per-fd owner table lives here;
+// close() is not instrumented, so a plain close() of an owned fd is not reported (Android
+// would warn).
+enum { FDSAN_DISABLED = 0, FDSAN_WARN_ONCE = 1, FDSAN_WARN_ALWAYS = 2, FDSAN_FATAL = 3 };
+#define FDSAN_FDS 65536
+static _Atomic uint64_t g_fdsan_tag[FDSAN_FDS];
+static _Atomic int g_fdsan_level = FDSAN_WARN_ONCE;
+static uint64_t klx_android_fdsan_create_owner_tag(int type, uint64_t value) {
+    if (value == 0) return 0;
+    if ((type & 0xff) != type) { fprintf(stderr, "invalid android_fdsan_owner_type value: %x\n", type); abort(); }
+    return ((uint64_t)type << 56) | (value & ((1ull << 56) - 1));
+}
+static int klx_android_fdsan_get_tag_type(uint64_t tag) { return (int)(tag >> 56); }
+static uint64_t klx_android_fdsan_get_tag_value(uint64_t tag) { return tag & ((1ull << 56) - 1); }
+static uint64_t klx_android_fdsan_get_owner_tag(int fd) {
+    if (fd < 0 || fd >= FDSAN_FDS) return 0;
+    return atomic_load(&g_fdsan_tag[fd]);
+}
+static const char *fdsan_type_name(int t) {
+    switch (t) {
+    case 0: return "unowned"; case 1: return "FILE*"; case 2: return "DIR*"; case 3: return "unique_fd";
+    case 4: return "FileInputStream"; case 5: return "FileOutputStream"; case 6: return "RandomAccessFile";
+    case 7: return "ParcelFileDescriptor"; case 8: return "ArtFd"; case 9: return "DatagramSocketImpl";
+    case 10: return "SocketImpl"; case 11: return "ZipArchive";
+    default: return "native object of unknown type";
+    }
+}
+static void fdsan_error(int fd, uint64_t expected, uint64_t actual, const char *what) {
+    int level = atomic_load(&g_fdsan_level);
+    if (level == FDSAN_DISABLED) return;
+    static _Atomic int said;
+    if (level == FDSAN_WARN_ONCE && atomic_exchange(&said, 1)) return;
+    char buf[200];
+    if (expected && !actual)
+        snprintf(buf, sizeof buf, "attempted to %s file descriptor %d with tag %s 0x%llx, but it is not owned",
+                 what, fd, fdsan_type_name((int)(expected >> 56)), (unsigned long long)(expected & ((1ull << 56) - 1)));
+    else if (!expected && actual)
+        snprintf(buf, sizeof buf, "attempted to %s file descriptor %d, expected to be unowned, actually owned by %s 0x%llx",
+                 what, fd, fdsan_type_name((int)(actual >> 56)), (unsigned long long)(actual & ((1ull << 56) - 1)));
+    else
+        snprintf(buf, sizeof buf, "attempted to %s file descriptor %d, expected to be owned by %s 0x%llx, actually owned by %s 0x%llx",
+                 what, fd, fdsan_type_name((int)(expected >> 56)), (unsigned long long)(expected & ((1ull << 56) - 1)),
+                 fdsan_type_name((int)(actual >> 56)), (unsigned long long)(actual & ((1ull << 56) - 1)));
+    fprintf(stderr, "  [fdsan] %s\n", buf);
+    if (level == FDSAN_FATAL) { fprintf(stderr, "fdsan: %s\n", buf); abort(); }
+}
+static void klx_android_fdsan_exchange_owner_tag(int fd, uint64_t expected, uint64_t newtag) {
+    if (fd < 0 || fd >= FDSAN_FDS) return;
+    uint64_t cur = expected;
+    if (!atomic_compare_exchange_strong(&g_fdsan_tag[fd], &cur, newtag)) {
+        fdsan_error(fd, expected, cur, "change owner tag of");
+        atomic_store(&g_fdsan_tag[fd], newtag);        // as bionic: reported, then the exchange is applied
+    }
+}
+static int klx_android_fdsan_close_with_tag(int fd, uint64_t tag) {
+    if (fd >= 0 && fd < FDSAN_FDS) {
+        uint64_t cur = tag;
+        if (!atomic_compare_exchange_strong(&g_fdsan_tag[fd], &cur, 0)) {
+            fdsan_error(fd, tag, cur, "close");
+            atomic_store(&g_fdsan_tag[fd], 0);
+        }
+    }
+    return close(fd);          // errno stays Darwin's; klb_errno translates it for the guest
+}
+static int klx_android_fdsan_get_error_level(void) { return atomic_load(&g_fdsan_level); }
+static int klx_android_fdsan_set_error_level(int lvl) { return atomic_exchange(&g_fdsan_level, lvl); }
+static int klx_android_fdsan_set_error_level_from_property(int dflt) {
+    char v[92] = "";
+    klb_sysprop_get("debug.fdsan", v);
+    int lvl = dflt;
+    if (!strcmp(v, "warn_once")) lvl = FDSAN_WARN_ONCE;
+    else if (!strcmp(v, "warn_always")) lvl = FDSAN_WARN_ALWAYS;
+    else if (!strcmp(v, "fatal")) lvl = FDSAN_FATAL;
+    else if (!strcmp(v, "disabled")) lvl = FDSAN_DISABLED;
+    return atomic_exchange(&g_fdsan_level, lvl);
+}
+
+// bionic's __progname for an app process is its zygote fork's argv[0] basename.
+static const char *g_progname = "app_process64";
+static const char *klx_getprogname(void) { return g_progname; }
+static void klx_setprogname(const char *n) {
+    static char buf[256];
+    if (!n) return;
+    const char *b = strrchr(n, '/');
+    snprintf(buf, sizeof buf, "%s", b ? b + 1 : n);
+    g_progname = buf;
+}
+
+// ---- liblog extras (API 30) ---------------------------------------------
+// struct __android_log_message, as kl_shim.c's kl_android_log_message.
+typedef struct { size_t size; int32_t buffer_id; int32_t priority; const char *tag; const char *file;
+                 uint32_t line; const char *message; } klx_log_message;
+void (*kl_log_custom_logger)(const klx_log_message *);       // __android_log_set_logger; read by kl_shim.c
+const char *kl_log_default_tag;                              // __android_log_set_default_tag
+static void (*g_log_aborter)(const char *);
+static void klx_android_log_set_logger(void (*f)(const klx_log_message *)) { kl_log_custom_logger = f; }
+static void klx_android_log_set_default_tag(const char *tag) {
+    static char buf[24];
+    if (!tag) { kl_log_default_tag = NULL; return; }
+    snprintf(buf, sizeof buf, "%s", tag);                    // bionic keeps at most 23 chars
+    kl_log_default_tag = buf;
+}
+static void klx_android_log_set_aborter(void (*f)(const char *)) { g_log_aborter = f; }
+static void klx_android_log_call_aborter(const char *msg) {
+    if (g_log_aborter) g_log_aborter(msg);
+    else { fprintf(stderr, "  [liblog] abort: %s\n", msg ? msg : ""); abort(); }
+}
+static void klx_android_log_stderr_logger(const klx_log_message *m) {
+    struct tm now; time_t t = time(NULL); localtime_r(&t, &now);
+    char ts[32]; strftime(ts, sizeof ts, "%m-%d %H:%M:%S", &now);
+    static const char chars[] = "XXVDIWEF";
+    char pc = (m->priority >= 0 && m->priority < 8) ? chars[m->priority] : '?';
+    uint64_t tid = 0;
+#ifdef __APPLE__
+    pthread_threadid_np(NULL, &tid);
+#endif
+    const char *prog = klx_getprogname();
+    if (m->file) fprintf(stderr, "%s %s %5d %5llu %c %-8s: %s:%u %s\n", prog ? prog : "?", ts, (int)getpid(),
+                         (unsigned long long)tid, pc, m->tag ? m->tag : "nullptr", m->file, m->line, m->message);
+    else fprintf(stderr, "%s %s %5d %5llu %c %-8s: %s\n", prog ? prog : "?", ts, (int)getpid(),
+                 (unsigned long long)tid, pc, m->tag ? m->tag : "nullptr", m->message);
+}
+// logd's own logger is the default one: the shim's log write (kl_shim.c) is what prints.
+static void klx_android_log_logd_logger(const klx_log_message *m) {
+    fprintf(stderr, "[%d/%s] %s\n", m->priority, m->tag ? m->tag : "", m->message ? m->message : "");
+}
+static void klx_android_log_close(void) {}
+// Binary event log: there is no event buffer to read here; the calls report the bytes
+// they were handed, as a successful write to logd does.
+static int klx_android_log_bwrite(int32_t tag, const void *payload, size_t len) { (void)tag; (void)payload; return (int)len; }
+static int klx_android_log_btwrite(int32_t tag, int type, const void *payload, size_t len) { (void)tag; (void)type; (void)payload; return (int)len; }
+static int klx_android_log_bswrite(int32_t tag, const char *payload) { (void)tag; return payload ? (int)strlen(payload) : -22; }
+static int klx_android_log_error_write(int tag, const char *subtag, int32_t uid, const char *data, uint32_t len) {
+    (void)tag; (void)subtag; (void)uid; (void)data; return (int)len;
+}
+
+// ---- fortify (_chk) leftovers --------------------------------------------
+static void fortify_fatal(const char *fmt, const char *fn) {
+    fprintf(stderr, "FORTIFY: ");
+    fprintf(stderr, fmt, fn);
+    fputc('\n', stderr);
+    abort();
+}
+static void *klx___memrchr_chk(const void *s, int c, size_t n, size_t cap) {
+    if (n > cap) fortify_fatal("%s: prevented read past end of buffer", "memrchr");
+    const unsigned char *p = s;
+    while (n--) if (p[n] == (unsigned char)c) return (void *)(p + n);
+    return NULL;
+}
+static char *klx___stpcpy_chk(char *d, const char *s, size_t cap) {
+    size_t l = strlen(s);
+    if (l >= cap) fortify_fatal("%s: prevented write past end of buffer", "stpcpy");
+    memcpy(d, s, l + 1);
+    return d + l;
+}
+static char *klx___stpncpy_chk(char *d, const char *s, size_t n, size_t cap) {
+    if (n > cap) fortify_fatal("%s: prevented write past end of buffer", "stpncpy");
+    return stpncpy(d, s, n);
+}
+static char *klx___stpncpy_chk2(char *d, const char *s, size_t n, size_t dcap, size_t scap) {
+    if (n > dcap) fortify_fatal("%s: prevented write past end of buffer", "stpncpy");
+    if (scap < n && strnlen(s, n) >= scap) fortify_fatal("%s: prevented read past end of buffer", "stpncpy");
+    return stpncpy(d, s, n);
+}
+static size_t klx___strlcpy_chk(char *d, const char *s, size_t n, size_t cap) {
+    if (n > cap) fortify_fatal("%s: prevented write past end of buffer", "strlcpy");
+    return strlcpy(d, s, n);
+}
+static size_t klx___strlcat_chk(char *d, const char *s, size_t n, size_t cap) {
+    if (n > cap) fortify_fatal("%s: prevented write past end of buffer", "strlcat");
+    return strlcat(d, s, n);
+}
+static int klx___umask_chk(unsigned mode) {
+    if (mode & ~0777u) fortify_fatal("%s: called with invalid mode", "umask");
+    return umask((mode_t)mode);
+}
+// fds_size is in bytes; a pollfd is 8 bytes in bionic.
+static int klx___ppoll_chk(void *fds, unsigned long nfds, const void *tmo, const void *mask, size_t fds_size) {
+    if (fds_size / 8 < nfds) fortify_fatal("%s: prevented write past end of buffer", "ppoll");
+    int (*pp)(void *, unsigned long, const void *, const void *) = (int (*)(void *, unsigned long, const void *, const void *))kl_shim_lookup("ppoll");
+    return pp(fds, nfds, tmo, mask);
+}
+static ssize_t klx___sendto_chk(int fd, const void *buf, size_t n, size_t cap, int flags, const void *addr, unsigned alen) {
+    if (n > cap) fortify_fatal("%s: prevented read past end of buffer", "sendto");
+    ssize_t (*st)(int, const void *, size_t, int, const void *, unsigned) = (ssize_t (*)(int, const void *, size_t, int, const void *, unsigned))kl_shim_lookup("sendto");
+    return st(fd, buf, n, flags, addr, alen);
+}
+static ssize_t klx___readlink_chk(const char *path, char *buf, size_t n, size_t cap) {
+    if (n > cap) fortify_fatal("%s: prevented write past end of buffer", "readlink");
+    ssize_t (*rl)(const char *, char *, size_t) = (ssize_t (*)(const char *, char *, size_t))kl_shim_lookup("readlink");
+    return rl(path, buf, n);
+}
+static ssize_t klx___readlinkat_chk(int dirfd, const char *path, char *buf, size_t n, size_t cap) {
+    if (n > cap) fortify_fatal("%s: prevented write past end of buffer", "readlinkat");
+    ssize_t (*rl)(int, const char *, char *, size_t) = (ssize_t (*)(int, const char *, char *, size_t))kl_shim_lookup("readlinkat");
+    return rl(dirfd, path, buf, n);
+}
+
+// ---- android_dlopen_ext / netid-aware resolver ---------------------------
+// android_dlextinfo { uint64_t flags; void *reserved_addr; size_t reserved_size; int relro_fd;
+//                     int library_fd; off64_t library_fd_offset; android_namespace_t *library_namespace; }
+// The flags that ask for a placement (RESERVED_ADDRESS 0x1/HINT 0x2), a relro file or a library
+// by fd (0x10) cannot be honoured by the loader here; the rest (namespace, use-fd-offset) do
+// not change what gets loaded. A guest that relies on one of the former gets the load
+// refused rather than a library mapped somewhere it did not ask for.
+extern void *klb_dlopen(const char *path, int flags);
+extern const char *klb_dlerror(void);
+static void *klx_android_dlopen_ext(const char *path, int flags, const void *ext) {
+    if (ext) {
+        uint64_t f = *(const uint64_t *)ext;
+        if (f & (0x1 | 0x2 | 0x4 | 0x8 | 0x10 | 0x100)) {
+            fprintf(stderr, "  [dl] android_dlopen_ext(\"%s\"): flags 0x%llx (reserved address / relro / library fd) are not supported\n",
+                    path ? path : "?", (unsigned long long)f);
+            return NULL;
+        }
+    }
+    return klb_dlopen(path, flags);
+}
+// The netid/mark arguments select an Android network; there is one network here.
+static int klx_android_getaddrinfofornet(const char *host, const char *serv, const void *hints,
+                                         unsigned netid, unsigned mark, void **res) {
+    (void)netid; (void)mark;
+    int (*gai)(const char *, const char *, const void *, void **) =
+        (int (*)(const char *, const char *, const void *, void **))kl_shim_lookup("getaddrinfo");
+    return gai ? gai(host, serv, hints, res) : -2;                      // EAI_NONAME... EAI_FAIL
+}
+static void *klx_android_gethostbynamefornet(const char *name, int af, unsigned netid, unsigned mark) {
+    (void)netid; (void)mark;
+    void *(*g)(const char *, int) = (void *(*)(const char *, int))kl_shim_lookup("gethostbyname2");
+    return g ? g(name, af) : NULL;
+}
+
+// ---- small libc leftovers ---------------------------------------------------
+static _Thread_local int g_h_errno;
+static int *klx___get_h_errno(void) { return &g_h_errno; }
+// cpu_set_t allocation (CPU_ALLOC / CPU_FREE expand to these)
+static void *klx___sched_cpualloc(size_t count) { return malloc(((count + 63) / 64) * 8); }
+static void klx___sched_cpufree(void *set) { free(set); }
+static int klx___system_properties_init(void) { return 0; }
+
+// base64 for the resolver (RFC 4648 alphabet, '=' padding), as in OpenBSD's b64_ntop/pton
+static const char b64chars[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+static int klx___b64_ntop(const unsigned char *src, size_t len, char *dst, size_t size) {
+    size_t o = 0;
+    while (len >= 3) {
+        if (o + 4 > size) return -1;
+        dst[o++] = b64chars[src[0] >> 2];
+        dst[o++] = b64chars[((src[0] & 3) << 4) | (src[1] >> 4)];
+        dst[o++] = b64chars[((src[1] & 15) << 2) | (src[2] >> 6)];
+        dst[o++] = b64chars[src[2] & 63];
+        src += 3; len -= 3;
+    }
+    if (len) {
+        if (o + 4 > size) return -1;
+        dst[o++] = b64chars[src[0] >> 2];
+        if (len == 1) { dst[o++] = b64chars[(src[0] & 3) << 4]; dst[o++] = '='; }
+        else { dst[o++] = b64chars[((src[0] & 3) << 4) | (src[1] >> 4)]; dst[o++] = b64chars[(src[1] & 15) << 2]; }
+        dst[o++] = '=';
+    }
+    if (o >= size) return -1;
+    dst[o] = 0;
+    return (int)o;
+}
+static int klx___b64_pton(const char *src, unsigned char *target, size_t targsize) {
+    int tarindex = 0, state = 0, ch;
+    const char *pos;
+    while ((ch = (unsigned char)*src++) != '\0') {
+        if (isspace(ch)) continue;
+        if (ch == '=') break;
+        pos = strchr(b64chars, ch);
+        if (pos == NULL) return -1;
+        unsigned v = (unsigned)(pos - b64chars);
+        switch (state) {
+        case 0:
+            if (target) { if ((size_t)tarindex >= targsize) return -1; target[tarindex] = (unsigned char)(v << 2); }
+            state = 1; break;
+        case 1:
+            if (target) { if ((size_t)tarindex + 1 >= targsize) return -1;
+                          target[tarindex] |= v >> 4; target[tarindex + 1] = (unsigned char)((v & 0x0f) << 4); }
+            tarindex++; state = 2; break;
+        case 2:
+            if (target) { if ((size_t)tarindex + 1 >= targsize) return -1;
+                          target[tarindex] |= v >> 2; target[tarindex + 1] = (unsigned char)((v & 0x03) << 6); }
+            tarindex++; state = 3; break;
+        case 3:
+            if (target) { if ((size_t)tarindex >= targsize) return -1; target[tarindex] |= v; }
+            tarindex++; state = 0; break;
+        }
+    }
+    if (ch == '=') {
+        ch = (unsigned char)*src++;
+        switch (state) {
+        case 0: case 1: return -1;
+        case 2:
+            for (; ch != '\0'; ch = (unsigned char)*src++) if (!isspace(ch)) break;
+            if (ch != '=') return -1;
+            ch = (unsigned char)*src++;
+            /* fall through */
+        case 3:
+            for (; ch != '\0'; ch = (unsigned char)*src++) if (!isspace(ch)) return -1;
+            if (target && (size_t)tarindex < targsize && target[tarindex] != 0) return -1;
+        }
+    } else if (state != 0) return -1;
+    return tarindex;
+}
+
+// sys_siglist: bionic's table, indexed by LINUX signal number.
+static const char *const klx_sys_siglist[65] = {
+    [0] = NULL, [1] = "Hangup", [2] = "Interrupt", [3] = "Quit", [4] = "Illegal instruction", [5] = "Trap",
+    [6] = "Aborted", [7] = "Bus error", [8] = "Floating point exception", [9] = "Killed",
+    [10] = "User defined signal 1", [11] = "Segmentation fault", [12] = "User defined signal 2",
+    [13] = "Broken pipe", [14] = "Alarm clock", [15] = "Terminated", [16] = "Stack fault",
+    [17] = "Child exited", [18] = "Continue", [19] = "Stopped (signal)", [20] = "Stopped",
+    [21] = "Stopped (tty input)", [22] = "Stopped (tty output)", [23] = "Urgent I/O condition",
+    [24] = "CPU time limit exceeded", [25] = "File size limit exceeded", [26] = "Virtual timer expired",
+    [27] = "Profiling timer expired", [28] = "Window size changed", [29] = "I/O possible",
+    [30] = "Power failure", [31] = "Bad system call",
+};
+static void klx__Exit(int status) { _exit(status); }
+static int klx_atexit(void (*fn)(void)) { return atexit(fn); }
+
 // ===== EXTERNS =====
 DECLX(klb_pthread_mutex_timedlock)
 DECLX(klb_pthread_mutex_timedlock_monotonic_np)
@@ -688,6 +1038,18 @@ DECLX(klb_sem_unlink)
 DECLX(klb_pthread_gettid_np)
 DECLX(klb_pthread_getname_np)
 DECLX(klb_pthread_getcpuclockid)
+DECLX(klb_sysprop_serial)
+DECLX(klb_sysprop_read_callback)
+DECLX(klb_sysprop_find_nth)
+DECLX(klb_sysprop_foreach)
+DECLX(klb_sysprop_set)
+DECLX(klb_sysprop_update)
+DECLX(klb_sysprop_add)
+DECLX(klb_sysprop_area_init)
+DECLX(klb_sysprop_set_filename)
+DECLX(klb_sysprop_area_serial)
+DECLX(klb_sysprop_wait)
+DECLX(klb_sysprop_wait_any)
 // ===== END EXTERNS =====
 
 // ===== TABLE =====
@@ -738,7 +1100,44 @@ static const kl_xentry g_extra[] = {
     XK(mbsrtowcs), XK(wcsnrtombs), XK(wcsrtombs), XK(mbstowcs), XK(wcstombs), XK(btowc), XK(wctob),
     XK(mbrtoc32), XK(mbrtoc16), XK(c32rtomb), XK(c16rtomb),
     XK(nl_langinfo), XK(nl_langinfo_l),
+    // ---- Android-only libc ----
+    XK(android_get_device_api_level), XK(android_get_application_target_sdk_version),
+    XK(android_fdsan_create_owner_tag), XK(android_fdsan_get_tag_type), XK(android_fdsan_get_tag_value),
+    XK(android_fdsan_get_owner_tag), XK(android_fdsan_exchange_owner_tag), XK(android_fdsan_close_with_tag),
+    XK(android_fdsan_get_error_level), XK(android_fdsan_set_error_level),
+    XK(android_fdsan_set_error_level_from_property),
+    XW("__android_log_set_logger", klx_android_log_set_logger),
+    XW("__android_log_set_default_tag", klx_android_log_set_default_tag),
+    XW("__android_log_set_aborter", klx_android_log_set_aborter),
+    XW("__android_log_call_aborter", klx_android_log_call_aborter),
+    XW("__android_log_stderr_logger", klx_android_log_stderr_logger),
+    XW("__android_log_logd_logger", klx_android_log_logd_logger),
+    XW("__android_log_close", klx_android_log_close),
+    XW("__android_log_bwrite", klx_android_log_bwrite), XW("__android_log_btwrite", klx_android_log_btwrite),
+    XW("__android_log_bswrite", klx_android_log_bswrite), XW("__android_log_error_write", klx_android_log_error_write),
+    XK(__memrchr_chk), XK(__stpcpy_chk), XK(__stpncpy_chk), XK(__stpncpy_chk2), XK(__strlcpy_chk), XK(__strlcat_chk),
+    XK(__umask_chk), XK(__ppoll_chk), XW("__ppoll64_chk", klx___ppoll_chk), XK(__sendto_chk),
+    XK(__readlink_chk), XK(__readlinkat_chk),
+    XK(__get_h_errno), XK(__sched_cpualloc), XK(__sched_cpufree), XK(__system_properties_init),
+    XK(__b64_ntop), XK(__b64_pton), XW("sys_siglist", klx_sys_siglist),
+    XK(android_getaddrinfofornet), XK(android_gethostbynamefornet), XK(android_dlopen_ext),
+    XK(getprogname), XK(setprogname), XK(_Exit), XK(atexit), X(quick_exit), X(at_quick_exit), X(arc4random_uniform),
     // ---- pthread / semaphore (kl_pthread.c) ----
+    // ---- system properties (kl_libc.c) ----
+    // ===== SYSPROP ROWS =====
+    XE("__system_property_serial", klb_sysprop_serial)
+    XE("__system_property_read_callback", klb_sysprop_read_callback)
+    XE("__system_property_find_nth", klb_sysprop_find_nth)
+    XE("__system_property_foreach", klb_sysprop_foreach)
+    XE("__system_property_set", klb_sysprop_set)
+    XE("__system_property_update", klb_sysprop_update)
+    XE("__system_property_add", klb_sysprop_add)
+    XE("__system_property_area_init", klb_sysprop_area_init)
+    XE("__system_property_set_filename", klb_sysprop_set_filename)
+    XE("__system_property_area_serial", klb_sysprop_area_serial)
+    XE("__system_property_wait", klb_sysprop_wait)
+    XE("__system_property_wait_any", klb_sysprop_wait_any)
+    // ===== END SYSPROP ROWS =====
     // ===== PTHREAD ROWS =====
     XE("pthread_mutex_timedlock", klb_pthread_mutex_timedlock)
     XE("pthread_mutex_timedlock_monotonic_np", klb_pthread_mutex_timedlock_monotonic_np)

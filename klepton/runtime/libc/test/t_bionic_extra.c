@@ -2,6 +2,9 @@
 //   cc -DKL_EXTRA_TEST -I.. t_bionic_extra.c -lm -o t && ./t
 // It includes the implementation file so the static wrappers are reachable.
 #include "../kl_bionic_extra.c"
+void *kl_shim_lookup(const char *n) { (void)n; return 0; }
+int klb_sysprop_get(const char *n, char *v) { (void)n; v[0] = 0; return 0; }
+void *klb_dlopen(const char *p, int f) { (void)p; (void)f; return 0; }
 
 static int bad;
 #define CHECK(c) do { if (!(c)) { printf("FAIL %s:%d  %s\n", __FILE__, __LINE__, #c); bad++; } } while (0)
@@ -91,8 +94,38 @@ static void t_utf8(void) {
     CHECK(klx_c32rtomb(o, 0x110000, &st) == (size_t)-1);
 }
 
+static void t_android(void) {
+    CHECK(klx_android_fdsan_create_owner_tag(3, 0x1234) == ((3ull << 56) | 0x1234));
+    CHECK(klx_android_fdsan_create_owner_tag(3, 0) == 0);
+    uint64_t tag = klx_android_fdsan_create_owner_tag(3, 77);
+    CHECK(klx_android_fdsan_get_tag_type(tag) == 3 && klx_android_fdsan_get_tag_value(tag) == 77);
+    int fd = dup(1);
+    klx_android_fdsan_exchange_owner_tag(fd, 0, tag);
+    CHECK(klx_android_fdsan_get_owner_tag(fd) == tag);
+    CHECK(klx_android_fdsan_close_with_tag(fd, tag) == 0);
+    CHECK(klx_android_fdsan_get_owner_tag(fd) == 0);
+    char o[64]; unsigned char back[32];
+    CHECK(klx___b64_ntop((const unsigned char *)"foobar", 6, o, sizeof o) == 8 && !strcmp(o, "Zm9vYmFy"));
+    CHECK(klx___b64_ntop((const unsigned char *)"fo", 2, o, sizeof o) == 4 && !strcmp(o, "Zm8="));
+    CHECK(klx___b64_ntop((const unsigned char *)"f", 1, o, sizeof o) == 4 && !strcmp(o, "Zg=="));
+    CHECK(klx___b64_ntop((const unsigned char *)"foobar", 6, o, 8) == -1);
+    CHECK(klx___b64_pton("Zm9vYmFy", back, sizeof back) == 6 && !memcmp(back, "foobar", 6));
+    CHECK(klx___b64_pton("Zm8=", back, sizeof back) == 2 && !memcmp(back, "fo", 2));
+    CHECK(klx___b64_pton("Zg==", back, sizeof back) == 1 && back[0] == 'f');
+    CHECK(klx___b64_pton("Zm8", back, sizeof back) == -1);
+    CHECK(klx___b64_pton("Zm$=", back, sizeof back) == -1);
+    CHECK(!strcmp(klx_sys_siglist[10], "User defined signal 1") && !strcmp(klx_sys_siglist[31], "Bad system call"));
+    char d[8]; CHECK(klx___stpcpy_chk(d, "abc", 8) == d + 3);
+    CHECK(klx___strlcpy_chk(d, "abcdefghij", 8, 8) == 10 && !strcmp(d, "abcdefg"));
+    { const char *hay = "abcabc"; CHECK(klx___memrchr_chk(hay, 'b', 6, 6) == (void *)(hay + 4)); }
+    CHECK(!strcmp(klx_getprogname(), "app_process64")); klx_setprogname("/x/y/foo"); CHECK(!strcmp(klx_getprogname(), "foo"));
+    klx_android_log_set_default_tag("tagtagtagtagtagtagtagtagtag");
+    CHECK(strlen(kl_log_default_tag) == 23);
+    CHECK(klx_android_get_device_api_level() == 32);
+}
+
 int main(void) {
-    t_math(); t_str(); t_utf8();
+    t_math(); t_str(); t_utf8(); t_android();
 #ifdef T_EXTRA_MORE
     t_more();
 #endif
