@@ -754,6 +754,7 @@ static int klx_android_fdsan_set_error_level_from_property(int dflt) {
 // bionic's __progname for an app process is its zygote fork's argv[0] basename.
 static const char *g_progname = "app_process64";
 static const char *klx_getprogname(void) { return g_progname; }
+const char *klb_getprogname_for_err(void) { return g_progname; }
 static void klx_setprogname(const char *n) {
     static char buf[256];
     if (!n) return;
@@ -995,6 +996,224 @@ static const char *const klx_sys_siglist[65] = {
 static void klx__Exit(int status) { _exit(status); }
 static int klx_atexit(void (*fn)(void)) { return atexit(fn); }
 
+
+// ======================================================================
+// <pwd.h> / <grp.h>: Android's static account database
+// ======================================================================
+// Android has no /etc/passwd. bionic answers from a built-in table of the platform's fixed
+// ids (AID_*), and from "u<user>_a<app>" for the application range 10000-19999. The structs
+// are bionic's, not Darwin's:
+//   passwd { char *pw_name, *pw_passwd; uid_t pw_uid; gid_t pw_gid; char *pw_gecos, *pw_dir, *pw_shell; }
+//   group  { char *gr_name, *gr_passwd; gid_t gr_gid; char **gr_mem; }
+typedef struct { char *pw_name, *pw_passwd; uint32_t pw_uid, pw_gid; char *pw_gecos, *pw_dir, *pw_shell; } bpasswd;
+typedef struct { char *gr_name, *gr_passwd; uint32_t gr_gid; char **gr_mem; } bgroup;
+static const struct { const char *name; uint32_t id; } g_aids[] = {
+    {"root", 0}, {"daemon", 1}, {"bin", 2}, {"system", 1000}, {"radio", 1001}, {"bluetooth", 1002},
+    {"graphics", 1003}, {"input", 1004}, {"audio", 1005}, {"camera", 1006}, {"log", 1007},
+    {"compass", 1008}, {"mount", 1009}, {"wifi", 1010}, {"adb", 1011}, {"install", 1012},
+    {"media", 1013}, {"dhcp", 1014}, {"sdcard_rw", 1015}, {"vpn", 1016}, {"keystore", 1017},
+    {"usb", 1018}, {"drm", 1019}, {"mdnsr", 1020}, {"gps", 1021}, {"media_rw", 1023},
+    {"mtp", 1024}, {"drmrpc", 1026}, {"nfc", 1027}, {"sdcard_r", 1028}, {"clat", 1029},
+    {"loop_radio", 1030}, {"mediadrm", 1031}, {"package_info", 1032}, {"sdcard_pics", 1033},
+    {"sdcard_av", 1034}, {"sdcard_all", 1035}, {"logd", 1036}, {"shared_relro", 1037},
+    {"dbus", 1038}, {"tlsdate", 1039}, {"mediaex", 1040}, {"audioserver", 1041},
+    {"metrics_coll", 1042}, {"metricsd", 1043}, {"webserv", 1044}, {"debuggerd", 1045},
+    {"mediacodec", 1046}, {"cameraserver", 1047}, {"firewall", 1048}, {"trunks", 1049},
+    {"nvram", 1050}, {"dns", 1051}, {"dns_tether", 1052}, {"webview_zygote", 1053},
+    {"vehicle_network", 1054}, {"media_audio", 1055}, {"media_video", 1056},
+    {"media_image", 1057}, {"tombstoned", 1058}, {"media_obb", 1059}, {"ese", 1060},
+    {"ota_update", 1061}, {"automotive_evs", 1062}, {"lowpan", 1063}, {"hsm", 1064},
+    {"reserved_disk", 1065}, {"statsd", 1066}, {"incidentd", 1067}, {"secure_element", 1068},
+    {"lmkd", 1069}, {"llkd", 1070}, {"iorapd", 1071}, {"gpu_service", 1072},
+    {"network_stack", 1073}, {"gsid", 1074}, {"fsverity_cert", 1075}, {"credstore", 1076},
+    {"external_storage", 1077}, {"ext_data_rw", 1078}, {"ext_obb_rw", 1079},
+    {"context_hub", 1080}, {"virtualizationservice", 1081}, {"artd", 1082}, {"uwb", 1083},
+    {"thread_network", 1084}, {"diced", 1085}, {"diced_utility", 1086}, {"dmesgd", 1087},
+    {"jc_weaver", 1088}, {"jc_strongbox", 1089}, {"jc_identity", 1090}, {"shell", 2000},
+    {"cache", 2001}, {"diag", 2002}, {"net_bt_admin", 3001}, {"net_bt", 3002}, {"inet", 3003},
+    {"net_raw", 3004}, {"net_admin", 3005}, {"net_bw_stats", 3006}, {"net_bw_acct", 3007},
+    {"readproc", 3009}, {"wakelock", 3010}, {"uhid", 3011}, {"readtracefs", 3012},
+    {"everybody", 9997}, {"misc", 9998}, {"nobody", 9999},
+};
+#define N_AIDS (sizeof g_aids / sizeof g_aids[0])
+// A uid in 10000..19999 is "u0_a<uid-10000>"; the other android users (uid/100000 > 0) are
+// "u<N>_a<M>" and appear only for the primary user here.
+static int pw_name_of(uint32_t id, char *buf, size_t n) {
+    for (size_t i = 0; i < N_AIDS; i++) if (g_aids[i].id == id) { snprintf(buf, n, "%s", g_aids[i].name); return 1; }
+    if (id >= 10000 && id <= 19999) { snprintf(buf, n, "u0_a%u", id - 10000); return 1; }
+    // The uid the host gave this process is the app's own uid: stat() reports it as the owner
+    // of every file the guest creates, so it must resolve to an account (u0_a<uid>) the way an
+    // app's uid does on Android.
+    if (id == (uint32_t)getuid() || id == (uint32_t)getgid() || id == (uint32_t)geteuid()) { snprintf(buf, n, "u0_a%u", id); return 1; }
+    return 0;
+}
+static int pw_id_of(const char *name, uint32_t *id) {
+    for (size_t i = 0; i < N_AIDS; i++) if (!strcmp(g_aids[i].name, name)) { *id = g_aids[i].id; return 1; }
+    unsigned a;
+    char tail, own[40];
+    snprintf(own, sizeof own, "u0_a%u", (uint32_t)getuid());
+    if (!strcmp(name, own)) { *id = (uint32_t)getuid(); return 1; }
+    snprintf(own, sizeof own, "u0_a%u", (uint32_t)getgid());
+    if (!strcmp(name, own)) { *id = (uint32_t)getgid(); return 1; }
+    if (sscanf(name, "u0_a%u%c", &a, &tail) == 1 && a <= 9999) { *id = 10000 + a; return 1; }
+    return 0;
+}
+static int pw_fill(bpasswd *pw, char *buf, size_t buflen, uint32_t id) {
+    char name[40];
+    if (!pw_name_of(id, name, sizeof name)) return 0;
+    const char *dir = (id >= 10000 && id <= 19999) || (id == (uint32_t)getuid() && id >= 500) ? "/data" : "/";
+    size_t need = strlen(name) + 1 + strlen(dir) + 1 + sizeof "/system/bin/sh";
+    if (need > buflen) return -1;
+    char *p = buf;
+    pw->pw_name = p; memcpy(p, name, strlen(name) + 1); p += strlen(name) + 1;
+    pw->pw_dir = p; memcpy(p, dir, strlen(dir) + 1); p += strlen(dir) + 1;
+    pw->pw_shell = p; memcpy(p, "/system/bin/sh", sizeof "/system/bin/sh");
+    pw->pw_passwd = NULL; pw->pw_gecos = NULL;
+    pw->pw_uid = pw->pw_gid = id;
+    return 1;
+}
+static _Thread_local bpasswd t_pw; static _Thread_local char t_pwbuf[160];
+static _Thread_local bgroup t_gr; static _Thread_local char t_grbuf[160]; static _Thread_local char *t_grmem[2];
+static bpasswd *klx_getpwuid(uint32_t uid) { return pw_fill(&t_pw, t_pwbuf, sizeof t_pwbuf, uid) == 1 ? &t_pw : NULL; }
+static bpasswd *klx_getpwnam(const char *name) {
+    uint32_t id;
+    return name && pw_id_of(name, &id) ? klx_getpwuid(id) : NULL;
+}
+static int klx_getpwuid_r(uint32_t uid, bpasswd *pw, char *buf, size_t n, bpasswd **res) {
+    *res = NULL;
+    int r = pw_fill(pw, buf, n, uid);
+    if (r < 0) return 34;                // ERANGE
+    if (r == 1) *res = pw;
+    return 0;
+}
+static int klx_getpwnam_r(const char *name, bpasswd *pw, char *buf, size_t n, bpasswd **res) {
+    uint32_t id;
+    *res = NULL;
+    if (!name || !pw_id_of(name, &id)) return 0;
+    return klx_getpwuid_r(id, pw, buf, n, res);
+}
+static size_t g_pwent;
+static bpasswd *klx_getpwent(void) {
+    while (g_pwent < N_AIDS) {
+        bpasswd *p = klx_getpwuid(g_aids[g_pwent++].id);
+        if (p) return p;
+    }
+    return NULL;
+}
+static void klx_setpwent(void) { g_pwent = 0; }
+static void klx_endpwent(void) { g_pwent = 0; }
+
+static int gr_fill(bgroup *gr, char **mem, char *buf, size_t buflen, uint32_t id) {
+    char name[40];
+    if (!pw_name_of(id, name, sizeof name)) return 0;
+    size_t need = strlen(name) + 1;
+    if (need > buflen) return -1;
+    memcpy(buf, name, need);
+    gr->gr_name = buf; gr->gr_passwd = NULL; gr->gr_gid = id;
+    mem[0] = buf; mem[1] = NULL;          // like bionic: the group's only member is its namesake user
+    gr->gr_mem = mem;
+    return 1;
+}
+static bgroup *klx_getgrgid(uint32_t gid) { return gr_fill(&t_gr, t_grmem, t_grbuf, sizeof t_grbuf, gid) == 1 ? &t_gr : NULL; }
+static bgroup *klx_getgrnam(const char *name) {
+    uint32_t id;
+    return name && pw_id_of(name, &id) ? klx_getgrgid(id) : NULL;
+}
+// _r forms keep the member array at the start of the caller's buffer (two pointers), then the name
+static int klx_getgrgid_r(uint32_t gid, bgroup *gr, char *buf, size_t n, bgroup **res) {
+    *res = NULL;
+    if (n < 2 * sizeof(char *)) return 34;
+    char **mem = (char **)buf;
+    int r = gr_fill(gr, mem, buf + 2 * sizeof(char *), n - 2 * sizeof(char *), gid);
+    if (r < 0) return 34;
+    if (r == 1) *res = gr;
+    return 0;
+}
+static int klx_getgrnam_r(const char *name, bgroup *gr, char *buf, size_t n, bgroup **res) {
+    uint32_t id;
+    *res = NULL;
+    if (!name || !pw_id_of(name, &id)) return 0;
+    return klx_getgrgid_r(id, gr, buf, n, res);
+}
+static size_t g_grent;
+static bgroup *klx_getgrent(void) {
+    while (g_grent < N_AIDS) {
+        bgroup *g = klx_getgrgid(g_aids[g_grent++].id);
+        if (g) return g;
+    }
+    return NULL;
+}
+static void klx_setgrent(void) { g_grent = 0; }
+static void klx_endgrent(void) { g_grent = 0; }
+static int klx_getdomainname(char *name, size_t len) {
+    static const char dn[] = "(none)";
+    if (len < sizeof dn) { errno = EINVAL; return -1; }
+    memcpy(name, dn, sizeof dn);
+    return 0;
+}
+static int klx_setdomainname(const char *name, size_t len) { (void)name; (void)len; errno = EPERM; return -1; }
+static int klx_sethostname(const char *name, size_t len) { (void)name; (void)len; errno = EPERM; return -1; }
+static int klx_clearenv(void) {
+    extern char **environ;
+    while (environ && environ[0]) {
+        char *eq = strchr(environ[0], '=');
+        size_t n = eq ? (size_t)(eq - environ[0]) : strlen(environ[0]);
+        char name[256];
+        if (n >= sizeof name) { environ[0] = environ[1]; continue; }
+        memcpy(name, environ[0], n); name[n] = 0;
+        unsetenv(name);
+        if (environ && environ[0] && !strncmp(environ[0], name, n) && (environ[0][n] == '=' || !environ[0][n]))
+            { errno = EINVAL; return -1; }      // unsetenv did not remove it (read-only environment)
+    }
+    return 0;
+}
+
+// get_nprocs and friends (sysinfo.h): bionic reads them off sysconf's own numbers.
+extern long klb_sysconf(int name);
+static int klx_get_nprocs(void) { return (int)klb_sysconf(0x61); }          // _SC_NPROCESSORS_ONLN
+static int klx_get_nprocs_conf(void) { return (int)klb_sysconf(0x60); }     // _SC_NPROCESSORS_CONF
+static long klx_get_phys_pages(void) { return klb_sysconf(0x62); }          // _SC_PHYS_PAGES
+static long klx_get_avphys_pages(void) { return klb_sysconf(0x63); }        // _SC_AVPHYS_PAGES
+
+// posix_spawn: visionOS cannot start another process, so the spawn calls refuse with ENOSYS and
+// say so. The file-action / attribute objects are plain data (bionic's types are pointers to
+// them) and keep their contents, so setup code that builds them and reads them back works.
+typedef struct { short flags; int32_t pgroup; uint64_t sigmask, sigdefault; int32_t policy, prio; } kl_spawnattr;
+static int klx_posix_spawnattr_init(kl_spawnattr **a) {
+    *a = calloc(1, sizeof **a);
+    return *a ? 0 : 12;
+}
+static int klx_posix_spawnattr_destroy(kl_spawnattr **a) { free(*a); *a = NULL; return 0; }
+static int klx_posix_spawnattr_setflags(kl_spawnattr **a, short f) {
+    if (f & ~0x7F) return 22;
+    (*a)->flags = f; return 0;
+}
+static int klx_posix_spawnattr_getflags(kl_spawnattr *const *a, short *f) { *f = (*a)->flags; return 0; }
+static int klx_posix_spawnattr_setpgroup(kl_spawnattr **a, int g) { (*a)->pgroup = g; return 0; }
+static int klx_posix_spawnattr_getpgroup(kl_spawnattr *const *a, int *g) { *g = (*a)->pgroup; return 0; }
+static int klx_posix_spawnattr_setsigmask(kl_spawnattr **a, const uint64_t *m) { (*a)->sigmask = *m; return 0; }
+static int klx_posix_spawnattr_getsigmask(kl_spawnattr *const *a, uint64_t *m) { *m = (*a)->sigmask; return 0; }
+static int klx_posix_spawnattr_setsigdefault(kl_spawnattr **a, const uint64_t *m) { (*a)->sigdefault = *m; return 0; }
+static int klx_posix_spawnattr_getsigdefault(kl_spawnattr *const *a, uint64_t *m) { *m = (*a)->sigdefault; return 0; }
+static int klx_posix_spawnattr_setschedpolicy(kl_spawnattr **a, int p) { (*a)->policy = p; return 0; }
+static int klx_posix_spawnattr_getschedpolicy(kl_spawnattr *const *a, int *p) { *p = (*a)->policy; return 0; }
+static int klx_posix_spawnattr_setschedparam(kl_spawnattr **a, const int *p) { (*a)->prio = p[0]; return 0; }
+static int klx_posix_spawnattr_getschedparam(kl_spawnattr *const *a, int *p) { p[0] = (*a)->prio; return 0; }
+static int klx_posix_spawn_file_actions_init(void **fa) { *fa = calloc(1, 16); return *fa ? 0 : 12; }
+static int klx_posix_spawn_file_actions_destroy(void **fa) { free(*fa); *fa = NULL; return 0; }
+static int klx_posix_spawn_file_actions_addclose(void **fa, int fd) { (void)fa; return fd < 0 ? 9 : 0; }
+static int klx_posix_spawn_file_actions_adddup2(void **fa, int fd, int nfd) { (void)fa; return (fd < 0 || nfd < 0) ? 9 : 0; }
+static int klx_posix_spawn_file_actions_addopen(void **fa, int fd, const char *path, int fl, unsigned mode) {
+    (void)fa; (void)fl; (void)mode; return (fd < 0 || !path) ? 9 : 0;
+}
+static int klx_posix_spawn_file_actions_addchdir_np(void **fa, const char *path) { (void)fa; return path ? 0 : 22; }
+static int klx_posix_spawn_file_actions_addfchdir_np(void **fa, int fd) { (void)fa; return fd < 0 ? 9 : 0; }
+static int klx_posix_spawn(int *pid, const char *path, const void *fa, const void *attr, char *const argv[], char *const envp[]) {
+    (void)pid; (void)fa; (void)attr; (void)argv; (void)envp;
+    fprintf(stderr, "  [klb] posix_spawn(\"%s\"): this platform cannot start another process — ENOSYS\n", path ? path : "?");
+    return 38;                            // ENOSYS (Linux numbering: the return value IS the error code)
+}
+
 // ===== EXTERNS =====
 DECLX(klb_pthread_mutex_timedlock)
 DECLX(klb_pthread_mutex_timedlock_monotonic_np)
@@ -1146,6 +1365,18 @@ static const kl_xentry g_extra[] = {
     XK(powl), XK(remainderl), XK(nexttowardl), XK(truncl), XK(fmal), XK(ldexpl), XK(scalbnl),
     XK(scalblnl), XK(frexpl), XK(nanl), XK(remquol), XK(lgammal_r), XK(sincosl),
     XK(lrintl), XK(llrintl), XK(lroundl), XK(llroundl),
+    XK(getpwuid), XK(getpwnam), XK(getpwuid_r), XK(getpwnam_r), XK(getpwent), XK(setpwent), XK(endpwent),
+    XK(getgrgid), XK(getgrnam), XK(getgrgid_r), XK(getgrnam_r), XK(getgrent), XK(setgrent), XK(endgrent),
+    XK(getdomainname), XK(setdomainname), XK(sethostname), XK(clearenv),
+    XK(get_nprocs), XK(get_nprocs_conf), XK(get_phys_pages), XK(get_avphys_pages),
+    XK(posix_spawnattr_init), XK(posix_spawnattr_destroy), XK(posix_spawnattr_setflags), XK(posix_spawnattr_getflags),
+    XK(posix_spawnattr_setpgroup), XK(posix_spawnattr_getpgroup), XK(posix_spawnattr_setsigmask),
+    XK(posix_spawnattr_getsigmask), XK(posix_spawnattr_setsigdefault), XK(posix_spawnattr_getsigdefault),
+    XK(posix_spawnattr_setschedpolicy), XK(posix_spawnattr_getschedpolicy), XK(posix_spawnattr_setschedparam),
+    XK(posix_spawnattr_getschedparam), XK(posix_spawn_file_actions_init), XK(posix_spawn_file_actions_destroy),
+    XK(posix_spawn_file_actions_addclose), XK(posix_spawn_file_actions_adddup2), XK(posix_spawn_file_actions_addopen),
+    XK(posix_spawn_file_actions_addchdir_np), XK(posix_spawn_file_actions_addfchdir_np),
+    XK(posix_spawn), XW("posix_spawnp", klx_posix_spawn),
     // ---- string / ctype / locale ----
     XK(bcmp), XK(bcopy), XK(bzero), XK(rindex), XK(explicit_bzero), XK(memset_explicit),
     XK(memccpy), X(memmem), XK(mempcpy), X(stpncpy), XK(strndup), XK(ffs), XK(ffsl), XK(ffsll),

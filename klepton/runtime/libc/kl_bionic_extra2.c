@@ -416,3 +416,102 @@ ssize_t klb_process_vm_writev(int pid, const struct iovec *l, unsigned long ln, 
     if (fl) { errno = EINVAL; return -1; }
     return pvm(pid, l, ln, r, rn, 1);
 }
+
+// ---------------------------------------------------------------- varargs consumers, wide printf, err.h
+#include <wchar.h>
+#include <locale.h>
+#include <xlocale.h>
+#include "kl_va.h"
+
+FILE *kl_host_file(void *guest);
+void klb_exit(int status);
+
+#define KL_MARSHAL2(fmt, va, mode, fail)                                     \
+    char _m[512] __attribute__((aligned(16)));                               \
+    if (kl_va_marshal((fmt), (va), _m, sizeof _m, (mode)) == (size_t)-1)     \
+        return fail;                                                         \
+    va_list _ap = (va_list)_m
+
+int klx2_vscanf(const char *fmt, kl_va *va) {
+    KL_MARSHAL2(fmt, va, KL_VA_SCANF, -1);
+    return vscanf(fmt, _ap);
+}
+int klx2_vfscanf(void *f, const char *fmt, kl_va *va) {
+    KL_MARSHAL2(fmt, va, KL_VA_SCANF, -1);
+    return vfscanf(kl_host_file(f), fmt, _ap);
+}
+int klx2_vdprintf(int fd, const char *fmt, kl_va *va) {
+    KL_MARSHAL2(fmt, va, KL_VA_PRINTF, -1);
+    return vdprintf(fd, fmt, _ap);
+}
+// vsyslog: same destination as the variadic syslog (klh_syslog in kl_va_handlers.c).
+void klx2_vsyslog(int pri, const char *fmt, kl_va *va) {
+    KL_MARSHAL2(fmt, va, KL_VA_PRINTF, );
+    fprintf(stderr, "[guest syslog %d] ", pri);
+    vfprintf(stderr, fmt, _ap);
+    fputc('\n', stderr);
+}
+
+// The wide printf family. The marshaller walks a narrow format, but a wide format's specifiers
+// are ASCII, so a narrowed copy (anything above 0x7F becomes '?', which is no specifier) drives
+// the argument walk and Darwin formats from the original wide string. The wide functions convert
+// narrow strings (%s) with the thread's locale: bionic converts as UTF-8, and the host runs in
+// the "C" locale, so the call is made under a UTF-8 locale when the system has one.
+static locale_t utf8_locale(void) {
+    static locale_t loc;
+    static _Atomic int tried;
+    if (!atomic_load(&tried)) {
+        loc = newlocale(LC_CTYPE_MASK, "C.UTF-8", NULL);
+        if (!loc) loc = newlocale(LC_CTYPE_MASK, "en_US.UTF-8", NULL);
+        atomic_store(&tried, 1);
+    }
+    return loc;
+}
+static int wmarshal(const wchar_t *wfmt, kl_va *va, char *out, size_t cap) {
+    size_t n = wcslen(wfmt);
+    char *nf = malloc(n + 1);
+    if (!nf) return -1;
+    for (size_t i = 0; i < n; i++) nf[i] = (wfmt[i] > 0 && wfmt[i] < 0x80) ? (char)wfmt[i] : '?';
+    nf[n] = 0;
+    size_t r = kl_va_marshal(nf, va, out, cap, KL_VA_PRINTF);
+    free(nf);
+    return r == (size_t)-1 ? -1 : 0;
+}
+int klx2_vswprintf(wchar_t *s, size_t n, const wchar_t *fmt, kl_va *va) {
+    char m[1024] __attribute__((aligned(16)));
+    if (wmarshal(fmt, va, m, sizeof m) != 0) return -1;
+    locale_t l = utf8_locale(), old = l ? uselocale(l) : 0;
+    int r = vswprintf(s, n, fmt, (va_list)m);
+    if (l) uselocale(old);
+    return r;
+}
+int klx2_vfwprintf(void *f, const wchar_t *fmt, kl_va *va) {
+    char m[1024] __attribute__((aligned(16)));
+    if (wmarshal(fmt, va, m, sizeof m) != 0) return -1;
+    locale_t l = utf8_locale(), old = l ? uselocale(l) : 0;
+    int r = vfwprintf(kl_host_file(f), fmt, (va_list)m);
+    if (l) uselocale(old);
+    return r;
+}
+int klx2_vwprintf(const wchar_t *fmt, kl_va *va) { return klx2_vfwprintf(stdout, fmt, va); }
+
+// BSD err.h: "<progname>: <message>[: <strerror(errno)>]\n" on stderr, then exit(eval) for err/errx.
+// The program name is bionic's __progname (see getprogname in kl_bionic_extra.c).
+extern const char *klb_getprogname_for_err(void);
+void klx2_verr(int eval, const char *fmt, kl_va *va, int with_errno, int do_exit) {
+    int saved = errno;
+    fprintf(stderr, "%s: ", klb_getprogname_for_err());
+    if (fmt) {
+        char m[512] __attribute__((aligned(16)));
+        if (kl_va_marshal(fmt, va, m, sizeof m, KL_VA_PRINTF) != (size_t)-1) vfprintf(stderr, fmt, (va_list)m);
+        if (with_errno) fputs(": ", stderr);
+    }
+    if (with_errno) fputs(strerror(saved), stderr);
+    fputc('\n', stderr);
+    if (do_exit) klb_exit(eval);
+}
+// verr/verrx/vwarn/vwarnx take the descriptor by reference already
+void klx2_verr_(int eval, const char *fmt, kl_va *va) { klx2_verr(eval, fmt, va, 1, 1); }
+void klx2_verrx_(int eval, const char *fmt, kl_va *va) { klx2_verr(eval, fmt, va, 0, 1); }
+void klx2_vwarn_(const char *fmt, kl_va *va) { klx2_verr(0, fmt, va, 1, 0); }
+void klx2_vwarnx_(const char *fmt, kl_va *va) { klx2_verr(0, fmt, va, 0, 0); }

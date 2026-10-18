@@ -3,6 +3,7 @@
 // It includes the implementation file so the static wrappers are reachable.
 #include "../kl_bionic_extra.c"
 void *kl_shim_lookup(const char *n) { (void)n; return 0; }
+long klb_sysconf(int n) { return n; }
 int klb_sysprop_get(const char *n, char *v) { (void)n; v[0] = 0; return 0; }
 void *klb_dlopen(const char *p, int f) { (void)p; (void)f; return 0; }
 
@@ -124,8 +125,30 @@ static void t_android(void) {
     CHECK(klx_android_get_device_api_level() == 32);
 }
 
+static void t_accounts(void) {
+    bpasswd *p = klx_getpwuid(0); CHECK(p && !strcmp(p->pw_name, "root") && !strcmp(p->pw_dir, "/"));
+    p = klx_getpwuid(10123); CHECK(p && !strcmp(p->pw_name, "u0_a123") && p->pw_gid == 10123 && !strcmp(p->pw_dir, "/data"));
+    p = klx_getpwnam("u0_a7"); CHECK(p && p->pw_uid == 10007);
+    CHECK(klx_getpwnam("u0_a7x") == NULL && klx_getpwuid(55555) == NULL && klx_getpwnam("nosuch") == NULL);
+    p = klx_getpwnam("shell"); CHECK(p && p->pw_uid == 2000 && !strcmp(p->pw_shell, "/system/bin/sh"));
+    bpasswd pw, *res; char buf[160];
+    CHECK(klx_getpwnam_r("system", &pw, buf, sizeof buf, &res) == 0 && res == &pw && pw.pw_uid == 1000);
+    CHECK(klx_getpwnam_r("system", &pw, buf, 4, &res) == 34 && res == NULL);
+    CHECK(klx_getpwnam_r("zzz", &pw, buf, sizeof buf, &res) == 0 && res == NULL);
+    bgroup *g = klx_getgrgid(2001); CHECK(g && !strcmp(g->gr_name, "cache") && g->gr_gid == 2001 && !strcmp(g->gr_mem[0], "cache") && !g->gr_mem[1]);
+    bgroup gr, *gres; char gbuf[160];
+    CHECK(klx_getgrnam_r("inet", &gr, gbuf, sizeof gbuf, &gres) == 0 && gres == &gr && gr.gr_gid == 3003);
+    int n = 0; klx_setpwent(); while (klx_getpwent()) n++; CHECK(n == (int)N_AIDS);
+    char dn[8]; CHECK(klx_getdomainname(dn, sizeof dn) == 0 && !strcmp(dn, "(none)") && klx_getdomainname(dn, 3) == -1);
+    kl_spawnattr *sa; CHECK(klx_posix_spawnattr_init(&sa) == 0);
+    short fl; CHECK(klx_posix_spawnattr_setflags(&sa, 0x4) == 0 && klx_posix_spawnattr_getflags(&sa, &fl) == 0 && fl == 4);
+    CHECK(klx_posix_spawnattr_setflags(&sa, 0x1000) == 22);
+    CHECK(klx_posix_spawnattr_destroy(&sa) == 0 && sa == NULL);
+    setenv("KLX_A", "1", 1); setenv("KLX_B", "2", 1); CHECK(klx_clearenv() == 0 && getenv("KLX_A") == NULL);
+}
+
 int main(void) {
-    t_math(); t_str(); t_utf8(); t_android();
+    t_math(); t_str(); t_utf8(); t_android(); t_accounts();
 #ifdef T_EXTRA_MORE
     t_more();
 #endif

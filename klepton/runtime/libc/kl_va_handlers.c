@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdarg.h>
+#include <wchar.h>
 #include <string.h>
 #include <fcntl.h>
 #include <sys/ioctl.h>
@@ -199,6 +200,23 @@ int klh_fscanf(void *f, const char *fmt, kl_va *va) {
     KL_MARSHAL(fmt, va, KL_VA_SCANF);
     return vfscanf(kl_host_file(f), fmt, _ap);
 }
+
+int klh_scanf(const char *fmt, kl_va *va) {
+    KL_MARSHAL(fmt, va, KL_VA_SCANF);
+    return vscanf(fmt, _ap);
+}
+
+// ---- wide printf, err.h: the work is in kl_bionic_extra2.c, which also serves the v* forms ----
+int klx2_vwprintf(const wchar_t *fmt, kl_va *va);
+int klx2_vfwprintf(void *f, const wchar_t *fmt, kl_va *va);
+int klx2_vswprintf(wchar_t *s, size_t n, const wchar_t *fmt, kl_va *va);
+void klx2_verr(int eval, const char *fmt, kl_va *va, int with_errno, int do_exit);
+int klh_wprintf(const wchar_t *fmt, kl_va *va)                    { return klx2_vwprintf(fmt, va); }
+int klh_fwprintf(void *f, const wchar_t *fmt, kl_va *va)          { return klx2_vfwprintf(f, fmt, va); }
+int klh_swprintf(wchar_t *s, size_t n, const wchar_t *fmt, kl_va *va) { return klx2_vswprintf(s, n, fmt, va); }
+void klh_err(int eval, const char *fmt, kl_va *va)  { klx2_verr(eval, fmt, va, 1, 1); }
+void klh_errx(int eval, const char *fmt, kl_va *va) { klx2_verr(eval, fmt, va, 0, 1); }
+void klh_warn(const char *fmt, kl_va *va)           { klx2_verr(0, fmt, va, 1, 0); }
 
 // ---- non-printf variadics: exactly one trailing argument, no format string ----
 int kl_open_flags(int lx);          // kl_libc.c
