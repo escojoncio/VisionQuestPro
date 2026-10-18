@@ -910,6 +910,8 @@ static void *klx_android_gethostbynamefornet(const char *name, int af, unsigned 
 // ---- small libc leftovers ---------------------------------------------------
 static _Thread_local int g_h_errno;
 static int *klx___get_h_errno(void) { return &g_h_errno; }
+int *kl_h_errno_ptr(void) { return &g_h_errno; }              // kl_bionic_extra3.c's resolver answers set it
+void kl_h_errno_set(int e) { g_h_errno = e; }
 // cpu_set_t allocation (CPU_ALLOC / CPU_FREE expand to these)
 static void *klx___sched_cpualloc(size_t count) { return malloc(((count + 63) / 64) * 8); }
 static void klx___sched_cpufree(void *set) { free(set); }
@@ -1659,10 +1661,11 @@ static const kl_xentry g_extra[] = {
 // ===== END TABLE =====
 };
 
+void *kl_bionic_extra3_lookup(const char *name);          // kl_bionic_extra3.c
 // Consulted by kl_shim_lookup / kl_shim_known BEFORE the generated table.
 void *kl_bionic_extra_lookup(const char *name) {
     if (!name) return NULL;
     for (size_t i = 0; i < sizeof g_extra / sizeof g_extra[0]; i++)
         if (g_extra[i].name[0] == name[0] && strcmp(g_extra[i].name, name) == 0) return g_extra[i].fn;
-    return NULL;
+    return kl_bionic_extra3_lookup(name);       // the second half: regex, search.h, iconv, getopt, netdb, kqueue-backed fds...
 }
