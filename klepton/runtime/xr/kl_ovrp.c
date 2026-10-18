@@ -1490,24 +1490,6 @@ void kl_ovrp_set_eye_texture_size(int w, int h) {
         h = (int)((float)h * scale + 0.5f);
     }
     int cap_dflt = native ? 4096 : 3072;
-    // AC Nexus: a quarter more (3840), paid for by rendering 2x multisampled
-    // instead of 4x (KL_VK_MAX_SAMPLES in kl_vulkan.c) and by two stages
-    // instead of three (kl_ovrp_stage_count). Arithmetic on the
-    // same headset: 4x at 3072 is 865 MB a stage (x3 here before), 2x at 3840
-    // is 676 MB a stage (x2), so the larger eye costs LESS than the old default.
-    // Only taken when that trade is actually in force: not when the sample
-    // mask or the stage count was overridden upwards, nor when the per-game
-    // MSAA choice (VPVK_MSAA) asks for more than 2x.
-    if (!native) {
-        extern int kl_is_ac_nexus(void);
-        const char *ms = getenv("KL_VK_MAX_SAMPLES");
-        const char *vm = getenv("VPVK_MSAA");
-        // 2x is no longer the AC default (4x, memoryless): the larger eye only when 2x is asked for.
-        int samples_ok = ms && atoi(ms) >= 1 && atoi(ms) <= 2;
-        int msaa_ok = !vm || atoi(vm) <= 2;
-        if (kl_is_ac_nexus() && samples_ok && msaa_ok && kl_ovrp_stage_count() <= 2)
-            cap_dflt = 3840;
-    }
     int cap = kl_env_int("KL_OVRP_EYE_MAX", cap_dflt);
     if (cap > 0 && (w > cap || h > cap)) {
         // Preserve the aspect ratio: clamping the axes independently would
