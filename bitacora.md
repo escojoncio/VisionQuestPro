@@ -257,6 +257,11 @@ Vulkan CTS desde la app; el informe de capacidades (vulkaninfo) de un Quest 3 re
      protected memory props, submit_wait_many_semaphores.
   4. NotSupported: implementar según «No soportados por motivo», con objetivo el perfil Adreno 740 (no todo).
   5. OpenXR CTS en el visor.
+  5a. (paso 2, rama paso-a1) `kl_openxr.c` xrEndFrame: validación por capa según spec 1.1 tras `KL_XR_STRICT_LAYERS`
+     (def. 0): space inválido/swapchain inválido → HANDLE_INVALID; projection viewCount≠2 o view.type malo o
+     imageArrayIndex≥arraySize → VALIDATION_FAILURE; swapchain sin imagen liberada → LAYER_INVALID; imageRect fuera
+     → SWAPCHAIN_RECT_INVALID (-25); cuaternión no unitario (±0,01) → POSE_INVALID (-39). Solo compilado en Linux;
+     falta exportar `KL_XR_STRICT_LAYERS=1` en `VQConformance.prepareOpenXR()` (Swift, fuera de xr/) y pasar el CTS.
 
 ## Juegos: problemas abiertos (resto)
 - Congelado tras `ShaderWarmupManager.WarmUpShaders` (AC, logs 53–55): `[futex]` en el `[snap]` para diagnosticar.
