@@ -1282,6 +1282,7 @@ static void kl_sendmsg_fanout(int fd, struct msghdr *h, int dflags) {
 
 static ssize_t kl_sendto(int fd, const void *buf, size_t n, int flags,
                          const struct sockaddr *sa, socklen_t len) {
+    if (kl_net_offline() && sa && !kl_net_loopback(sa)) { errno = ENETUNREACH; return -1; }  // offline: no datagrams out
     struct sockaddr_storage hs;
     char host[80] = "-";
     if (sa && kl_sa_to_host(&hs, sa, len) == 0) {
@@ -1536,6 +1537,10 @@ static int kl_cmsg_type_to_guest(int level, int type) {
 static ssize_t kl_sendmsg(int fd, const void *gmsg, int flags) {
     const kl_lx_msghdr *g = gmsg;
     if (!g) { errno = EFAULT; return -1; }
+    if (kl_net_offline() && g->msg_name && g->msg_namelen && !kl_net_loopback(g->msg_name)) {
+        errno = ENETUNREACH;   // offline: no datagrams out
+        return -1;
+    }
     struct msghdr h;
     memset(&h, 0, sizeof h);
     struct sockaddr_storage hs;
