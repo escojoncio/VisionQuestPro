@@ -5241,11 +5241,23 @@ static void klvk_note_magenta_pipelines(uint32_t n, const VkGraphicsPipelineCrea
             unsigned t = __atomic_add_fetch(&total, 1, __ATOMIC_RELAXED);
             if (__atomic_fetch_add(&said, 1, __ATOMIC_RELAXED) < 16) {
                 VKI("[magenta] pipeline %p uses that fragment module (renderPass %p subpass %u, "
-                    "%u colour attachment(s), %u samples) — %u such pipeline(s) so far\n",
+                    "%u colour attachment(s), %u samples) — %u such pipeline(s) so far "
+                    "[att0 writeMask=0x%x blend=%u; depth test=%u write=%u op=%u; cull=0x%x]\n",
                     (void *)out[i], (void *)ci[i].renderPass, ci[i].subpass,
                     ci[i].pColorBlendState ? ci[i].pColorBlendState->attachmentCount : 0,
                     ci[i].pMultisampleState ? (unsigned)ci[i].pMultisampleState->rasterizationSamples : 0,
-                    t);
+                    t,
+                    // Colour writeMask 0 means a depth-only pass: if these are visible, the bug is ours.
+                    ci[i].pColorBlendState && ci[i].pColorBlendState->attachmentCount &&
+                        ci[i].pColorBlendState->pAttachments
+                        ? (unsigned)ci[i].pColorBlendState->pAttachments[0].colorWriteMask : 0xffffu,
+                    ci[i].pColorBlendState && ci[i].pColorBlendState->attachmentCount &&
+                        ci[i].pColorBlendState->pAttachments
+                        ? (unsigned)ci[i].pColorBlendState->pAttachments[0].blendEnable : 0xffffu,
+                    ci[i].pDepthStencilState ? (unsigned)ci[i].pDepthStencilState->depthTestEnable : 0xffffu,
+                    ci[i].pDepthStencilState ? (unsigned)ci[i].pDepthStencilState->depthWriteEnable : 0xffffu,
+                    ci[i].pDepthStencilState ? (unsigned)ci[i].pDepthStencilState->depthCompareOp : 0xffffu,
+                    ci[i].pRasterizationState ? (unsigned)ci[i].pRasterizationState->cullMode : 0xffffu);
             }
         }
     }

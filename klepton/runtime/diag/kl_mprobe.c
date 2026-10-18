@@ -447,7 +447,8 @@ void kl_mprobe_tick(unsigned frame) {
     // measurement — this title reaches poses through OVRInput, below.
     static const MethodInfo *m_axis;
     static const MethodInfo *m_cpos, *m_crot, *m_conn, *m_pvalid, *m_ptracked;
-    static const MethodInfo *m_active, *m_ldev, *m_ovrpver, *m_verstr;
+    static const MethodInfo *m_active, *m_ovrpver, *m_verstr;
+    static const MethodInfo *m_hmdpres, *m_hmdp, *m_ovrminst, *m_ovrminit;
     static Il2CppObject *axis_str[N_AXES];
     static int resolved;
     if (!resolved) {
@@ -466,7 +467,12 @@ void kl_mprobe_tick(unsigned frame) {
         // XR device OVRManager thinks is loaded, and the OVRPlugin version the
         // managed side parsed. Any of these may be stripped; "?" then.
         m_active   = find_method("", "OVRInput", "GetActiveController", 0);
-        m_ldev     = find_method("", "OVRManager", "get_loadedXRDevice", 0);
+        // OVRInput.Update is skipped when OVRManager.isHmdPresent is false, which
+        // would leave connected=0x0 despite our ovrp controller state.
+        m_hmdpres  = find_method("", "OVRManager", "get_isHmdPresent", 0);
+        m_hmdp     = find_method("", "OVRPlugin", "get_hmdPresent", 0);
+        m_ovrminst = find_method("", "OVRManager", "get_instance", 0);
+        m_ovrminit = find_method("", "OVRManager", "get_OVRManagerinitialized", 0);
         m_ovrpver  = find_method("", "OVRPlugin", "get_version", 0);
         m_verstr   = find_method("System", "Version", "ToString", 0);
         for (unsigned i = 0; i < N_AXES; i++) axis_str[i] = il.string_new(AXES[i]);
@@ -701,7 +707,10 @@ void kl_mprobe_tick(unsigned frame) {
     else   fprintf(stderr, "?");
     {
         Il2CppObject *ac = invoke(m_active, NULL, "OVRInput.GetActiveController");
-        Il2CppObject *ld = invoke(m_ldev, NULL, "OVRManager.loadedXRDevice");
+        Il2CppObject *hp = invoke(m_hmdpres, NULL, "OVRManager.isHmdPresent");
+        Il2CppObject *pp = invoke(m_hmdp, NULL, "OVRPlugin.hmdPresent");
+        Il2CppObject *mi = invoke(m_ovrminst, NULL, "OVRManager.instance");
+        Il2CppObject *mn = invoke(m_ovrminit, NULL, "OVRManager.OVRManagerinitialized");
         Il2CppObject *vo = invoke(m_ovrpver, NULL, "OVRPlugin.version");
         char vs[64] = "?";
         if (vo) {
@@ -711,8 +720,16 @@ void kl_mprobe_tick(unsigned frame) {
         fprintf(stderr, " active=");
         if (ac) fprintf(stderr, "0x%x", *(uint32_t *)il.object_unbox(ac));
         else    fprintf(stderr, "?");
-        fprintf(stderr, " loadedXRDevice=");
-        if (ld) fprintf(stderr, "%d", *(int32_t *)il.object_unbox(ld));
+        fprintf(stderr, " isHmdPresent=");
+        if (hp) fprintf(stderr, "%d", *(uint8_t *)il.object_unbox(hp));
+        else    fprintf(stderr, "?");
+        fprintf(stderr, " hmdPresent=");
+        if (pp) fprintf(stderr, "%d", *(uint8_t *)il.object_unbox(pp));
+        else    fprintf(stderr, "?");
+        // Reference-type result: unlike the bool probes, NULL here is a real answer.
+        fprintf(stderr, " ovrmInstance=%d", m_ovrminst ? (mi != NULL) : -1);
+        fprintf(stderr, " ovrmInit=");
+        if (mn) fprintf(stderr, "%d", *(uint8_t *)il.object_unbox(mn));
         else    fprintf(stderr, "?");
         fprintf(stderr, " ovrpVersion=%s", vs);
     }
