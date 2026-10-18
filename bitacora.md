@@ -29,6 +29,19 @@ Logs: `…-fin-Attack_on_Titan…` y `…-fin-Assassins_Creed_Nexus_VR` (19:55-2
    `HALF RATE held by the system` si ya era 0; fin `HALF RATE over after X s`; resumen al cerrar.
 6. Carátulas: ver «Pendiente conocido».
 
+### 2026-10-18 (noche, 2.º log AC, perfil Vulkan completo)
+- Audio AC OK (1 Voice Starvation, burst 1024). Pulsaciones llegan (`[input]` A/X/gatillos), `[ctrl] GetControllerState4 -> Connected=0x3`,
+  pero `OVRInput connected=0x0 active=0x0` (ovrpVersion 1.88.0; OVRManager OnDestroy al cambiar de escena).
+- Rosa sigue con perfil completo (vk.caps 1.3, 128, geom, int16, vertex stores) y sin `-force-vulkan` (usuario): NO son capacidades
+  ni el Vulkan forzado. Son objetos que en Quest son invisibles (no son mandos), visibles desde el arranque y pegados a las manos.
+- Regresión: panel de calibración de mandos de AC no aparece (salen sus botones); con los parches de AC sí. Causa probable: b609321
+  quitó la composición de quads en orden de envío (era comportamiento de Quest, no muleta). Restaurada para TODOS
+  (`KL_OVERLAY_SUBMIT_ORDER` def. 1, KleptonCompositor.swift). Efecto menor: el HUD de FPS hereda `overlayOrderState`.
+- Basura gráfica ~1 s en la carga: sin causa. Limpieza síncrona de capas descartada en revisión (stall en el hilo del juego;
+  el compositor ya limpia capas no escritas con `unwrittenLayerReady`).
+- Pendiente rosa: ¿salía con los parches de AC? Si no, bisecar los parches retirados (b495801: 2 etapas, pose fresca,
+  SpaceWarp spin, MSAA/ojo, overlay texl) con `KL_AC_NEXUS_PATCHES=1`.
+
 ### Pruebas pedidas con la build nueva
 - AoT y AC por defecto: audio de AC (sin Voice Starvation, burst 1024), `[magenta]` (¿desaparecen?), `vk.caps`,
   `vk.err what=varyings`, líneas `[cp] HALF RATE`/`minimumFrameRepeatCount`.
