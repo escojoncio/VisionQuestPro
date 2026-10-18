@@ -82,6 +82,12 @@ VPKEngine `main` = e6c3f3b.
 - VPKEngine (arreglado 498bc9f/e6c3f3b, `taa_native_metal.mm` sin compilar): fase de jitter solo si se codificó,
   handler con `shared_ptr<Stats>`, `*WithCount` con min(n,1), requisitos de memoria sin handle nulo, uiMask bajo
   submitMutex; EGL BAD_ACCESS y destrucción diferida de contexto/surface. Queda: hilo que muere sin soltar su contexto.
+- Carátulas: en el launcher solo salen los iconos; la carátula que trae cada juego de Quest no se muestra.
+  `VQCover.swift` busca: imagen en la carpeta del juego (cover/banner/poster o la mayor) → en el APK solo
+  `res/**/{app_banner,banner,tv_banner,app_icon,ic_launcher,icon,…}.{png,jpg,webp}` → cae al icono. No mira `assets/`,
+  OBB ni nombres ofuscados por aapt2 (`res/xx.png`). Pendiente: localizar en un APK real dónde va la carátula
+  (listar el zip y buscar imágenes anchas) y añadir esa ruta con prioridad sobre el icono; invalidar `cover-apk.*`
+  ya cacheados (hoy guardan el icono y tapan la carátula aunque se corrija la búsqueda).
 - Después de los pasos: SSAO propio en VPKEngine (media resolución, profundidad compartida con VPKTAA, toggle por
   juego desactivado por defecto; origen: AoT no trae el SSAO de URP).
 
