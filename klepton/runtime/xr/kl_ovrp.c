@@ -116,6 +116,15 @@ static uint64_t klovrp_called(const char *name) {
                 name, pred ? "0 (predicate: no)" : "UNSUPPORTED", img ? img : "?", off);
     }
     if (pred) return 0;
+    // Pointer-returning entry points: a negative result would be called as a
+    // function pointer. NULL is the only safe "unsupported".
+    if (strstr(name, "ProcAddr") || strstr(name, "Hook") ||
+        (strncmp(name, "ovrp_Get", 8) == 0 &&
+         (strstr(name, "Pointer") || strstr(name, "Ptr")))) {
+        if (s < 0 || g_ovrp[s].calls == 1)
+            fprintf(stderr, "  [ovrp] %s looks pointer-returning -> NULL\n", name);
+        return 0;
+    }
     return (uint64_t)(int64_t)-1004;  // ovrpFailure_Unsupported
 }
 
@@ -8911,7 +8920,23 @@ void *kl_ovrp_dlopen(const char *soname) {
 
 int kl_ovrp_is_handle(const void *h) { return h == (const void *)g_ovrp_handle; }
 
+// ovrp_UnityOpenXR_HookGetInstanceProcAddr(PFN_xrGetInstanceProcAddr next) returns
+// the PFN libUnityOpenXR will call as xrGetInstanceProcAddr. The real plugin
+// returns its hook; returning `next` unchanged is "no hook". The generic stub's
+// -1004 was used as that pointer (jump to 0xfffffffffffffc14, CODESIGNING kill).
+static void *klovrp_UnityOpenXR_HookGetInstanceProcAddr(void *next) {
+    static int logged;
+    if (!logged) {
+        logged = 1;
+        fprintf(stderr, "  [ovrp] ovrp_UnityOpenXR_HookGetInstanceProcAddr: "
+                        "pass-through %p (no hook)\n", next);
+    }
+    return next;
+}
+
 static const struct { const char *name; void *fn; } g_ovrp_impl[] = {
+    {"ovrp_UnityOpenXR_HookGetInstanceProcAddr",
+        (void *)klovrp_UnityOpenXR_HookGetInstanceProcAddr},
     {"UnityPluginLoad",   (void *)klovrp_UnityPluginLoad},
     {"UnityPluginUnload", (void *)klovrp_UnityPluginUnload},
     {"JNI_OnLoad",        (void *)klovrp_JNI_OnLoad},
@@ -9147,6 +9172,15 @@ static const struct { const char *name; void *fn; } g_ovrp_impl[] = {
 static const char *const g_ovrp_result_ok[] = {
     // Tearing down a passthrough that never initialised trivially succeeds.
     "ovrp_ShutdownInsightPassthrough",
+    // Unity OpenXR bridge (Meta XR SDK C#). Setters/notifications: success no-ops.
+    // HookGetInstanceProcAddr returns a pointer and has its own impl.
+    "ovrp_UnityOpenXR_SetClientVersion", "ovrp_UnityOpenXR_OnBeforeInstanceCreate",
+    "ovrp_UnityOpenXR_OnInstanceCreate", "ovrp_UnityOpenXR_OnInstanceDestroy",
+    "ovrp_UnityOpenXR_OnSessionCreate", "ovrp_UnityOpenXR_OnAppSpaceChange",
+    "ovrp_UnityOpenXR_OnSessionStateChange", "ovrp_UnityOpenXR_OnSessionBegin",
+    "ovrp_UnityOpenXR_OnSessionEnd", "ovrp_UnityOpenXR_OnSessionExiting",
+    "ovrp_UnityOpenXR_OnSessionDestroy",
+    "ovrp_AllowVisibilityMask",
 // Unity's native plugin interface. All void.
     "UnitySetGraphicsDevice", "UnitySetEventQueue", "UnityShaderCompilerExtEvent",
     "UnityRenderingExtEvent",

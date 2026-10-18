@@ -232,3 +232,8 @@ VPKEngine `main` = e6c3f3b.
 - `app/Sources/VQCover.swift`: ficha `/api/v1/id/<id>` (formato no verificado: el log lista sus claves; ajustar `detailImages` si difiere), candidatos apaisados primero, 401/403 de URL firmada no marca net, fallback a cuadrada, marcadores v3.
 - `app/Sources/VQLog.swift` (+VQLaunch/VQLauncher/VQConformanceView, KleptonApp.swift): centinela `Registros/sesion-en-curso.txt` (VQSession) y MetricKit `VQMetrics` volcando MXCrashDiagnostic al log.
 - Pendiente: verificar en visor AC (memoria), TRIANGLE (rwlock), Demeo (MetricKit/.ips); pausa con corona.
+
+## Fix Demeo: hook OpenXR de OVRPlugin
+- .ips 00:48:38 (Demeo): SIGKILL CODESIGNING, pc=x8=-1004 llamado desde libUnityOpenXR+0xef73c. `ovrp_UnityOpenXR_HookGetInstanceProcAddr` caía en `klovrp_called` (-1004) y Unity lo usaba como `xrGetInstanceProcAddr`.
+- `klepton/runtime/xr/kl_ovrp.c`: `klovrp_UnityOpenXR_HookGetInstanceProcAddr` pass-through del argumento (en `g_ovrp_impl`); `ovrp_UnityOpenXR_*` (SetClientVersion, On*Instance*/Session*/AppSpaceChange) y `ovrp_AllowVisibilityMask` → `g_ovrp_result_ok`; `klovrp_called` devuelve 0 (no -1004) si el nombre contiene ProcAddr/Hook o es `ovrp_Get*Ptr/Pointer`.
+- .ips 00:23:52 (TRIANGLE, build 650083e): SIGSEGV 0x34 en slowLog → ya corregido en VPKEngine a316f28.
