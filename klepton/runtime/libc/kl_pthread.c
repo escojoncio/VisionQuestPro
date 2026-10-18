@@ -805,9 +805,28 @@ void kl_pthread_report(FILE *out) {
     }
 }
 // bionic pthread_mutexattr_t is a plain int holding the type.
+// Layout (opaque to the guest): bits 0-1 type, 0x10 process-shared, 0x20 PRIO_INHERIT.
+// settype refuses anything but NORMAL/RECURSIVE/ERRORCHECK, as bionic does.
 int klb_pthread_mutexattr_init(int *a)            { *a = 0; return 0; }
 int klb_pthread_mutexattr_destroy(int *a)         { (void)a; return 0; }
-int klb_pthread_mutexattr_settype(int *a, int t)  { *a = t; return 0; }
+int klb_pthread_mutexattr_settype(int *a, int t) {
+    if (t < 0 || t > 2) return 22;                    // EINVAL
+    *a = (*a & ~3) | t;
+    return 0;
+}
+int klb_pthread_mutexattr_gettype(const int *a, int *t)   { *t = *a & 3; return 0; }
+int klb_pthread_mutexattr_setpshared(int *a, int ps) {
+    if (ps != 0 && ps != 1) return 22;
+    *a = ps ? (*a | 0x10) : (*a & ~0x10);
+    return 0;
+}
+int klb_pthread_mutexattr_getpshared(const int *a, int *ps) { *ps = (*a & 0x10) ? 1 : 0; return 0; }
+int klb_pthread_mutexattr_setprotocol(int *a, int proto) {
+    if (proto == 0) { *a &= ~0x20; return 0; }         // PTHREAD_PRIO_NONE
+    if (proto == 1) { *a |= 0x20; return 0; }          // PTHREAD_PRIO_INHERIT
+    return 22;                                         // PRIO_PROTECT is not supported by bionic
+}
+int klb_pthread_mutexattr_getprotocol(const int *a, int *proto) { *proto = (*a & 0x20) ? 1 : 0; return 0; }
 
 // ---------- condition variable ----------
 // Init KEEPS an existing host cond for the same address, exactly as
@@ -962,9 +981,22 @@ int klb_pthread_cond_clockwait(void *c, void *m, int clk, const struct timespec 
     (void)clk;
     return klb_pthread_cond_timedwait(c, m, ts);
 }
+// bionic's pthread_condattr_t is a long holding (clock << 1) | pshared, clock being
+// CLOCK_REALTIME (0, the default) or CLOCK_MONOTONIC (1) and nothing else.
 int klb_pthread_condattr_init(long *a)                 { *a = 0; return 0; }
 int klb_pthread_condattr_destroy(long *a)              { (void)a; return 0; }
-int klb_pthread_condattr_setclock(long *a, int clk)    { (void)a; (void)clk; return 0; }
+int klb_pthread_condattr_setclock(long *a, int clk) {
+    if (clk != 0 && clk != 1) return 22;               // EINVAL
+    *a = (*a & 1) | ((long)clk << 1);
+    return 0;
+}
+int klb_pthread_condattr_getclock(const long *a, int *clk)   { *clk = (int)((*a >> 1) & 3); return 0; }
+int klb_pthread_condattr_setpshared(long *a, int ps) {
+    if (ps != 0 && ps != 1) return 22;
+    *a = (*a & ~1L) | ps;
+    return 0;
+}
+int klb_pthread_condattr_getpshared(const long *a, int *ps)  { *ps = (int)(*a & 1); return 0; }
 
 // ---------- rwlock ----------
 int klb_pthread_rwlock_init(void *l, const void *a) { (void)a; g_rwl_recycle(l); rwl(l); return 0; }
@@ -1655,8 +1687,8 @@ int klb_sem_trywait(int *s) {
 // which is the wrong semantics here — the guest's names are process-scoped.
 // The value argument only exists when O_CREAT (Linux 0x40 — NOT Darwin's
 // 0x200) is set; the receive-side variadic read is the klb_execl pattern.
+static struct { char name[128]; int slot; int used; } named[64];     // sem_open / sem_unlink
 void *klb_sem_open(const char *name, int oflag, ...) {
-    static struct { char name[128]; int slot; int used; } named[64];
     for (int i = 0; i < 64; i++)
         if (named[i].used && strcmp(named[i].name, name) == 0)
             return &named[i].slot;
@@ -1724,5 +1756,269 @@ int klb_sem_getvalue(int *s, int *out) {
     if (!k) { errno = EINVAL; return -1; }
     int v = atomic_load(&k->count);
     *out = v > 0 ? v : 0;
+    return 0;
+}
+
+// ======================================================================
+// The rest of bionic's pthread surface (see kl_bionic_extra.c for the table).
+// ======================================================================
+int kl_clock_to_darwin(int clk);                       // kl_libc.c
+
+// ---- timed waits over a try-lock -------------------------------------
+// Darwin has no pthread_mutex_timedlock and its rwlocks have no timed forms, so a
+// timed acquire is the try form polled until the deadline, backing off from 20 us to
+// 2 ms. The deadline is measured on the clock the caller named; only CLOCK_REALTIME
+// (0) and CLOCK_MONOTONIC (1) are valid there, as in bionic. Like bionic, the lock is
+// tried FIRST, so an already-expired deadline still succeeds on a free lock.
+static int klx_deadline_clock(int clk) {
+    if (clk == 0) return CLOCK_REALTIME;
+    if (clk == 1) return CLOCK_MONOTONIC;
+    return -1;
+}
+static int klx_poll_until(int (*try_)(void *), void *obj, int dclk, const struct timespec *abs) {
+    int r = try_(obj);
+    if (r != 16 /* EBUSY on both */) return r;
+    if (!abs || abs->tv_nsec < 0 || abs->tv_nsec >= 1000000000L) return 22;      // EINVAL
+    useconds_t nap = 20;
+    for (;;) {
+        struct timespec now;
+        clock_gettime(dclk, &now);
+        if (now.tv_sec > abs->tv_sec || (now.tv_sec == abs->tv_sec && now.tv_nsec >= abs->tv_nsec))
+            return kl_errno_to_linux(ETIMEDOUT);
+        int64_t left_us = ((int64_t)abs->tv_sec - now.tv_sec) * 1000000 + (abs->tv_nsec - now.tv_nsec) / 1000;
+        useconds_t n = nap;
+        if ((int64_t)n > left_us && left_us > 0) n = (useconds_t)left_us;
+        usleep(n);
+        if (nap < 2000) nap *= 2;
+        r = try_(obj);
+        if (r != 16) return r;
+    }
+}
+static int klx_try_mutex(void *m) { return klb_pthread_mutex_trylock(m); }
+int klb_pthread_mutex_timedlock(void *m, const struct timespec *abs) {
+    return klx_poll_until(klx_try_mutex, m, CLOCK_REALTIME, abs);
+}
+int klb_pthread_mutex_timedlock_monotonic_np(void *m, const struct timespec *abs) {
+    return klx_poll_until(klx_try_mutex, m, CLOCK_MONOTONIC, abs);
+}
+int klb_pthread_mutex_clocklock(void *m, int clk, const struct timespec *abs) {
+    int d = klx_deadline_clock(clk);
+    if (d < 0) return 22;
+    return klx_poll_until(klx_try_mutex, m, d, abs);
+}
+// pthread_mutex_lock_timeout_np(mutex, relative milliseconds) — bionic's only RELATIVE timed lock.
+int klb_pthread_mutex_lock_timeout_np(void *m, unsigned ms) {
+    struct timespec t;
+    clock_gettime(CLOCK_MONOTONIC, &t);
+    t.tv_sec += ms / 1000;
+    t.tv_nsec += (long)(ms % 1000) * 1000000L;
+    if (t.tv_nsec >= 1000000000L) { t.tv_sec++; t.tv_nsec -= 1000000000L; }
+    return klx_poll_until(klx_try_mutex, m, CLOCK_MONOTONIC, &t);
+}
+// Robust mutexes do not exist in bionic's non-robust objects: consistent on one is EINVAL.
+int klb_pthread_mutex_consistent(void *m) { (void)m; return 22; }
+
+static int klx_try_rd(void *l) { return klb_pthread_rwlock_tryrdlock(l); }
+static int klx_try_wr(void *l) { return klb_pthread_rwlock_trywrlock(l); }
+int klb_pthread_rwlock_timedrdlock(void *l, const struct timespec *abs) {
+    return klx_poll_until(klx_try_rd, l, CLOCK_REALTIME, abs);
+}
+int klb_pthread_rwlock_timedwrlock(void *l, const struct timespec *abs) {
+    return klx_poll_until(klx_try_wr, l, CLOCK_REALTIME, abs);
+}
+int klb_pthread_rwlock_clockrdlock(void *l, int clk, const struct timespec *abs) {
+    int d = klx_deadline_clock(clk);
+    return d < 0 ? 22 : klx_poll_until(klx_try_rd, l, d, abs);
+}
+int klb_pthread_rwlock_clockwrlock(void *l, int clk, const struct timespec *abs) {
+    int d = klx_deadline_clock(clk);
+    return d < 0 ? 22 : klx_poll_until(klx_try_wr, l, d, abs);
+}
+// bionic's pthread_rwlockattr_t is an int: bit 0 pshared, bits 1-2 the kind.
+int klb_pthread_rwlockattr_init(int *a)    { *a = 0; return 0; }
+int klb_pthread_rwlockattr_destroy(int *a) { (void)a; return 0; }
+int klb_pthread_rwlockattr_setpshared(int *a, int ps) {
+    if (ps != 0 && ps != 1) return 22;
+    *a = (*a & ~1) | ps;
+    return 0;
+}
+int klb_pthread_rwlockattr_getpshared(const int *a, int *ps) { *ps = *a & 1; return 0; }
+int klb_pthread_rwlockattr_setkind_np(int *a, int kind) {
+    if (kind < 0 || kind > 2) return 22;       // PREFER_READER_NP / PREFER_WRITER_NP / ..._NONRECURSIVE_NP
+    *a = (*a & 1) | (kind << 1);
+    return 0;
+}
+int klb_pthread_rwlockattr_getkind_np(const int *a, int *kind) { *kind = (*a >> 1) & 3; return 0; }
+
+// ---- cond: the _np timed forms ------------------------------------------
+// pthread_cond_timedwait_monotonic_np takes a CLOCK_MONOTONIC abstime; klb_pthread_cond_timedwait
+// already rebases small (monotonic-sized) abstimes onto the realtime clock Darwin waits on.
+int klb_pthread_cond_timedwait_monotonic_np(void *c, void *m, const struct timespec *ts) {
+    return klb_pthread_cond_timedwait(c, m, ts);
+}
+// pthread_cond_timeout_np(cond, mutex, relative ms)
+int klb_pthread_cond_timeout_np(void *c, void *m, unsigned ms) {
+    struct timespec t;
+    clock_gettime(CLOCK_MONOTONIC, &t);
+    t.tv_sec += ms / 1000;
+    t.tv_nsec += (long)(ms % 1000) * 1000000L;
+    if (t.tv_nsec >= 1000000000L) { t.tv_sec++; t.tv_nsec -= 1000000000L; }
+    return klb_pthread_cond_timedwait(c, m, &t);
+}
+
+// ---- spin locks ---------------------------------------------------------
+// bionic keeps the state in the guest's own 8 bytes (a spinlock is never shared with a
+// host object), so this is done in place: 0 free, 1 held.
+int klb_pthread_spin_init(void *l, int pshared) {
+    if (pshared != 0 && pshared != 1) return 22;
+    atomic_store((_Atomic int *)l, 0);
+    return 0;
+}
+int klb_pthread_spin_destroy(void *l) {
+    return atomic_load((_Atomic int *)l) ? 16 /* EBUSY */ : 0;
+}
+int klb_pthread_spin_trylock(void *l) {
+    int zero = 0;
+    return atomic_compare_exchange_strong((_Atomic int *)l, &zero, 1) ? 0 : 16;
+}
+int klb_pthread_spin_lock(void *l) {
+    _Atomic int *s = l;
+    for (unsigned spins = 0;; spins++) {
+        int zero = 0;
+        if (atomic_compare_exchange_weak_explicit(s, &zero, 1, memory_order_acquire, memory_order_relaxed))
+            return 0;
+        if (spins > 64) sched_yield();
+        else __builtin_arm_yield();
+    }
+}
+int klb_pthread_spin_unlock(void *l) {
+    atomic_store_explicit((_Atomic int *)l, 0, memory_order_release);
+    return 0;
+}
+
+// ---- barriers -----------------------------------------------------------
+// Darwin has none. Address-keyed like the mutex map (a bionic barrier is 32 bytes of
+// guest storage that is never read or written here): init registers {count, waiting,
+// generation}, wait is the usual mutex+cond generation counter, and exactly one
+// waiter per generation gets PTHREAD_BARRIER_SERIAL_THREAD (-1).
+typedef struct {
+    uintptr_t key;
+    unsigned count, waiting;
+    uint64_t generation;
+    pthread_mutex_t m;
+    pthread_cond_t c;
+} klx_barrier;
+#define KLX_BAR_SLOTS 8192
+static klx_barrier *g_bars[KLX_BAR_SLOTS];            // open addressing; (klx_barrier *)1 = tombstone
+static pthread_mutex_t g_bar_mu = PTHREAD_MUTEX_INITIALIZER;
+static unsigned bar_hash(uintptr_t a) { return (unsigned)(((a >> 3) * 0x9E3779B97F4A7C15ULL) >> 51) & (KLX_BAR_SLOTS - 1); }
+static klx_barrier *bar_find_locked(uintptr_t key) {
+    for (unsigned n = 0, i = bar_hash(key); n < KLX_BAR_SLOTS; n++, i = (i + 1) & (KLX_BAR_SLOTS - 1)) {
+        klx_barrier *b = g_bars[i];
+        if (!b) return NULL;
+        if (b != (klx_barrier *)1 && b->key == key) return b;
+    }
+    return NULL;
+}
+int klb_pthread_barrierattr_init(int *a)    { *a = 0; return 0; }
+int klb_pthread_barrierattr_destroy(int *a) { (void)a; return 0; }
+int klb_pthread_barrierattr_setpshared(int *a, int ps) {
+    if (ps != 0 && ps != 1) return 22;
+    *a = ps;
+    return 0;
+}
+int klb_pthread_barrierattr_getpshared(const int *a, int *ps) { *ps = *a & 1; return 0; }
+int klb_pthread_barrier_init(void *bar, const int *attr, unsigned count) {
+    (void)attr;
+    if (count == 0) return 22;
+    klx_barrier *nb = calloc(1, sizeof *nb);
+    if (!nb) return 12;                                   // ENOMEM
+    nb->key = (uintptr_t)bar; nb->count = count;
+    pthread_mutex_init(&nb->m, NULL); pthread_cond_init(&nb->c, NULL);
+    pthread_mutex_lock(&g_bar_mu);
+    klx_barrier *old = bar_find_locked(nb->key);
+    if (old) {                                            // re-init of a live address: replace it
+        for (unsigned i = 0; i < KLX_BAR_SLOTS; i++) if (g_bars[i] == old) { g_bars[i] = nb; break; }
+        pthread_mutex_unlock(&g_bar_mu);
+        return 0;                                         // (old leaks: a waiter may still be inside)
+    }
+    unsigned i = bar_hash(nb->key);
+    for (unsigned n = 0; n < KLX_BAR_SLOTS; n++, i = (i + 1) & (KLX_BAR_SLOTS - 1))
+        if (!g_bars[i] || g_bars[i] == (klx_barrier *)1) { g_bars[i] = nb; pthread_mutex_unlock(&g_bar_mu); return 0; }
+    pthread_mutex_unlock(&g_bar_mu);
+    free(nb);
+    return 11 /* EAGAIN */;
+}
+int klb_pthread_barrier_destroy(void *bar) {
+    pthread_mutex_lock(&g_bar_mu);
+    klx_barrier *b = bar_find_locked((uintptr_t)bar);
+    if (!b) { pthread_mutex_unlock(&g_bar_mu); return 22; }
+    if (b->waiting) { pthread_mutex_unlock(&g_bar_mu); return 16; }      // EBUSY
+    for (unsigned i = 0; i < KLX_BAR_SLOTS; i++) if (g_bars[i] == b) { g_bars[i] = (klx_barrier *)1; break; }
+    pthread_mutex_unlock(&g_bar_mu);
+    return 0;                                             // the object is leaked on purpose (see mutex destroy)
+}
+int klb_pthread_barrier_wait(void *bar) {
+    pthread_mutex_lock(&g_bar_mu);
+    klx_barrier *b = bar_find_locked((uintptr_t)bar);
+    pthread_mutex_unlock(&g_bar_mu);
+    if (!b) return 22;                                    // never initialised
+    pthread_mutex_lock(&b->m);
+    if (++b->waiting == b->count) {
+        b->waiting = 0;
+        b->generation++;
+        pthread_cond_broadcast(&b->c);
+        pthread_mutex_unlock(&b->m);
+        return -1;                                        // PTHREAD_BARRIER_SERIAL_THREAD
+    }
+    uint64_t gen = b->generation;
+    while (gen == b->generation) pthread_cond_wait(&b->c, &b->m);
+    pthread_mutex_unlock(&b->m);
+    return 0;
+}
+
+// ---- sem: clockwait / unlink --------------------------------------------
+// sem_clockwait(sem, clockid, abstime): the abstime is on CLOCK_REALTIME or
+// CLOCK_MONOTONIC; a monotonic one is moved onto the wall clock timedwait waits on.
+int klb_sem_clockwait(int *s, int clk, const struct timespec *abs) {
+    if (klx_deadline_clock(clk) < 0 || !abs) { errno = EINVAL; return -1; }
+    if (clk == 0) return klb_sem_timedwait(s, abs);
+    struct timespec mo, rt, t;
+    clock_gettime(CLOCK_MONOTONIC, &mo);
+    clock_gettime(CLOCK_REALTIME, &rt);
+    t.tv_sec = abs->tv_sec - mo.tv_sec + rt.tv_sec;
+    t.tv_nsec = abs->tv_nsec - mo.tv_nsec + rt.tv_nsec;
+    while (t.tv_nsec >= 1000000000L) { t.tv_nsec -= 1000000000L; t.tv_sec++; }
+    while (t.tv_nsec < 0)            { t.tv_nsec += 1000000000L; t.tv_sec--; }
+    return klb_sem_timedwait(s, &t);
+}
+int klb_sem_unlink(const char *name) {
+    for (int i = 0; i < 64; i++)
+        if (named[i].used && strcmp(named[i].name, name) == 0) {
+            named[i].used = 0;                            // the slot stays alive for holders (sem_close is a no-op)
+            return 0;
+        }
+    errno = ENOENT;
+    return -1;
+}
+
+// ---- thread queries -----------------------------------------------------
+int klb_pthread_gettid_np(pthread_t t) {
+    uint64_t id = 0;
+    if (pthread_threadid_np(t, &id) != 0) return 0;
+    return (int)id;
+}
+int klb_pthread_getname_np(pthread_t t, char *buf, size_t len) {
+    if (!buf || len == 0) return 34;                      // ERANGE
+    return px(pthread_getname_np(t, buf, len));
+}
+// pthread_getcpuclockid: a clock id the guest then hands to clock_gettime, so it
+// is a BIONIC id: CLOCK_THREAD_CPUTIME_ID (3) is the only thread clock bionic has.
+int klb_pthread_getcpuclockid(pthread_t t, int *clk) {
+    // Linux encodes the thread into the clock id; our clock_gettime only knows "the calling
+    // thread" (3). For another thread there is no clock to name, and saying 3 would hand
+    // back the CALLER's time as theirs.
+    if (!pthread_equal(t, pthread_self())) return 95;         // ENOTSUP
+    *clk = 3;
     return 0;
 }

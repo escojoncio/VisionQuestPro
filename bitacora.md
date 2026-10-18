@@ -266,6 +266,30 @@ Vulkan CTS desde la app; el informe de capacidades (vulkaninfo) de un Quest 3 re
   - Fork, no portado: `klovrp_enq_age` (ruta EndFrame legada), usuarios offline por app id de otras tiendas,
     `KL_OVERLAY_FLIP_X/Y` (los paneles de AC podrían salir girados 180°; comprobar).
 
+## 2026-10-18 (agente 14): Android completo B (libandroid, libmediandk, AAudio/OpenSL, JNI de clases Android) — SIN PROBAR EN DISPOSITIVO
+- Solo comprobado con `clang -fsyntax-only` y arneses Linux con stubs de CoreVideo/VideoToolbox/CommonCrypto (no hay build Darwin).
+- `media/kl_mediandk.c`: AMediaFormat tipado (64 claves; Int64/Float/Double/Size/Buffer/Rect, copy, toString, +71 AMEDIAFORMAT_KEY_*),
+  errores AMEDIA_*, DataSource por URI (esquemas remotos -> ERROR_IO), Extractor completo, Codec (async, nombre, formatos,
+  parámetros, salida a surface; codificación y DRM no soportados a propósito), AImageReader/AImage (planos solo YUV_420_888 sobre NV12),
+  AHardwareBuffer (allocate/lock/lockPlanes/describe/unlock/getId), ATrace.
+- `media/kl_aaudio.c`: requestPause/Flush, release, getters de usage/contentType/capturePolicy/privacy/spatialized/hardware*,
+  convertStreamStateToText, getTimestamp validado.
+- `media/kl_opensl.c`: todos los SL_IID_*, MuteSolo, EffectSend, OutputMix, EngineCapabilities, Query* del motor;
+  Create* rechaza con FEATURE_UNSUPPORTED una interfaz requerida no servida. Efectos/3D/MIDI no soportados.
+- `guest/kl_android.c` (+`.h`, nuevo; `kl_ndk_lookup` cae a `kl_android_lookup`): AConfiguration de Quest 3, AChoreographer sobre el looper
+  (hilo de pulso a kl_ovrp_display_frequency), AThermal real (`media/kl_thermal.m`: NSProcessInfo.thermalState), APerformanceHint,
+  AStorageManager/AObb (montaje -> ERROR_COULD_NOT_MOUNT), ASharedMemory, AInput*/AKeyEvent/AMotionEvent, ANativeActivity.
+  `kl_ndk.c`: ANativeWindow (transform, dataspace, frame rate), ASensor accessors. Makefile: kl_android.c, kl_thermal.m, kl_jni_sysinfo.c.
+- JNI: nuevo `jni/kl_jni_sysinfo.c` (tabla `klj_bind_sysinfo`): SystemClock, Process (myPid/myUid/is64Bit...), PowerManager
+  (isInteractive, isPowerSaveMode, getCurrentThermalStatus real vía `kl_android_thermal_status`, newWakeLock/WakeLock con contador),
+  BatteryManager.getLongProperty, Build.getSerial, Debug, Locale (display names, ISO3, toString). `kl_jni.c`: campos Build
+  (BOARD, HOST, SERIAL, CPU_ABI, SOC_*), Build.VERSION (SDK, SECURITY_PATCH, PREVIEW_SDK_INT), VERSION_CODES, constantes de PowerManager/
+  BatteryManager/Process. Con `KL_QUEST3=1` (o target batman): SDK_INT=32 (`klj_field_ival`, también `kl_jni_build_int`), RELEASE=12,
+  SDK="32", fingerprint ":12/". Por defecto sigue siendo Quest 2 / SDK 29 (decisión previa; ver comentarios de Build en `kl_jni.c`).
+  ANDROID_ID ya era fijo sintético (`kl_jni_net.c`).
+- Pendiente: sensores del Quest (lista ASensor vacía), AObb montaje real, AImage otros formatos, `ovrp` aún dice Quest 2 si no hay KL_QUEST3,
+  sysinfo sin probar con un juego (Unity/Unreal); comprobar que gen_xcodeproj/project.yml de visionos lista los ficheros nuevos.
+
 ## 2026-10-15 (15): una sola pose por frame para TODAS las lecturas; registros al acabar el juego — SIN PROBAR
 - Resultado de (14) (Registros 9/10, builds e56af9c/c29ae8e): PEOR al girar («los ojos ni se sincronizan»). El log lo
   mide: `frame record -> last Update(Render)` worst 2–7°, mean 0,7–1,2° girando, 22° en tirones = lo que el registro se
@@ -369,3 +393,22 @@ Vulkan CTS desde la app; el informe de capacidades (vulkaninfo) de un Quest 3 re
   `VQConformance*`; `app/Native/vq_apk.c` (ZIP + AXML), `vq_config.c` (reenvío `vpvk_config_set_*`).
 - CI `visionos.yml`: solo `[build]` o manual; release `visionos` (`VisionQuestPro.ipa`, bundle `com.kdt.livecontainer`);
   log de CI en rama `ci-logs` (`visionos.txt`; `gh run view --log-failed` da 403 desde aquí).
+
+## Paso 3A (agente 13): libc/libm/pthread/bionic + escáner
+- Escáner: `kl_shim_known` (klepton/runtime/libc/kl_shim.c) ya no marca por prefijo AMedia*/AImage*/AHardwareBuffer*/AAudio*; consulta `kl_aaudio_lookup` / `kl_mediandk_lookup` y la tabla nueva `kl_bionic_extra_lookup`.
+- Nuevos: `libc/kl_bionic_extra.c` (tabla g_extra, ~504 símbolos: libm/long double binario128 vía `kl_ld128.h`, clasificación FP, strings/ctype/locale, multibyte UTF-8, nl_langinfo, android_get_device_api_level=32, fdsan, liblog, _chk, pwd/grp AID, spawn attrs...), `libc/kl_bionic_extra2.c` (solo Darwin: xattr, rlimit, memoria, splice/copy_file_range, ids/sched, ptrace, printf ancho, err.h, clock_nanosleep, temporizadores POSIX con hilo, stdio extra, mallinfo/mallopt).
+- Modificados: kl_pthread.c (timed locks, rwlock attr, spin, barrier, sem_clockwait, gettid/getname), kl_libc.c (propiedades Quest 3 eureka/kalama API 32 y Quest 2; `__system_property_*` extra; set/add/update denegados), kl_va_thunks.S + kl_va_handlers.c (scanf/wprintf/err...), Makefile (RUNTIME_SHIP).
+- Test host: `libc/test/t_bionic_extra.c` (`clang -DKL_EXTRA_TEST -I.. ... -lm`) -> "all ok".
+- NO verificado en Darwin (no se compiló nada): kl_bionic_extra2.c, adiciones de kl_pthread.c, ensamblado de los thunks, posibles choques de símbolos klb_timer_* con los static de kl_shim.c.
+- Pendiente: ~300 nombres aún sin servir (ver lista de escáner: regex/regcomp, hsearch/tsearch, res_*, iconv, getopt_long, mkstemps/mkostemp, timerfd, signalfd, tcgetattr extra, utmp, getmntent, pselect/ppoll64, preadv/pwritev, pthread_cancel...), inotify ENOSYS, posix_spawn ENOSYS, getcpuclockid solo propio hilo.
+
+## Paso 3 (agente 15): Android completo
+
+- libc/kl_bionic_extra3.c (portable, test host en libc/test/t_bionic_extra3.c, contrastado con glibc): regex, tsearch/hsearch/lsearch, rand48 exacto, getopt_long, iconv (UTF-8/16/32, Latin-1), C11 threads, complejos, utmp/mntent, red offline (gethostby*_r, protocolos, res_*, ns_*), sig2str, termios cf*.
+- libc/kl_bionic_extra4.c (solo Darwin): timerfd, signalfd, inotify sobre kqueue, termios bionic, stdio_ext, statx, renameat2, mkstemps, preadv2, pselect, epoll_pwait, sendmmsg/recvmmsg, pidfd (solo pid propio), sigqueue/sigtimedwait, negativas honestas (exec*, SysV IPC, openpty).
+- Orden de resolucion: kl_shim_lookup, kl_bionic_extra_lookup, extra3, extra4. Las entradas inotify de extra4 ganan a los ENOSYS de kl_shim.c.
+- Riesgos del agente 13: timers renombrados a kl_xt_timer_*, rlimit NOFILE sin bajar el hard, mbsinit con estado.
+- Inotify: IN_MODIFY/ATTRIB/DELETE_SELF/MOVE_SELF por EVFILT_VNODE; en directorios CREATE/DELETE/MOVED por diff (max 128 hijos). IN_ACCESS/OPEN/CLOSE_* no existen en kqueue.
+- Sin servir a proposito (bionic no los exporta): pthread_cancel, pthread_setcancelstate, wordexp, strfmon.
+- Sensores: solo giroscopio (kl_ovrp_head_motion rotado al marco de la cabeza, ticker por cola). Acelerometro, magnetometro y proximidad sin fuente real: no se listan.
+- Sin compilar ni probar en Darwin: extra2, extra4, thunks, internals de FILE, kqueue.

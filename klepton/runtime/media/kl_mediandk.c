@@ -57,7 +57,17 @@ enum { AMEDIA_OK = 0,
        AMEDIA_ERROR_MALFORMED         = -10001,
        AMEDIA_ERROR_UNSUPPORTED       = -10002,
        AMEDIA_ERROR_INVALID_OBJECT    = -10003,
-       AMEDIA_ERROR_INVALID_PARAMETER = -10004 };
+       AMEDIA_ERROR_INVALID_PARAMETER = -10004,
+       AMEDIA_ERROR_INVALID_OPERATION = -10005,
+       AMEDIA_ERROR_END_OF_STREAM     = -10006,
+       AMEDIA_ERROR_IO                = -10007,
+       AMEDIA_ERROR_WOULD_BLOCK       = -10008,
+       AMEDIA_DRM_NOT_PROVISIONED     = -20001,
+       AMEDIA_IMGREADER_NO_BUFFER_AVAILABLE   = -30001,
+       AMEDIA_IMGREADER_MAX_IMAGES_ACQUIRED   = -30002,
+       AMEDIA_IMGREADER_CANNOT_LOCK_IMAGE     = -30003,
+       AMEDIA_IMGREADER_CANNOT_UNLOCK_IMAGE   = -30004,
+       AMEDIA_IMGREADER_IMAGE_NOT_LOCKED      = -30005 };
 enum { AMEDIACODEC_INFO_TRY_AGAIN_LATER    = -1,
        AMEDIACODEC_INFO_OUTPUT_FORMAT_CHANGED = -2,
        AMEDIACODEC_INFO_OUTPUT_BUFFERS_CHANGED = -3 };
@@ -85,10 +95,20 @@ typedef struct { void *context; klm_image_cb onImageAvailable; } klm_listener;
 // colour keys describe a conversion VideoToolbox is doing for us. Keeping the
 // rest anyway means AMediaFormat_toString and the report can show what the
 // guest asked for, which is how a wrong assumption gets noticed.
-#define KLM_FMT_MAX 32
+// Typed like AMessage is: a key set as an int64 is not an int32 and a getter of
+// the other type answers "absent". The one deliberate leniency is the widening
+// the original getters already did (an int32 reads back as int64/float), since
+// Unity stores durationUs and reads it either way.
+#define KLM_FMT_MAX 64
+enum { KLM_K_INT32 = 0, KLM_K_STR, KLM_K_INT64, KLM_K_FLOAT, KLM_K_DOUBLE,
+       KLM_K_SIZE, KLM_K_BUF, KLM_K_RECT };
 typedef struct {
-    struct { char *key; char *sval; int32_t ival; int is_str; } kv[KLM_FMT_MAX];
+    struct {
+        char *key; char *sval; int32_t ival; int is_str;
+        int kind; int64_t i64; double dbl; uint8_t *buf; size_t blen; int32_t rect[4];
+    } kv[KLM_FMT_MAX];
     int n;
+    char *text;                 // AMediaFormat_toString's result, owned by the format
 } klm_format;
 
 static int klm_fmt_slot(klm_format *f, const char *key) {
@@ -99,12 +119,23 @@ static int klm_fmt_slot(klm_format *f, const char *key) {
     return f->n++;
 }
 
+// A slot being overwritten with a different type must not keep the old one's
+// heap data alive or its stale kind.
+static void klm_fmt_reset(klm_format *f, int i, int kind) {
+    free(f->kv[i].sval); f->kv[i].sval = NULL;
+    free(f->kv[i].buf);  f->kv[i].buf = NULL;
+    f->kv[i].blen = 0;
+    f->kv[i].is_str = kind == KLM_K_STR;
+    f->kv[i].kind = kind;
+}
+
 static void *klm_AMediaFormat_new(void) { return calloc(1, sizeof(klm_format)); }
 
 static int klm_AMediaFormat_delete(void *fmt) {
     klm_format *f = fmt;
     if (!f) return AMEDIA_ERROR_INVALID_PARAMETER;
-    for (int i = 0; i < f->n; i++) { free(f->kv[i].key); free(f->kv[i].sval); }
+    for (int i = 0; i < f->n; i++) { free(f->kv[i].key); free(f->kv[i].sval); free(f->kv[i].buf); }
+    free(f->text);
     free(f);
     return AMEDIA_OK;
 }
@@ -114,7 +145,8 @@ static void klm_AMediaFormat_setInt32(void *fmt, const char *key, int32_t v) {
     if (!f || !key) return;
     int i = klm_fmt_slot(f, key);
     if (i < 0) return;
-    f->kv[i].ival = v; f->kv[i].is_str = 0;
+    klm_fmt_reset(f, i, KLM_K_INT32);
+    f->kv[i].ival = v;
 }
 
 static void klm_AMediaFormat_setString(void *fmt, const char *key, const char *v) {
@@ -124,9 +156,8 @@ static void klm_AMediaFormat_setString(void *fmt, const char *key, const char *v
     if (i < 0) return;
     // Copied, not pointed at: the guest builds these strings on its own stack
     // and in its own std::string temporaries.
-    free(f->kv[i].sval);
+    klm_fmt_reset(f, i, KLM_K_STR);
     f->kv[i].sval = v ? strdup(v) : NULL;
-    f->kv[i].is_str = 1;
 }
 
 static const char *klm_fmt_string(klm_format *f, const char *key) {
@@ -146,29 +177,105 @@ static const char *klm_fmt_string(klm_format *f, const char *key) {
 // a truthful "no" rather than a stub. They exist because a format whose owner
 // cannot fill it must still be ASKABLE — a guest querying an empty format is
 // doing the right thing and must get an answer, not an abort.
+static int klm_fmt_find(klm_format *f, const char *key) {
+    if (!f || !key) return -1;
+    for (int i = 0; i < f->n; i++)
+        if (!strcmp(f->kv[i].key, key)) return i;
+    return -1;
+}
 static bool klm_AMediaFormat_getInt32(void *fmt, const char *key, int32_t *out) {
     klm_format *f = fmt;
-    if (!f || !key || !out) return false;
-    for (int i = 0; i < f->n; i++)
-        if (!strcmp(f->kv[i].key, key) && !f->kv[i].is_str) { *out = f->kv[i].ival; return true; }
-    return false;
+    int i = klm_fmt_find(f, key);
+    if (i < 0 || !out || f->kv[i].kind != KLM_K_INT32) return false;
+    *out = f->kv[i].ival;
+    return true;
 }
 static bool klm_AMediaFormat_getInt64(void *fmt, const char *key, int64_t *out) {
-    int32_t v;
-    if (!out || !klm_AMediaFormat_getInt32(fmt, key, &v)) return false;
-    *out = v;
-    return true;
+    klm_format *f = fmt;
+    int i = klm_fmt_find(f, key);
+    if (i < 0 || !out) return false;
+    if (f->kv[i].kind == KLM_K_INT64) { *out = f->kv[i].i64; return true; }
+    if (f->kv[i].kind == KLM_K_INT32) { *out = f->kv[i].ival; return true; }
+    return false;
 }
 static bool klm_AMediaFormat_getFloat(void *fmt, const char *key, float *out) {
-    int32_t v;
-    if (!out || !klm_AMediaFormat_getInt32(fmt, key, &v)) return false;
-    *out = (float)v;
+    klm_format *f = fmt;
+    int i = klm_fmt_find(f, key);
+    if (i < 0 || !out) return false;
+    if (f->kv[i].kind == KLM_K_FLOAT)  { *out = (float)f->kv[i].dbl; return true; }
+    if (f->kv[i].kind == KLM_K_INT32)  { *out = (float)f->kv[i].ival; return true; }
+    return false;
+}
+static bool klm_AMediaFormat_getDouble(void *fmt, const char *key, double *out) {
+    klm_format *f = fmt;
+    int i = klm_fmt_find(f, key);
+    if (i < 0 || !out) return false;
+    if (f->kv[i].kind == KLM_K_DOUBLE || f->kv[i].kind == KLM_K_FLOAT) { *out = f->kv[i].dbl; return true; }
+    return false;
+}
+static bool klm_AMediaFormat_getSize(void *fmt, const char *key, size_t *out) {
+    klm_format *f = fmt;
+    int i = klm_fmt_find(f, key);
+    if (i < 0 || !out || f->kv[i].kind != KLM_K_SIZE) return false;
+    *out = (size_t)f->kv[i].i64;
     return true;
 }
-// "crop" (API 28) is a rect; it is stored as the four crop-* ints, the same keys
-// MediaCodec puts in an output format on older releases.
+static bool klm_AMediaFormat_getBuffer(void *fmt, const char *key, void **data, size_t *size) {
+    klm_format *f = fmt;
+    int i = klm_fmt_find(f, key);
+    if (i < 0 || f->kv[i].kind != KLM_K_BUF) return false;
+    if (data) *data = f->kv[i].buf;
+    if (size) *size = f->kv[i].blen;
+    return true;
+}
+static void klm_AMediaFormat_setInt64(void *fmt, const char *key, int64_t v) {
+    klm_format *f = fmt; int i;
+    if (!f || !key || (i = klm_fmt_slot(f, key)) < 0) return;
+    klm_fmt_reset(f, i, KLM_K_INT64); f->kv[i].i64 = v;
+}
+static void klm_AMediaFormat_setFloat(void *fmt, const char *key, float v) {
+    klm_format *f = fmt; int i;
+    if (!f || !key || (i = klm_fmt_slot(f, key)) < 0) return;
+    klm_fmt_reset(f, i, KLM_K_FLOAT); f->kv[i].dbl = v;
+}
+static void klm_AMediaFormat_setDouble(void *fmt, const char *key, double v) {
+    klm_format *f = fmt; int i;
+    if (!f || !key || (i = klm_fmt_slot(f, key)) < 0) return;
+    klm_fmt_reset(f, i, KLM_K_DOUBLE); f->kv[i].dbl = v;
+}
+static void klm_AMediaFormat_setSize(void *fmt, const char *key, size_t v) {
+    klm_format *f = fmt; int i;
+    if (!f || !key || (i = klm_fmt_slot(f, key)) < 0) return;
+    klm_fmt_reset(f, i, KLM_K_SIZE); f->kv[i].i64 = (int64_t)v;
+}
+static void klm_AMediaFormat_setBuffer(void *fmt, const char *key, const void *data, size_t size) {
+    klm_format *f = fmt; int i;
+    if (!f || !key || (i = klm_fmt_slot(f, key)) < 0) return;
+    klm_fmt_reset(f, i, KLM_K_BUF);
+    f->kv[i].buf = size ? malloc(size) : NULL;      // copied: the guest's csd lives on its stack
+    if (f->kv[i].buf && data) { memcpy(f->kv[i].buf, data, size); f->kv[i].blen = size; }
+}
+static void klm_AMediaFormat_setRect(void *fmt, const char *key, int32_t l, int32_t t,
+                                     int32_t r, int32_t b) {
+    klm_format *f = fmt; int i;
+    if (!f || !key || (i = klm_fmt_slot(f, key)) < 0) return;
+    klm_fmt_reset(f, i, KLM_K_RECT);
+    f->kv[i].rect[0] = l; f->kv[i].rect[1] = t; f->kv[i].rect[2] = r; f->kv[i].rect[3] = b;
+}
+// "crop" (API 28) is a rect. A decoder reports it as the four crop-* ints
+// (MediaCodec's own output format on older releases); a rect the guest stored
+// itself is read back as stored.
 static bool klm_AMediaFormat_getRect(void *fmt, const char *key, int32_t *l, int32_t *t,
                                      int32_t *r, int32_t *b) {
+    klm_format *f = fmt;
+    int i = klm_fmt_find(f, key);
+    if (i >= 0 && f->kv[i].kind == KLM_K_RECT) {
+        if (l) *l = f->kv[i].rect[0];
+        if (t) *t = f->kv[i].rect[1];
+        if (r) *r = f->kv[i].rect[2];
+        if (b) *b = f->kv[i].rect[3];
+        return true;
+    }
     if (!key || strcmp(key, "crop")) return false;
     int32_t v[4];
     if (!klm_AMediaFormat_getInt32(fmt, "crop-left", &v[0]) ||
@@ -180,6 +287,58 @@ static bool klm_AMediaFormat_getRect(void *fmt, const char *key, int32_t *l, int
     if (r) *r = v[2];
     if (b) *b = v[3];
     return true;
+}
+// Deep copy; the destination keeps nothing of what it held (AMessage::extend
+// would merge, but the NDK documents a copy).
+static int klm_AMediaFormat_copy(void *to, const void *from) {
+    klm_format *d = to; const klm_format *s = from;
+    if (!d || !s) return AMEDIA_ERROR_INVALID_PARAMETER;
+    if (d == s) return AMEDIA_OK;
+    for (int i = 0; i < d->n; i++) { free(d->kv[i].key); free(d->kv[i].sval); free(d->kv[i].buf); }
+    memset(d->kv, 0, sizeof d->kv);
+    d->n = s->n;
+    for (int i = 0; i < s->n; i++) {
+        d->kv[i] = s->kv[i];
+        d->kv[i].key = strdup(s->kv[i].key);
+        d->kv[i].sval = s->kv[i].sval ? strdup(s->kv[i].sval) : NULL;
+        d->kv[i].buf = NULL;
+        if (s->kv[i].buf && s->kv[i].blen) {
+            d->kv[i].buf = malloc(s->kv[i].blen);
+            if (d->kv[i].buf) memcpy(d->kv[i].buf, s->kv[i].buf, s->kv[i].blen);
+            else d->kv[i].blen = 0;
+        }
+    }
+    return AMEDIA_OK;
+}
+// "{key: type(value), ...}", owned by the format and replaced on the next call —
+// AMediaFormat_toString's own lifetime rule.
+static const char *klm_AMediaFormat_toString(void *fmt) {
+    klm_format *f = fmt;
+    if (!f) return NULL;
+    size_t cap = 64;
+    for (int i = 0; i < f->n; i++)
+        cap += strlen(f->kv[i].key) + (f->kv[i].sval ? strlen(f->kv[i].sval) : 0) + 64;
+    char *t = malloc(cap), *w = t;
+    if (!t) return NULL;
+    w += snprintf(w, cap, "{");
+    for (int i = 0; i < f->n; i++) {
+        size_t left = cap - (size_t)(w - t);
+        const char *sep = i ? ", " : "";
+        switch (f->kv[i].kind) {
+        case KLM_K_STR:    w += snprintf(w, left, "%s%s: string(%s)", sep, f->kv[i].key, f->kv[i].sval ? f->kv[i].sval : ""); break;
+        case KLM_K_INT64:  w += snprintf(w, left, "%s%s: int64(%lld)", sep, f->kv[i].key, (long long)f->kv[i].i64); break;
+        case KLM_K_FLOAT:  w += snprintf(w, left, "%s%s: float(%g)", sep, f->kv[i].key, f->kv[i].dbl); break;
+        case KLM_K_DOUBLE: w += snprintf(w, left, "%s%s: double(%g)", sep, f->kv[i].key, f->kv[i].dbl); break;
+        case KLM_K_SIZE:   w += snprintf(w, left, "%s%s: size(%lld)", sep, f->kv[i].key, (long long)f->kv[i].i64); break;
+        case KLM_K_BUF:    w += snprintf(w, left, "%s%s: Buffer(%zu bytes)", sep, f->kv[i].key, f->kv[i].blen); break;
+        case KLM_K_RECT:   w += snprintf(w, left, "%s%s: rect(%d, %d, %d, %d)", sep, f->kv[i].key, f->kv[i].rect[0], f->kv[i].rect[1], f->kv[i].rect[2], f->kv[i].rect[3]); break;
+        default:           w += snprintf(w, left, "%s%s: int32(%d)", sep, f->kv[i].key, f->kv[i].ival); break;
+        }
+    }
+    snprintf(w, cap - (size_t)(w - t), "}");
+    free(f->text);
+    f->text = t;
+    return t;
 }
 static bool klm_AMediaFormat_getString(void *fmt, const char *key, const char **out) {
     if (!out) return false;
@@ -222,6 +381,80 @@ static const char *g_key_stride          = "stride";
 static const char *g_key_rotation        = "rotation-degrees";
 static const char *g_key_encoder_delay   = "encoder-delay";
 static const char *g_key_slice_height    = "slice-height";
+// The rest of <media/NdkMediaFormat.h> up to API 32 (Android 12L, the Quest 3's).
+// A guest that imports one of these weakly checks for NULL first, so defining
+// them only turns on code Android itself runs.
+static const char *g_key_aac_drc_attenuation_factor = "aac-drc-cut-level";
+static const char *g_key_aac_drc_boost_factor = "aac-drc-boost-level";
+static const char *g_key_aac_drc_heavy_compression = "aac-drc-heavy-compression";
+static const char *g_key_aac_drc_target_reference_level = "aac-target-ref-level";
+static const char *g_key_aac_encoded_target_level = "aac-encoded-target-level";
+static const char *g_key_aac_max_output_channel_count = "aac-max-output-channel_count";
+static const char *g_key_aac_profile = "aac-profile";
+static const char *g_key_audio_session_id = "audio-session-id";
+static const char *g_key_bitrate_mode = "bitrate-mode";
+static const char *g_key_bit_rate = "bitrate";
+static const char *g_key_capture_rate = "capture-rate";
+static const char *g_key_channel_mask = "channel-mask";
+static const char *g_key_complexity = "complexity";
+static const char *g_key_csd = "csd";
+static const char *g_key_csd_0 = "csd-0";
+static const char *g_key_csd_1 = "csd-1";
+static const char *g_key_csd_2 = "csd-2";
+static const char *g_key_display_crop = "crop";
+static const char *g_key_display_height = "display-height";
+static const char *g_key_display_width = "display-width";
+static const char *g_key_frame_count = "frame-count";
+static const char *g_key_grid_columns = "grid-cols";
+static const char *g_key_grid_rows = "grid-rows";
+static const char *g_key_hdr10_plus_info = "hdr10-plus-info";
+static const char *g_key_hdr_static_info = "hdr-static-info";
+static const char *g_key_is_adts = "is-adts";
+static const char *g_key_is_autoselect = "is-autoselect";
+static const char *g_key_is_default = "is-default";
+static const char *g_key_is_forced_subtitle = "is-forced-subtitle";
+static const char *g_key_i_frame_interval = "i-frame-interval";
+static const char *g_key_latency = "latency";
+static const char *g_key_level = "level";
+static const char *g_key_location = "location";
+static const char *g_key_loop = "loop";
+static const char *g_key_low_latency = "low-latency";
+static const char *g_key_max_bit_rate = "max-bitrate";
+static const char *g_key_max_fps_to_encoder = "max-fps-to-encoder";
+static const char *g_key_max_input_size = "max-input-size";
+static const char *g_key_max_pts_gap_to_encoder = "max-pts-gap-to-encoder";
+static const char *g_key_mpeg2_stream_header = "mpeg2-stream-header";
+static const char *g_key_mpegh_compatible_sets = "mpegh-compatible-sets";
+static const char *g_key_mpegh_profile_level_indication = "mpegh-profile-level-indication";
+static const char *g_key_mpegh_reference_channel_layout = "mpegh-reference-channel-layout";
+static const char *g_key_pcm_encoding = "pcm-encoding";
+static const char *g_key_profile = "profile";
+static const char *g_key_pssh = "pssh";
+static const char *g_key_push_blank_buffers_on_stop = "push-blank-buffers-on-shutdown";
+static const char *g_key_quality = "quality";
+static const char *g_key_repeat_previous_frame_after = "repeat-previous-frame-after";
+static const char *g_key_sar_height = "sar-height";
+static const char *g_key_sar_width = "sar-width";
+static const char *g_key_sei = "sei";
+static const char *g_key_temporal_layer_id = "temporal-layer-id";
+static const char *g_key_temporal_layering = "ts-schema";
+static const char *g_key_text_format_data = "text-format-data";
+static const char *g_key_thumbnail_csd_hevc = "thumbnail-csd-hevc";
+static const char *g_key_thumbnail_height = "thumbnail-height";
+static const char *g_key_thumbnail_time = "thumbnail-time";
+static const char *g_key_thumbnail_width = "thumbnail-width";
+static const char *g_key_time_us = "timeUs";
+static const char *g_key_title = "title";
+static const char *g_key_track_id = "track-id";
+static const char *g_key_track_index = "track-index";
+static const char *g_key_valid_samples = "valid-samples";
+static const char *g_key_year = "year";
+static const char *g_key_exif_offset = "exif-offset";
+static const char *g_key_exif_size = "exif-size";
+static const char *g_key_icc_profile = "icc-profile";
+static const char *g_key_sample_file_offset = "sample-file-offset";
+static const char *g_key_last_sample_index_in_chunk = "last-sample-index-in-chunk";
+static const char *g_key_create_input_surface_suspended = "create-input-buffers-suspended";
 
 // ---------------------------------------------------------------------------
 // AMediaExtractor — the DEMUXER, and the one part of this file that refuses.
@@ -266,6 +499,7 @@ typedef struct {
     char    *source;        // for the report: what it was asked to open
     kl_avdemux *dm;         // the demuxer, when a container was opened (else NULL)
     int      spooled;       // `source` is a temp file of ours (setDataSourceCustom): unlink on delete
+    int      unselected;    // the guest unselected the (only) track: no more samples until reselected
 } klm_extractor;
 
 static klm_extractor *klm_ex(void *ex) {
@@ -326,7 +560,14 @@ static int klm_AMediaExtractor_setDataSource(void *ex, const char *location) {
     klm_extractor *x = klm_ex(ex);
     if (!x) return AMEDIA_ERROR_INVALID_OBJECT;
     if (!klm_extractor_enabled()) return klm_extractor_refuse(x, location);
+    if (location && (!strncmp(location, "http://", 7) || !strncmp(location, "https://", 8) ||
+                     !strncmp(location, "rtsp://", 7) || !strncmp(location, "rtp://", 6) ||
+                     !strncmp(location, "udp://", 6) || !strncmp(location, "ftp://", 6))) {
+        klm_extractor_refuse(x, location);
+        return AMEDIA_ERROR_IO;                 // offline: a stream that cannot be reached
+    }
     if (location) {
+        if (!strncmp(location, "file://", 7)) location += 7;
         x->dm = kl_avdemux_open(location, 0, 0);
         if (x->dm) {
             free(x->source); x->source = strdup(location);
@@ -379,12 +620,16 @@ static int klm_AMediaExtractor_setDataSourceFd(void *ex, int fd, int64_t offset,
 typedef ssize_t (*klm_ds_read_at)(void *userdata, off_t offset, void *buffer, size_t size);
 typedef ssize_t (*klm_ds_get_size)(void *userdata);
 typedef void    (*klm_ds_close)(void *userdata);
+typedef ssize_t (*klm_ds_get_avail)(void *userdata, off_t offset);
 typedef struct {
     uint32_t        magic;
     void           *userdata;
     klm_ds_read_at  read_at;
     klm_ds_get_size get_size;
     klm_ds_close    close;
+    klm_ds_get_avail get_avail;  // API 34: how much past `offset` is readable now
+    char           *uri;         // AMediaDataSource_newUri: no guest callbacks, the URI is the source
+    int             closed;      // the close callback runs once, from close() or delete()
 } klm_datasource;
 
 static klm_datasource *klm_ds(void *p) {
@@ -399,8 +644,9 @@ static void *klm_AMediaDataSource_new(void) {
 static void klm_AMediaDataSource_delete(void *p) {
     klm_datasource *d = klm_ds(p);
     if (!d) return;
-    if (d->close) d->close(d->userdata);   // the guest's own cleanup of its stream
+    if (d->close && !d->closed) d->close(d->userdata);   // the guest's own cleanup of its stream
     d->magic = 0;
+    free(d->uri);
     free(d);
 }
 static void klm_AMediaDataSource_setUserdata(void *p, void *userdata) {
@@ -420,14 +666,38 @@ static void klm_AMediaDataSource_setClose(void *p, klm_ds_close fn) {
     if (d) d->close = fn;
 }
 
+// A location the device can only reach over the network. This runtime is
+// offline by design, and Android's own answer to a stream it cannot open is an
+// I/O error, which is what a guest's player already handles.
+static int klm_is_remote_uri(const char *u) {
+    return u && (!strncmp(u, "http://", 7) || !strncmp(u, "https://", 8) ||
+                 !strncmp(u, "rtsp://", 7) || !strncmp(u, "rtp://", 6) ||
+                 !strncmp(u, "udp://", 6) || !strncmp(u, "ftp://", 6));
+}
+
 static int klm_AMediaExtractor_setDataSourceCustom(void *ex, void *src) {
     klm_extractor *x = klm_ex(ex);
     klm_datasource *d = klm_ds(src);
     if (!x) return AMEDIA_ERROR_INVALID_OBJECT;
-    if (!d || !d->read_at || !d->get_size) return AMEDIA_ERROR_INVALID_PARAMETER;
+    if (!d || (!d->uri && (!d->read_at || !d->get_size))) return AMEDIA_ERROR_INVALID_PARAMETER;
     if (x->dm) { kl_avdemux_close(x->dm); x->dm = NULL; }
     if (x->spooled && x->source) { unlink(x->source); x->spooled = 0; }
     if (!klm_extractor_enabled()) return klm_extractor_refuse(x, "(custom data source)");
+    if (d->uri) {
+        // newUri: a source the framework opens itself. A file:// URI or a bare
+        // path is a local file; anything networked is refused as offline.
+        if (klm_is_remote_uri(d->uri)) {
+            klm_extractor_refuse(x, d->uri);
+            return AMEDIA_ERROR_IO;
+        }
+        const char *path = !strncmp(d->uri, "file://", 7) ? d->uri + 7 : d->uri;
+        if (strstr(path, "://")) return klm_extractor_refuse(x, d->uri);   // content:// etc.
+        x->dm = kl_avdemux_open(path, 0, 0);
+        if (!x->dm) return klm_extractor_refuse(x, d->uri);
+        free(x->source); x->source = strdup(path);
+        fprintf(stderr, "  [media] AMediaExtractor: demuxing \"%s\" (data source URI)\n", path);
+        return AMEDIA_OK;
+    }
 
     long long size = (long long)d->get_size(d->userdata);
     // 2 GiB is far past any clip a title streams this way, and a negative or
@@ -516,21 +786,22 @@ static void *klm_AMediaExtractor_getTrackFormat(void *ex, size_t i) {
 static int klm_AMediaExtractor_selectTrack(void *ex, size_t i) {
     klm_extractor *x = klm_ex(ex);
     if (!x || !x->dm || i != 0) return AMEDIA_ERROR_INVALID_PARAMETER;
+    x->unselected = 0;
     return AMEDIA_OK;               // the single video track is already reading
 }
 static ssize_t klm_AMediaExtractor_readSampleData(void *ex, uint8_t *buf, size_t cap) {
     klm_extractor *x = klm_ex(ex);
-    if (!x || !x->dm) return -1;
+    if (!x || !x->dm || x->unselected) return -1;
     return (ssize_t)kl_avdemux_read(x->dm, buf, (unsigned long)cap);
 }
 static int klm_AMediaExtractor_getSampleTrackIndex(void *ex) {
     klm_extractor *x = klm_ex(ex);
-    if (!x || !x->dm) return -1;
+    if (!x || !x->dm || x->unselected) return -1;
     return kl_avdemux_sample_time_us(x->dm) < 0 ? -1 : 0;
 }
 static int64_t klm_AMediaExtractor_getSampleTime(void *ex) {
     klm_extractor *x = klm_ex(ex);
-    if (!x || !x->dm) return -1;
+    if (!x || !x->dm || x->unselected) return -1;
     return (int64_t)kl_avdemux_sample_time_us(x->dm);
 }
 static bool klm_AMediaExtractor_advance(void *ex) {
@@ -548,10 +819,20 @@ static int klm_AMediaExtractor_seekTo(void *ex, int64_t us, int mode) {
 // ---------------------------------------------------------------------------
 // AHardwareBuffer — a refcounted handle on one CVPixelBuffer.
 
+// Two kinds share the handle. A DECODER's buffer wraps the CVPixelBuffer it was
+// decoded into (pixels != NULL) and is what EGL imports. One the guest allocated
+// itself with AHardwareBuffer_allocate is plain CPU memory (mem != NULL): the
+// CPU-side contract (describe/lock/unlock) is complete, but no GPU API can see
+// it, since the graphics side only maps decoder frames.
 typedef struct {
     uint32_t magic;
     int      refs;
-    void    *pixels;            // CVPixelBufferRef, retained
+    void    *pixels;            // CVPixelBufferRef, retained (decoder frames)
+    void    *mem;               // guest-allocated storage (AHardwareBuffer_allocate)
+    uint32_t width, height, layers, format;
+    uint64_t usage, id;
+    uint32_t stride_px;         // allocated buffers: row length in pixels
+    int      locked;
 } klm_hwbuf;
 
 #define KLM_HWBUF_MAGIC 0x4b4c4842u    /* 'KLHB' */
@@ -567,13 +848,16 @@ static klm_hwbuf *klm_hwbuf_new(CVPixelBufferRef pb) {
     h->magic = KLM_HWBUF_MAGIC;
     h->refs = 1;
     h->pixels = (void *)CVPixelBufferRetain(pb);
+    static uint64_t next_id;
+    h->id = __atomic_add_fetch(&next_id, 1, __ATOMIC_RELAXED);
     return h;
 }
 
 static void klm_hwbuf_release(klm_hwbuf *h) {
     if (!h || h->magic != KLM_HWBUF_MAGIC) return;
     if (__atomic_sub_fetch(&h->refs, 1, __ATOMIC_ACQ_REL) > 0) return;
-    CVPixelBufferRelease((CVPixelBufferRef)h->pixels);
+    if (h->pixels) CVPixelBufferRelease((CVPixelBufferRef)h->pixels);
+    free(h->mem);
     h->magic = 0;
     free(h);
 }
@@ -599,6 +883,8 @@ typedef struct {
     void    *pixels;            // CVPixelBufferRef, retained
     int64_t  pts_us;
     klm_hwbuf *hw;              // made on demand, owned by the image
+    int32_t  format;            // the reader's, for AImage_getFormat
+    int      locked;            // pixels are locked for plane access
 } klm_image;
 
 #define KLM_IMAGE_MAGIC 0x4b4c494du    /* 'KLIM' */
@@ -621,6 +907,7 @@ static void klm_AImage_delete(void *image) {
     // (QSVLFrameServer keeps a deque of them). Releasing our reference here and
     // letting the guest's keep it alive is exactly Android's contract.
     klm_hwbuf_release(im->hw);
+    if (im->locked) CVPixelBufferUnlockBaseAddress((CVPixelBufferRef)im->pixels, kCVPixelBufferLock_ReadOnly);
     CVPixelBufferRelease((CVPixelBufferRef)im->pixels);
     im->magic = 0;
     free(im);
@@ -809,7 +1096,7 @@ static int klm_AImageReader_acquireLatestImage(void *reader, void **out) {
     klm_reader *r = reader;
     if (!r || r->magic != KLM_READER_MAGIC || !out) return AMEDIA_ERROR_INVALID_PARAMETER;
     pthread_mutex_lock(&r->lock);
-    if (!r->count) { pthread_mutex_unlock(&r->lock); return AMEDIA_ERROR_UNKNOWN; }
+    if (!r->count) { pthread_mutex_unlock(&r->lock); return AMEDIA_IMGREADER_NO_BUFFER_AVAILABLE; }
     while (r->count > 1) {
         CVPixelBufferRelease((CVPixelBufferRef)r->q[r->head].pb);
         r->head = (r->head + 1) % KLM_READER_MAX;
@@ -827,6 +1114,7 @@ static int klm_AImageReader_acquireLatestImage(void *reader, void **out) {
     klm_image *im = klm_image_new((CVPixelBufferRef)pb, pts);
     CVPixelBufferRelease((CVPixelBufferRef)pb);   // the image took its own
     if (!im) return AMEDIA_ERROR_UNKNOWN;
+    im->format = r->format;
     *out = im;
     return AMEDIA_OK;
 }
@@ -933,6 +1221,16 @@ typedef struct {
     int64_t  eos_quiet_us;      // monotonic time of EOS / of the last frame after it
     int      eos_sent;
     int64_t  last_pts;
+
+    // AMediaCodec_setAsyncNotifyCallback: a thread that does the dequeueing and
+    // calls the guest's four callbacks, as the framework's looper does.
+    pthread_t athread;
+    int      arunning;
+    void    *aud;
+    void   (*a_in)(void *codec, void *ud, int32_t idx);
+    void   (*a_out)(void *codec, void *ud, int32_t idx, AMediaCodecBufferInfo *info);
+    void   (*a_fmt)(void *codec, void *ud, void *format);
+    void   (*a_err)(void *codec, void *ud, int err, int32_t action, const char *detail);
 } klm_codec;
 
 #define KLM_CODEC_MAGIC 0x4b4c4344u    /* 'KLCD' */
@@ -1035,9 +1333,12 @@ static int klm_AMediaCodec_flush(void *codec) {
     return AMEDIA_OK;
 }
 
+static void klm_codec_async_stop(klm_codec *c);
+
 static int klm_AMediaCodec_delete(void *codec) {
     klm_codec *c = codec;
     if (!c || c->magic != KLM_CODEC_MAGIC) return AMEDIA_ERROR_INVALID_PARAMETER;
+    klm_codec_async_stop(c);
     pthread_mutex_lock(&c->lock);
     klm_codec_drop_outputs(c);
     for (int i = 0; i < KLM_IN_BUFFERS; i++) free(c->in[i].data);
@@ -1534,6 +1835,643 @@ void kl_mediandk_report(FILE *f) {
 // ---------------------------------------------------------------------------
 // The table, and the two doors into it.
 
+// ---------------------------------------------------------------------------
+// The rest of libmediandk as Android 12L/13/14 ships it (NDK r26), served for
+// what the Quest 3 can honestly do from here:
+//   - decode: yes (AMediaCodec over VideoToolbox, above).
+//   - encode, DRM, secure buffers: no. A guest that asks gets the error Android
+//     itself returns for "no such codec / not an encoder / no crypto", which is
+//     the path every media player already has.
+// Nothing below invents data: an extractor with one video track says so, a
+// decoder-made AHardwareBuffer describes what the decoder produced.
+
+// ---- AMediaDataSource: URI sources, close, available size --------------------
+static void *klm_AMediaDataSource_newUri(const char *uri, int numheaders,
+                                         const char *const *key_values) {
+    (void)numheaders; (void)key_values;     // headers only matter to a network fetch
+    if (!uri) return NULL;
+    klm_datasource *d = klm_AMediaDataSource_new();
+    if (!d) return NULL;
+    d->uri = strdup(uri);
+    if (!d->uri) { free(d); return NULL; }
+    return d;
+}
+static void klm_AMediaDataSource_setGetAvailableSize(void *p, klm_ds_get_avail fn) {
+    klm_datasource *d = klm_ds(p);
+    if (d) d->get_avail = fn;               // we spool the whole source, so it is never asked
+}
+// Closes the stream without deleting the source (reads then fail): the guest's
+// close callback runs exactly once, from here or from delete.
+static void klm_AMediaDataSource_close(void *p) {
+    klm_datasource *d = klm_ds(p);
+    if (!d || d->closed) return;
+    d->closed = 1;
+    if (d->close) d->close(d->userdata);
+}
+
+// ---- AMediaExtractor: the remaining getters ---------------------------------
+static void *klm_AMediaExtractor_getFileFormat(void *ex) {
+    klm_extractor *x = klm_ex(ex);
+    if (!x || !x->dm) return NULL;
+    int w = 0, h = 0; const char *mime = NULL; long long dur = 0; float fps = 0;
+    kl_avdemux_info(x->dm, &w, &h, &mime, &dur, &fps);
+    klm_format *f = klm_AMediaFormat_new();
+    if (!f) return NULL;
+    klm_AMediaFormat_setString(f, g_key_mime, "video/mp4");   // the container's, as MediaExtractor.getMetrics does
+    klm_AMediaFormat_setInt64(f, g_key_duration, dur);
+    return f;
+}
+static void *klm_AMediaExtractor_getSampleFormat(void *ex) {
+    klm_extractor *x = klm_ex(ex);
+    if (!x || !x->dm || x->unselected || kl_avdemux_sample_time_us(x->dm) < 0) return NULL;
+    return klm_AMediaExtractor_getTrackFormat(ex, 0);
+}
+static ssize_t klm_AMediaExtractor_getSampleSize(void *ex) {
+    klm_extractor *x = klm_ex(ex);
+    if (!x || !x->dm || x->unselected) return -1;
+    unsigned char probe[1];
+    return (ssize_t)kl_avdemux_read(x->dm, probe, 0);      // full length even when cap is 0
+}
+static uint32_t klm_AMediaExtractor_getSampleFlags(void *ex) {
+    klm_extractor *x = klm_ex(ex);
+    if (!x || !x->dm || x->unselected || kl_avdemux_sample_time_us(x->dm) < 0) return 0;
+    return kl_avdemux_sample_keyframe(x->dm) ? 1u /* AMEDIAEXTRACTOR_SAMPLE_FLAG_SYNC */ : 0u;
+}
+static int64_t klm_AMediaExtractor_getCachedDuration(void *ex) {
+    (void)ex;
+    return -1;                   // a local file has no cache to measure; Android answers -1 too
+}
+static int klm_AMediaExtractor_unselectTrack(void *ex, size_t i) {
+    klm_extractor *x = klm_ex(ex);
+    if (!x || !x->dm || i != 0) return AMEDIA_ERROR_INVALID_PARAMETER;
+    x->unselected = 1;
+    return AMEDIA_OK;
+}
+// Both are NULL for a clear (non-DRM) stream, which is what every file here is.
+static void *klm_AMediaExtractor_getPsshInfo(void *ex) { (void)ex; return NULL; }
+static void *klm_AMediaExtractor_getSampleCryptoInfo(void *ex) { (void)ex; return NULL; }
+
+// ---- AMediaCrypto / AMediaDrm: no DRM, by the project's standing rule -------
+static bool klm_AMediaCrypto_isCryptoSchemeSupported(const uint8_t uuid[16]) { (void)uuid; return false; }
+static bool klm_AMediaCrypto_requiresSecureDecoderComponent(const char *mime) { (void)mime; return false; }
+static void *klm_AMediaCrypto_new(const uint8_t uuid[16], const void *init, size_t n) {
+    (void)uuid; (void)init; (void)n;
+    return NULL;                 // "scheme not supported" — the guest falls back to clear playback or errors
+}
+static void klm_AMediaCrypto_delete(void *c) { (void)c; }
+static bool klm_AMediaDrm_isCryptoSchemeSupported(const uint8_t uuid[16], const char *mime) {
+    (void)uuid; (void)mime;
+    return false;
+}
+static void *klm_AMediaDrm_createByUUID(const uint8_t uuid[16]) { (void)uuid; return NULL; }
+static int klm_AMediaDrm_release(void *drm) { (void)drm; return AMEDIA_OK; }
+
+// ---- AMediaCodecCryptoInfo: a plain container --------------------------------
+typedef struct {
+    uint32_t magic;
+    int      mode;
+    size_t   n;
+    uint8_t  key[16], iv[16];
+    size_t  *clear, *enc;
+    int32_t  pat_enc, pat_skip;
+} klm_cryptoinfo;
+#define KLM_CRYPTOINFO_MAGIC 0x4b4c4349u   /* 'KLCI' */
+static klm_cryptoinfo *klm_ci(void *p) {
+    klm_cryptoinfo *c = p;
+    return (c && c->magic == KLM_CRYPTOINFO_MAGIC) ? c : NULL;
+}
+static void *klm_AMediaCodecCryptoInfo_new(int n, uint8_t key[16], uint8_t iv[16], int mode,
+                                           size_t *clear, size_t *enc) {
+    if (n < 0 || !key || !iv || (n && (!clear || !enc))) return NULL;
+    klm_cryptoinfo *c = calloc(1, sizeof *c);
+    if (!c) return NULL;
+    c->magic = KLM_CRYPTOINFO_MAGIC; c->mode = mode; c->n = (size_t)n;
+    memcpy(c->key, key, 16); memcpy(c->iv, iv, 16);
+    c->clear = calloc(n ? (size_t)n : 1, sizeof(size_t));
+    c->enc   = calloc(n ? (size_t)n : 1, sizeof(size_t));
+    if (!c->clear || !c->enc) { free(c->clear); free(c->enc); free(c); return NULL; }
+    for (int i = 0; i < n; i++) { c->clear[i] = clear[i]; c->enc[i] = enc[i]; }
+    return c;
+}
+static int klm_AMediaCodecCryptoInfo_delete(void *p) {
+    klm_cryptoinfo *c = klm_ci(p);
+    if (!c) return AMEDIA_ERROR_INVALID_OBJECT;
+    c->magic = 0; free(c->clear); free(c->enc); free(c);
+    return AMEDIA_OK;
+}
+static void klm_AMediaCodecCryptoInfo_setPattern(void *p, const int32_t *pat) {
+    klm_cryptoinfo *c = klm_ci(p);
+    if (c && pat) { c->pat_enc = pat[0]; c->pat_skip = pat[1]; }
+}
+static size_t klm_AMediaCodecCryptoInfo_getNumSubSamples(void *p) {
+    klm_cryptoinfo *c = klm_ci(p);
+    return c ? c->n : 0;         // Android returns 0 for an invalid info too
+}
+static int klm_AMediaCodecCryptoInfo_getKey(void *p, uint8_t *dst) {
+    klm_cryptoinfo *c = klm_ci(p);
+    if (!c || !dst) return AMEDIA_ERROR_INVALID_PARAMETER;
+    memcpy(dst, c->key, 16);
+    return AMEDIA_OK;
+}
+static int klm_AMediaCodecCryptoInfo_getIV(void *p, uint8_t *dst) {
+    klm_cryptoinfo *c = klm_ci(p);
+    if (!c || !dst) return AMEDIA_ERROR_INVALID_PARAMETER;
+    memcpy(dst, c->iv, 16);
+    return AMEDIA_OK;
+}
+static int klm_AMediaCodecCryptoInfo_getMode(void *p) {
+    klm_cryptoinfo *c = klm_ci(p);
+    return c ? c->mode : AMEDIA_ERROR_INVALID_OBJECT;
+}
+static int klm_AMediaCodecCryptoInfo_getClearBytes(void *p, size_t *dst) {
+    klm_cryptoinfo *c = klm_ci(p);
+    if (!c || !dst) return AMEDIA_ERROR_INVALID_PARAMETER;
+    memcpy(dst, c->clear, c->n * sizeof(size_t));
+    return AMEDIA_OK;
+}
+static int klm_AMediaCodecCryptoInfo_getEncryptedBytes(void *p, size_t *dst) {
+    klm_cryptoinfo *c = klm_ci(p);
+    if (!c || !dst) return AMEDIA_ERROR_INVALID_PARAMETER;
+    memcpy(dst, c->enc, c->n * sizeof(size_t));
+    return AMEDIA_OK;
+}
+
+// ---- AMediaCodec: the rest of the surface ------------------------------------
+// Names a Qualcomm/AOSP decoder carries ("OMX.qcom.video.decoder.avc",
+// "c2.qti.hevc.decoder", "c2.android.avc.decoder"); createCodecByName serves the
+// decoders and says NULL ("no such codec") for everything else.
+static const char *klm_mime_for_codec_name(const char *name) {
+    if (!name || !strstr(name, "ecoder")) return NULL;     // decoder / Decoder
+    if (strstr(name, "hevc") || strstr(name, "h265") || strstr(name, "HEVC")) return "video/hevc";
+    if (strstr(name, "avc") || strstr(name, "h264") || strstr(name, "AVC")) return "video/avc";
+    return NULL;
+}
+static void *klm_AMediaCodec_createCodecByName(const char *name) {
+    const char *mime = klm_mime_for_codec_name(name);
+    if (!mime) {
+        fprintf(stderr, "  [media] AMediaCodec_createCodecByName(\"%s\"): not a decoder served here\n",
+                name ? name : "(null)");
+        return NULL;
+    }
+    return klm_AMediaCodec_createDecoderByType(mime);
+}
+static void *klm_AMediaCodec_createEncoderByType(const char *mime) {
+    fprintf(stderr, "  [media] AMediaCodec_createEncoderByType(\"%s\"): there is no encoder here\n",
+            mime ? mime : "(null)");
+    return NULL;
+}
+static int klm_AMediaCodec_setOutputSurface(void *codec, void *window) {
+    klm_codec *c = codec;
+    if (!c || c->magic != KLM_CODEC_MAGIC || !window) return AMEDIA_ERROR_INVALID_PARAMETER;
+    klm_reader *r = kl_ndk_window_owner(window);
+    pthread_mutex_lock(&c->lock);
+    c->surface = r;                          // later frames go to the new reader
+    pthread_mutex_unlock(&c->lock);
+    if (!r) fprintf(stderr, "  [media] AMediaCodec_setOutputSurface: that window is not an AImageReader's\n");
+    return AMEDIA_OK;
+}
+// Decoders have no input surface; MediaCodec answers INVALID_OPERATION.
+static int klm_AMediaCodec_createInputSurface(void *codec, void **out) {
+    (void)codec; if (out) *out = NULL;
+    return AMEDIA_ERROR_INVALID_OPERATION;
+}
+static int klm_AMediaCodec_createPersistentInputSurface(void **out) {
+    if (out) *out = NULL;
+    return AMEDIA_ERROR_UNSUPPORTED;         // needs an encoder
+}
+static int klm_AMediaCodec_setInputSurface(void *codec, void *window) {
+    (void)codec; (void)window;
+    return AMEDIA_ERROR_INVALID_OPERATION;
+}
+static int klm_AMediaCodec_signalEndOfInputStream(void *codec) {
+    (void)codec;
+    return AMEDIA_ERROR_INVALID_OPERATION;
+}
+static int klm_AMediaCodec_setParameters(void *codec, const void *params) {
+    klm_codec *c = codec;
+    if (!c || c->magic != KLM_CODEC_MAGIC || !params) return AMEDIA_ERROR_INVALID_PARAMETER;
+    return AMEDIA_OK;                        // nothing a hardware decoder changes mid-stream is exposed
+}
+static int klm_AMediaCodec_getName(void *codec, char **out) {
+    klm_codec *c = codec;
+    if (!c || c->magic != KLM_CODEC_MAGIC || !out) return AMEDIA_ERROR_INVALID_PARAMETER;
+    *out = strdup(strstr(c->mime, "hevc") ? "c2.qti.hevc.decoder" : "c2.qti.avc.decoder");
+    return *out ? AMEDIA_OK : AMEDIA_ERROR_UNKNOWN;
+}
+static void klm_AMediaCodec_releaseName(void *codec, char *name) { (void)codec; free(name); }
+static void *klm_AMediaCodec_getInputFormat(void *codec) {
+    klm_codec *c = codec;
+    if (!c || c->magic != KLM_CODEC_MAGIC) return NULL;
+    klm_format *f = klm_AMediaFormat_new();
+    if (f) klm_AMediaFormat_setString(f, g_key_mime, c->mime);
+    return f;
+}
+static void *klm_AMediaCodec_getBufferFormat(void *codec, size_t idx) {
+    (void)idx;
+    return klm_AMediaCodec_getOutputFormat(codec);
+}
+static int klm_AMediaCodec_releaseOutputBufferAtTime(void *codec, size_t idx, int64_t ts_ns) {
+    (void)ts_ns;                             // the reader presents on arrival; there is no display timeline to hold it to
+    return klm_AMediaCodec_releaseOutputBuffer(codec, idx, true);
+}
+// Secure input needs a crypto the codec was never configured with.
+static int klm_AMediaCodec_queueSecureInputBuffer(void *codec, size_t idx, off_t off,
+                                                  void *info, uint64_t time_us, uint32_t flags) {
+    (void)codec; (void)idx; (void)off; (void)info; (void)time_us; (void)flags;
+    return AMEDIA_ERROR_INVALID_OPERATION;
+}
+
+typedef struct {
+    void (*onAsyncInputAvailable)(void *codec, void *ud, int32_t idx);
+    void (*onAsyncOutputAvailable)(void *codec, void *ud, int32_t idx, AMediaCodecBufferInfo *info);
+    void (*onAsyncFormatChanged)(void *codec, void *ud, void *format);
+    void (*onAsyncError)(void *codec, void *ud, int err, int32_t action, const char *detail);
+} klm_async_cb;
+
+static void *klm_codec_async_loop(void *arg) {
+    klm_codec *c = arg;
+    kl_thread_init();                        // guest callbacks run on this thread
+    while (__atomic_load_n(&c->arunning, __ATOMIC_ACQUIRE)) {
+        int progress = 0;
+        if (c->started) {
+            ssize_t i = klm_AMediaCodec_dequeueInputBuffer(c, 0);
+            if (i >= 0) {
+                if (c->a_in) c->a_in(c, c->aud, (int32_t)i);
+                progress = 1;
+            }
+            AMediaCodecBufferInfo info;
+            memset(&info, 0, sizeof info);
+            ssize_t o = klm_AMediaCodec_dequeueOutputBuffer(c, &info, 0);
+            if (o >= 0) {
+                if (c->a_out) c->a_out(c, c->aud, (int32_t)o, &info);
+                progress = 1;
+            } else if (o == AMEDIACODEC_INFO_OUTPUT_FORMAT_CHANGED) {
+                void *f = klm_AMediaCodec_getOutputFormat(c);
+                if (f && c->a_fmt) c->a_fmt(c, c->aud, f);
+                if (f) klm_AMediaFormat_delete(f);      // owned by the codec for the callback's duration
+                progress = 1;
+            }
+        }
+        if (!progress) usleep(1000);
+    }
+    return NULL;
+}
+static void klm_codec_async_stop(klm_codec *c) {
+    if (!c->arunning) return;
+    __atomic_store_n(&c->arunning, 0, __ATOMIC_RELEASE);
+    pthread_join(c->athread, NULL);
+}
+static int klm_AMediaCodec_setAsyncNotifyCallback(void *codec, klm_async_cb cb, void *ud) {
+    klm_codec *c = codec;
+    if (!c || c->magic != KLM_CODEC_MAGIC) return AMEDIA_ERROR_INVALID_PARAMETER;
+    klm_codec_async_stop(c);
+    c->a_in = cb.onAsyncInputAvailable; c->a_out = cb.onAsyncOutputAvailable;
+    c->a_fmt = cb.onAsyncFormatChanged; c->a_err = cb.onAsyncError; c->aud = ud;
+    if (!c->a_in && !c->a_out && !c->a_fmt) return AMEDIA_OK;   // callbacks cleared: back to synchronous mode
+    c->arunning = 1;
+    if (pthread_create(&c->athread, NULL, klm_codec_async_loop, c) != 0) {
+        c->arunning = 0;
+        return AMEDIA_ERROR_UNKNOWN;
+    }
+    return AMEDIA_OK;
+}
+
+// ---- AImageReader / AImage: the rest -----------------------------------------
+#define KLM_AIMAGE_FORMAT_PRIVATE     0x22
+#define KLM_AIMAGE_FORMAT_YUV_420_888 0x23
+static int klm_AImageReader_new(int32_t w, int32_t h, int32_t format, int32_t max_images, void **out) {
+    // No usage given: the default is CPU_READ_OFTEN, which is what makes the
+    // planes readable.
+    return klm_AImageReader_newWithUsage(w, h, format, 3 /* AHARDWAREBUFFER_USAGE_CPU_READ_OFTEN */,
+                                         max_images, out);
+}
+static int klm_reader_get(void *reader, int32_t *out, int which) {
+    klm_reader *r = reader;
+    if (!r || r->magic != KLM_READER_MAGIC || !out) return AMEDIA_ERROR_INVALID_PARAMETER;
+    *out = which == 0 ? r->width : which == 1 ? r->height : which == 2 ? r->format : r->max_images;
+    return AMEDIA_OK;
+}
+static int klm_AImageReader_getWidth(void *r, int32_t *o)     { return klm_reader_get(r, o, 0); }
+static int klm_AImageReader_getHeight(void *r, int32_t *o)    { return klm_reader_get(r, o, 1); }
+static int klm_AImageReader_getFormat(void *r, int32_t *o)    { return klm_reader_get(r, o, 2); }
+static int klm_AImageReader_getMaxImages(void *r, int32_t *o) { return klm_reader_get(r, o, 3); }
+// FIFO: the oldest queued frame, no dropping (acquireLatestImage is the one that drops).
+static int klm_AImageReader_acquireNextImage(void *reader, void **out) {
+    klm_reader *r = reader;
+    if (!r || r->magic != KLM_READER_MAGIC || !out) return AMEDIA_ERROR_INVALID_PARAMETER;
+    pthread_mutex_lock(&r->lock);
+    if (!r->count) { pthread_mutex_unlock(&r->lock); return AMEDIA_IMGREADER_NO_BUFFER_AVAILABLE; }
+    void *pb = r->q[r->head].pb;
+    int64_t pts = r->q[r->head].pts_us;
+    r->head = (r->head + 1) % KLM_READER_MAX;
+    r->count--;
+    r->n_acquired++;
+    pthread_mutex_unlock(&r->lock);
+    klm_image *im = klm_image_new((CVPixelBufferRef)pb, pts);
+    CVPixelBufferRelease((CVPixelBufferRef)pb);
+    if (!im) return AMEDIA_ERROR_UNKNOWN;
+    im->format = r->format;
+    *out = im;
+    return AMEDIA_OK;
+}
+// The "Async" forms exist for a fence the producer signals when the frame is
+// really ready. Ours is ready when queued, so the fence is -1 (already signalled).
+static int klm_AImageReader_acquireNextImageAsync(void *r, void **out, int *fence) {
+    if (!fence) return AMEDIA_ERROR_INVALID_PARAMETER;
+    *fence = -1;
+    return klm_AImageReader_acquireNextImage(r, out);
+}
+static int klm_AImageReader_acquireLatestImageAsync(void *r, void **out, int *fence) {
+    if (!fence) return AMEDIA_ERROR_INVALID_PARAMETER;
+    *fence = -1;
+    return klm_AImageReader_acquireLatestImage(r, out);
+}
+// Fires when the producer detaches a buffer from the queue; this reader never
+// reallocates buffers behind the guest's back, so it is accepted and never called.
+static int klm_AImageReader_setBufferRemovedListener(void *reader, const void *listener) {
+    klm_reader *r = reader;
+    (void)listener;
+    if (!r || r->magic != KLM_READER_MAGIC) return AMEDIA_ERROR_INVALID_PARAMETER;
+    return AMEDIA_OK;
+}
+static klm_image *klm_img(void *p) {
+    klm_image *im = p;
+    return (im && im->magic == KLM_IMAGE_MAGIC) ? im : NULL;
+}
+static int klm_AImage_getFormat(void *image, int32_t *out) {
+    klm_image *im = klm_img(image);
+    if (!im || !out) return AMEDIA_ERROR_INVALID_PARAMETER;
+    *out = im->format ? im->format : KLM_AIMAGE_FORMAT_PRIVATE;
+    return AMEDIA_OK;
+}
+typedef struct { int32_t left, top, right, bottom; } klm_rect;
+static int klm_AImage_getCropRect(void *image, klm_rect *r) {
+    klm_image *im = klm_img(image);
+    if (!im || !r) return AMEDIA_ERROR_INVALID_PARAMETER;
+    r->left = 0; r->top = 0;
+    r->right  = (int32_t)CVPixelBufferGetWidth((CVPixelBufferRef)im->pixels);
+    r->bottom = (int32_t)CVPixelBufferGetHeight((CVPixelBufferRef)im->pixels);
+    return AMEDIA_OK;
+}
+static void klm_AImage_deleteAsync(void *image, int fence) {
+    if (fence >= 0) close(fence);            // ownership passes to the callee
+    klm_AImage_delete(image);
+}
+// Planes: only a YUV_420_888 reader over an NV12 frame has CPU-readable planes
+// (Y, then the interleaved CbCr read as pixelStride-2 U and V). A PRIVATE
+// reader's pixels belong to the GPU, and Android refuses plane access on those.
+static int klm_image_lock_planes(klm_image *im) {
+    if (im->format != KLM_AIMAGE_FORMAT_YUV_420_888 ||
+        !klm_pb_is_nv12((CVPixelBufferRef)im->pixels))
+        return AMEDIA_ERROR_UNSUPPORTED;
+    if (!im->locked) {
+        if (CVPixelBufferLockBaseAddress((CVPixelBufferRef)im->pixels, kCVPixelBufferLock_ReadOnly) != 0)
+            return AMEDIA_IMGREADER_CANNOT_LOCK_IMAGE;
+        im->locked = 1;
+    }
+    return AMEDIA_OK;
+}
+static int klm_AImage_getNumberOfPlanes(void *image, int32_t *out) {
+    klm_image *im = klm_img(image);
+    if (!im || !out) return AMEDIA_ERROR_INVALID_PARAMETER;
+    if (im->format != KLM_AIMAGE_FORMAT_YUV_420_888 ||
+        !klm_pb_is_nv12((CVPixelBufferRef)im->pixels)) return AMEDIA_ERROR_UNSUPPORTED;
+    *out = 3;
+    return AMEDIA_OK;
+}
+static int klm_AImage_getPlaneRowStride(void *image, int plane, int32_t *out) {
+    klm_image *im = klm_img(image);
+    if (!im || !out || plane < 0 || plane > 2) return AMEDIA_ERROR_INVALID_PARAMETER;
+    int st = klm_image_lock_planes(im);
+    if (st != AMEDIA_OK) return st;
+    *out = (int32_t)CVPixelBufferGetBytesPerRowOfPlane((CVPixelBufferRef)im->pixels, plane ? 1 : 0);
+    return AMEDIA_OK;
+}
+static int klm_AImage_getPlanePixelStride(void *image, int plane, int32_t *out) {
+    klm_image *im = klm_img(image);
+    if (!im || !out || plane < 0 || plane > 2) return AMEDIA_ERROR_INVALID_PARAMETER;
+    int st = klm_image_lock_planes(im);
+    if (st != AMEDIA_OK) return st;
+    *out = plane ? 2 : 1;
+    return AMEDIA_OK;
+}
+static int klm_AImage_getPlaneData(void *image, int plane, uint8_t **data, int *len) {
+    klm_image *im = klm_img(image);
+    if (!im || !data || !len || plane < 0 || plane > 2) return AMEDIA_ERROR_INVALID_PARAMETER;
+    int st = klm_image_lock_planes(im);
+    if (st != AMEDIA_OK) return st;
+    CVPixelBufferRef pb = (CVPixelBufferRef)im->pixels;
+    size_t h = CVPixelBufferGetHeightOfPlane(pb, plane ? 1 : 0);
+    size_t stride = CVPixelBufferGetBytesPerRowOfPlane(pb, plane ? 1 : 0);
+    uint8_t *base = CVPixelBufferGetBaseAddressOfPlane(pb, plane ? 1 : 0);
+    if (!base) return AMEDIA_IMGREADER_CANNOT_LOCK_IMAGE;
+    *data = plane == 2 ? base + 1 : base;      // Cr interleaves right after Cb
+    *len = (int)(stride * h) - (plane == 2 ? 1 : 0);
+    return AMEDIA_OK;
+}
+
+// ---- AHardwareBuffer: allocate / describe / lock / unlock --------------------
+typedef struct {
+    uint32_t width, height, layers, format;
+    uint64_t usage;
+    uint32_t stride, rfu0;
+    uint64_t rfu1;
+} klm_ahb_desc;
+typedef struct { int32_t left, top, right, bottom; } klm_arect;
+typedef struct { void *data; uint32_t pixelStride, rowStride; } klm_ahb_plane;
+typedef struct { uint32_t planeCount; klm_ahb_plane planes[4]; } klm_ahb_planes;
+
+enum { KLM_AHB_CPU_READ_MASK = 0xF, KLM_AHB_CPU_WRITE_MASK = 0xF0,
+       KLM_AHB_USAGE_PROTECTED = 0x4000 };
+enum { KLM_AHB_BLOB = 0x21, KLM_AHB_YUV420 = 0x23 };
+
+// Bytes per pixel of a gralloc format, 0 for one we do not know (and for the
+// planar/blob ones, which have their own size rules).
+static int klm_ahb_bpp(uint32_t fmt) {
+    switch (fmt) {
+    case 1: case 2: case 0x2b: case 0x32: case 0x33: case 0x3a: return 4;
+    case 3: case 0x31: return 3;
+    case 4: case 0x30: case 0x39: return 2;
+    case 0x16: case 0x34: return 8;
+    case 0x35: case 0x38: return 1;
+    default: return 0;
+    }
+}
+static int klm_ahb_check(const klm_ahb_desc *d) {
+    if (!d || !d->width || !d->height || !d->layers) return -22;           // -EINVAL
+    if (d->usage & KLM_AHB_USAGE_PROTECTED) return -22;                    // no protected memory: DRM line
+    if (d->format == KLM_AHB_BLOB) return (d->height == 1 && d->layers == 1) ? 0 : -22;
+    if (d->format == KLM_AHB_YUV420) return 0;
+    return klm_ahb_bpp(d->format) ? 0 : -22;
+}
+static int klm_AHardwareBuffer_isSupported(const klm_ahb_desc *d) { return klm_ahb_check(d) == 0; }
+static klm_hwbuf *klm_hw(const void *p) {
+    const klm_hwbuf *h = p;
+    return (h && h->magic == KLM_HWBUF_MAGIC) ? (klm_hwbuf *)h : NULL;
+}
+static int klm_AHardwareBuffer_allocate(const klm_ahb_desc *d, void **out) {
+    if (!out) return -22;
+    *out = NULL;
+    int bad = klm_ahb_check(d);
+    if (bad) return bad;
+    uint32_t stride = d->format == KLM_AHB_BLOB ? d->width : (d->width + 63u) & ~63u;   // gralloc pads rows
+    size_t bytes;
+    if (d->format == KLM_AHB_BLOB) bytes = d->width;
+    else if (d->format == KLM_AHB_YUV420) bytes = (size_t)stride * d->height * 3 / 2;
+    else bytes = (size_t)stride * d->height * (size_t)klm_ahb_bpp(d->format) * d->layers;
+    if (bytes > (512u << 20)) return -12;                                   // -ENOMEM
+    klm_hwbuf *h = calloc(1, sizeof *h);
+    if (!h) return -12;
+    h->mem = calloc(1, bytes ? bytes : 1);
+    if (!h->mem) { free(h); return -12; }
+    h->magic = KLM_HWBUF_MAGIC; h->refs = 1;
+    h->width = d->width; h->height = d->height; h->layers = d->layers;
+    h->format = d->format; h->usage = d->usage; h->stride_px = stride;
+    static uint64_t next_id = 1ull << 32;      // apart from decoder frames' ids
+    h->id = __atomic_add_fetch(&next_id, 1, __ATOMIC_RELAXED);
+    *out = h;
+    return 0;
+}
+static void klm_AHardwareBuffer_describe(const void *buf, klm_ahb_desc *out) {
+    klm_hwbuf *h = klm_hw(buf);
+    if (!out) return;
+    memset(out, 0, sizeof *out);
+    if (!h) return;
+    if (h->mem) {
+        out->width = h->width; out->height = h->height; out->layers = h->layers;
+        out->format = h->format; out->usage = h->usage; out->stride = h->stride_px;
+        return;
+    }
+    CVPixelBufferRef pb = (CVPixelBufferRef)h->pixels;
+    out->width = (uint32_t)CVPixelBufferGetWidth(pb);
+    out->height = (uint32_t)CVPixelBufferGetHeight(pb);
+    out->layers = 1;
+    out->format = klm_pb_is_nv12(pb) ? KLM_AHB_YUV420 : 1;
+    out->usage = 0x100 /* GPU_SAMPLED_IMAGE */ | 3 /* CPU_READ_OFTEN */;
+    size_t bpr = CVPixelBufferGetBytesPerRow(pb);
+    out->stride = (uint32_t)(klm_pb_is_nv12(pb) ? bpr : bpr / 4);
+}
+static int klm_ahb_rect_ok(const klm_hwbuf *h, const klm_arect *r) {
+    if (!r) return 1;
+    uint32_t w, hh;
+    if (h->mem) { w = h->width; hh = h->height; }
+    else { w = (uint32_t)CVPixelBufferGetWidth((CVPixelBufferRef)h->pixels);
+           hh = (uint32_t)CVPixelBufferGetHeight((CVPixelBufferRef)h->pixels); }
+    return r->left >= 0 && r->top >= 0 && r->right >= r->left && r->bottom >= r->top &&
+           (uint32_t)r->right <= w && (uint32_t)r->bottom <= hh;
+}
+// Common front of lock/lockPlanes/lockAndGetInfo. Returns 0 or -errno as
+// gralloc does: usage must name CPU access the buffer was allocated for, and the
+// rect must lie inside it. The fence is ours to close.
+static int klm_ahb_lock_common(klm_hwbuf *h, uint64_t usage, int fence, const klm_arect *rect) {
+    if (fence >= 0) close(fence);            // producers here are synchronous: always signalled
+    if (!h) return -22;
+    uint64_t cpu = usage & (KLM_AHB_CPU_READ_MASK | KLM_AHB_CPU_WRITE_MASK);
+    if (!cpu || (usage & ~(uint64_t)(KLM_AHB_CPU_READ_MASK | KLM_AHB_CPU_WRITE_MASK))) return -22;
+    if (h->mem) {
+        if ((cpu & KLM_AHB_CPU_READ_MASK) && !(h->usage & KLM_AHB_CPU_READ_MASK)) return -22;
+        if ((cpu & KLM_AHB_CPU_WRITE_MASK) && !(h->usage & KLM_AHB_CPU_WRITE_MASK)) return -22;
+    } else if (cpu & KLM_AHB_CPU_WRITE_MASK) {
+        return -22;                          // a decoder's frame is read-only to the CPU
+    }
+    if (!klm_ahb_rect_ok(h, rect)) return -22;
+    return 0;
+}
+static int klm_ahb_lock_pixels(klm_hwbuf *h) {
+    if (h->mem) { h->locked++; return 0; }
+    if (CVPixelBufferLockBaseAddress((CVPixelBufferRef)h->pixels, kCVPixelBufferLock_ReadOnly) != 0)
+        return -5;                           // -EIO
+    h->locked++;
+    return 0;
+}
+static int klm_AHardwareBuffer_lock(void *buf, uint64_t usage, int32_t fence,
+                                    const klm_arect *rect, void **out) {
+    klm_hwbuf *h = klm_hw(buf);
+    int rc = klm_ahb_lock_common(h, usage, fence, rect);
+    if (rc) return rc;
+    if (!out) return -22;
+    // Planar YUV has no single address: Android refuses lock() on it, and the
+    // guest must come through lockPlanes.
+    if (h->mem ? h->format == KLM_AHB_YUV420 : klm_pb_is_nv12((CVPixelBufferRef)h->pixels)) return -22;
+    if ((rc = klm_ahb_lock_pixels(h))) return rc;
+    *out = h->mem ? h->mem : CVPixelBufferGetBaseAddress((CVPixelBufferRef)h->pixels);
+    return *out ? 0 : -5;
+}
+static int klm_AHardwareBuffer_lockPlanes(void *buf, uint64_t usage, int32_t fence,
+                                          const klm_arect *rect, klm_ahb_planes *out) {
+    klm_hwbuf *h = klm_hw(buf);
+    int rc = klm_ahb_lock_common(h, usage, fence, rect);
+    if (rc) return rc;
+    if (!out) return -22;
+    if ((rc = klm_ahb_lock_pixels(h))) return rc;
+    memset(out, 0, sizeof *out);
+    if (h->mem) {
+        uint8_t *m = h->mem;
+        if (h->format == KLM_AHB_YUV420) {
+            size_t ysz = (size_t)h->stride_px * h->height;
+            out->planeCount = 3;
+            out->planes[0] = (klm_ahb_plane){m, 1, h->stride_px};
+            out->planes[1] = (klm_ahb_plane){m + ysz, 2, h->stride_px};
+            out->planes[2] = (klm_ahb_plane){m + ysz + 1, 2, h->stride_px};
+        } else {
+            int bpp = klm_ahb_bpp(h->format);
+            out->planeCount = 1;
+            out->planes[0] = (klm_ahb_plane){m, (uint32_t)(bpp ? bpp : 1),
+                                             h->format == KLM_AHB_BLOB ? h->width : h->stride_px * (uint32_t)bpp};
+        }
+        return 0;
+    }
+    CVPixelBufferRef pb = (CVPixelBufferRef)h->pixels;
+    if (klm_pb_is_nv12(pb)) {
+        out->planeCount = 3;
+        uint8_t *y = CVPixelBufferGetBaseAddressOfPlane(pb, 0), *c = CVPixelBufferGetBaseAddressOfPlane(pb, 1);
+        out->planes[0] = (klm_ahb_plane){y, 1, (uint32_t)CVPixelBufferGetBytesPerRowOfPlane(pb, 0)};
+        out->planes[1] = (klm_ahb_plane){c, 2, (uint32_t)CVPixelBufferGetBytesPerRowOfPlane(pb, 1)};
+        out->planes[2] = (klm_ahb_plane){c ? c + 1 : NULL, 2, (uint32_t)CVPixelBufferGetBytesPerRowOfPlane(pb, 1)};
+    } else {
+        out->planeCount = 1;
+        out->planes[0] = (klm_ahb_plane){CVPixelBufferGetBaseAddress(pb), 4,
+                                         (uint32_t)CVPixelBufferGetBytesPerRow(pb)};
+    }
+    return 0;
+}
+static int klm_AHardwareBuffer_lockAndGetInfo(void *buf, uint64_t usage, int32_t fence,
+                                              const klm_arect *rect, void **out,
+                                              int32_t *bpp, int32_t *stride_bytes) {
+    klm_hwbuf *h = klm_hw(buf);
+    int rc = klm_AHardwareBuffer_lock(buf, usage, fence, rect, out);
+    if (rc) return rc;
+    int b = h->mem ? klm_ahb_bpp(h->format) : 4;
+    if (bpp) *bpp = b ? b : -1;                         // gralloc says -1 where it has no single answer
+    if (stride_bytes)
+        *stride_bytes = h->mem ? (b ? (int32_t)(h->stride_px * (uint32_t)b) : -1)
+                               : (int32_t)CVPixelBufferGetBytesPerRow((CVPixelBufferRef)h->pixels);
+    return 0;
+}
+static int klm_AHardwareBuffer_unlock(void *buf, int32_t *fence) {
+    klm_hwbuf *h = klm_hw(buf);
+    if (!h) return -22;
+    if (h->locked <= 0) return -22;                     // unlock without lock
+    h->locked--;
+    if (!h->mem) CVPixelBufferUnlockBaseAddress((CVPixelBufferRef)h->pixels, kCVPixelBufferLock_ReadOnly);
+    if (fence) *fence = -1;
+    return 0;
+}
+static int klm_AHardwareBuffer_getId(const void *buf, uint64_t *id) {
+    klm_hwbuf *h = klm_hw(buf);
+    if (!h || !id) return -22;
+    *id = h->id;
+    return 0;
+}
+
+// ---- ATrace -------------------------------------------------------------------
+// Tracing is never enabled for a shipped app, so isEnabled is false and the
+// rest cost nothing.
+static bool klm_ATrace_isEnabled(void) { return false; }
+static void klm_ATrace_beginAsyncSection(const char *name, int32_t cookie) { (void)name; (void)cookie; }
+static void klm_ATrace_endAsyncSection(const char *name, int32_t cookie) { (void)name; (void)cookie; }
+static void klm_ATrace_setCounter(const char *name, int64_t value) { (void)name; (void)value; }
+
 #define M(sym, fn) {sym, (void *)(fn)}
 static const struct { const char *name; void *fn; } g_media[] = {
     M("AMediaFormat_new",       klm_AMediaFormat_new),
@@ -1545,6 +2483,17 @@ static const struct { const char *name; void *fn; } g_media[] = {
     M("AMediaFormat_getFloat",  klm_AMediaFormat_getFloat),
     M("AMediaFormat_getString", klm_AMediaFormat_getString),
     M("AMediaFormat_getRect",   klm_AMediaFormat_getRect),
+    M("AMediaFormat_setInt64",  klm_AMediaFormat_setInt64),
+    M("AMediaFormat_setFloat",  klm_AMediaFormat_setFloat),
+    M("AMediaFormat_setDouble", klm_AMediaFormat_setDouble),
+    M("AMediaFormat_setSize",   klm_AMediaFormat_setSize),
+    M("AMediaFormat_setBuffer", klm_AMediaFormat_setBuffer),
+    M("AMediaFormat_setRect",   klm_AMediaFormat_setRect),
+    M("AMediaFormat_getDouble", klm_AMediaFormat_getDouble),
+    M("AMediaFormat_getSize",   klm_AMediaFormat_getSize),
+    M("AMediaFormat_getBuffer", klm_AMediaFormat_getBuffer),
+    M("AMediaFormat_copy",      klm_AMediaFormat_copy),
+    M("AMediaFormat_toString",  klm_AMediaFormat_toString),
 
     // Data symbols, not functions — see the note by the definitions.
     M("AMEDIAFORMAT_KEY_MIME",           &g_key_mime),
@@ -1567,6 +2516,77 @@ static const struct { const char *name; void *fn; } g_media[] = {
     M("AMEDIAFORMAT_KEY_ROTATION",       &g_key_rotation),
     M("AMEDIAFORMAT_KEY_ENCODER_DELAY",  &g_key_encoder_delay),
     M("AMEDIAFORMAT_KEY_SLICE_HEIGHT",   &g_key_slice_height),
+    M("AMEDIAFORMAT_KEY_AAC_DRC_ATTENUATION_FACTOR", &g_key_aac_drc_attenuation_factor),
+    M("AMEDIAFORMAT_KEY_AAC_DRC_BOOST_FACTOR", &g_key_aac_drc_boost_factor),
+    M("AMEDIAFORMAT_KEY_AAC_DRC_HEAVY_COMPRESSION", &g_key_aac_drc_heavy_compression),
+    M("AMEDIAFORMAT_KEY_AAC_DRC_TARGET_REFERENCE_LEVEL", &g_key_aac_drc_target_reference_level),
+    M("AMEDIAFORMAT_KEY_AAC_ENCODED_TARGET_LEVEL", &g_key_aac_encoded_target_level),
+    M("AMEDIAFORMAT_KEY_AAC_MAX_OUTPUT_CHANNEL_COUNT", &g_key_aac_max_output_channel_count),
+    M("AMEDIAFORMAT_KEY_AAC_PROFILE", &g_key_aac_profile),
+    M("AMEDIAFORMAT_KEY_AUDIO_SESSION_ID", &g_key_audio_session_id),
+    M("AMEDIAFORMAT_KEY_BITRATE_MODE", &g_key_bitrate_mode),
+    M("AMEDIAFORMAT_KEY_BIT_RATE", &g_key_bit_rate),
+    M("AMEDIAFORMAT_KEY_CAPTURE_RATE", &g_key_capture_rate),
+    M("AMEDIAFORMAT_KEY_CHANNEL_MASK", &g_key_channel_mask),
+    M("AMEDIAFORMAT_KEY_COMPLEXITY", &g_key_complexity),
+    M("AMEDIAFORMAT_KEY_CSD", &g_key_csd),
+    M("AMEDIAFORMAT_KEY_CSD_0", &g_key_csd_0),
+    M("AMEDIAFORMAT_KEY_CSD_1", &g_key_csd_1),
+    M("AMEDIAFORMAT_KEY_CSD_2", &g_key_csd_2),
+    M("AMEDIAFORMAT_KEY_DISPLAY_CROP", &g_key_display_crop),
+    M("AMEDIAFORMAT_KEY_DISPLAY_HEIGHT", &g_key_display_height),
+    M("AMEDIAFORMAT_KEY_DISPLAY_WIDTH", &g_key_display_width),
+    M("AMEDIAFORMAT_KEY_FRAME_COUNT", &g_key_frame_count),
+    M("AMEDIAFORMAT_KEY_GRID_COLUMNS", &g_key_grid_columns),
+    M("AMEDIAFORMAT_KEY_GRID_ROWS", &g_key_grid_rows),
+    M("AMEDIAFORMAT_KEY_HDR10_PLUS_INFO", &g_key_hdr10_plus_info),
+    M("AMEDIAFORMAT_KEY_HDR_STATIC_INFO", &g_key_hdr_static_info),
+    M("AMEDIAFORMAT_KEY_IS_ADTS", &g_key_is_adts),
+    M("AMEDIAFORMAT_KEY_IS_AUTOSELECT", &g_key_is_autoselect),
+    M("AMEDIAFORMAT_KEY_IS_DEFAULT", &g_key_is_default),
+    M("AMEDIAFORMAT_KEY_IS_FORCED_SUBTITLE", &g_key_is_forced_subtitle),
+    M("AMEDIAFORMAT_KEY_I_FRAME_INTERVAL", &g_key_i_frame_interval),
+    M("AMEDIAFORMAT_KEY_LATENCY", &g_key_latency),
+    M("AMEDIAFORMAT_KEY_LEVEL", &g_key_level),
+    M("AMEDIAFORMAT_KEY_LOCATION", &g_key_location),
+    M("AMEDIAFORMAT_KEY_LOOP", &g_key_loop),
+    M("AMEDIAFORMAT_KEY_LOW_LATENCY", &g_key_low_latency),
+    M("AMEDIAFORMAT_KEY_MAX_BIT_RATE", &g_key_max_bit_rate),
+    M("AMEDIAFORMAT_KEY_MAX_FPS_TO_ENCODER", &g_key_max_fps_to_encoder),
+    M("AMEDIAFORMAT_KEY_MAX_INPUT_SIZE", &g_key_max_input_size),
+    M("AMEDIAFORMAT_KEY_MAX_PTS_GAP_TO_ENCODER", &g_key_max_pts_gap_to_encoder),
+    M("AMEDIAFORMAT_KEY_MPEG2_STREAM_HEADER", &g_key_mpeg2_stream_header),
+    M("AMEDIAFORMAT_KEY_MPEGH_COMPATIBLE_SETS", &g_key_mpegh_compatible_sets),
+    M("AMEDIAFORMAT_KEY_MPEGH_PROFILE_LEVEL_INDICATION", &g_key_mpegh_profile_level_indication),
+    M("AMEDIAFORMAT_KEY_MPEGH_REFERENCE_CHANNEL_LAYOUT", &g_key_mpegh_reference_channel_layout),
+    M("AMEDIAFORMAT_KEY_PCM_ENCODING", &g_key_pcm_encoding),
+    M("AMEDIAFORMAT_KEY_PROFILE", &g_key_profile),
+    M("AMEDIAFORMAT_KEY_PSSH", &g_key_pssh),
+    M("AMEDIAFORMAT_KEY_PUSH_BLANK_BUFFERS_ON_STOP", &g_key_push_blank_buffers_on_stop),
+    M("AMEDIAFORMAT_KEY_QUALITY", &g_key_quality),
+    M("AMEDIAFORMAT_KEY_REPEAT_PREVIOUS_FRAME_AFTER", &g_key_repeat_previous_frame_after),
+    M("AMEDIAFORMAT_KEY_SAR_HEIGHT", &g_key_sar_height),
+    M("AMEDIAFORMAT_KEY_SAR_WIDTH", &g_key_sar_width),
+    M("AMEDIAFORMAT_KEY_SEI", &g_key_sei),
+    M("AMEDIAFORMAT_KEY_TEMPORAL_LAYER_ID", &g_key_temporal_layer_id),
+    M("AMEDIAFORMAT_KEY_TEMPORAL_LAYERING", &g_key_temporal_layering),
+    M("AMEDIAFORMAT_KEY_TEXT_FORMAT_DATA", &g_key_text_format_data),
+    M("AMEDIAFORMAT_KEY_THUMBNAIL_CSD_HEVC", &g_key_thumbnail_csd_hevc),
+    M("AMEDIAFORMAT_KEY_THUMBNAIL_HEIGHT", &g_key_thumbnail_height),
+    M("AMEDIAFORMAT_KEY_THUMBNAIL_TIME", &g_key_thumbnail_time),
+    M("AMEDIAFORMAT_KEY_THUMBNAIL_WIDTH", &g_key_thumbnail_width),
+    M("AMEDIAFORMAT_KEY_TIME_US", &g_key_time_us),
+    M("AMEDIAFORMAT_KEY_TITLE", &g_key_title),
+    M("AMEDIAFORMAT_KEY_TRACK_ID", &g_key_track_id),
+    M("AMEDIAFORMAT_KEY_TRACK_INDEX", &g_key_track_index),
+    M("AMEDIAFORMAT_KEY_VALID_SAMPLES", &g_key_valid_samples),
+    M("AMEDIAFORMAT_KEY_YEAR", &g_key_year),
+    M("AMEDIAFORMAT_KEY_EXIF_OFFSET", &g_key_exif_offset),
+    M("AMEDIAFORMAT_KEY_EXIF_SIZE", &g_key_exif_size),
+    M("AMEDIAFORMAT_KEY_ICC_PROFILE", &g_key_icc_profile),
+    M("AMEDIAFORMAT_KEY_SAMPLE_FILE_OFFSET", &g_key_sample_file_offset),
+    M("AMEDIAFORMAT_KEY_LAST_SAMPLE_INDEX_IN_CHUNK", &g_key_last_sample_index_in_chunk),
+    M("AMEDIAFORMAT_KEY_CREATE_INPUT_SURFACE_SUSPENDED", &g_key_create_input_surface_suspended),
 
     M("AMediaCodec_createDecoderByType",  klm_AMediaCodec_createDecoderByType),
     M("AMediaCodec_configure",            klm_AMediaCodec_configure),
@@ -1620,6 +2640,82 @@ static const struct { const char *name; void *fn; } g_media[] = {
 
     M("ATrace_beginSection", klm_ATrace_beginSection),
     M("ATrace_endSection",   klm_ATrace_endSection),
+    M("AMediaCodec_createCodecByName",       klm_AMediaCodec_createCodecByName),
+    M("AMediaCodec_createEncoderByType",     klm_AMediaCodec_createEncoderByType),
+    M("AMediaCodec_setOutputSurface",        klm_AMediaCodec_setOutputSurface),
+    M("AMediaCodec_createInputSurface",      klm_AMediaCodec_createInputSurface),
+    M("AMediaCodec_createPersistentInputSurface", klm_AMediaCodec_createPersistentInputSurface),
+    M("AMediaCodec_setInputSurface",         klm_AMediaCodec_setInputSurface),
+    M("AMediaCodec_signalEndOfInputStream",  klm_AMediaCodec_signalEndOfInputStream),
+    M("AMediaCodec_setParameters",           klm_AMediaCodec_setParameters),
+    M("AMediaCodec_getName",                 klm_AMediaCodec_getName),
+    M("AMediaCodec_releaseName",             klm_AMediaCodec_releaseName),
+    M("AMediaCodec_getInputFormat",          klm_AMediaCodec_getInputFormat),
+    M("AMediaCodec_getBufferFormat",         klm_AMediaCodec_getBufferFormat),
+    M("AMediaCodec_releaseOutputBufferAtTime", klm_AMediaCodec_releaseOutputBufferAtTime),
+    M("AMediaCodec_queueSecureInputBuffer",  klm_AMediaCodec_queueSecureInputBuffer),
+    M("AMediaCodec_setAsyncNotifyCallback",  klm_AMediaCodec_setAsyncNotifyCallback),
+
+    M("AMediaCodecCryptoInfo_new",             klm_AMediaCodecCryptoInfo_new),
+    M("AMediaCodecCryptoInfo_delete",          klm_AMediaCodecCryptoInfo_delete),
+    M("AMediaCodecCryptoInfo_setPattern",      klm_AMediaCodecCryptoInfo_setPattern),
+    M("AMediaCodecCryptoInfo_getNumSubSamples", klm_AMediaCodecCryptoInfo_getNumSubSamples),
+    M("AMediaCodecCryptoInfo_getKey",          klm_AMediaCodecCryptoInfo_getKey),
+    M("AMediaCodecCryptoInfo_getIV",           klm_AMediaCodecCryptoInfo_getIV),
+    M("AMediaCodecCryptoInfo_getMode",         klm_AMediaCodecCryptoInfo_getMode),
+    M("AMediaCodecCryptoInfo_getClearBytes",   klm_AMediaCodecCryptoInfo_getClearBytes),
+    M("AMediaCodecCryptoInfo_getEncryptedBytes", klm_AMediaCodecCryptoInfo_getEncryptedBytes),
+
+    M("AMediaCrypto_isCryptoSchemeSupported",        klm_AMediaCrypto_isCryptoSchemeSupported),
+    M("AMediaCrypto_requiresSecureDecoderComponent", klm_AMediaCrypto_requiresSecureDecoderComponent),
+    M("AMediaCrypto_new",                            klm_AMediaCrypto_new),
+    M("AMediaCrypto_delete",                         klm_AMediaCrypto_delete),
+    M("AMediaDrm_isCryptoSchemeSupported",           klm_AMediaDrm_isCryptoSchemeSupported),
+    M("AMediaDrm_createByUUID",                      klm_AMediaDrm_createByUUID),
+    M("AMediaDrm_release",                           klm_AMediaDrm_release),
+
+    M("AMediaDataSource_newUri",             klm_AMediaDataSource_newUri),
+    M("AMediaDataSource_setGetAvailableSize", klm_AMediaDataSource_setGetAvailableSize),
+    M("AMediaDataSource_close",              klm_AMediaDataSource_close),
+    M("AMediaExtractor_getFileFormat",       klm_AMediaExtractor_getFileFormat),
+    M("AMediaExtractor_getSampleFormat",     klm_AMediaExtractor_getSampleFormat),
+    M("AMediaExtractor_getSampleSize",       klm_AMediaExtractor_getSampleSize),
+    M("AMediaExtractor_getSampleFlags",      klm_AMediaExtractor_getSampleFlags),
+    M("AMediaExtractor_getCachedDuration",   klm_AMediaExtractor_getCachedDuration),
+    M("AMediaExtractor_unselectTrack",       klm_AMediaExtractor_unselectTrack),
+    M("AMediaExtractor_getPsshInfo",         klm_AMediaExtractor_getPsshInfo),
+    M("AMediaExtractor_getSampleCryptoInfo", klm_AMediaExtractor_getSampleCryptoInfo),
+
+    M("AImageReader_new",                     klm_AImageReader_new),
+    M("AImageReader_getWidth",                klm_AImageReader_getWidth),
+    M("AImageReader_getHeight",               klm_AImageReader_getHeight),
+    M("AImageReader_getFormat",               klm_AImageReader_getFormat),
+    M("AImageReader_getMaxImages",            klm_AImageReader_getMaxImages),
+    M("AImageReader_acquireNextImage",        klm_AImageReader_acquireNextImage),
+    M("AImageReader_acquireNextImageAsync",   klm_AImageReader_acquireNextImageAsync),
+    M("AImageReader_acquireLatestImageAsync", klm_AImageReader_acquireLatestImageAsync),
+    M("AImageReader_setBufferRemovedListener", klm_AImageReader_setBufferRemovedListener),
+    M("AImage_getFormat",         klm_AImage_getFormat),
+    M("AImage_getCropRect",       klm_AImage_getCropRect),
+    M("AImage_deleteAsync",       klm_AImage_deleteAsync),
+    M("AImage_getNumberOfPlanes", klm_AImage_getNumberOfPlanes),
+    M("AImage_getPlaneRowStride", klm_AImage_getPlaneRowStride),
+    M("AImage_getPlanePixelStride", klm_AImage_getPlanePixelStride),
+    M("AImage_getPlaneData",      klm_AImage_getPlaneData),
+
+    M("AHardwareBuffer_allocate",     klm_AHardwareBuffer_allocate),
+    M("AHardwareBuffer_describe",     klm_AHardwareBuffer_describe),
+    M("AHardwareBuffer_lock",         klm_AHardwareBuffer_lock),
+    M("AHardwareBuffer_lockPlanes",   klm_AHardwareBuffer_lockPlanes),
+    M("AHardwareBuffer_lockAndGetInfo", klm_AHardwareBuffer_lockAndGetInfo),
+    M("AHardwareBuffer_unlock",       klm_AHardwareBuffer_unlock),
+    M("AHardwareBuffer_isSupported",  klm_AHardwareBuffer_isSupported),
+    M("AHardwareBuffer_getId",        klm_AHardwareBuffer_getId),
+
+    M("ATrace_isEnabled",         klm_ATrace_isEnabled),
+    M("ATrace_beginAsyncSection", klm_ATrace_beginAsyncSection),
+    M("ATrace_endAsyncSection",   klm_ATrace_endAsyncSection),
+    M("ATrace_setCounter",        klm_ATrace_setCounter),
 };
 
 void *kl_mediandk_lookup(const char *name) {

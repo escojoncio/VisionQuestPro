@@ -1889,8 +1889,19 @@ static void kl_openlog(const char *a, int b, int c) { (void)a; (void)b; (void)c;
 static void kl_closelog(void) {}
 static int  kl_cxa_atexit(void (*f)(void *), void *a, void *d) { (void)f;(void)a;(void)d; return 0; }
 static void kl_cxa_finalize(void *d) { (void)d; }
+struct kl_android_log_message { size_t size; int32_t buffer_id; int32_t priority;
+    const char *tag; const char *file; uint32_t line; const char *message; };
+// __android_log_set_logger / __android_log_set_default_tag (kl_bionic_extra.c)
+extern void (*kl_log_custom_logger)(const struct kl_android_log_message *);
+extern const char *kl_log_default_tag;
 static void kl_android_log_write(int p, const char *t, const char *m) {
     extern void kl_openxr_status_log(const char *, const char *);
+    if (!t && kl_log_default_tag) t = kl_log_default_tag;
+    if (kl_log_custom_logger) {          // the guest replaced liblog's logger: every write goes through it
+        struct kl_android_log_message msg = { sizeof msg, 1 /* LOG_ID_MAIN */, p, t, NULL, 0, m };
+        kl_log_custom_logger(&msg);
+        return;
+    }
     kl_openxr_status_log(t, m);   // OpenXR CTS progress (HUD); ignores every other tag
     fprintf(stderr, "[%d/%s] %s\n", p, t ? t : "", m ? m : ""); }
 // liblog: everything at INFO or above is loggable (Oboe gates its verbose output on this).
@@ -1904,8 +1915,6 @@ static int kl_android_log_buf_write(int buf, int p, const char *t, const char *m
     (void)buf; kl_android_log_write(p, t, m); return 1; }
 static int kl_android_log_set_minimum_priority(int p) { int o = g_log_min_prio; g_log_min_prio = p; return o; }
 static int kl_android_log_get_minimum_priority(void) { return g_log_min_prio; }
-struct kl_android_log_message { size_t size; int32_t buffer_id; int32_t priority;
-    const char *tag; const char *file; uint32_t line; const char *message; };
 static void kl_android_log_write_log_message(struct kl_android_log_message *m) {
     if (m) kl_android_log_write(m->priority, m->tag, m->message); }
 // libdl linker namespaces: none on this platform. NULL/false makes callers
@@ -2052,6 +2061,7 @@ static int klb_timer_getoverrun(void *t) { (void)t; return 0; }
 uintptr_t klb_stack_chk_guard = (uintptr_t)0x00000aff0a0000ULL;  // NUL/newline bytes trap overruns
 
 // ---------- table ----------
+void *kl_bionic_extra_lookup(const char *name);     // kl_bionic_extra.c
 typedef struct { const char *name; void *fn; } kl_entry;
 #define E(n, f)   { n, (void *)(f) }
 #define KL_FWD(n) { #n, (void *)(n) },
@@ -2448,6 +2458,7 @@ void kl_shim_set_guest_gl(kl_image *img) { g_guest_gl = img; }
 // media NDK, Oculus Platform), 0 when nothing would serve it.
 int kl_shim_known(const char *name) {
     if (!name || !*name) return 0;
+    if (kl_bionic_extra_lookup(name)) return 1;
     for (size_t i = 0; i < sizeof g_shim / sizeof g_shim[0]; i++)
         if (strcmp(g_shim[i].name, name) == 0) return 1;
     if (kl_ndk_lookup(name)) return 1;
@@ -2456,15 +2467,25 @@ int kl_shim_known(const char *name) {
         (name[0] == 'v' && name[1] == 'k' && name[2] >= 'A' && name[2] <= 'Z') ||
         (name[0] == 'x' && name[1] == 'r' && name[2] >= 'A' && name[2] <= 'Z') ||
         !strncmp(name, "SL_IID_", 7) || !strcmp(name, "slCreateEngine") ||
-        !strncmp(name, "AAudio", 6) || !strncmp(name, "AMedia", 6) || !strncmp(name, "AImage", 6) ||
-        !strncmp(name, "AHardwareBuffer_", 16) || !strncmp(name, "ATrace_", 7) ||
-        !strncmp(name, "AMEDIAFORMAT_", 13) || !strncmp(name, "ovr_", 4) || !strncmp(name, "ovrID", 5))
+        !strncmp(name, "ovr_", 4) || !strncmp(name, "ovrID", 5))
         return 2;
+    // AAudio / media NDK: the REAL tables answer, not the prefix. A prefix rule reported
+    // every AMedia*/AImage*/AHardwareBuffer_*/AAudio* import as served although most are not
+    // in the table, which hid the gaps from the scanner (and kl_shim_lookup says no to them).
+    if (!strncmp(name, "AAudio", 6)) return kl_aaudio_lookup(name) ? 2 : 0;
+    if (!strncmp(name, "AMedia", 6) || !strncmp(name, "AImage", 6) ||
+        !strncmp(name, "AHardwareBuffer_", 16) || !strncmp(name, "ATrace_", 7) ||
+        !strncmp(name, "AMEDIAFORMAT_", 13))
+        return kl_mediandk_lookup(name) ? 2 : 0;
     return 0;
 }
 
 void *kl_shim_lookup(const char *name) {
     if (kl_shim_override) { void *o = kl_shim_override(name); if (o) return o; }
+    // kl_bionic_extra.c: the bionic names no title had asked for yet, plus the few the
+    // generated table forwarded with the wrong ABI (long double) or semantics (UTF-8).
+    void *extra = kl_bionic_extra_lookup(name);
+    if (extra) return extra;
     for (size_t i = 0; i < sizeof g_shim / sizeof g_shim[0]; i++)
         if (strcmp(g_shim[i].name, name) == 0) return g_shim[i].fn;
     // Tier 4: the NDK surface lives in its own table — it is a different

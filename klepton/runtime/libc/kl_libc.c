@@ -244,6 +244,39 @@ static const char *sysprop_dns(int idx) {           // idx 0..3 for net.dns1..4
     return idx < n ? servers[idx] : NULL;
 }
 
+// Properties with no Build.* twin. They describe the SAME device the Build fields do: a
+// Quest 3 (codename eureka, Snapdragon XR2 Gen 2 = platform "kalama", shipped on Android
+// 12L = first API level 32) when the Build identity says so, a Quest 2 (hollywood, XR2
+// Gen 1 = "kona", first API level 29) otherwise. An unset property is NOT listed: bionic
+// answers those with an empty string.
+typedef struct { const char *prop, *value; } klb_prop_extra;
+static const klb_prop_extra *sysprop_extra_table(void) {
+    static const klb_prop_extra q3[] = {
+        {"ro.product.cpu.abi", "arm64-v8a"}, {"ro.product.cpu.abilist", "arm64-v8a"},
+        {"ro.product.cpu.abilist64", "arm64-v8a"}, {"ro.product.cpu.abilist32", ""},
+        {"ro.product.board", "eureka"}, {"ro.board.platform", "kalama"},
+        {"ro.soc.manufacturer", "Qualcomm"}, {"ro.soc.model", "SXR2230P"},
+        {"ro.product.first_api_level", "32"}, {"ro.build.version.preview_sdk", "0"},
+        {"ro.opengles.version", "196610"}, {"ro.zygote", "zygote64"},
+        {"ro.debuggable", "0"}, {"ro.secure", "1"}, {"ro.config.low_ram", "false"},
+        {"ro.product.locale", "en-US"}, {"persist.sys.locale", "en-US"},
+        {NULL, NULL}
+    };
+    static const klb_prop_extra q2[] = {
+        {"ro.product.cpu.abi", "arm64-v8a"}, {"ro.product.cpu.abilist", "arm64-v8a"},
+        {"ro.product.cpu.abilist64", "arm64-v8a"}, {"ro.product.cpu.abilist32", ""},
+        {"ro.product.board", "hollywood"}, {"ro.board.platform", "kona"},
+        {"ro.soc.manufacturer", "Qualcomm"}, {"ro.soc.model", "SXR2130P"},
+        {"ro.product.first_api_level", "29"}, {"ro.build.version.preview_sdk", "0"},
+        {"ro.opengles.version", "196610"}, {"ro.zygote", "zygote64"},
+        {"ro.debuggable", "0"}, {"ro.secure", "1"}, {"ro.config.low_ram", "false"},
+        {"ro.product.locale", "en-US"}, {"persist.sys.locale", "en-US"},
+        {NULL, NULL}
+    };
+    const char *dev = kl_jni_build_string("DEVICE");
+    return dev && strcmp(dev, "eureka") == 0 ? q3 : q2;
+}
+
 static const char *sysprop_value(const char *n) {
     if (!n) return NULL;
     if (strcmp(n, "ro.build.version.sdk") == 0) {
@@ -307,6 +340,8 @@ static const char *sysprop_value(const char *n) {
     for (size_t i = 0; i < sizeof g_sysprops / sizeof *g_sysprops; i++)
         if (strcmp(n, g_sysprops[i].prop) == 0)
             return kl_jni_build_string(g_sysprops[i].build_field);
+    for (const klb_prop_extra *e = sysprop_extra_table(); e->prop; e++)
+        if (strcmp(n, e->prop) == 0) return e->value;
     return NULL;
 }
 
@@ -333,6 +368,8 @@ const void *klb_sysprop_find(const char *n) {
     for (size_t i = 0; i < sizeof g_sysprops / sizeof *g_sysprops; i++)
         if (strcmp(n, g_sysprops[i].prop) == 0 && sysprop_value(n))
             return g_sysprops[i].prop;
+    for (const klb_prop_extra *e = sysprop_extra_table(); e->prop; e++)
+        if (strcmp(n, e->prop) == 0) return e->prop;
     return NULL;
 }
 
@@ -353,6 +390,91 @@ void klb_sysprop_read(const void *p, char *n, char *v) {
     const char *prop = (const char *)p;
     if (n) { if (prop) snprintf(n, 32, "%s", prop); else n[0] = 0; }
     if (v) klb_sysprop_get(prop, v);
+}
+
+// ---- the rest of bionic's property API ----------------------------------
+// A property's serial is (value length << 24) | counter; the low bit marks an update in
+// progress. Nothing ever changes a property here (see __system_property_set below), so the
+// counter is fixed at 0.
+static uint32_t sysprop_serial_of(const char *prop) {
+    const char *v = sysprop_value(prop);
+    return (uint32_t)(v ? strlen(v) : 0) << 24;
+}
+uint32_t klb_sysprop_serial(const void *p) { return p ? sysprop_serial_of((const char *)p) : 0; }
+void klb_sysprop_read_callback(const void *p, void (*cb)(void *, const char *, const char *, uint32_t), void *cookie) {
+    const char *prop = (const char *)p;
+    if (!prop || !cb) return;
+    const char *v = sysprop_value(prop);
+    cb(cookie, prop, v ? v : "", sysprop_serial_of(prop));
+}
+// Enumeration order: Build-backed, sdk, dns, extras — the same order find_nth and foreach use.
+static const char *sysprop_nth(unsigned n) {
+    static const char *const dns_names[] = { "net.dns1", "net.dns2", "net.dns3", "net.dns4" };
+    unsigned i = 0;
+    for (size_t k = 0; k < sizeof g_sysprops / sizeof *g_sysprops; k++)
+        if (sysprop_value(g_sysprops[k].prop) && i++ == n) return g_sysprops[k].prop;
+    if (i++ == n) return "ro.build.version.sdk";
+    for (int d = 0; d < 4; d++)
+        if (sysprop_value(dns_names[d]) && i++ == n) return dns_names[d];
+    for (const klb_prop_extra *e = sysprop_extra_table(); e->prop; e++)
+        if (i++ == n) return e->prop;
+    return NULL;
+}
+const void *klb_sysprop_find_nth(unsigned n) { return sysprop_nth(n); }
+int klb_sysprop_foreach(void (*cb)(const void *, void *), void *cookie) {
+    if (!cb) return -1;
+    for (unsigned i = 0; ; i++) {
+        const char *p = sysprop_nth(i);
+        if (!p) break;
+        cb(p, cookie);
+    }
+    return 0;
+}
+// An app process maps the property area read-only and has no right to the property
+// service: init refuses a set from an untrusted app (SELinux), and writing the area itself
+// would fault. Both come back as failure here — what bionic gives back — and say so once.
+static int sysprop_denied(const char *what, const char *name) {
+    static _Atomic int said;
+    if (atomic_fetch_add(&said, 1) < 8)
+        fprintf(stderr, "  [sysprop] %s(%s) refused: an app may not change system properties\n", what, name ? name : "?");
+    return -1;
+}
+int klb_sysprop_set(const char *name, const char *value) {
+    if (!name || !value) return -1;
+    return sysprop_denied("__system_property_set", name);
+}
+int klb_sysprop_update(void *pi, const char *value, unsigned len) {
+    (void)pi; (void)value; (void)len;
+    return sysprop_denied("__system_property_update", "(prop_info)");
+}
+int klb_sysprop_add(const char *name, unsigned namelen, const char *value, unsigned valuelen) {
+    (void)namelen; (void)value; (void)valuelen;
+    return sysprop_denied("__system_property_add", name);
+}
+int klb_sysprop_area_init(void *dir) { (void)dir; return sysprop_denied("__system_property_area_init", "/dev/__properties__"); }
+int klb_sysprop_set_filename(const char *f) { return f && strlen(f) < 1024 ? 0 : -1; }
+uint32_t klb_sysprop_area_serial(void) { return 1; }
+// Waiting for a change: nothing ever changes, so a wait on the serial a property already has
+// can only end by timeout; a caller holding an older serial returns at once with the current one.
+static void sysprop_wait_forever(void) {
+    static _Atomic int said;
+    if (!atomic_exchange(&said, 1))
+        fprintf(stderr, "  [sysprop] a guest thread waits for a property change with no timeout; none can happen here\n");
+    for (;;) sleep(3600);
+}
+int klb_sysprop_wait(const void *pi, uint32_t old_serial, uint32_t *new_serial, const struct timespec *rel_timeout) {
+    uint32_t cur = pi ? klb_sysprop_serial(pi) : klb_sysprop_area_serial();
+    if (cur != old_serial) { if (new_serial) *new_serial = cur; return 1; }
+    if (!rel_timeout) sysprop_wait_forever();
+    struct timespec t = *rel_timeout;
+    nanosleep(&t, NULL);
+    return 0;
+}
+uint32_t klb_sysprop_wait_any(uint32_t old_serial) {
+    uint32_t cur = klb_sysprop_area_serial();
+    if (cur != old_serial) return cur;
+    sysprop_wait_forever();
+    return cur;
 }
 int  klb_prctl(int op, ...)                  { (void)op; return 0; }
 int  klb_sched_getaffinity(int p, size_t sz, void *m) {
@@ -3102,7 +3224,9 @@ off_t  klb_lseek(int fd, off_t o, int w)   { int handled; off_t r = kl_obbmap_ls
                                              return handled ? r : lseek(fd, o, w); }
 // ...and close, so an OBB read-through fd is unregistered before its number can
 // be recycled by an unrelated open (or the table would misroute that open).
+void   kl_extra4_fd_closed(int fd);        // kl_bionic_extra4.c: stops the feeder of a timerfd/signalfd/inotify/pidfd
 int    klb_close(int fd)                   { int handled; int r = kl_obbmap_close(fd, &handled);
+                                             if (!handled) kl_extra4_fd_closed(fd);
                                              return handled ? r : close(fd); }
 // bare-name pread (libUE4 uses it): interpose the read-through window.
 ssize_t klb_pread(int fd, void *buf, size_t n, off_t off) {
@@ -3479,7 +3603,7 @@ static int t_time(void) { static int t = -1; if (t < 0) t = kl_env_on("KL_TRACE_
 //           8 REALTIME_ALARM 9 BOOTTIME_ALARM
 //   Darwin: 0 REALTIME 4 MONOTONIC_RAW 6 MONOTONIC 8 UPTIME_RAW
 //           12 PROCESS_CPUTIME_ID
-static int kl_clock_to_darwin(int clk) {
+int kl_clock_to_darwin(int clk) {
     switch (clk) {
     case 0: case 5: case 8: return 0;    // realtime (coarse/alarm degrade to it)
     case 1: case 6:         return 6;    // monotonic (coarse degrades)
