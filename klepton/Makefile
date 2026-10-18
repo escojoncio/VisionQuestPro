@@ -781,22 +781,23 @@ swiftcheck:
 # runs the PREVIOUS constant while the source says otherwise. That is the same
 # stale-artifact trap the xcframework rule below already records; the fix there
 # stopped at the archives and left this behind it.
+# Every file is compiled before failing, so one CI run lists all the errors.
 build/xros/libklepton.a: $(RUNTIME_SHIP) $(RUNTIME_ALL_HDRS)
 	@mkdir -p build/xros
 	@rm -f $@
-	@for s in $(RUNTIME_SHIP); do \
+	@rc=0; for s in $(RUNTIME_SHIP); do \
 	  o=build/xros/$$(basename $$s | sed 's/\.[cSm]$$/.o/'); \
 	  $(CC) $(XROS_CFLAGS) -target arm64-apple-xros1.0 -isysroot $(XROS_SDK) \
-	    -c $$s -o $$o || exit 1; done
+	    -c $$s -o $$o || rc=1; done; [ $$rc = 0 ] || exit 1
 	@ar rcs $@ build/xros/*.o
 
 build/xrsim/libklepton.a: $(RUNTIME_SHIP) $(RUNTIME_ALL_HDRS)
 	@mkdir -p build/xrsim
 	@rm -f $@
-	@for s in $(RUNTIME_SHIP); do \
+	@rc=0; for s in $(RUNTIME_SHIP); do \
 	  o=build/xrsim/$$(basename $$s | sed 's/\.[cSm]$$/.o/'); \
 	  $(CC) $(XROS_CFLAGS) -target arm64-apple-xros1.0-simulator -isysroot $(XRSIM_SDK) \
-	    -c $$s -o $$o || exit 1; done
+	    -c $$s -o $$o || rc=1; done; [ $$rc = 0 ] || exit 1
 	@ar rcs $@ build/xrsim/*.o
 
 # The gate: link each archive into a dylib with -all_load, so a symbol that is

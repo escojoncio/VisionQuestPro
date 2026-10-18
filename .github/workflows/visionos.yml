@@ -74,7 +74,8 @@ jobs:
         run: |
           set -o pipefail
           cd klepton
-          make -j1 build/xros/libklepton.a XROS_PLATFORMS=xros 2>&1 | tee ../runtime.log
+          # Do not fail the step, so "The app" still reports its errors (it needs libklepton.a for BUILD SUCCEEDED).
+          make -j1 build/xros/libklepton.a XROS_PLATFORMS=xros 2>&1 | tee ../runtime.log || echo "::error::libklepton.a failed"
 
       - name: Apple's certificates (the chain a signed library carries)
         run: |

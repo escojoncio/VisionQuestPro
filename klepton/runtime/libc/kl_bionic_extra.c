@@ -40,6 +40,9 @@
 #include <wchar.h>
 #include <wctype.h>
 #include "kl_ld128.h"
+// Darwin's math.h hides these two behind _REENTRANT, but libSystem exports them.
+double lgamma_r(double, int *);
+float lgammaf_r(float, int *);
 void *kl_shim_lookup(const char *name);        // kl_shim.c
 
 #ifndef __APPLE__
