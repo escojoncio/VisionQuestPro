@@ -3979,11 +3979,13 @@ final class KleptonCompositor {
         // Median gap in periods, only for windows that are being held (mean >= 1.5 periods):
         // mean and median apart tell a steady 2.0 from a mix of 1.0 and long gaps.
         var medianText = ""
-        if displayPeriod > 0, periods >= 1.5, !cadenceGaps.isEmpty {
+        var medianPeriods: Double? = nil   // also used by the half-rate recovery below
+        if displayPeriod > 0, !cadenceGaps.isEmpty {
             let s = cadenceGaps.sorted()
             let mid = s.count / 2
             let med = s.count % 2 == 1 ? s[mid] : (s[mid - 1] + s[mid]) / 2
-            medianText = String(format: " (median %.2f)", med / displayPeriod)
+            medianPeriods = med / displayPeriod
+            if periods >= 1.5 { medianText = String(format: " (median %.2f)", med / displayPeriod) }
         }
         let out = String(format: "cadence %.2f ms mean / %.2f max", meanS * 1000,
                          cadenceMax * 1000)
@@ -4055,12 +4057,17 @@ final class KleptonCompositor {
         // Half-rate recovery. Six windows (~3 s) in a row at 1.8-2.2 periods with no frame past
         // its deadline means WE are on time and the system is the one holding every frame twice.
         // The one thing we can undo is a repeat count above 0; we never set anything else.
-        if halfRateRecover, displayPeriod > 0, cadenceN >= 10 {
-            if periods >= 1.8 && periods <= 2.2 && missedDeadline == 0 {
+        if halfRateRecover, displayPeriod > 0 {
+            // A window with fewer than 10 samples is not evidence of sustained half rate: reset the streak.
+            // The median gap decides 1.8-2.2 periods (the mean is skewed by a few long gaps).
+            let halfPeriods = medianPeriods ?? periods
+            if cadenceN >= 10, halfPeriods >= 1.8 && halfPeriods <= 2.2 && missedDeadline == 0 {
                 halfRateWindows += 1
             } else {
                 halfRateWindows = 0
             }
+        }
+        if halfRateRecover, displayPeriod > 0, cadenceN >= 10 {
             if halfRateActive && periods >= 1.5 {
                 halfRatePresents += cadenceN
                 halfRateSeconds += cadenceSum

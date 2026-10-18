@@ -3,7 +3,40 @@
 Historial completo: `git log -p bitacora.md` (compactada el 2026-10-18; detalle de cada paso en los commits
 «Integrar paso-aN» y en las ramas `paso-aN` de GitHub).
 
-## EMPEZAR AQUÍ — 2026-10-18: pasos 1-7 compilados — BUILD SUCCEEDED, IPA publicada (sin probar en el visor)
+## EMPEZAR AQUÍ — 2026-10-18 (noche): primera prueba en el visor (AoT + AC) → 5 frentes; build lanzada
+Logs: `…-fin-Attack_on_Titan…` y `…-fin-Assassins_Creed_Nexus_VR` (19:55-20:03). Hallazgos y cambios:
+1. **Audio AC roto** (514 «Voice Starvation», `[aaudio] burst 256`): `klaa_guest_wwise` (kl_aaudio.c) miraba
+   `access(<g_native_lib_dir>/libAkSoundEngine.so)`, pero en la app `tree/lib` nunca tiene `.so` (VQPrepare extrae a
+   `work/`, convierte a dylib y borra el ELF); antes lo tapaba `kl_is_ac_nexus`. Arreglo 861f148: `kl_find_image`
+   (registro del loader, kl_dl.c), solo se cachea el 1 → burst 1024 para cualquier guest con Wwise.
+2. **AC «pillado en el menú»** = aviso de UbiServices (esperado: `ovr_User_GetAccessToken` → error por
+   `KL_PLAT_TOKEN_ERROR`, 0 intentos de red) que no se puede cerrar porque **AC no ve mandos**: `[mprobe] OVRInput:
+   connected=0x0` toda la sesión (AoT `0x3`). AC: OVRPlugin 1.88, `ovrp_GetControllerState4` (mask 3 y 0xfffffff, nuestro
+   relleno da Connected=3); AoT: 1.89, `GetControllerState6`. Causa sin confirmar; sospecha: identidad Quest 3 (headset 11)
+   con OVRPlugin 1.88. Diagnóstico 861f148: `[ctrl]` primeras 24 llamadas por versión de GetControllerState*; logs de
+   `ovrp_GetVersion*/GetNativeSDKVersion*`; mprobe añade `active= loadedXRDevice= ovrpVersion=` (loadedXRDevice
+   probablemente `?`: suele ser campo, no propiedad).
+3. **Carga larga «de Ubisoft»**: no es red (0 DNS/connect); es el vídeo `Ubisoft-Logo-With-Sound.mp4` mientras AC carga
+   datos (19:55:36→19:56:35, memoria 1,7→4,9 GB).
+4. **Rosa global**: `[magenta] fragment module … (1,0,1,1)` en AC (2 pipelines, pase de ojo 4x) y AoT (4, 2x) = shader de
+   error de Unity. Hipótesis: `maxVertexOutputComponents/maxFragmentInputComponents` 124 < 128 (`interpolators32`).
+   VPKEngine c920e54: 128 con `VPVK_REPORT_GEOM=1` (juegos), `vk.caps` volcado, `vk.err what=varyings`. Ajuste nuevo
+   «Perfil Vulkan completo (experimental)» (`vq.vkFullProfile` → `VPVK_EXTRA_EXTENSIONS=1` en juegos) para A/B.
+5. **50 Hz pegado** (AoT 20:02:35→fin): tras picos de GPU del juego (63 ms) y ventanas con 6-9 `past deadline`, el sistema
+   presenta cada 20,02 ms con 0 retrasos (medio ritmo impuesto por visionOS; térmico «fair»). a707196 + revisión:
+   `[cp] minimumFrameRepeatCount N at start` / `changed A -> B (by the system)`; `KL_CP_HALFRATE_RECOVER` (def. 1):
+   6 ventanas con mediana 1,8-2,2 periodos y 0 retrasos → `minimumFrameRepeatCount = 0` (`[cp] HALF RATE …`) o
+   `HALF RATE held by the system` si ya era 0; fin `HALF RATE over after X s`; resumen al cerrar.
+6. Carátulas: ver «Pendiente conocido».
+
+### Pruebas pedidas con la build nueva
+- AoT y AC por defecto: audio de AC (sin Voice Starvation, burst 1024), `[magenta]` (¿desaparecen?), `vk.caps`,
+  `vk.err what=varyings`, líneas `[cp] HALF RATE`/`minimumFrameRepeatCount`.
+- AC con «Perfil Quest 3» apagado: ¿`connected=0x3`? Si sí → identidad Quest 3 + OVRPlugin < 1.89 (arreglo general).
+- Si sigue el rosa: repetir con «Perfil Vulkan completo».
+- Si el medio ritmo sigue con repeatCount 0 → regulador del juego (como AVP) para no provocar retrasos del compositor.
+
+## 2026-10-18 (tarde): pasos 1-7 compilados — BUILD SUCCEEDED, IPA publicada
 - Run 39150059344 (merge 12090b2) falló solo en `kl_bionic_extra.c`: `lgamma_r`/`lgammaf_r` no declarados (math.h de
   Darwin los esconde tras `_REENTRANT`; libSystem los exporta). Arreglo 210c12b: prototipos explícitos tras los includes.
 - 210c12b también: recetas `build/xros|xrsim/libklepton.a` del `klepton/Makefile` compilan todos los `.c` y fallan al
