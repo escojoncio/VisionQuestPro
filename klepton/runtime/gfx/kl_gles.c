@@ -156,13 +156,19 @@ uint32_t kl_gles_layer_texture(int is_eye, int eye, int stage, int w, int h, uin
     if (is_eye) {
         void *mtl = mtl_of(img);
         // Array: both eyes are slices of this one image; Stereo: one image per eye, slice 0.
+        // eye < 0 (DoubleWide): one wide image holds both eyes, slice 0; each eye is cropped by
+        // its own submit viewport, so both (eye, stage) keys are registered.
         if (layers > 1) {
             kl_glfb_note_eye_mtl_texture(0, stage, mtl, 0, w, h);
             kl_glfb_note_eye_mtl_texture(1, stage, mtl, 1, w, h);
+        } else if (eye < 0) {
+            kl_glfb_note_eye_mtl_texture(0, stage, mtl, 0, w, h);
+            kl_glfb_note_eye_mtl_texture(1, stage, mtl, 0, w, h);
         } else {
             kl_glfb_note_eye_mtl_texture(eye, stage, mtl, 0, w, h);
         }
-        kl_glfb_note_eye_texture(eye, stage, name);
+        kl_glfb_note_eye_texture(eye < 0 ? 0 : eye, stage, name);
+        if (eye < 0 || layers > 1) kl_glfb_note_eye_texture(1, stage, name);
     }
     fprintf(stderr, "  [gles] layer texture %s eye %d stage %d = GL %u (VkImage %p, %dx%d, %d layer%s, GL %#x)\n",
             is_eye ? "eye" : "quad", eye, stage, name, (void *)img, w, h, layers, layers > 1 ? "s" : "", glfmt);

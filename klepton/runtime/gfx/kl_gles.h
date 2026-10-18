@@ -14,7 +14,8 @@ void *kl_gles_sym(const char *name);
 
 // OVRPlugin eye/layer storage on the vpgles path: a VkImage of vpgles' device, `layers` array
 // slices (2 = both eyes, multiview), wrapped as a GL texture of the current context and published
-// to the compositor (kl_glfb_note_eye_mtl_texture) for eyes. Returns the GL name, 0 on failure.
+// to the compositor (kl_glfb_note_eye_mtl_texture) for eyes; eye = -1 registers one image for both
+// eyes (DoubleWide). Returns the GL name, 0 on failure.
 uint32_t kl_gles_layer_texture(int is_eye, int eye, int stage, int w, int h, uint32_t gl_internal_fmt,
                                int layers);
 

@@ -7608,7 +7608,8 @@ static uint64_t klovrp_GetLayerTexture2(int layer_id, int stage, int eye,
             const char *fname_g = NULL;
             uint32_t glfmt_g = klovrp_gl_format(l->desc.format, &fname_g);
             if (!glfmt_g) glfmt_g = KL_OVRP_TEXFMT_EYE;
-            *slot_g = kl_gles_layer_texture(l->is_eye, canon_g, stage, l->desc.texture_size.w,
+            const int dw_g = l->is_eye && l->desc.layout == KLOVRP_LAYOUT_DOUBLEWIDE;
+            *slot_g = kl_gles_layer_texture(l->is_eye, dw_g ? -1 : canon_g, stage, l->desc.texture_size.w,
                                             l->desc.texture_size.h, glfmt_g, array_g ? 2 : 1);
             if (!*slot_g) return OVRP_FAIL_NOT_INITIALIZED;
             if (l->is_eye) {
@@ -7617,6 +7618,7 @@ static uint64_t klovrp_GetLayerTexture2(int layer_id, int stage, int eye,
             }
         }
         l->tex[stage][eye] = *slot_g;
+        if (array_g || l->desc.layout == KLOVRP_LAYOUT_DOUBLEWIDE) l->tex[stage][1 - eye] = *slot_g;
         if (color) *color = *slot_g;
         if (depth) *depth = 0;
         return OVRP_SUCCESS;
