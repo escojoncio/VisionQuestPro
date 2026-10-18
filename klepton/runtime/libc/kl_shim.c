@@ -2456,10 +2456,16 @@ int kl_shim_known(const char *name) {
         (name[0] == 'v' && name[1] == 'k' && name[2] >= 'A' && name[2] <= 'Z') ||
         (name[0] == 'x' && name[1] == 'r' && name[2] >= 'A' && name[2] <= 'Z') ||
         !strncmp(name, "SL_IID_", 7) || !strcmp(name, "slCreateEngine") ||
-        !strncmp(name, "AAudio", 6) || !strncmp(name, "AMedia", 6) || !strncmp(name, "AImage", 6) ||
-        !strncmp(name, "AHardwareBuffer_", 16) || !strncmp(name, "ATrace_", 7) ||
-        !strncmp(name, "AMEDIAFORMAT_", 13) || !strncmp(name, "ovr_", 4) || !strncmp(name, "ovrID", 5))
+        !strncmp(name, "ovr_", 4) || !strncmp(name, "ovrID", 5))
         return 2;
+    // AAudio / media NDK: the REAL tables answer, not the prefix. A prefix rule reported
+    // every AMedia*/AImage*/AHardwareBuffer_*/AAudio* import as served although most are not
+    // in the table, which hid the gaps from the scanner (and kl_shim_lookup says no to them).
+    if (!strncmp(name, "AAudio", 6)) return kl_aaudio_lookup(name) ? 2 : 0;
+    if (!strncmp(name, "AMedia", 6) || !strncmp(name, "AImage", 6) ||
+        !strncmp(name, "AHardwareBuffer_", 16) || !strncmp(name, "ATrace_", 7) ||
+        !strncmp(name, "AMEDIAFORMAT_", 13))
+        return kl_mediandk_lookup(name) ? 2 : 0;
     return 0;
 }
 
