@@ -3479,7 +3479,7 @@ static int t_time(void) { static int t = -1; if (t < 0) t = kl_env_on("KL_TRACE_
 //           8 REALTIME_ALARM 9 BOOTTIME_ALARM
 //   Darwin: 0 REALTIME 4 MONOTONIC_RAW 6 MONOTONIC 8 UPTIME_RAW
 //           12 PROCESS_CPUTIME_ID
-static int kl_clock_to_darwin(int clk) {
+int kl_clock_to_darwin(int clk) {
     switch (clk) {
     case 0: case 5: case 8: return 0;    // realtime (coarse/alarm degrade to it)
     case 1: case 6:         return 6;    // monotonic (coarse degrades)

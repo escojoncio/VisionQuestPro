@@ -636,6 +636,60 @@ static char *klx_nl_langinfo(int item) {
 }
 static char *klx_nl_langinfo_l(int item, void *l) { (void)l; return klx_nl_langinfo(item); }
 
+// Symbols implemented in the other libc files (kl_pthread.c, kl_libc.c, kl_libc_slink.c). The
+// host test (KL_EXTRA_TEST) builds this file alone, so their table rows vanish there.
+#ifndef KL_EXTRA_TEST
+#define XE(guest, sym) { guest, (void *)sym },
+#define DECLX(sym) extern void sym(void);
+#else
+#define XE(guest, sym)
+#define DECLX(sym)
+#endif
+// ===== EXTERNS =====
+DECLX(klb_pthread_mutex_timedlock)
+DECLX(klb_pthread_mutex_timedlock_monotonic_np)
+DECLX(klb_pthread_mutex_clocklock)
+DECLX(klb_pthread_mutex_lock_timeout_np)
+DECLX(klb_pthread_mutex_consistent)
+DECLX(klb_pthread_rwlock_timedrdlock)
+DECLX(klb_pthread_rwlock_timedwrlock)
+DECLX(klb_pthread_rwlock_clockrdlock)
+DECLX(klb_pthread_rwlock_clockwrlock)
+DECLX(klb_pthread_rwlockattr_init)
+DECLX(klb_pthread_rwlockattr_destroy)
+DECLX(klb_pthread_rwlockattr_setpshared)
+DECLX(klb_pthread_rwlockattr_getpshared)
+DECLX(klb_pthread_rwlockattr_setkind_np)
+DECLX(klb_pthread_rwlockattr_getkind_np)
+DECLX(klb_pthread_cond_timedwait_monotonic_np)
+DECLX(klb_pthread_cond_timeout_np)
+DECLX(klb_pthread_condattr_getclock)
+DECLX(klb_pthread_condattr_setpshared)
+DECLX(klb_pthread_condattr_getpshared)
+DECLX(klb_pthread_mutexattr_gettype)
+DECLX(klb_pthread_mutexattr_setpshared)
+DECLX(klb_pthread_mutexattr_getpshared)
+DECLX(klb_pthread_mutexattr_setprotocol)
+DECLX(klb_pthread_mutexattr_getprotocol)
+DECLX(klb_pthread_spin_init)
+DECLX(klb_pthread_spin_destroy)
+DECLX(klb_pthread_spin_trylock)
+DECLX(klb_pthread_spin_lock)
+DECLX(klb_pthread_spin_unlock)
+DECLX(klb_pthread_barrierattr_init)
+DECLX(klb_pthread_barrierattr_destroy)
+DECLX(klb_pthread_barrierattr_setpshared)
+DECLX(klb_pthread_barrierattr_getpshared)
+DECLX(klb_pthread_barrier_init)
+DECLX(klb_pthread_barrier_destroy)
+DECLX(klb_pthread_barrier_wait)
+DECLX(klb_sem_clockwait)
+DECLX(klb_sem_unlink)
+DECLX(klb_pthread_gettid_np)
+DECLX(klb_pthread_getname_np)
+DECLX(klb_pthread_getcpuclockid)
+// ===== END EXTERNS =====
+
 // ===== TABLE =====
 #define XK(n) { #n, (void *)klx_##n }
 static const kl_xentry g_extra[] = {
@@ -684,6 +738,51 @@ static const kl_xentry g_extra[] = {
     XK(mbsrtowcs), XK(wcsnrtombs), XK(wcsrtombs), XK(mbstowcs), XK(wcstombs), XK(btowc), XK(wctob),
     XK(mbrtoc32), XK(mbrtoc16), XK(c32rtomb), XK(c16rtomb),
     XK(nl_langinfo), XK(nl_langinfo_l),
+    // ---- pthread / semaphore (kl_pthread.c) ----
+    // ===== PTHREAD ROWS =====
+    XE("pthread_mutex_timedlock", klb_pthread_mutex_timedlock)
+    XE("pthread_mutex_timedlock_monotonic_np", klb_pthread_mutex_timedlock_monotonic_np)
+    XE("pthread_mutex_clocklock", klb_pthread_mutex_clocklock)
+    XE("pthread_mutex_lock_timeout_np", klb_pthread_mutex_lock_timeout_np)
+    XE("pthread_mutex_consistent", klb_pthread_mutex_consistent)
+    XE("pthread_rwlock_timedrdlock", klb_pthread_rwlock_timedrdlock)
+    XE("pthread_rwlock_timedwrlock", klb_pthread_rwlock_timedwrlock)
+    XE("pthread_rwlock_clockrdlock", klb_pthread_rwlock_clockrdlock)
+    XE("pthread_rwlock_clockwrlock", klb_pthread_rwlock_clockwrlock)
+    XE("pthread_rwlockattr_init", klb_pthread_rwlockattr_init)
+    XE("pthread_rwlockattr_destroy", klb_pthread_rwlockattr_destroy)
+    XE("pthread_rwlockattr_setpshared", klb_pthread_rwlockattr_setpshared)
+    XE("pthread_rwlockattr_getpshared", klb_pthread_rwlockattr_getpshared)
+    XE("pthread_rwlockattr_setkind_np", klb_pthread_rwlockattr_setkind_np)
+    XE("pthread_rwlockattr_getkind_np", klb_pthread_rwlockattr_getkind_np)
+    XE("pthread_cond_timedwait_monotonic_np", klb_pthread_cond_timedwait_monotonic_np)
+    XE("pthread_cond_timeout_np", klb_pthread_cond_timeout_np)
+    XE("pthread_condattr_getclock", klb_pthread_condattr_getclock)
+    XE("pthread_condattr_setpshared", klb_pthread_condattr_setpshared)
+    XE("pthread_condattr_getpshared", klb_pthread_condattr_getpshared)
+    XE("pthread_mutexattr_gettype", klb_pthread_mutexattr_gettype)
+    XE("pthread_mutexattr_setpshared", klb_pthread_mutexattr_setpshared)
+    XE("pthread_mutexattr_getpshared", klb_pthread_mutexattr_getpshared)
+    XE("pthread_mutexattr_setprotocol", klb_pthread_mutexattr_setprotocol)
+    XE("pthread_mutexattr_getprotocol", klb_pthread_mutexattr_getprotocol)
+    XE("pthread_spin_init", klb_pthread_spin_init)
+    XE("pthread_spin_destroy", klb_pthread_spin_destroy)
+    XE("pthread_spin_trylock", klb_pthread_spin_trylock)
+    XE("pthread_spin_lock", klb_pthread_spin_lock)
+    XE("pthread_spin_unlock", klb_pthread_spin_unlock)
+    XE("pthread_barrierattr_init", klb_pthread_barrierattr_init)
+    XE("pthread_barrierattr_destroy", klb_pthread_barrierattr_destroy)
+    XE("pthread_barrierattr_setpshared", klb_pthread_barrierattr_setpshared)
+    XE("pthread_barrierattr_getpshared", klb_pthread_barrierattr_getpshared)
+    XE("pthread_barrier_init", klb_pthread_barrier_init)
+    XE("pthread_barrier_destroy", klb_pthread_barrier_destroy)
+    XE("pthread_barrier_wait", klb_pthread_barrier_wait)
+    XE("sem_clockwait", klb_sem_clockwait)
+    XE("sem_unlink", klb_sem_unlink)
+    XE("pthread_gettid_np", klb_pthread_gettid_np)
+    XE("pthread_getname_np", klb_pthread_getname_np)
+    XE("pthread_getcpuclockid", klb_pthread_getcpuclockid)
+    // ===== END PTHREAD ROWS =====
 // ===== END TABLE =====
 };
 
