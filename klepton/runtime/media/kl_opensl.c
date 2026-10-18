@@ -86,6 +86,44 @@ IID(SL_IID_ENGINECAPABILITIES,     0x1010)
 IID(SL_IID_OUTPUTMIX,              0x1011)
 IID(SL_IID_ANDROIDBUFFERQUEUESOURCE, 0x1012)
 IID(SL_IID_NULL,                   0x1013)
+// The rest of <SLES/OpenSLES.h> and <SLES/OpenSLES_Android.h>: every id a guest can
+// import. Most are interfaces Android itself does not implement on a buffer-queue
+// player (3D, MIDI, LED, vibra...), and for those the right answer is the one
+// Android gives: the id exists and asking an object for it is FEATURE_UNSUPPORTED.
+IID(SL_IID_ENVIRONMENTALREVERB, 0x1014)
+IID(SL_IID_PRESETREVERB, 0x1015)
+IID(SL_IID_EQUALIZER, 0x1016)
+IID(SL_IID_BASSBOOST, 0x1017)
+IID(SL_IID_VIRTUALIZER, 0x1018)
+IID(SL_IID_DYNAMICINTERFACEMANAGEMENT, 0x1019)
+IID(SL_IID_DEVICEVOLUME, 0x101a)
+IID(SL_IID_THREADSYNC, 0x101b)
+IID(SL_IID_3DCOMMIT, 0x101c)
+IID(SL_IID_3DDOPPLER, 0x101d)
+IID(SL_IID_3DGROUPING, 0x101e)
+IID(SL_IID_3DLOCATION, 0x101f)
+IID(SL_IID_3DMACROSCOPIC, 0x1020)
+IID(SL_IID_3DSOURCE, 0x1021)
+IID(SL_IID_AUDIODECODERCAPABILITIES, 0x1022)
+IID(SL_IID_AUDIOENCODERCAPABILITIES, 0x1023)
+IID(SL_IID_AUDIOIODEVICECAPABILITIES, 0x1024)
+IID(SL_IID_AUDIOENCODER, 0x1025)
+IID(SL_IID_LED, 0x1026)
+IID(SL_IID_VIBRA, 0x1027)
+IID(SL_IID_MIDIMESSAGE, 0x1028)
+IID(SL_IID_MIDIMUTESOLO, 0x1029)
+IID(SL_IID_MIDITEMPO, 0x102a)
+IID(SL_IID_MIDITIME, 0x102b)
+IID(SL_IID_PITCH, 0x102c)
+IID(SL_IID_RATEPITCH, 0x102d)
+IID(SL_IID_VISUALIZATION, 0x102e)
+IID(SL_IID_METADATATRAVERSAL, 0x102f)
+IID(SL_IID_DYNAMICSOURCE, 0x1030)
+IID(SL_IID_OBJECT, 0x1031)
+IID(SL_IID_ANDROIDEFFECTCAPABILITIES, 0x1032)
+IID(SL_IID_ANDROIDACOUSTICECHOCANCELLATION, 0x1033)
+IID(SL_IID_ANDROIDAUTOMATICGAINCONTROL, 0x1034)
+IID(SL_IID_ANDROIDNOISESUPPRESSION, 0x1035)
 
 // A readable name for an interface id we issued, for the log only. Anything
 // else is not dereferenced: it may be a stub's code bytes (see above).
@@ -101,6 +139,40 @@ static const char *sl_iid_name(const SLInterfaceID iid) {
         {&SL_IID_ANDROIDEFFECT, "ANDROIDEFFECT"}, {&SL_IID_ANDROIDEFFECTSEND, "ANDROIDEFFECTSEND"},
         {&SL_IID_ENGINECAPABILITIES, "ENGINECAPABILITIES"}, {&SL_IID_OUTPUTMIX, "OUTPUTMIX"},
         {&SL_IID_ANDROIDBUFFERQUEUESOURCE, "ANDROIDBUFFERQUEUESOURCE"}, {&SL_IID_NULL, "NULL"},
+        {&SL_IID_ENVIRONMENTALREVERB, "ENVIRONMENTALREVERB"},
+        {&SL_IID_PRESETREVERB, "PRESETREVERB"},
+        {&SL_IID_EQUALIZER, "EQUALIZER"},
+        {&SL_IID_BASSBOOST, "BASSBOOST"},
+        {&SL_IID_VIRTUALIZER, "VIRTUALIZER"},
+        {&SL_IID_DYNAMICINTERFACEMANAGEMENT, "DYNAMICINTERFACEMANAGEMENT"},
+        {&SL_IID_DEVICEVOLUME, "DEVICEVOLUME"},
+        {&SL_IID_THREADSYNC, "THREADSYNC"},
+        {&SL_IID_3DCOMMIT, "3DCOMMIT"},
+        {&SL_IID_3DDOPPLER, "3DDOPPLER"},
+        {&SL_IID_3DGROUPING, "3DGROUPING"},
+        {&SL_IID_3DLOCATION, "3DLOCATION"},
+        {&SL_IID_3DMACROSCOPIC, "3DMACROSCOPIC"},
+        {&SL_IID_3DSOURCE, "3DSOURCE"},
+        {&SL_IID_AUDIODECODERCAPABILITIES, "AUDIODECODERCAPABILITIES"},
+        {&SL_IID_AUDIOENCODERCAPABILITIES, "AUDIOENCODERCAPABILITIES"},
+        {&SL_IID_AUDIOIODEVICECAPABILITIES, "AUDIOIODEVICECAPABILITIES"},
+        {&SL_IID_AUDIOENCODER, "AUDIOENCODER"},
+        {&SL_IID_LED, "LED"},
+        {&SL_IID_VIBRA, "VIBRA"},
+        {&SL_IID_MIDIMESSAGE, "MIDIMESSAGE"},
+        {&SL_IID_MIDIMUTESOLO, "MIDIMUTESOLO"},
+        {&SL_IID_MIDITEMPO, "MIDITEMPO"},
+        {&SL_IID_MIDITIME, "MIDITIME"},
+        {&SL_IID_PITCH, "PITCH"},
+        {&SL_IID_RATEPITCH, "RATEPITCH"},
+        {&SL_IID_VISUALIZATION, "VISUALIZATION"},
+        {&SL_IID_METADATATRAVERSAL, "METADATATRAVERSAL"},
+        {&SL_IID_DYNAMICSOURCE, "DYNAMICSOURCE"},
+        {&SL_IID_OBJECT, "OBJECT"},
+        {&SL_IID_ANDROIDEFFECTCAPABILITIES, "ANDROIDEFFECTCAPABILITIES"},
+        {&SL_IID_ANDROIDACOUSTICECHOCANCELLATION, "ANDROIDACOUSTICECHOCANCELLATION"},
+        {&SL_IID_ANDROIDAUTOMATICGAINCONTROL, "ANDROIDAUTOMATICGAINCONTROL"},
+        {&SL_IID_ANDROIDNOISESUPPRESSION, "ANDROIDNOISESUPPRESSION"},
     };
     for (size_t i = 0; i < sizeof t / sizeof t[0]; i++)
         if (*t[i].id == iid) return t[i].nm;
@@ -216,6 +288,47 @@ struct SLVolumeItf_ {
     SLresult (*GetStereoPosition)(SLVolumeItf, int16_t *);
 };
 
+struct SLMuteSoloItf_;
+typedef const struct SLMuteSoloItf_ *const *SLMuteSoloItf;
+struct SLMuteSoloItf_ {
+    SLresult (*SetChannelMute)(SLMuteSoloItf, uint8_t, SLboolean);
+    SLresult (*GetChannelMute)(SLMuteSoloItf, uint8_t, SLboolean *);
+    SLresult (*SetChannelSolo)(SLMuteSoloItf, uint8_t, SLboolean);
+    SLresult (*GetChannelSolo)(SLMuteSoloItf, uint8_t, SLboolean *);
+    SLresult (*GetNumChannels)(SLMuteSoloItf, uint8_t *);
+};
+
+struct SLEffectSendItf_;
+typedef const struct SLEffectSendItf_ *const *SLEffectSendItf;
+struct SLEffectSendItf_ {
+    SLresult (*EnableEffectSend)(SLEffectSendItf, const void *, SLboolean, int16_t);
+    SLresult (*IsEnabled)(SLEffectSendItf, const void *, SLboolean *);
+    SLresult (*SetDirectLevel)(SLEffectSendItf, int16_t);
+    SLresult (*GetDirectLevel)(SLEffectSendItf, int16_t *);
+    SLresult (*SetSendLevel)(SLEffectSendItf, const void *, int16_t);
+    SLresult (*GetSendLevel)(SLEffectSendItf, const void *, int16_t *);
+};
+
+struct SLOutputMixItf_;
+typedef const struct SLOutputMixItf_ *const *SLOutputMixItf;
+struct SLOutputMixItf_ {
+    SLresult (*GetDestinationOutputDeviceIDs)(SLOutputMixItf, int32_t *, SLuint32 *);
+    SLresult (*RegisterDeviceChangeCallback)(SLOutputMixItf, void *, void *);
+    SLresult (*ReRoute)(SLOutputMixItf, int32_t, SLuint32 *);
+};
+
+struct SLEngineCapabilitiesItf_;
+typedef const struct SLEngineCapabilitiesItf_ *const *SLEngineCapabilitiesItf;
+struct SLEngineCapabilitiesItf_ {
+    SLresult (*QuerySupportedProfiles)(SLEngineCapabilitiesItf, uint16_t *);
+    SLresult (*QueryAvailableVoices)(SLEngineCapabilitiesItf, SLuint32, uint16_t *, SLboolean *, uint16_t *);
+    SLresult (*QueryNumberOfMIDISynthesizers)(SLEngineCapabilitiesItf, int16_t *);
+    SLresult (*QueryAPIVersion)(SLEngineCapabilitiesItf, int16_t *, int16_t *, int16_t *);
+    SLresult (*QueryLEDCapabilities)(SLEngineCapabilitiesItf, SLuint32 *, SLuint32 *, void *);
+    SLresult (*QueryVibraCapabilities)(SLEngineCapabilitiesItf, SLuint32 *, SLuint32 *, void *);
+    SLresult (*IsThreadSafe)(SLEngineCapabilitiesItf, SLboolean *);
+};
+
 struct SLConfigItf_;
 typedef const struct SLConfigItf_ *const *SLConfigItf;
 struct SLConfigItf_ {
@@ -252,6 +365,8 @@ typedef struct kl_sl_player {
     const struct SLBufferQueueItf_ *bq_vt;
     const struct SLConfigItf_ *cfg_vt;
     const struct SLVolumeItf_ *vol_vt;
+    const struct SLMuteSoloItf_ *ms_vt;
+    const struct SLEffectSendItf_ *fx_vt;
 
     pthread_mutex_t lock;
     pthread_cond_t  wake;
@@ -284,12 +399,21 @@ typedef struct kl_sl_player {
     int16_t  stereo_pos;
     SLboolean stereo_on;
     float    gain;
+    // SLMuteSoloItf: per-channel masks, applied by the feeder to 16-bit PCM.
+    // SLEffectSendItf: the direct (dry) level in millibels, folded into gain.
+    uint32_t mute_mask, solo_mask;
+    int16_t  direct_mb;
 } kl_sl_player;
 
-typedef struct { const struct SLObjectItf_ *obj_vt; } kl_sl_mix;
+typedef struct {
+    const struct SLObjectItf_ *obj_vt;
+    const struct SLOutputMixItf_ *mix_vt;
+    void *route_cb, *route_ctx;
+} kl_sl_mix;
 typedef struct {
     const struct SLObjectItf_ *obj_vt;
     const struct SLEngineItf_ *engine_vt;
+    const struct SLEngineCapabilitiesItf_ *caps_vt;
 } kl_sl_engine;
 
 // The capture object — the mirror of kl_sl_player, driving kl_audio.c's mic path
@@ -358,6 +482,8 @@ static kl_sl_player *obj_as_player(const void *self) {
 #define KL_SL_BQ_P(self)   ((kl_sl_player *)((char *)(self) - offsetof(kl_sl_player, bq_vt)))
 #define KL_SL_CFG_P(self)  ((kl_sl_player *)((char *)(self) - offsetof(kl_sl_player, cfg_vt)))
 #define KL_SL_VOL_P(self)  ((kl_sl_player *)((char *)(self) - offsetof(kl_sl_player, vol_vt)))
+#define KL_SL_MS_P(self)   ((kl_sl_player *)((char *)(self) - offsetof(kl_sl_player, ms_vt)))
+#define KL_SL_FX_P(self)   ((kl_sl_player *)((char *)(self) - offsetof(kl_sl_player, fx_vt)))
 
 // The recorder's own container-of macros. Its bq/cfg vtable pointers sit at
 // different offsets than the player's, so they need their own recovery — a
@@ -449,7 +575,9 @@ static void *feeder(void *arg) {
         // SLVolumeItf: attenuate (or mute) 16-bit PCM on its way to the device.
         // Unity gain stays a straight pass of the guest's buffer.
         float gain = p->gain;
-        if (buf && p->bits == 16 && gain != 1.0f) {
+        uint32_t mute_m = p->mute_mask, solo_m = p->solo_mask;
+        int chmask = (mute_m | solo_m) != 0 && p->channels > 0;
+        if (buf && p->bits == 16 && (gain != 1.0f || chmask)) {
             size_t n = size / sizeof(int16_t);
             if (buf != p->conv && n > p->conv_cap) {
                 int16_t *c = realloc(p->conv, n * sizeof(int16_t));
@@ -457,8 +585,17 @@ static void *feeder(void *arg) {
             }
             if (n <= p->conv_cap) {
                 const int16_t *in = buf;
-                for (size_t i = 0; i < n; i++)
-                    p->conv[i] = (int16_t)lrintf((float)in[i] * gain);
+                unsigned nch = p->channels ? p->channels : 1;
+                for (size_t i = 0; i < n; i++) {
+                    float g = gain;
+                    if (chmask) {
+                        unsigned c = (unsigned)(i % nch);
+                        int audible = !(mute_m & (1u << (c & 31))) &&
+                                      (!solo_m || (solo_m & (1u << (c & 31))));
+                        if (!audible) g = 0.0f;
+                    }
+                    p->conv[i] = (int16_t)lrintf((float)in[i] * g);
+                }
                 buf = p->conv;
             }
         }
@@ -731,8 +868,9 @@ static const struct SLConfigItf_ g_cfg_vt = { cfg_Set, cfg_Get };
 // NULL vtable call on CRI's audio thread (Attack on Titan VR).
 #define SL_MILLIBEL_MIN ((int16_t)-32768)
 static void vol_update(kl_sl_player *p) {
-    if (p->muted || p->vol_mb <= SL_MILLIBEL_MIN) { p->gain = 0.0f; return; }
-    p->gain = p->vol_mb >= 0 ? 1.0f : powf(10.0f, (float)p->vol_mb / 2000.0f);
+    if (p->muted || p->vol_mb <= SL_MILLIBEL_MIN || p->direct_mb <= SL_MILLIBEL_MIN) { p->gain = 0.0f; return; }
+    int total = (int)p->vol_mb + (int)p->direct_mb;       // dry path = volume x direct level
+    p->gain = total >= 0 ? 1.0f : powf(10.0f, (float)total / 2000.0f);
 }
 static SLresult vol_SetVolumeLevel(SLVolumeItf s, int16_t mb) {
     kl_sl_player *p = KL_SL_VOL_P(s);
@@ -775,6 +913,187 @@ static const struct SLVolumeItf_ g_vol_vt = {
     vol_GetStereoPosition,
 };
 
+// ---- SLMuteSoloItf -------------------------------------------------------
+// Per-channel mute/solo on the player's own channels. Audible = not muted, and
+// (no channel soloed, or this one is). Channel numbers past the player's count
+// are PARAMETER_INVALID, as on Android.
+static SLresult ms_set(SLMuteSoloItf s, uint8_t ch, SLboolean on, int solo) {
+    kl_sl_player *p = KL_SL_MS_P(s);
+    if (ch >= p->channels || ch >= 32) return 2;
+    uint32_t *m = solo ? &p->solo_mask : &p->mute_mask;
+    if (on) *m |= 1u << ch; else *m &= ~(1u << ch);
+    return SL_RESULT_SUCCESS;
+}
+static SLresult ms_get(SLMuteSoloItf s, uint8_t ch, SLboolean *out, int solo) {
+    kl_sl_player *p = KL_SL_MS_P(s);
+    if (!out || ch >= p->channels || ch >= 32) return 2;
+    *out = ((solo ? p->solo_mask : p->mute_mask) >> ch) & 1u;
+    return SL_RESULT_SUCCESS;
+}
+static SLresult ms_SetChannelMute(SLMuteSoloItf s, uint8_t c, SLboolean m) { return ms_set(s, c, m, 0); }
+static SLresult ms_GetChannelMute(SLMuteSoloItf s, uint8_t c, SLboolean *m) { return ms_get(s, c, m, 0); }
+static SLresult ms_SetChannelSolo(SLMuteSoloItf s, uint8_t c, SLboolean m) { return ms_set(s, c, m, 1); }
+static SLresult ms_GetChannelSolo(SLMuteSoloItf s, uint8_t c, SLboolean *m) { return ms_get(s, c, m, 1); }
+static SLresult ms_GetNumChannels(SLMuteSoloItf s, uint8_t *n) {
+    if (!n) return 2;
+    *n = (uint8_t)KL_SL_MS_P(s)->channels;
+    return SL_RESULT_SUCCESS;
+}
+static const struct SLMuteSoloItf_ g_ms_vt = {
+    ms_SetChannelMute, ms_GetChannelMute, ms_SetChannelSolo, ms_GetChannelSolo, ms_GetNumChannels,
+};
+
+// ---- SLEffectSendItf -----------------------------------------------------
+// The direct (dry) level is real: it scales the player like the volume does.
+// The sends are not: an aux send needs an effect interface (reverb) from the
+// output mix, and this mix has none to hand out, so no valid pAuxEffect can
+// exist. Android answers PARAMETER_INVALID for an effect it does not know.
+static SLresult fx_EnableEffectSend(SLEffectSendItf s, const void *aux, SLboolean en, int16_t lv) {
+    (void)s; (void)aux; (void)en; (void)lv;
+    return 2; /* SL_RESULT_PARAMETER_INVALID */
+}
+static SLresult fx_IsEnabled(SLEffectSendItf s, const void *aux, SLboolean *en) {
+    (void)s; (void)aux; (void)en;
+    return 2;
+}
+static SLresult fx_SetDirectLevel(SLEffectSendItf s, int16_t mb) {
+    kl_sl_player *p = KL_SL_FX_P(s);
+    if (mb > 0) return 2;
+    p->direct_mb = mb; vol_update(p);
+    return SL_RESULT_SUCCESS;
+}
+static SLresult fx_GetDirectLevel(SLEffectSendItf s, int16_t *mb) {
+    if (!mb) return 2;
+    *mb = KL_SL_FX_P(s)->direct_mb;
+    return SL_RESULT_SUCCESS;
+}
+static SLresult fx_SetSendLevel(SLEffectSendItf s, const void *aux, int16_t mb) {
+    (void)s; (void)aux; (void)mb;
+    return 2;
+}
+static SLresult fx_GetSendLevel(SLEffectSendItf s, const void *aux, int16_t *mb) {
+    (void)s; (void)aux; (void)mb;
+    return 2;
+}
+static const struct SLEffectSendItf_ g_fx_vt = {
+    fx_EnableEffectSend, fx_IsEnabled, fx_SetDirectLevel, fx_GetDirectLevel,
+    fx_SetSendLevel, fx_GetSendLevel,
+};
+
+// ---- SLOutputMixItf ------------------------------------------------------
+// One destination, the default output (SL_DEFAULTDEVICEID_AUDIOOUTPUT). Routing
+// is the system's: ReRoute is FEATURE_UNSUPPORTED, as it is on Android.
+#define KL_SL_DEFAULTDEVICEID_AUDIOOUTPUT 0xFFFFFFFEu
+static SLresult mix_GetDestinationOutputDeviceIDs(SLOutputMixItf s, int32_t *n, SLuint32 *ids) {
+    (void)s;
+    if (!n || !ids) return 2;
+    if (*n < 1) return 7;                      // SL_RESULT_BUFFER_INSUFFICIENT
+    *n = 1;
+    ids[0] = KL_SL_DEFAULTDEVICEID_AUDIOOUTPUT;
+    return SL_RESULT_SUCCESS;
+}
+static SLresult mix_RegisterDeviceChangeCallback(SLOutputMixItf s, void *cb, void *ctx) {
+    (void)s; (void)cb; (void)ctx;              // the output device never changes under the guest
+    return SL_RESULT_SUCCESS;
+}
+static SLresult mix_ReRoute(SLOutputMixItf s, int32_t n, SLuint32 *ids) {
+    (void)s; (void)n; (void)ids;
+    return SL_RESULT_FEATURE_UNSUPPORTED;
+}
+static const struct SLOutputMixItf_ g_mixitf_vt = {
+    mix_GetDestinationOutputDeviceIDs, mix_RegisterDeviceChangeCallback, mix_ReRoute,
+};
+
+// ---- SLEngineCapabilitiesItf ---------------------------------------------
+static SLresult cap_QuerySupportedProfiles(SLEngineCapabilitiesItf s, uint16_t *p) {
+    (void)s;
+    if (!p) return 2;
+    *p = 0x1 | 0x2;                            // SL_PROFILES_PHONE | SL_PROFILES_MUSIC
+    return SL_RESULT_SUCCESS;
+}
+static SLresult cap_QueryAvailableVoices(SLEngineCapabilitiesItf s, SLuint32 type,
+                                         uint16_t *max, SLboolean *abs_max, uint16_t *freev) {
+    (void)s;
+    if (type != 1 /* SL_VOICETYPE_2D_AUDIO */) return type == 2 || type == 3 ? SL_RESULT_FEATURE_UNSUPPORTED : 2;
+    if (max) *max = 32;
+    if (abs_max) *abs_max = 0;                 // a soft limit: players are cheap here
+    if (freev) *freev = 32;
+    return SL_RESULT_SUCCESS;
+}
+static SLresult cap_QueryNumberOfMIDISynthesizers(SLEngineCapabilitiesItf s, int16_t *n) {
+    (void)s; if (!n) return 2; *n = 0; return SL_RESULT_SUCCESS;
+}
+static SLresult cap_QueryAPIVersion(SLEngineCapabilitiesItf s, int16_t *maj, int16_t *min, int16_t *step) {
+    (void)s;
+    if (!maj || !min || !step) return 2;
+    *maj = 1; *min = 0; *step = 1;             // OpenSL ES 1.0.1, what Android implements
+    return SL_RESULT_SUCCESS;
+}
+static SLresult cap_unsupported(SLEngineCapabilitiesItf s, SLuint32 *a, SLuint32 *b, void *c) {
+    (void)s; (void)a; (void)b; (void)c;
+    return SL_RESULT_FEATURE_UNSUPPORTED;       // no LED, no vibra device
+}
+static SLresult cap_IsThreadSafe(SLEngineCapabilitiesItf s, SLboolean *t) {
+    (void)s; if (!t) return 2; *t = 1; return SL_RESULT_SUCCESS;
+}
+static const struct SLEngineCapabilitiesItf_ g_caps_vt = {
+    cap_QuerySupportedProfiles, cap_QueryAvailableVoices, cap_QueryNumberOfMIDISynthesizers,
+    cap_QueryAPIVersion, cap_unsupported, cap_unsupported, cap_IsThreadSafe,
+};
+
+// ---- what each object kind serves -----------------------------------------
+// One list per kind, used for the engine's Query* answers and for refusing, at
+// creation, a REQUIRED interface the object cannot give — which is what Android
+// does (SL_RESULT_FEATURE_UNSUPPORTED), rather than succeeding and failing later
+// at GetInterface.
+enum { KL_SLK_PLAYER, KL_SLK_RECORDER, KL_SLK_MIX, KL_SLK_ENGINE, KL_SLK_N };
+#define KL_SL_OBJECTID_ENGINE        0x1001u
+#define KL_SL_OBJECTID_AUDIOPLAYER   0x1004u
+#define KL_SL_OBJECTID_AUDIORECORDER 0x1005u
+#define KL_SL_OBJECTID_OUTPUTMIX     0x1009u
+static const struct SLInterfaceID_ *g_serves[KL_SLK_N][8];
+static unsigned g_nserves[KL_SLK_N];
+static pthread_once_t g_serves_once = PTHREAD_ONCE_INIT;
+static void sl_serves_init(void) {
+    const struct SLInterfaceID_ *pl[] = { SL_IID_PLAY, SL_IID_BUFFERQUEUE, SL_IID_ANDROIDSIMPLEBUFFERQUEUE,
+                                          SL_IID_ANDROIDCONFIGURATION, SL_IID_VOLUME, SL_IID_MUTESOLO,
+                                          SL_IID_EFFECTSEND };
+    const struct SLInterfaceID_ *rc[] = { SL_IID_RECORD, SL_IID_BUFFERQUEUE, SL_IID_ANDROIDSIMPLEBUFFERQUEUE,
+                                          SL_IID_ANDROIDCONFIGURATION };
+    const struct SLInterfaceID_ *mx[] = { SL_IID_OUTPUTMIX };
+    const struct SLInterfaceID_ *en[] = { SL_IID_ENGINE, SL_IID_ENGINECAPABILITIES };
+    memcpy(g_serves[KL_SLK_PLAYER], pl, sizeof pl);   g_nserves[KL_SLK_PLAYER]   = sizeof pl / sizeof pl[0];
+    memcpy(g_serves[KL_SLK_RECORDER], rc, sizeof rc); g_nserves[KL_SLK_RECORDER] = sizeof rc / sizeof rc[0];
+    memcpy(g_serves[KL_SLK_MIX], mx, sizeof mx);      g_nserves[KL_SLK_MIX]      = sizeof mx / sizeof mx[0];
+    memcpy(g_serves[KL_SLK_ENGINE], en, sizeof en);   g_nserves[KL_SLK_ENGINE]   = sizeof en / sizeof en[0];
+}
+static int sl_kind_for_objectid(SLuint32 id) {
+    switch (id) {
+    case KL_SL_OBJECTID_ENGINE:        return KL_SLK_ENGINE;
+    case KL_SL_OBJECTID_AUDIOPLAYER:   return KL_SLK_PLAYER;
+    case KL_SL_OBJECTID_AUDIORECORDER: return KL_SLK_RECORDER;
+    case KL_SL_OBJECTID_OUTPUTMIX:     return KL_SLK_MIX;
+    default: return -1;
+    }
+}
+// Creation check: 0, or FEATURE_UNSUPPORTED when a required interface is not served.
+static SLresult sl_check_required(int kind, SLuint32 n, const SLInterfaceID *ids, const SLboolean *req) {
+    pthread_once(&g_serves_once, sl_serves_init);
+    if (!ids || !req) return SL_RESULT_SUCCESS;
+    for (SLuint32 i = 0; i < n; i++) {
+        if (!req[i]) continue;
+        int ok = 0;
+        for (unsigned k = 0; k < g_nserves[kind]; k++) if (g_serves[kind][k] == ids[i]) ok = 1;
+        if (!ok) {
+            const char *nm = sl_iid_name(ids[i]);
+            fprintf(stderr, "  [sl] creation refused: required SL_IID_%s is not served by this object\n",
+                    nm ? nm : "?");
+            return SL_RESULT_FEATURE_UNSUPPORTED;
+        }
+    }
+    return SL_RESULT_SUCCESS;
+}
+
 // ---- SLEngineItf ----
 static void sl_log_requested(const char *what, SLuint32 n, const SLInterfaceID *ids,
                              const SLboolean *req);
@@ -782,7 +1101,11 @@ static SLresult eng_CreateOutputMix(SLEngineItf self, SLObjectItf *out, SLuint32
                                     const SLInterfaceID *ids, const SLboolean *req) {
     (void)self;
     sl_log_requested("CreateOutputMix", n, ids, req);
+    if (out) *out = NULL;
+    SLresult bad = sl_check_required(KL_SLK_MIX, n, ids, req);
+    if (bad) return bad;
     g_mix.obj_vt = &g_obj_vt;
+    g_mix.mix_vt = &g_mixitf_vt;
     if (out) *out = (SLObjectItf)&g_mix;
     return SL_RESULT_SUCCESS;
 }
@@ -809,7 +1132,9 @@ static void sl_log_requested(const char *what, SLuint32 n, const SLInterfaceID *
         const char *nm = sl_iid_name(ids[i]);
         int served = ids[i] == SL_IID_PLAY || ids[i] == SL_IID_ANDROIDSIMPLEBUFFERQUEUE ||
                      ids[i] == SL_IID_BUFFERQUEUE || ids[i] == SL_IID_ANDROIDCONFIGURATION ||
-                     ids[i] == SL_IID_VOLUME || ids[i] == SL_IID_RECORD;
+                     ids[i] == SL_IID_VOLUME || ids[i] == SL_IID_RECORD ||
+                     ids[i] == SL_IID_MUTESOLO || ids[i] == SL_IID_EFFECTSEND ||
+                     ids[i] == SL_IID_OUTPUTMIX || ids[i] == SL_IID_ENGINECAPABILITIES;
         fprintf(stderr, "  [sl] %s asks for SL_IID_%s%s%s\n", what, nm ? nm : "?",
                 req && req[i] ? " (required)" : "", served ? "" : " — NOT served");
     }
@@ -859,6 +1184,9 @@ static SLresult eng_CreateAudioPlayer(SLEngineItf self, SLObjectItf *out,
                                       const SLInterfaceID *ids, const SLboolean *req) {
     (void)self; (void)snk;
     sl_log_requested("CreateAudioPlayer", n, ids, req);
+    if (out) *out = NULL;
+    SLresult bad = sl_check_required(KL_SLK_PLAYER, n, ids, req);
+    if (bad) return bad;
     // A FREE slot, so a second output (vampire: UE4 alongside FMOD) does not stop
     // and memset a live player out from under its feeder. Only when all slots are
     // in use do we fall back to reclaiming slot 0.
@@ -878,6 +1206,8 @@ static SLresult eng_CreateAudioPlayer(SLEngineItf self, SLObjectItf *out,
     p->bq_vt = &g_bq_vt;
     p->cfg_vt = &g_cfg_vt;
     p->vol_vt = &g_vol_vt;
+    p->ms_vt = &g_ms_vt;
+    p->fx_vt = &g_fx_vt;
     p->gain = 1.0f;
     p->state = SL_PLAYSTATE_STOPPED;
     p->rate = 48000; p->channels = 2; p->bits = 16;
@@ -1128,7 +1458,10 @@ static void recorder_stop(kl_sl_recorder *r) {
 static SLresult eng_CreateAudioRecorder(SLEngineItf self, SLObjectItf *out,
                                         void *src, void *snk, SLuint32 n,
                                         const SLInterfaceID *ids, const SLboolean *req) {
-    (void)self; (void)src; (void)n; (void)ids; (void)req;
+    (void)self; (void)src;
+    if (out) *out = NULL;
+    SLresult bad = sl_check_required(KL_SLK_RECORDER, n, ids, req);
+    if (bad) return bad;
     // Gated: with the microphone toggle OFF this is the same refusal it always
     // was, and nothing touches the mic. The AAudio input path is the priority and
     // fully exercised; this OpenSL recorder is best-effort for a guest that
@@ -1185,6 +1518,49 @@ static SLresult eng_CreateAudioRecorder(SLEngineItf self, SLObjectItf *out,
 
 static SLresult eng_unsupported(void) { return SL_RESULT_FEATURE_UNSUPPORTED; }
 
+// Object ids with no implementation behind them (LED, vibra, MIDI, listener, 3D
+// group, metadata extractor) are FEATURE_UNSUPPORTED, as on Android; an id that
+// is not an object at all is PARAMETER_INVALID.
+static SLresult eng_ObjectKind(SLuint32 id, int *kind) {
+    *kind = sl_kind_for_objectid(id);
+    if (*kind >= 0) return SL_RESULT_SUCCESS;
+    return (id >= 0x1001 && id <= 0x100A) ? SL_RESULT_FEATURE_UNSUPPORTED : 2;
+}
+static SLresult eng_QueryNumSupportedInterfaces(SLEngineItf self, SLuint32 id, SLuint32 *n) {
+    (void)self;
+    pthread_once(&g_serves_once, sl_serves_init);
+    int kind; SLresult r = eng_ObjectKind(id, &kind);
+    if (r != SL_RESULT_SUCCESS) return r;
+    if (!n) return 2;
+    *n = g_nserves[kind];
+    return SL_RESULT_SUCCESS;
+}
+static SLresult eng_QuerySupportedInterfaces(SLEngineItf self, SLuint32 id, SLuint32 index,
+                                             SLInterfaceID *out) {
+    (void)self;
+    pthread_once(&g_serves_once, sl_serves_init);
+    int kind; SLresult r = eng_ObjectKind(id, &kind);
+    if (r != SL_RESULT_SUCCESS) return r;
+    if (!out || index >= g_nserves[kind]) return 2;
+    *out = (SLInterfaceID)g_serves[kind][index];
+    return SL_RESULT_SUCCESS;
+}
+// No vendor extensions: the list is empty, every name is "not supported", and an
+// index into an empty list is out of range.
+static SLresult eng_QueryNumSupportedExtensions(SLEngineItf self, SLuint32 *n) {
+    (void)self; if (!n) return 2; *n = 0; return SL_RESULT_SUCCESS;
+}
+static SLresult eng_QuerySupportedExtension(SLEngineItf self, SLuint32 i, char *name, int16_t *len) {
+    (void)self; (void)i; (void)name; (void)len;
+    return 2;
+}
+static SLresult eng_IsExtensionSupported(SLEngineItf self, const char *name, SLboolean *ok) {
+    (void)self;
+    if (!name || !ok) return 2;
+    *ok = 0;
+    return SL_RESULT_SUCCESS;
+}
+
 static const struct SLEngineItf_ g_engine_vt = {
     (void *)eng_unsupported,        // CreateLEDDevice
     (void *)eng_unsupported,        // CreateVibraDevice
@@ -1196,11 +1572,11 @@ static const struct SLEngineItf_ g_engine_vt = {
     eng_CreateOutputMix,
     (void *)eng_unsupported,        // CreateMetadataExtractor
     (void *)eng_unsupported,        // CreateExtensionObject
-    (void *)eng_unsupported,        // QueryNumSupportedInterfaces
-    (void *)eng_unsupported,        // QuerySupportedInterfaces
-    (void *)eng_unsupported,        // QueryNumSupportedExtensions
-    (void *)eng_unsupported,        // QuerySupportedExtension
-    (void *)eng_unsupported,        // IsExtensionSupported
+    eng_QueryNumSupportedInterfaces,
+    eng_QuerySupportedInterfaces,
+    eng_QueryNumSupportedExtensions,
+    eng_QuerySupportedExtension,
+    eng_IsExtensionSupported,
 };
 
 // GetInterface hands back a pointer to the right vtable *slot inside the object*,
@@ -1216,6 +1592,16 @@ static SLresult obj_GetInterface(SLObjectItf self, const SLInterfaceID iid, void
         *(void **)out = &g_engine.engine_vt;
         return SL_RESULT_SUCCESS;
     }
+    if (o == (void *)&g_engine && iid == SL_IID_ENGINECAPABILITIES) {
+        g_engine.caps_vt = &g_caps_vt;
+        *(void **)out = &g_engine.caps_vt;
+        return SL_RESULT_SUCCESS;
+    }
+    if (o == (void *)&g_mix && iid == SL_IID_OUTPUTMIX) {
+        g_mix.mix_vt = &g_mixitf_vt;
+        *(void **)out = &g_mix.mix_vt;
+        return SL_RESULT_SUCCESS;
+    }
     kl_sl_player *p = obj_as_player(o);
     if (p) {
         if (iid == SL_IID_PLAY) { *(void **)out = &p->play_vt; return SL_RESULT_SUCCESS; }
@@ -1226,6 +1612,8 @@ static SLresult obj_GetInterface(SLObjectItf self, const SLInterfaceID iid, void
             *(void **)out = &p->cfg_vt; return SL_RESULT_SUCCESS;
         }
         if (iid == SL_IID_VOLUME) { *(void **)out = &p->vol_vt; return SL_RESULT_SUCCESS; }
+        if (iid == SL_IID_MUTESOLO) { *(void **)out = &p->ms_vt; return SL_RESULT_SUCCESS; }
+        if (iid == SL_IID_EFFECTSEND) { *(void **)out = &p->fx_vt; return SL_RESULT_SUCCESS; }
     }
     kl_sl_recorder *r = obj_as_recorder(o);
     if (r) {
@@ -1322,6 +1710,40 @@ static const struct { const char *name; void *addr; } g_sl_syms[] = {
     {"SL_IID_OUTPUTMIX",                &SL_IID_OUTPUTMIX},
     {"SL_IID_ANDROIDBUFFERQUEUESOURCE", &SL_IID_ANDROIDBUFFERQUEUESOURCE},
     {"SL_IID_NULL",                     &SL_IID_NULL},
+    {"SL_IID_ENVIRONMENTALREVERB", &SL_IID_ENVIRONMENTALREVERB},
+    {"SL_IID_PRESETREVERB", &SL_IID_PRESETREVERB},
+    {"SL_IID_EQUALIZER", &SL_IID_EQUALIZER},
+    {"SL_IID_BASSBOOST", &SL_IID_BASSBOOST},
+    {"SL_IID_VIRTUALIZER", &SL_IID_VIRTUALIZER},
+    {"SL_IID_DYNAMICINTERFACEMANAGEMENT", &SL_IID_DYNAMICINTERFACEMANAGEMENT},
+    {"SL_IID_DEVICEVOLUME", &SL_IID_DEVICEVOLUME},
+    {"SL_IID_THREADSYNC", &SL_IID_THREADSYNC},
+    {"SL_IID_3DCOMMIT", &SL_IID_3DCOMMIT},
+    {"SL_IID_3DDOPPLER", &SL_IID_3DDOPPLER},
+    {"SL_IID_3DGROUPING", &SL_IID_3DGROUPING},
+    {"SL_IID_3DLOCATION", &SL_IID_3DLOCATION},
+    {"SL_IID_3DMACROSCOPIC", &SL_IID_3DMACROSCOPIC},
+    {"SL_IID_3DSOURCE", &SL_IID_3DSOURCE},
+    {"SL_IID_AUDIODECODERCAPABILITIES", &SL_IID_AUDIODECODERCAPABILITIES},
+    {"SL_IID_AUDIOENCODERCAPABILITIES", &SL_IID_AUDIOENCODERCAPABILITIES},
+    {"SL_IID_AUDIOIODEVICECAPABILITIES", &SL_IID_AUDIOIODEVICECAPABILITIES},
+    {"SL_IID_AUDIOENCODER", &SL_IID_AUDIOENCODER},
+    {"SL_IID_LED", &SL_IID_LED},
+    {"SL_IID_VIBRA", &SL_IID_VIBRA},
+    {"SL_IID_MIDIMESSAGE", &SL_IID_MIDIMESSAGE},
+    {"SL_IID_MIDIMUTESOLO", &SL_IID_MIDIMUTESOLO},
+    {"SL_IID_MIDITEMPO", &SL_IID_MIDITEMPO},
+    {"SL_IID_MIDITIME", &SL_IID_MIDITIME},
+    {"SL_IID_PITCH", &SL_IID_PITCH},
+    {"SL_IID_RATEPITCH", &SL_IID_RATEPITCH},
+    {"SL_IID_VISUALIZATION", &SL_IID_VISUALIZATION},
+    {"SL_IID_METADATATRAVERSAL", &SL_IID_METADATATRAVERSAL},
+    {"SL_IID_DYNAMICSOURCE", &SL_IID_DYNAMICSOURCE},
+    {"SL_IID_OBJECT", &SL_IID_OBJECT},
+    {"SL_IID_ANDROIDEFFECTCAPABILITIES", &SL_IID_ANDROIDEFFECTCAPABILITIES},
+    {"SL_IID_ANDROIDACOUSTICECHOCANCELLATION", &SL_IID_ANDROIDACOUSTICECHOCANCELLATION},
+    {"SL_IID_ANDROIDAUTOMATICGAINCONTROL", &SL_IID_ANDROIDAUTOMATICGAINCONTROL},
+    {"SL_IID_ANDROIDNOISESUPPRESSION", &SL_IID_ANDROIDNOISESUPPRESSION},
 };
 
 void *kl_opensl_sym(const char *name) {

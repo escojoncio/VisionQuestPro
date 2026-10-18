@@ -100,6 +100,8 @@ antialiasing VPKTAA (escojoncio/PTVisionPro).
 - Si el juego genera vectores de movimiento (juegos con SpaceWarp), VPKTAA los usa para no dejar
   estelas en objetos en movimiento.
 - El foveado del juego se conecta con el foveado propio.
+- VPKTAA nativo solo actúa sobre el 3D: la UI/2D dibujada dentro del buffer del ojo (menús, textos, HUD) se
+  excluye con una máscara reactiva (R8) que escribe VPKEngine; así el texto no se emborrona.
 
 ## Alcance
 - Solo juego sin conexión: sin cuentas ni servicios en línea de ningún tipo.

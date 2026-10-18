@@ -18,6 +18,7 @@ typedef struct vq_gfx_config {
     int32_t anisotropy;       // 0 = game's own; 16 = force 16x on mipmapped linear samplers
     int32_t force_single_sample; // 1 = render the game's MSAA targets at 1x (VPKTAA does the AA)
     int32_t msaa_override;    // 0 = the game's own sample count; 2/4/8 where the game asked for MSAA
+    int32_t taa_native;       // 1 = «VPKTAA nativo»: VPKEngine's own pass (also env VPVK_TAA_NATIVE)
 } vq_gfx_config;
 
 // Stores the config and pushes it to VPVulkan if loaded (returns 1 if forwarded).
@@ -36,3 +37,6 @@ uint32_t vq_prewarm_run(vq_prewarm_progress progress, void *user);
 // First-run precompile: translates + compiles every <dir>/*.spv (vq_harvest_spirv output) with
 // VPVulkan's vpvk_precompile_spirv. Returns the libraries compiled (0 without VPVulkan).
 uint32_t vq_precompile_run(const char *dir, vq_prewarm_progress progress, void *user);
+// AOT build (VPVulkan vpvk_aot_build, needs env VPVK_AOT=1): every <spirv_dir>/*.spv + every stored
+// recipe compiled and serialized into the game's Metal binary archive. 0 without VPVulkan / gate off.
+uint32_t vq_aot_run(const char *spirv_dir, vq_prewarm_progress progress, void *user);

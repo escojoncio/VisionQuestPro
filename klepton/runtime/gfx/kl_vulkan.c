@@ -115,6 +115,8 @@ int   kl_vulkan_aa_detected(int *dm) { if (dm) *dm = -1; return -1; }
 int   kl_vulkan_aa_gate(void) { return 0; }
 int   kl_vulkan_native_submit(void (*fn)(void *, void *), void *u) { (void)fn; (void)u; return 0; }
 void *kl_vulkan_native_device(void) { return NULL; }
+int   kl_vulkan_taa_native_on(void) { return 0; }
+int   kl_vulkan_taa_native_encode(const void *f, void *cb) { (void)f; (void)cb; return 0; }
 void *kl_vulkan_eye_color_mtl(int s, int e, int *sl, int *w, int *h) {
     (void)s; (void)e; if (sl) *sl = 0; if (w) *w = 0; if (h) *h = 0; return NULL;
 }
@@ -2198,8 +2200,10 @@ unsigned kl_vulkan_spacewarp_writes(int stage, int kind) {
 // ---------------------------------------------------------------------------
 // VPKTAA eye depth — the contract is in kl_vulkan.h. Four small tables (depth
 // images, render passes, framebuffers, the current frame's pick) and the per
-// stage record. Everything is inert unless KL_VPKTAA=1 (KL_VPKTAA_DEPTH=0 turns
-// just this off): no usage/storeOp rewrite, no tracking, no copy.
+// stage record. Everything is inert unless a consumer is on — VPKTAA (KL_VPKTAA=1,
+// Klepton's or VPKEngine's native pass) or the compositor's depth reprojection
+// (KL_CP_PTW=1); KL_VPKTAA_DEPTH=0 turns just this off: no usage/storeOp
+// rewrite, no tracking, no copy.
 // ---------------------------------------------------------------------------
 static int klvk_aa_mode(void);    // KL_AA_MODE, defined with the AA gate
 // A MULTISAMPLED depth is only ever read by VPKTAA in the explicit vpktaa mode
@@ -2207,9 +2211,19 @@ static int klvk_aa_mode(void);    // KL_AA_MODE, defined with the AA gate
 // VPKTAA is off for that game, so forcing such a depth SAMPLED / STORE would only
 // cost tile bandwidth.
 static int klvk_taa_wants_ms_depth(void);
+static void *klvk_ed_ms_resolve(klvk_device *d, VkImage img, int key, int rev);
 static int klvk_taa_depth_on(void) {
     static int v = -1;
-    if (v < 0) v = kl_env_on("KL_VPKTAA", 0) && kl_env_on("KL_VPKTAA_DEPTH", 1);
+    if (v < 0) v = (kl_env_on("KL_VPKTAA", 0) || kl_env_on("KL_CP_PTW", 0)) && kl_env_on("KL_VPKTAA_DEPTH", 1);
+    return v;
+}
+// A multisampled eye depth for a SINGLE-SAMPLE reader (the compositor's PTW, the
+// async VPKTAA): resolved on VPKEngine's queue (vpvk_depth_resolve_encode,
+// nearest sample) into an engine-owned depth32Float, filed as a copy
+// (snapshot 1, samples 1). KL_DEPTH_MS_RESOLVE=0 turns it off.
+static int klvk_ms_depth_resolve_on(void) {
+    static int v = -1;
+    if (v < 0) v = kl_env_on("KL_DEPTH_MS_RESOLVE", 1);
     return v;
 }
 static int klvk_is_depth_format(VkFormat f) {
@@ -2573,7 +2587,16 @@ static void klvk_ed_frame_done(klvk_device *d, int stage) {
         void *mtl = NULL;
         int snap = 0;
         int inl = kl_vulkan_taa_inline();
-        if (inl && samples > 1 && !klvk_taa_wants_ms_depth()) {
+        int ms_resolved = 0;
+        if (samples > 1 && klvk_taa_wants_ms_depth() && klvk_ms_depth_resolve_on() &&
+            (!inl || kl_env_on("KL_CP_PTW", 0)) && !kl_vulkan_taa_native_on() &&
+            (mtl = klvk_ed_ms_resolve(d, img, stage * 2 + e, cleared ? (clear < 0.5f) : census == 1)) != NULL) {
+            // Resolved to one sample (VPKEngine queue, ordered after this frame):
+            // what the single-sample readers take. The native VPKTAA reads the
+            // samples itself (live MS texture, below).
+            ms_resolved = 1;
+            snap = 1;
+        } else if (inl && samples > 1 && !klvk_taa_wants_ms_depth()) {
             // A multisampled eye depth outside the vpktaa mode: VPKTAA is off for
             // this game (auto keeps the game's MSAA), and asking VPKEngine for the
             // texture would allocate a depth that may live on tile only.
@@ -2586,7 +2609,7 @@ static void klvk_ed_frame_done(klvk_device *d, int stage) {
             // samples). It must have been created SAMPLED (vkCreateImage).
             mtl = eye_mtl_texture(d, img);
         } else if (samples > 1) {
-            mtl = NULL;              // a multisampled depth: VPKTAA cannot use it (logged there)
+            mtl = NULL;              // a multisampled depth: unusable without the resolve (logged there)
         } else if (shared && kl_env_on("KL_VPKTAA_DEPTH_COPY", 1)) {
             // Both eyes of a multiview depth are one image: copy once, from eye 0.
             void *eye0 = NULL;
@@ -2615,7 +2638,8 @@ static void klvk_ed_frame_done(klvk_device *d, int stage) {
         info.w = (int)w; info.h = (int)h; info.layers = (int)layers;
         info.slice = layers > 1 ? e : 0;
         info.vk_format = (int)fmt;
-        info.samples = (int)samples;
+        info.samples = ms_resolved ? 1 : (int)samples;
+        if (ms_resolved) { info.vk_format = VK_FORMAT_D32_SFLOAT; info.layers = (int)layers; }
         info.reversed_z = cleared ? (clear < 0.5f ? 1 : 0) : census;
         info.clear_depth = clear;
         info.source = kind;
@@ -2633,6 +2657,7 @@ static void klvk_ed_frame_done(klvk_device *d, int stage) {
                 "MTLTexture %p\n", f, stage,
                 kind == 1 ? "eye-pass" : kind == 2 ? "spacewarp" : "size-match",
                 (void *)img, w, h, (int)fmt, layers, samples,
+                ms_resolved ? "MSAA resolved to 1 sample (nearest, VPKEngine)" :
                 snap ? "copied (shared between stages)" :
                 inl ? "live (inline: read before the next frame)" : "live (per-stage image)",
                 cleared ? "" : "none ", (double)(cleared ? clear : 0.0f), g, l,
@@ -3003,7 +3028,7 @@ void *kl_vulkan_mtl_for_handle(unsigned long long h) {
 
     // Resolve on EVERY call (not just the first), so every frame samples fresh UI.
     //
-    // Default OFF for AC Nexus (package gate), on for every other game. This
+    // Default on (KL_OVERLAY_TEXL=0 turns it off). This
     // detour exists because the layer's own swapchain image used to be empty -
     // and it was empty because ovrp_GetLayerTexturePtr handed Unity the raw
     // VkImage instead of a VkImage* cell (now fixed: klovrp_texcell). With that
@@ -3015,11 +3040,8 @@ void *kl_vulkan_mtl_for_handle(unsigned long long h) {
     // something else). Other games keep the detour until measured the same way.
     static int texl = -1;
     if (texl < 0) {
-        extern int kl_is_ac_nexus(void);
-        extern int kl_ac_nexus_known(void);
-        int r = kl_env_on("KL_OVERLAY_TEXL", !kl_is_ac_nexus());
-        if (kl_ac_nexus_known()) texl = r;
-        if (!r) return NULL;
+        texl = kl_env_on("KL_OVERLAY_TEXL", 1);
+        if (!texl) return NULL;
     } else if (!texl) return NULL;
     // Only a live, tracked, non-eye image. A wild or already-destroyed handle here
     // is exactly the stale-MVKImage crash that destroy-tracking now prevents:
@@ -3560,6 +3582,10 @@ static struct {
     void *(*native_device)(void);
     int   (*msaa_detected)(void);      // weak: VPKEngine with the automatic AA API only
     int   (*msaa_device_max)(void);
+    // weak: VPKEngine with the native VPKTAA (vpvk/config.h "VPKTAA nativo")
+    int   (*taa_native_enabled)(void);
+    int   (*taa_native_encode)(const void *frame, void *mtl_cmdbuf);
+    void *(*depth_resolve_encode)(void *mtl_cmdbuf, void *depth_ms, int reversed_z, int mode, int key);
 } g_vpvk;
 static pthread_mutex_t g_vpvk_mu = PTHREAD_MUTEX_INITIALIZER;
 
@@ -3576,6 +3602,10 @@ static void klvk_vpvk_resolve(void) {
         g_vpvk.native_device = (void *(*)(void))mvk_sym("vpvk_native_device");
         g_vpvk.msaa_detected   = (int (*)(void))mvk_sym("vpvk_msaa_detected");
         g_vpvk.msaa_device_max = (int (*)(void))mvk_sym("vpvk_msaa_device_max");
+        g_vpvk.taa_native_enabled = (int (*)(void))mvk_sym("vpvk_taa_native_enabled");
+        g_vpvk.taa_native_encode = (int (*)(const void *, void *))mvk_sym("vpvk_taa_native_encode");
+        g_vpvk.depth_resolve_encode =
+            (void *(*)(void *, void *, int, int, int))mvk_sym("vpvk_depth_resolve_encode");
         __atomic_store_n(&g_vpvk.resolved, 1, __ATOMIC_RELEASE);
     }
     pthread_mutex_unlock(&g_vpvk_mu);
@@ -3634,7 +3664,10 @@ static const char *klvk_aa_mode_name(int m) {
 }
 
 static int klvk_taa_wants_ms_depth(void) {
-    return klvk_aa_mode() == KLVK_AA_VPKTAA || kl_env_on("KL_VPKTAA_MS_DEPTH", 0);
+    // PTW and VPKEngine's native VPKTAA read a multisampled depth too (resolved /
+    // read per sample), so the game's MSAA keeps a usable depth for them.
+    return klvk_aa_mode() == KLVK_AA_VPKTAA || kl_env_on("KL_VPKTAA_MS_DEPTH", 0) ||
+           kl_env_on("KL_CP_PTW", 0) || kl_vulkan_taa_native_on();
 }
 
 int kl_vulkan_aa_detected(int *device_max) {
@@ -3697,6 +3730,39 @@ int kl_vulkan_native_submit(void (*fn)(void *mtl_cmdbuf, void *user), void *user
 void *kl_vulkan_native_device(void) {
     klvk_vpvk_resolve();
     return g_vpvk.native_device ? g_vpvk.native_device() : NULL;
+}
+
+int kl_vulkan_taa_native_on(void) {
+    if (!kl_env_on("KL_VPKTAA", 0)) return 0;
+    klvk_vpvk_resolve();
+    if (g_vpvk.taa_native_enabled && g_vpvk.taa_native_encode) return g_vpvk.taa_native_enabled() != 0;
+    return 0;   // driver without the native pass (MoltenVK, older VPKEngine)
+}
+
+int kl_vulkan_taa_native_encode(const void *frame, void *mtl_cmdbuf) {
+    klvk_vpvk_resolve();
+    return g_vpvk.taa_native_encode ? g_vpvk.taa_native_encode(frame, mtl_cmdbuf) : 0;
+}
+
+// klvk_ed_ms_resolve: a multisampled eye depth resolved to one sample on
+// VPKEngine's queue (after this frame's work, before the next frame's).
+typedef struct { void *src; int rev, key; void *out; } klvk_msres;
+static void klvk_msres_cb(void *cb, void *user) {
+    klvk_msres *r = (klvk_msres *)user;
+    r->out = g_vpvk.depth_resolve_encode(cb, r->src, r->rev, 1, r->key);
+}
+static void *klvk_ed_ms_resolve(klvk_device *d, VkImage img, int key, int rev) {
+    klvk_vpvk_resolve();
+    if (!g_vpvk.depth_resolve_encode || !g_vpvk.native_submit) return NULL;
+    klvk_msres r = { eye_mtl_texture(d, img), rev, key, NULL };
+    if (!r.src || !g_vpvk.native_submit(klvk_msres_cb, &r)) return NULL;
+    static unsigned said;
+    if (said < 2) {
+        said++;
+        VKI("[taa-depth] MSAA eye depth %p resolved to 1 sample (nearest, revZ=%d) by VPKEngine -> %p\n",
+            (void *)img, rev, r.out);
+    }
+    return r.out;
 }
 
 // MTLTexture per eye image, cached by VkImage: the hook asks twice per frame
@@ -4797,7 +4863,7 @@ static VkResult VKAPI_CALL klvk_CreateImage(VkDevice dev, const VkImageCreateInf
         (ci->usage & VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT) &&
         klvk_eye_size_match(ci->extent.width, ci->extent.height) &&
         (ci->samples == VK_SAMPLE_COUNT_1_BIT || kl_env_on("VPVK_FORCE_1X", 0) ||
-         (kl_vulkan_taa_inline() && klvk_taa_wants_ms_depth()))) {
+         ((kl_vulkan_taa_inline() || kl_env_on("KL_CP_PTW", 0)) && klvk_taa_wants_ms_depth()))) {
         VkImageUsageFlags want = (ci->usage | VK_IMAGE_USAGE_SAMPLED_BIT) &
                                  ~(VkImageUsageFlags)VK_IMAGE_USAGE_TRANSIENT_ATTACHMENT_BIT;
         if (want != ci->usage) {
@@ -6069,18 +6135,13 @@ static int klvk_spoof_gpu(void) {
 // are transient on a Quest's tiler and cost it nothing; here they are real
 // memory - AC Nexus's 4x colour and depth pair is 865 MB per eye stage at
 // 3072 px - so the sample count is what an eye size
-// is paid for with. Default 2 for AC Nexus only (package gate); 0 for every
-// other game. An explicit per-game MSAA choice in the app (VPVK_MSAA, applied
+// is paid for with. Default 0 (the truth) for every game. An explicit per-game MSAA choice in the app (VPVK_MSAA, applied
 // inside VPKEngine to the sample count the game asks for) still wins over this,
 // and VPVK_FORCE_1X still forces 1x: this only changes what the guest asks for.
 static uint32_t klvk_sample_mask(void) {
     static int v = -1;
     if (v < 0) {
-        extern int kl_is_ac_nexus(void);
-        extern int kl_ac_nexus_known(void);
-        int r = kl_env_int("KL_VK_MAX_SAMPLES", 0) /* AC back to 4x: transient MSAA is memoryless in VPKEngine */;
-        if (!kl_ac_nexus_known()) return r == 1 ? 0x1u : r == 2 ? 0x3u : r == 4 ? 0x7u : ~0u;
-        v = r;
+        v = kl_env_int("KL_VK_MAX_SAMPLES", 0);
     }
     return v == 1 ? 0x1u : v == 2 ? 0x3u : v == 4 ? 0x7u : ~0u;
 }
@@ -6203,7 +6264,8 @@ static void VKAPI_CALL klvk_GetPhysicalDeviceQueueFamilyProperties(
 // SystemInfo.maxComputeBufferInputsVertex = 0 and drops every subshader whose vertex program
 // reads a StructuredBuffer — the pink-material failure Unity is known for on such GPUs.
 // Adreno and MoltenVK (where AC's menus are fine) both report 1, and Metal vertex functions
-// read device buffers natively. KL_VK_VTX_SSBO=0 restores VPKEngine's answer;
+// read device buffers natively. Default 0 (VPKEngine's answer, behind its CTS gate): exposed to
+// AC it hung the shader warmup (2026-10-16); KL_VK_VTX_SSBO=1 forces it for A/B tests only;
 // KL_VK_IMG_NOFMT=1 also claims storage-image read/write without format (second suspect).
 static void klvk_patch_features(VkPhysicalDeviceFeatures *f) {
     if (!f) return;

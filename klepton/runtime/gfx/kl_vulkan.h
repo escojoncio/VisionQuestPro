@@ -181,6 +181,11 @@ unsigned kl_vulkan_spacewarp_writes(int stage, int kind);
 //   3 "size match" the depth attachment of the LAST pass whose depth image has
 //                  the eye image's size (URP final-blit pattern: the scene pass
 //                  has no eye attachment).
+// Tracking runs whenever a consumer is on: VPKTAA (KL_VPKTAA=1, Klepton's or
+// the native pass) or the compositor's depth reprojection (KL_CP_PTW=1). A
+// MULTISAMPLED eye depth is resolved to one sample (nearest, by VPKEngine,
+// KL_DEPTH_MS_RESOLVE=1 default) for the single-sample readers and filed as a
+// copy (samples 1, D32_SFLOAT); the native VPKTAA reads the live MS depth.
 // To make that depth readable at all, eye-sized depth images are created with
 // SAMPLED usage and without TRANSIENT (VPKEngine would keep them on tile), and
 // every depth attachment's storeOp is forced to STORE (DONT_CARE discards it
@@ -309,6 +314,34 @@ int  kl_vulkan_aa_gate(void);
 int  kl_vulkan_native_submit(void (*fn)(void *mtl_cmdbuf, void *user), void *user);
 // vpvk_native_device: id<MTLDevice>, unretained. NULL without VPVulkan.
 void *kl_vulkan_native_device(void);
+// VPKTAA NATIVO (VPKEngine's own pass, vpvk_taa_native_*): 1 when KL_VPKTAA=1
+// and the driver reports it on (app setting «VPKTAA nativo» / VPVK_TAA_NATIVE).
+// Then VPKEngine also picks the jitter (its own Halton(2,3)); the inline hook
+// hands it the frame (`frame` = vpvk_taa_native_frame, mirrored in
+// KleptonTAA.swift) inside kl_vulkan_native_submit's callback, and the pass
+// replaces VPKTAACore's resolve for that frame.
+// Mirror of VPKEngine's vpvk_taa_native_eye / vpvk_taa_native_frame
+// (gpu/vulkan/include/vpvk/config.h), field for field.
+typedef struct {
+    void    *color;  uint32_t color_slice;
+    void    *depth;  uint32_t depth_slice;
+    void    *motion; uint32_t motion_slice;
+    float    motion_scale[2];
+    float    orientation[4];
+    float    position[3];
+    float    tangents[4];
+    float    crop[4];
+} kl_vulkan_taa_native_eye;
+typedef struct {
+    kl_vulkan_taa_native_eye eye[2];
+    void    *output;
+    int      output_srgb;
+    int      reversed_z;
+    float    near_z, far_z;
+    int      reset;
+} kl_vulkan_taa_native_frame;
+int  kl_vulkan_taa_native_on(void);
+int  kl_vulkan_taa_native_encode(const void *frame, void *mtl_cmdbuf);
 // The guest's LIVE eye colour for (stage, eye) — the image it rendered, never
 // the VPKTAA output published over it. id<MTLTexture> (borrowed); *slice is
 // the array layer holding `eye` (Array/multiview layout), 0 under Stereo.

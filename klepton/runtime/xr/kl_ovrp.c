@@ -23,6 +23,7 @@
 // kl_glfb_last_render_stage (which stage the guest actually drew into — see
 // klovrp_EndFrame). Up here rather than beside SetupEyeTexture2 now that the
 // timewarp bookkeeping needs it too.
+#include "kl_gles.h"
 #include "kl_glfb.h"
 // kl_egl_sym (the GL gateway the eye textures are allocated through) and
 // kl_egl_swap_count (whether eglSwapBuffers is this guest's presentation
@@ -849,6 +850,14 @@ static int klovrp_headset_type(void) {
         int dflt = (tgt && strcmp(tgt, "liminalvr") == 0)
                      ? OVRP_HEADSET_OCULUS_QUEST
                      : OVRP_HEADSET_OCULUS_QUEST_2;
+        // KL_OVRP_QUEST3_ID (default 1; 0 restores the old Quest 2 answer): when JNI already presents a Quest 3
+        // (KL_QUEST3, Build.MODEL "Quest 3"), answer OVRPlugin with the same
+        // device - ovrpSystemHeadset Meta_Quest_3 = 11 (OVRPlugin.cs: Quest 8,
+        // Quest_2 9, Quest_Pro 10, Quest_3 11, Quest_3S 12 - order verified against
+        // Meta v71 OVRManager docs + Unity SystemHeadset values) and product name
+        // "Meta Quest 3" - so the two surfaces stop disagreeing. Titles
+        // that only behave with the Quest 2 answer can set KL_OVRP_QUEST3_ID=0.
+        if (kl_env_on("KL_OVRP_QUEST3_ID", 1) && kl_env_on("KL_QUEST3", 0)) dflt = 11;
         v = (int)kl_env_int("KL_OVRP_HEADSET", dflt);
     }
     return v;
@@ -945,7 +954,8 @@ int kl_ovrp_multiview(void) {
     // path, and the guest spins forever recalculating the layer it can never get.
     // Only the Vulkan path serves Array. (Dropping this guard once regressed twd2
     // into exactly that non-booting CalculateLayerDesc loop.)
-    if (!kl_vulkan_guest_active()) return 0;
+    // VPKEngine's own GLES (kl_gles.h, gated) implements GL_OVR_multiview2 and serves Array.
+    if (!kl_vulkan_guest_active() && !kl_gles_enabled()) return 0;
     return kl_env_on("KL_OVRP_MULTIVIEW", 1);
 }
 
@@ -1144,6 +1154,34 @@ static uint64_t klovrp_GetAppShouldRecenter(void) {   // ovrpBool
     return (uint64_t)klovrp_take_recenter();
 }
 
+// Seconds to add for frame `idx` when `cur` is the newest begun frame. Pure so
+// it can be tested on the host (tests/xr harness).
+static double klovrp_pred_frame_offset(int on, int idx, int cur, float hz) {
+    if (!on || cur < 0 || idx <= cur || !(hz > 1.0f)) return 0.0;
+    int k = idx - cur; if (k > 3) k = 3;
+    return (double)k / (double)hz;
+}
+static int g_fring_begin;
+// Extrapolate an ovrpPoseStatef (floats: q xyzw 0-3, p 4-6, v 7-9, w 13-15)
+// by dt seconds: p += v*dt; q = exp(w*dt/2) * q (OVRPlugin velocities are in
+// tracking space, so the rotation pre-multiplies). dt clamped to 0..50 ms.
+// Pure, tested by tests/pred_frame_offset_test.c.
+static void klovrp_extrapolate_pose(float *f, double dt) {
+    if (!(dt > 0.0)) return;
+    if (dt > 0.05) dt = 0.05;
+    float t = (float)dt;
+    f[4] += f[7] * t; f[5] += f[8] * t; f[6] += f[9] * t;
+    float wx = f[13] * t, wy = f[14] * t, wz = f[15] * t;
+    float ang = sqrtf(wx * wx + wy * wy + wz * wz);
+    if (ang < 1e-9f) return;
+    float sh = sinf(ang * 0.5f) / ang, dw = cosf(ang * 0.5f);
+    float dx = wx * sh, dy = wy * sh, dz = wz * sh;
+    float qx = f[0], qy = f[1], qz = f[2], qw = f[3];
+    f[0] = dw * qx + dx * qw + dy * qz - dz * qy;
+    f[1] = dw * qy - dx * qz + dy * qw + dz * qx;
+    f[2] = dw * qz + dx * qy - dy * qx + dz * qw;
+    f[3] = dw * qw - dx * qx - dy * qy - dz * qz;
+}
 // The time (seconds, monotonic) the guest is told the next frame will be shown,
 // for its timewarp pose prediction. Real signature (0x171fd0) is
 // ovrpResult + double* out — s0 is NOT the return, the value goes through the
@@ -1154,6 +1192,17 @@ static uint64_t klovrp_GetPredictedDisplayTime(int node, double *out) {
     (void)node;
     if (!out) return -1001;
     double t = kl_ovrp_predicted_display_time();
+    // KL_OVRP_PRED_FRAMEIDX (def. 0): the real plugin's argument is a frame
+    // index, and a guest asking about frame N+k (Unity's render thread runs one
+    // ahead of the main thread) is told the display time k periods later.
+    // Measured relative to the newest frame begun (g_fring_begin); clamped to
+    // 0..3 periods so a bogus index never predicts the past or far future.
+    {
+        static int on = -1;
+        if (on < 0) on = kl_env_on("KL_OVRP_PRED_FRAMEIDX", 0);
+        t += klovrp_pred_frame_offset(on, node, __atomic_load_n(&g_fring_begin, __ATOMIC_ACQUIRE),
+                                      kl_ovrp_display_frequency());
+    }
     if (!isfinite(t) || t <= 0.0) {
         static int nf; if (!nf++)
             fprintf(stderr, "  [ovrp] NONFINITE ovrp_GetPredictedDisplayTime %f -> monotonic\n", t);
@@ -1169,9 +1218,12 @@ static uint64_t klovrp_GetPredictedDisplayTime(int node, double *out) {
 // NULL is explicitly tolerated). A static string is therefore both safe and
 // required if we want the name answered at all; "Oculus Quest 2" is what the
 // real plugin returns on the device we are presenting as everywhere else.
+static const char *klovrp_product_name(void) {
+    return klovrp_headset_type() == 11 ? "Meta Quest 3" : "Oculus Quest 2";
+}
 static const char *klovrp_GetSystemProductName(void) {
     ovrp_hit("ovrp_GetSystemProductName");
-    return "Oculus Quest 2";
+    return klovrp_product_name();
 }
 
 // The 2-form of the same answer: ovrpResult + const char** out — real
@@ -1181,7 +1233,7 @@ static const char *klovrp_GetSystemProductName(void) {
 static uint64_t klovrp_GetSystemProductName2(const char **out) {
     ovrp_hit("ovrp_GetSystemProductName2");
     if (!out) return -1001;
-    *out = "Oculus Quest 2";
+    *out = klovrp_product_name();
     return OVRP_SUCCESS;
 }
 
@@ -1490,24 +1542,6 @@ void kl_ovrp_set_eye_texture_size(int w, int h) {
         h = (int)((float)h * scale + 0.5f);
     }
     int cap_dflt = native ? 4096 : 3072;
-    // AC Nexus: a quarter more (3840), paid for by rendering 2x multisampled
-    // instead of 4x (KL_VK_MAX_SAMPLES in kl_vulkan.c) and by two stages
-    // instead of three (kl_ovrp_stage_count). Arithmetic on the
-    // same headset: 4x at 3072 is 865 MB a stage (x3 here before), 2x at 3840
-    // is 676 MB a stage (x2), so the larger eye costs LESS than the old default.
-    // Only taken when that trade is actually in force: not when the sample
-    // mask or the stage count was overridden upwards, nor when the per-game
-    // MSAA choice (VPVK_MSAA) asks for more than 2x.
-    if (!native) {
-        extern int kl_is_ac_nexus(void);
-        const char *ms = getenv("KL_VK_MAX_SAMPLES");
-        const char *vm = getenv("VPVK_MSAA");
-        // 2x is no longer the AC default (4x, memoryless): the larger eye only when 2x is asked for.
-        int samples_ok = ms && atoi(ms) >= 1 && atoi(ms) <= 2;
-        int msaa_ok = !vm || atoi(vm) <= 2;
-        if (kl_is_ac_nexus() && samples_ok && msaa_ok && kl_ovrp_stage_count() <= 2)
-            cap_dflt = 3840;
-    }
     int cap = kl_env_int("KL_OVRP_EYE_MAX", cap_dflt);
     if (cap > 0 && (w > cap || h > cap)) {
         // Preserve the aspect ratio: clamping the axes independently would
@@ -3030,21 +3064,9 @@ static struct {
 int kl_ovrp_stage_count(void) {
     static int n;
     if (!n) {
-        // Two for AC Nexus (package gate). Unity keeps a 4x (2x with
-        // KL_VK_MAX_SAMPLES) multisampled colour and depth target per stage
-        // beside each eye image, transient on a Quest and real memory here
-        // (865 MB a stage at 3072 px and 4x). With three
-        // the level load peaked at 8.1 GB of an 8.2 GB limit and was killed
-        // once; with two it peaks at 7.1-7.6. Not latched until the guest
-        // package is known, so an early caller cannot fix the wrong count.
-        extern int kl_is_ac_nexus(void);
-        extern int kl_ac_nexus_known(void);
-        int r = kl_env_int("KL_OVRP_STAGES", kl_is_ac_nexus() ? 2 : KLOVRP_STAGES_DEFAULT);
+        int r = kl_env_int("KL_OVRP_STAGES", KLOVRP_STAGES_DEFAULT);
         if (r < 1) r = 1;
-        if (r > KLOVRP_MAX_STAGES) r = KLOVRP_MAX_STAGES;
-        if (!kl_ac_nexus_known()) return r;
-        n = r;
-        if (n > KLOVRP_MAX_STAGES) n = KLOVRP_MAX_STAGES;
+        n = r > KLOVRP_MAX_STAGES ? KLOVRP_MAX_STAGES : r;
     }
     return n;
 }
@@ -3058,7 +3080,19 @@ int kl_ovrp_stage_count(void) {
 // our own counter is what the ring is indexed by, so a guest that numbers
 // frames differently — or restarts them — cannot desynchronise the ring from
 // the records in it.
+// ---- frame latency samples for ovrp_GetAppLatencyTimings2 (KL_OVRP_LATENCY) ----
+// begin = BeginFrame (pose latch), end = GPU done (Vulkan) or EndFrame (GL).
+static uint64_t g_lat_begin_ns, g_lat_end_ns;
+static float    g_lat_render_s;   // EMA of end - begin, seconds
+static void klovrp_lat_end(uint64_t now) {
+    uint64_t b = __atomic_load_n(&g_lat_begin_ns, __ATOMIC_ACQUIRE);
+    if (!b || now <= b) return;
+    float d = (float)((double)(now - b) * 1e-9);
+    g_lat_render_s = g_lat_render_s > 0.0f ? g_lat_render_s * 0.9f + d * 0.1f : d;
+    __atomic_store_n(&g_lat_end_ns, now, __ATOMIC_RELEASE);
+}
 static uint64_t klovrp_begin_frame_impl(int guest_frame_index) {
+    __atomic_store_n(&g_lat_begin_ns, klovrp_mono_ns(), __ATOMIC_RELEASE);
 // The RENDER step's sample — the pose the guest was handed for this frame
     // and rendered every eye from. Not a fresh read: a fresh read at this
     // moment is a pose the picture was never drawn with, and reprojection
@@ -3288,7 +3322,9 @@ static void klovrp_record_last_sample(int frame) {
 
 static uint64_t klovrp_end_frame_impl(int guest_frame_index, const int *viewports,
                                       const int *viewport_of, int named_stage) {
+    kl_gles_frame_end();   // gated (kl_gles.h): the frame's GL work is on the GPU before compositing
     klovrp_record_last_sample(guest_frame_index);
+    if (!kl_vulkan_guest_active()) klovrp_lat_end(klovrp_mono_ns());
 // Close the observation window opened at BeginFrame. `observed` is still
     // the sticky answer; `mask`/`binds` are what say whether it belongs to this
     // frame, and they are the difference between an association that is known
@@ -3627,7 +3663,8 @@ static uint64_t klovrp_EndFrame4(int guest_frame_index, const void *layer_submit
         // frame-completion point either way.
         uint64_t t_wait = klovrp_mono_ns();
         kl_vulkan_frame_done(named < 0 ? 0 : named);
-        klovrp_publish_deferred();   // the picture exists now: the compositor may take it
+        klovrp_publish_deferred();
+        klovrp_lat_end(klovrp_mono_ns());   // the picture exists now: the compositor may take it
         {
             static double sum_ms, worst_ms; static unsigned n;
             double ms = (double)(klovrp_mono_ns() - t_wait) / 1e6;
@@ -4517,6 +4554,21 @@ uint64_t klovrp_GetNodePoseState_impl(int step, int node, void *out) {
         if (!isfinite(tm) || tm <= 0.0) {
             struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
             tm = (double)ts.tv_sec + (double)ts.tv_nsec * 1e-9;
+        }
+        // SDK: a GetNodePoseState3(Render, frameIndex) answer is the pose for
+        // THAT frame's display time, and Time says which. Same gate and offset
+        // as ovrp_GetPredictedDisplayTime, so the two never disagree.
+        {
+            static int on = -1;
+            if (on < 0) on = kl_env_on("KL_OVRP_PRED_FRAMEIDX", 0);
+            if (t_req_frame >= 0) {
+                double dt = klovrp_pred_frame_offset(on, t_req_frame,
+                          __atomic_load_n(&g_fring_begin, __ATOMIC_ACQUIRE),
+                          kl_ovrp_display_frequency());
+                tm += dt;
+                // The pose answered must BE the pose at Time, not the pinned one.
+                klovrp_extrapolate_pose(f, dt);
+            }
         }
         memcpy((char *)out + 0x50, &tm, sizeof tm);
     }
@@ -7522,7 +7574,7 @@ static uint64_t klovrp_GetLayerTexture2(int layer_id, int stage, int eye,
     // kl_ovrp_multiview() said yes, so a refusal here would be the two answers
     // disagreeing — it is kept as the guard for exactly that.
     if (l->is_eye && l->desc.layout == KLOVRP_LAYOUT_ARRAY &&
-        kl_vulkan_guest_active() && kl_ovrp_multiview()) {
+        (kl_vulkan_guest_active() || kl_gles_enabled()) && kl_ovrp_multiview()) {
         /* served below */
     } else if (l->is_eye && l->desc.layout != KLOVRP_LAYOUT_STEREO &&
                l->desc.layout != KLOVRP_LAYOUT_DOUBLEWIDE) {
@@ -7591,6 +7643,33 @@ static uint64_t klovrp_GetLayerTexture2(int layer_id, int stage, int eye,
                 l->is_eye ? "eye layer " : "layer ", layer_id, eye, stage, img, w, h,
                 fname ? fname : "?",
                 layers > 1 ? ", array slice — both eyes share this image" : "");
+        return OVRP_SUCCESS;
+    }
+
+    // VPKEngine's own GLES (kl_gles.h, gated): the storage is a VkImage of vpgles' device wrapped
+    // as a GL name — Array (both eyes as slices, multiview), Stereo or DoubleWide alike.
+    if (kl_gles_enabled() && !kl_vulkan_guest_active()) {
+        int canon_g = (l->is_eye && l->desc.layout == KLOVRP_LAYOUT_DOUBLEWIDE) ? 0 : eye;
+        int array_g = l->is_eye && l->desc.layout == KLOVRP_LAYOUT_ARRAY;
+        if (array_g) canon_g = 0;
+        uint32_t *slot_g = &l->tex[stage][canon_g];
+        if (!*slot_g) {
+            const char *fname_g = NULL;
+            uint32_t glfmt_g = klovrp_gl_format(l->desc.format, &fname_g);
+            if (!glfmt_g) glfmt_g = KL_OVRP_TEXFMT_EYE;
+            const int dw_g = l->is_eye && l->desc.layout == KLOVRP_LAYOUT_DOUBLEWIDE;
+            *slot_g = kl_gles_layer_texture(l->is_eye, dw_g ? -1 : canon_g, stage, l->desc.texture_size.w,
+                                            l->desc.texture_size.h, glfmt_g, array_g ? 2 : 1);
+            if (!*slot_g) return OVRP_FAIL_NOT_INITIALIZED;
+            if (l->is_eye) {
+                g_eye_storage_w = l->desc.texture_size.w;
+                g_eye_storage_h = l->desc.texture_size.h;
+            }
+        }
+        l->tex[stage][eye] = *slot_g;
+        if (array_g || l->desc.layout == KLOVRP_LAYOUT_DOUBLEWIDE) l->tex[stage][1 - eye] = *slot_g;
+        if (color) *color = *slot_g;
+        if (depth) *depth = 0;
         return OVRP_SUCCESS;
     }
 
@@ -8087,6 +8166,27 @@ static uint64_t klovrp_GetPerfMetricsFloat(int metric, float *out) {
 // caller's own wrapper answers 0.0f on a negative result. Distinct from
 // ovrp_GetAppPerfStats (the un-numbered 1.28 form), which is not an out-param
 // call at all — libunity reads the RETURNED pointer there.
+
+// ovrp_GetAppLatencyTimings2(ovrpAppLatencyTimings *out) — OVR_Plugin_Types.h:
+// { float LatencyRender, LatencyTimewarp, LatencyPostPresent, ErrorRender,
+// ErrorTimewarp } in seconds. KL_OVRP_LATENCY=1 (def. 0) answers from what is
+// measured here: LatencyRender = mean BeginFrame->GPU done + one display period
+// (the frame is shown on the next vsync); LatencyTimewarp = one period (our
+// compositor reprojects at present); PostPresent and the errors 0. Off: the
+// old Unsupported answer, which every title running today was seen with.
+static uint64_t klovrp_GetAppLatencyTimings2(float *out) {
+    ovrp_hit("ovrp_GetAppLatencyTimings2");
+    if (!out) return OVRP_FAIL_INVALID_PARAM;
+    memset(out, 0, 5 * sizeof(float));
+    static int on = -1;
+    if (on < 0) on = kl_env_on("KL_OVRP_LATENCY", 0);
+    if (!on || !(g_lat_render_s > 0.0f)) return OVRP_FAIL_UNSUPPORTED;
+    float hz = kl_ovrp_display_frequency();
+    float per = hz > 1.0f ? 1.0f / hz : 1.0f / 72.0f;
+    out[0] = g_lat_render_s + per;
+    out[1] = per;
+    return OVRP_SUCCESS;
+}
 #define KLOVRP_APP_PERF_STATS_BYTES 292
 static uint64_t klovrp_GetAppPerfStats2(void *out) {
     ovrp_hit("ovrp_GetAppPerfStats2");
@@ -8842,6 +8942,7 @@ static const struct { const char *name; void *fn; } g_ovrp_impl[] = {
     {"ovrp_GetAppShouldRecenter2", (void *)klovrp_GetAppShouldRecenter2},
     {"ovrp_GetAppShouldRecenter", (void *)klovrp_GetAppShouldRecenter},
     {"ovrp_GetPredictedDisplayTime", (void *)klovrp_GetPredictedDisplayTime},
+    {"ovrp_GetAppLatencyTimings2", (void *)klovrp_GetAppLatencyTimings2},
     {"ovrp_GetSystemProductName", (void *)klovrp_GetSystemProductName},
     {"ovrp_GetSystemProductName2", (void *)klovrp_GetSystemProductName2},
     {"ovrp_GetSystemDisplayFrequency", (void *)klovrp_GetSystemDisplayFrequency},
@@ -9092,7 +9193,8 @@ static const char *const g_ovrp_result_ok[] = {
     "ovrp_SetControllerLocalizedVibration",
     // Eye tracking (Quest Pro) — wanderer starts/stops it per session. No eye
     // tracker on this path; accept the start/stop, and gaze reads stay zeroed.
-    "ovrp_StartEyeTracking", "ovrp_StopEyeTracking",
+    // (StartEyeTracking/StopEyeTracking moved to Unsupported: a Quest 3 has no
+    // eye tracker and its plugin answers ovrpFailure_Unsupported there.)
     // Per-frame eye-gaze poll (wanderer, right after StartEyeTracking). Success +
     // a pre-zeroed EyeGazesState reads as "no gaze this frame", which the guest
     // treats as gaze unavailable rather than a fault.
@@ -9435,8 +9537,10 @@ static const char *const g_ovrp_result_unsupported[] = {
     "ovrp_GetActionStateVector2", "ovrp_GetActionStatePose",
     "ovrp_GetCurrentInteractionProfileName", "ovrp_GetCurrentDetachedInteractionProfile",
     "ovrp_TriggerVibrationAction",
+    // eye tracking: Quest Pro only; a Quest 3 answers Unsupported
+    "ovrp_StartEyeTracking", "ovrp_StopEyeTracking",
     // performance telemetry this host cannot measure
-    "ovrp_GetGPUUtilLevel2", "ovrp_GetAppLatencyTimings2", "ovrp_GetPassthroughPreferences",
+    "ovrp_GetGPUUtilLevel2", "ovrp_GetPassthroughPreferences",
     "ovrp_GetLayerOcclusionMesh",
     // mixed-reality capture (no external camera)
     "ovrp_Media_GetCurrentCameraAnchorHandle", "ovrp_Media_GetCameraAnchorName",

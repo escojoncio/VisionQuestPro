@@ -317,8 +317,12 @@ struct VQSettingsView: View {
                     .pickerStyle(.segmented)
                     Toggle(VQL("ASW desactivado (todos los frames reales)", "ASW off (every frame real)"), isOn: $settings.aswDisabled)
                     Toggle(VQL("Precompilar shaders antes de jugar", "Precompile shaders before playing"), isOn: $settings.precompileShaders)
+                    Toggle(VQL("Caché de shaders en QUEST (sobrevive a reinstalar)", "Shader cache in QUEST (survives reinstall)"), isOn: $settings.shaderCacheInQuest)
+                    Toggle(VQL("Shaders AOT (todo compilado antes de jugar, experimental)", "AOT shaders (all compiled before playing, experimental)"), isOn: $settings.aotShaders)
                     Toggle(VQL("Perfil Quest 3", "Quest 3 profile"), isOn: $settings.quest3Profile)
                     Toggle(VQL("Forzar Vulkan en juegos Unity", "Force Vulkan in Unity games"), isOn: $settings.forceVulkan)
+                    Toggle(VQL("OpenGL ES con VPKEngine (experimental)", "OpenGL ES with VPKEngine (experimental)"),
+                           isOn: $settings.glesVPK)
                     Toggle(VQL("Capturas de diagnóstico", "Diagnostic captures"), isOn: $settings.diagCaptures)
                     Toggle(VQL("Diagnóstico de rendimiento", "Performance diagnostics"), isOn: $settings.perfDiag)
                     Toggle(VQL("Diagnóstico de ficheros (log grande)", "File diagnostics (large log)"), isOn: $settings.fsDiag)
@@ -473,6 +477,11 @@ struct VQVPKTAATuning: View {
         Text(VQL("Enfoque aplicado después del suavizado, para recuperar el detalle que el TAA difumina. Demasiado alto: halos y bordes que parpadean. Recomendado 20–30 %; 0 % lo desactiva.",
                  "Sharpening applied after the smoothing, to recover the detail TAA blurs. Too high: halos and flickering edges. Recommended 20–30 %; 0 % turns it off."))
             .font(.caption)
+        Toggle(VQL("VPKTAA nativo (pase del motor VPKEngine; experimental)", "Native VPKTAA (VPKEngine pass; experimental)"),
+               isOn: $settings.vpktaaNative)
+        Text(VQL("El TAA corre dentro de VPKEngine con su propio jitter, los dos ojos en un pase y afilado RCAS. Apagado: el VPKTAA de siempre. Se aplica al lanzar el juego.",
+                 "TAA runs inside VPKEngine with its own jitter, both eyes in one pass and RCAS sharpening. Off: the usual VPKTAA. Applied when the game launches."))
+            .font(.caption)
     }
 }
 
@@ -483,10 +492,15 @@ struct VQGameSettingsView: View {
     @ObservedObject private var settings = VQSettings.shared
     @Environment(\.dismiss) private var dismiss
     @State private var aa: VQGameAA
+    @State private var res: VQGameRes
+    /// -1 = global level (nothing saved for this game), else 0/2/4/8/16.
+    @State private var aniso: Int
 
     init(game: VQGame) {
         self.game = game
         _aa = State(initialValue: VQGameAA.load(key: game.aaKey))
+        _res = State(initialValue: VQGameRes.load(key: game.aaKey))
+        _aniso = State(initialValue: VQGameAniso.load(key: game.aaKey) ?? -1)
     }
 
     /// The game's own eye-pass sample count seen on an earlier run (nil: not yet).
@@ -515,6 +529,33 @@ struct VQGameSettingsView: View {
                     if showsMSAALevel { msaaLevel }
                     if showsVPKTAATuning { VQVPKTAATuning(settings: settings) }
                 }
+                Section(VQL("Resolución", "Resolution")) {
+                    Toggle(VQL("Usar la global", "Use the global one"), isOn: $res.useGlobal)
+                    if !res.useGlobal {
+                        Picker(VQL("Resolución base", "Base resolution"), selection: $res.base) {
+                            Text(VQL("Original", "Original")).tag("original")
+                            Text("Vision Pro").tag("compositor")
+                            Text(VQL("Nativa", "Native")).tag("native")
+                        }
+                        .pickerStyle(.segmented)
+                        Stepper(VQL("Resolución de render: \(Int(res.scale * 100)) %", "Render resolution: \(Int(res.scale * 100)) %"),
+                                value: $res.scale, in: 0.5...1.5, step: 0.05)
+                    }
+                    Text(eyeResText).font(.caption)
+                }
+                Section(VQL("Filtrado anisotrópico", "Anisotropic filtering")) {
+                    Picker(VQL("Filtrado anisotrópico", "Anisotropic filtering"), selection: $aniso) {
+                        Text(VQL("Global", "Global")).tag(-1)
+                        Text(VQL("Del juego", "Game's own")).tag(0)
+                        Text("2x").tag(2)
+                        Text("4x").tag(4)
+                        Text("8x").tag(8)
+                        Text("16x").tag(16)
+                    }
+                    Text(VQL("Fuerza el nivel en los samplers de materiales del juego. «Global» usa el ajuste de Ajustes; «Del juego» no toca nada.",
+                             "Forces the level on the game's material samplers. «Global» follows Settings; «Game's own» changes nothing."))
+                        .font(.caption)
+                }
             }
             .navigationTitle(game.name)
             .toolbar { Button(VQL("Hecho", "Done")) { dismiss() } }
@@ -524,8 +565,26 @@ struct VQGameSettingsView: View {
                 v.save(key: game.aaKey)
                 VQLog.log("Ajustes del juego \(game.aaKey): AA modo \(v.mode.rawValue), MSAA \(v.msaa)")
             }
+            .onChange(of: res) { _, new in
+                new.save(key: game.aaKey)
+                VQLog.log("Ajustes del juego \(game.aaKey): resolución \(new.useGlobal ? "global" : "\(new.base) \(Int(new.scale * 100)) %")")
+            }
+            .onChange(of: aniso) { _, new in
+                VQGameAniso.save(new < 0 ? nil : new, key: game.aaKey)
+                VQLog.log("Ajustes del juego \(game.aaKey): anisotrópico \(new < 0 ? "global" : "x\(new)")")
+            }
         }
         .frame(minWidth: 560, minHeight: 480)
+    }
+
+    /// Per-eye resolution the choice gives (the global one when "Usar la global").
+    private var eyeResText: String {
+        let base = res.useGlobal ? settings.resolutionBase : res.base
+        let scale = res.useGlobal ? settings.renderScale : res.scale
+        if let e = VQGameRes.approxEye(base: base, scale: scale) {
+            return VQL("≈ \(e.w) × \(e.h) px por ojo (\(Int(scale * 100)) %)", "≈ \(e.w) × \(e.h) px per eye (\(Int(scale * 100)) %)")
+        }
+        return VQL("Resolución por ojo según el visor al arrancar (\(Int(scale * 100)) %)", "Per-eye resolution follows the headset at launch (\(Int(scale * 100)) %)")
     }
 
     @ViewBuilder private var detectionRow: some View {

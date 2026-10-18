@@ -90,7 +90,7 @@ typedef struct {
     int32_t direction, format, channels, rate, buffer_capacity;
     int32_t performance_mode, sharing_mode, input_preset;
     int32_t content_type, usage, session_id, privacy_sensitive, capture_policy;
-    int32_t frames_per_data_cb, device_id;
+    int32_t frames_per_data_cb, device_id, spatialized;
     klaa_data_cb  data_cb;   void *data_user;
     klaa_error_cb error_cb;  void *error_user;
 } klaa_builder;
@@ -104,6 +104,8 @@ typedef struct klaa_stream {
     // replayed the builder's AAUDIO_UNSPECIFIED would describe a stream that
     // does not exist.
     int32_t direction, sharing_mode, performance_mode, input_preset, device_id;
+    int32_t usage, content_type, capture_policy, privacy_sensitive, spatialized;
+    int      released;           // AAudioStream_release ran: resources freed, handle still valid
     klaa_data_cb  data_cb;   void *data_user;
     klaa_error_cb error_cb;  void *error_user;
 
@@ -144,24 +146,18 @@ static int g_input_streams;     // INPUT streams sharing the one capture device
 static unsigned long g_short_writes;
 static int g_input_refusals;    // input opens declined because the mic was off
 
-// 1 when the guest mixes through Audiokinetic Wwise: AC Nexus by package, or any
-// Unity guest that ships Wwise's integration library (libAkSoundEngine.so) beside
+// 1 when the guest mixes through Audiokinetic Wwise: any Unity guest that ships Wwise's integration library (libAkSoundEngine.so) beside
 // its own. Unreal titles link Wwise statically and cannot be told apart from
 // here; KL_AAUDIO_BURST=1024 serves them by hand.
 static int klaa_guest_wwise(void) {
     static int v = -1;
     if (v >= 0) return v;
-    extern int kl_is_ac_nexus(void);
-    extern int kl_ac_nexus_known(void);
     extern const char *g_native_lib_dir;
-    int r = kl_is_ac_nexus();
-    if (!r && g_native_lib_dir && *g_native_lib_dir) {
-        char p[1200];
-        snprintf(p, sizeof p, "%s/libAkSoundEngine.so", g_native_lib_dir);
-        r = access(p, F_OK) == 0;
-    }
-    if (kl_ac_nexus_known()) v = r;
-    return r;
+    if (!g_native_lib_dir || !*g_native_lib_dir) return 0;   // not configured yet: ask again later
+    char p[1200];
+    snprintf(p, sizeof p, "%s/libAkSoundEngine.so", g_native_lib_dir);
+    v = access(p, F_OK) == 0;
+    return v;
 }
 
 static int klaa_burst_frames(void) {
@@ -503,6 +499,8 @@ static void klaa_setPerformanceMode(klaa_builder *b, int32_t v)  { if (b) b->per
 static void klaa_setSharingMode(klaa_builder *b, int32_t v)      { if (b) b->sharing_mode = v; }
 static void klaa_setFormat(klaa_builder *b, int32_t v)           { if (b) b->format = v; }
 static void klaa_setChannelCount(klaa_builder *b, int32_t v)     { if (b) b->channels = v; }
+// Deprecated alias of setChannelCount, still exported by libaaudio.
+#define klaa_setSamplesPerFrame klaa_setChannelCount
 // AAudioStreamBuilder_setChannelMask (API 32) — a channel LAYOUT mask instead of
 // a plain count. ZIX's Wwise sets it and aborted on the missing entry point.
 // Derive the channel count from the set-bit count so a builder that sets only
@@ -516,7 +514,7 @@ static void klaa_setChannelMask(klaa_builder *b, uint32_t mask) {
 // we open the stream, so they are inert stores/no-ops — but they must EXIST, or
 // the guest aborts on the missing entry point.
 static void klaa_setSpatializationBehavior(klaa_builder *b, int32_t v)  { (void)b; (void)v; }
-static void klaa_setIsContentSpatialized(klaa_builder *b, uint8_t v)    { (void)b; (void)v; }
+static void klaa_setIsContentSpatialized(klaa_builder *b, uint8_t v)    { if (b) b->spatialized = v; }
 static void klaa_setPackageName(klaa_builder *b, const char *v)         { (void)b; (void)v; }
 static void klaa_setAttributionTag(klaa_builder *b, const char *v)      { (void)b; (void)v; }
 static void klaa_setSampleRate(klaa_builder *b, int32_t v)       { if (b) b->rate = v; }
@@ -555,6 +553,22 @@ static void klaa_setErrorCallback(klaa_builder *b, klaa_error_cb cb, void *user)
 static aaudio_result_t klaa_builder_delete(klaa_builder *b) {
     free(b);
     return AAUDIO_OK;
+}
+
+// What the stream reports back for the attributes it does not act on. The
+// defaults are the framework's: an output stream with no usage/content type is
+// MEDIA/MUSIC, capture by anyone is allowed, and a capture stream is privacy
+// sensitive when its preset is a voice one.
+static void klaa_adopt_attrs(klaa_stream *s, const klaa_builder *b) {
+    int out = s->direction != AAUDIO_DIRECTION_INPUT;
+    s->usage        = b->usage ? b->usage : (out ? 1 /* MEDIA */ : 0);
+    s->content_type = b->content_type ? b->content_type : (out ? 2 /* MUSIC */ : 0);
+    s->capture_policy = b->capture_policy ? b->capture_policy : 1;   // ALLOW_CAPTURE_BY_ALL
+    s->privacy_sensitive = b->privacy_sensitive;
+    if (!out && !s->privacy_sensitive)
+        s->privacy_sensitive = b->input_preset == 7 /* VOICE_COMMUNICATION */ ||
+                               b->input_preset == 6 /* VOICE_RECOGNITION */;
+    s->spatialized = b->spatialized;
 }
 
 static aaudio_result_t klaa_openStream(klaa_builder *b, klaa_stream **out) {
@@ -614,6 +628,7 @@ static aaudio_result_t klaa_openStream(klaa_builder *b, klaa_stream **out) {
         is->performance_mode = b->performance_mode;
         is->input_preset     = b->input_preset;
         is->device_id        = b->device_id;
+        klaa_adopt_attrs(is, b);
         is->state = AAUDIO_STREAM_STATE_OPEN;
         // The capture format this stream resamples FROM. read/feeder use these to
         // map the device's frames onto the guest's requested rate/channels.
@@ -664,6 +679,7 @@ static aaudio_result_t klaa_openStream(klaa_builder *b, klaa_stream **out) {
     s->performance_mode = b->performance_mode;
     s->input_preset     = b->input_preset;
     s->device_id        = b->device_id;
+    klaa_adopt_attrs(s, b);
     s->state = AAUDIO_STREAM_STATE_OPEN;
 
     s->scratch_bytes = (size_t)s->burst * (size_t)klaa_bytes_per_frame(s);
@@ -699,6 +715,7 @@ static aaudio_result_t klaa_openStream(klaa_builder *b, klaa_stream **out) {
 
 static aaudio_result_t klaa_requestStart(klaa_stream *s) {
     if (!s) return AAUDIO_ERROR_NULL;
+    if (s->released) return AAUDIO_ERROR_INVALID_STATE;   // released: only the getters and close remain
 
     // INPUT: the capture unit is already running (opened at openStream). A stream
     // that registered a data callback gets a feeder that pulls the mic and hands
@@ -767,6 +784,39 @@ static aaudio_result_t klaa_requestStop(klaa_stream *s) {
     return AAUDIO_OK;
 }
 
+// Pause keeps what is queued (the device ring is not flushed); start resumes it.
+// Capture streams cannot be paused: AAudio itself says UNIMPLEMENTED for input.
+static int32_t klaa_getState(klaa_stream *s);
+static aaudio_result_t klaa_requestPause(klaa_stream *s) {
+    if (!s) return AAUDIO_ERROR_NULL;
+    if (s->direction == AAUDIO_DIRECTION_INPUT) return AAUDIO_ERROR_UNIMPLEMENTED;
+    int32_t st = klaa_getState(s);
+    if (st == AAUDIO_STREAM_STATE_PAUSED || st == AAUDIO_STREAM_STATE_PAUSING) return AAUDIO_OK;
+    if (st != AAUDIO_STREAM_STATE_STARTED && st != AAUDIO_STREAM_STATE_STARTING)
+        return AAUDIO_ERROR_INVALID_STATE;
+    klaa_stop_join(s);
+    pthread_mutex_lock(&s->lock);
+    s->state = AAUDIO_STREAM_STATE_PAUSED;
+    pthread_mutex_unlock(&s->lock);
+    return AAUDIO_OK;
+}
+
+// Flush discards queued audio and is only meaningful while paused (or freshly
+// open); frame counters are not reset.
+static aaudio_result_t klaa_requestFlush(klaa_stream *s) {
+    if (!s) return AAUDIO_ERROR_NULL;
+    if (s->direction == AAUDIO_DIRECTION_INPUT) return AAUDIO_ERROR_UNIMPLEMENTED;
+    int32_t st = klaa_getState(s);
+    if (st != AAUDIO_STREAM_STATE_PAUSED && st != AAUDIO_STREAM_STATE_OPEN &&
+        st != AAUDIO_STREAM_STATE_FLUSHED)
+        return AAUDIO_ERROR_INVALID_STATE;
+    kl_audio_flush();
+    pthread_mutex_lock(&s->lock);
+    s->state = AAUDIO_STREAM_STATE_FLUSHED;
+    pthread_mutex_unlock(&s->lock);
+    return AAUDIO_OK;
+}
+
 // AAudioStream_read — the blocking-read capture path Steam Link uses. Pull up to
 // numFrames guest frames from the mic; if fewer are available and timeoutNanos
 // is positive, sleep-poll up to the timeout, matching how the output feeder
@@ -826,8 +876,11 @@ static aaudio_result_t klaa_write(klaa_stream *s, const void *buffer,
     return done;
 }
 
-static aaudio_result_t klaa_close(klaa_stream *s) {
-    if (!s) return AAUDIO_ERROR_NULL;
+// The device side of closing, shared by close and AAudioStream_release (which
+// frees it early but leaves the handle valid for the getters). Idempotent.
+static void klaa_release_resources(klaa_stream *s) {
+    if (s->released) return;
+    s->released = 1;
     klaa_stop_join(s);
     fprintf(stderr, "  [aaudio] close(%s): %lu callbacks, %lu frames\n",
             s->direction == AAUDIO_DIRECTION_INPUT ? "input" : "output",
@@ -836,10 +889,24 @@ static aaudio_result_t klaa_close(klaa_stream *s) {
         // The capture device is shared like the output one; close it only when
         // the last input stream is gone.
         if (--g_input_streams <= 0) { g_input_streams = 0; kl_audio_mic_close(); }
-        free(s->in_hold);
+        free(s->in_hold); s->in_hold = NULL;
     } else {
         if (--g_open_streams <= 0) { g_open_streams = 0; kl_audio_close(); }
     }
+    pthread_mutex_lock(&s->lock);
+    s->state = AAUDIO_STREAM_STATE_CLOSED;
+    pthread_mutex_unlock(&s->lock);
+}
+
+static aaudio_result_t klaa_release(klaa_stream *s) {
+    if (!s) return AAUDIO_ERROR_NULL;
+    klaa_release_resources(s);
+    return AAUDIO_OK;
+}
+
+static aaudio_result_t klaa_close(klaa_stream *s) {
+    if (!s) return AAUDIO_ERROR_NULL;
+    klaa_release_resources(s);
     pthread_mutex_destroy(&s->lock);
     free(s->scratch); free(s->staging); free(s);
     return AAUDIO_OK;
@@ -993,14 +1060,45 @@ static aaudio_result_t klaa_setMMapPolicy(int32_t p) { (void)p; return AAUDIO_OK
 // Position of the frame the device consumed most recently, stamped now on the
 // clock the guest asked for (Linux CLOCK_MONOTONIC=1 / BOOTTIME=7 both map to
 // the host monotonic clock). Oboe uses it for latency, never for correctness.
+//
+// Output position is frames handed over minus one burst still queued in the
+// device ring, so written-minus-position (the latency Oboe computes) is a real,
+// small number rather than zero; input position is frames captured. Like
+// Android it is only answerable while the stream runs.
 static aaudio_result_t klaa_getTimestamp(klaa_stream *s, int32_t clk, int64_t *pos, int64_t *ns) {
-    (void)clk;
     if (!s || !pos || !ns) return AAUDIO_ERROR_NULL;
+    if (clk != 1 /* CLOCK_MONOTONIC */ && clk != 7 /* CLOCK_BOOTTIME */) return AAUDIO_ERROR_ILLEGAL_ARGUMENT;
+    int32_t st = klaa_getState(s);
+    if (st != AAUDIO_STREAM_STATE_STARTED && st != AAUDIO_STREAM_STATE_STARTING)
+        return AAUDIO_ERROR_INVALID_STATE;
     struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t);
-    *pos = klaa_getFramesRead(s);
+    int64_t n;
+    pthread_mutex_lock(&s->lock);
+    n = (int64_t)s->frames;
+    pthread_mutex_unlock(&s->lock);
+    if (s->direction != AAUDIO_DIRECTION_INPUT) { n -= s->burst; if (n < 0) n = 0; }
+    *pos = n;
     *ns = (int64_t)t.tv_sec * 1000000000LL + t.tv_nsec;
     return AAUDIO_OK;
 }
+
+// The attributes the stream adopted but does not act on — see klaa_adopt_attrs.
+static int32_t klaa_getUsage(klaa_stream *s)          { return s ? s->usage : 0; }
+static int32_t klaa_getContentType(klaa_stream *s)    { return s ? s->content_type : 0; }
+static int32_t klaa_getAllowedCapturePolicy(klaa_stream *s) { return s ? s->capture_policy : 0; }
+static uint8_t klaa_isPrivacySensitive(klaa_stream *s) { return s ? (uint8_t)(s->privacy_sensitive != 0) : 0; }
+static uint8_t klaa_isContentSpatialized(klaa_stream *s) { return s ? (uint8_t)(s->spatialized != 0) : 0; }
+// API 34: the DEVICE's native shape, not the stream's. The Quest 3's output is
+// 48 kHz stereo 16-bit; a capture stream reports the microphone it really got.
+static int32_t klaa_getHardwareChannelCount(klaa_stream *s) {
+    if (!s) return 0;
+    return s->direction == AAUDIO_DIRECTION_INPUT ? (int32_t)s->mic_ch : 2;
+}
+static int32_t klaa_getHardwareSampleRate(klaa_stream *s) {
+    if (!s) return 0;
+    return s->direction == AAUDIO_DIRECTION_INPUT ? (int32_t)s->mic_rate : 48000;
+}
+static int32_t klaa_getHardwareFormat(klaa_stream *s) { return s ? AAUDIO_FORMAT_PCM_I16 : 0; }
 
 // The guest's idiom is "ask to start, then wait for STARTING to become
 // something else". Our start is synchronous, so the state has already moved
@@ -1040,8 +1138,21 @@ static const char *klaa_convertResultToText(aaudio_result_t r) {
     case AAUDIO_ERROR_OUT_OF_RANGE:    return "AAUDIO_ERROR_OUT_OF_RANGE";
     case AAUDIO_ERROR_NO_SERVICE:      return "AAUDIO_ERROR_NO_SERVICE";
     case AAUDIO_ERROR_INVALID_RATE:    return "AAUDIO_ERROR_INVALID_RATE";
-    default:                           return "AAUDIO_ERROR_UNKNOWN";
+    default:                           return "Unrecognized AAudio error.";
     }
+}
+
+static const char *klaa_convertStreamStateToText(int32_t st) {
+    static const char *const names[] = {
+        "AAUDIO_STREAM_STATE_UNINITIALIZED", "AAUDIO_STREAM_STATE_UNKNOWN",
+        "AAUDIO_STREAM_STATE_OPEN", "AAUDIO_STREAM_STATE_STARTING",
+        "AAUDIO_STREAM_STATE_STARTED", "AAUDIO_STREAM_STATE_PAUSING",
+        "AAUDIO_STREAM_STATE_PAUSED", "AAUDIO_STREAM_STATE_FLUSHING",
+        "AAUDIO_STREAM_STATE_FLUSHED", "AAUDIO_STREAM_STATE_STOPPING",
+        "AAUDIO_STREAM_STATE_STOPPED", "AAUDIO_STREAM_STATE_CLOSING",
+        "AAUDIO_STREAM_STATE_CLOSED", "AAUDIO_STREAM_STATE_DISCONNECTED" };
+    return (st >= 0 && st < (int32_t)(sizeof names / sizeof names[0])) ? names[st]
+                                                                       : "Unrecognized AAudio state.";
 }
 
 // ---------------------------------------------------------------------------
@@ -1107,6 +1218,19 @@ static const klaa_entry g_aaudio[] = {
     A("AAudio_getMMapPolicy",                      klaa_getMMapPolicy),
     A("AAudio_setMMapPolicy",                      klaa_setMMapPolicy),
     A("AAudioStream_getTimestamp",                 klaa_getTimestamp),
+    A("AAudioStreamBuilder_setSamplesPerFrame",    klaa_setSamplesPerFrame),
+    A("AAudioStream_requestPause",                 klaa_requestPause),
+    A("AAudioStream_requestFlush",                 klaa_requestFlush),
+    A("AAudioStream_release",                      klaa_release),
+    A("AAudioStream_getUsage",                     klaa_getUsage),
+    A("AAudioStream_getContentType",               klaa_getContentType),
+    A("AAudioStream_getAllowedCapturePolicy",      klaa_getAllowedCapturePolicy),
+    A("AAudioStream_isPrivacySensitive",           klaa_isPrivacySensitive),
+    A("AAudioStream_isContentSpatialized",         klaa_isContentSpatialized),
+    A("AAudioStream_getHardwareChannelCount",      klaa_getHardwareChannelCount),
+    A("AAudioStream_getHardwareSampleRate",        klaa_getHardwareSampleRate),
+    A("AAudioStream_getHardwareFormat",            klaa_getHardwareFormat),
+    A("AAudio_convertStreamStateToText",           klaa_convertStreamStateToText),
 };
 #undef A
 

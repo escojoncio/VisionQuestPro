@@ -615,6 +615,7 @@ final class KleptonTAA {
         let tex: MTLTexture
         let layers: [MTLTexture]
         let reads: [MTLTexture]
+        let both: MTLTexture        // both layers through the non-sRGB view (VPKTAA nativo)
         let w: Int, h: Int
         let fmt: MTLPixelFormat
     }
@@ -805,7 +806,9 @@ final class KleptonTAA {
                                             levels: 0..<1, slices: e..<(e + 1)) else { return nil }
             layers.append(v); reads.append(r)
         }
-        return InlineOut(tex: t, layers: layers, reads: reads, w: w, h: h, fmt: fmt)
+        guard let both = t.makeTextureView(pixelFormat: wf, textureType: .type2DArray,
+                                           levels: 0..<1, slices: 0..<2) else { return nil }
+        return InlineOut(tex: t, layers: layers, reads: reads, both: both, w: w, h: h, fmt: fmt)
     }
 
     /// A free ring slot for a w x h fmt output, marked busy (under `lock`); (index, nil) or
@@ -953,10 +956,25 @@ final class KleptonTAA {
 
         let job = InlineJob(k: k, gen: gen, pose: r, vkSerial: vkSerial)
         let committedAt = Date()
+        // VPKTAA nativo: VPKEngine's own pass (its jitter, both eyes in one dispatch, RCAS)
+        // replaces VPKTAACore for this frame; same output ring, same publication.
+        let native = kl_vulkan_taa_native_on() != 0
+        let nf = native ? nativeFrame(inputs, output: out.both) : nil
+        if native && !inNativeSaid {
+            inNativeSaid = true
+            NSLog("[taa-inline] VPKTAA nativo: VPKEngine resolves (vpvk_taa_native_encode); VPKTAACore idle")
+        }
         let box = InlineEncode { [self] cmd in
             // First: whatever is encoded, the command buffer now owns slot and semaphore.
             cmd.addCompletedHandler { [self] cb in self.inlineCompleted(job, cb, committedAt) }
             owned = true
+            if var frame = nf {
+                let ok = withUnsafePointer(to: &frame) {
+                    kl_vulkan_taa_native_encode(UnsafeRawPointer($0), Unmanaged.passUnretained(cmd).toOpaque())
+                }
+                if ok != 0 { job.ok = true }
+                return
+            }
             for e in 0..<2 {
                 if !self.core.encode(cmd: cmd, eye: e, input: inputs[e], output: out.layers[e]) { return }
             }
@@ -984,6 +1002,48 @@ final class KleptonTAA {
             if inputs[e].motion != nil, core.motionRefused[e] == nil { inMV[e] += 1 }
         }
         return nil
+    }
+
+    private var inNativeSaid = false
+    private var inNativeEye = SIMD2<Int>(0, 0)
+
+    /// VPKTAA nativo: the frame description VPKEngine's pass takes, from the same inputs
+    /// VPKTAACore would get (pose, unjittered tangents, crop, live depth incl. MSAA, AppSW
+    /// motion). Texture pointers are unretained: the inputs outlive the synchronous encode.
+    private func nativeFrame(_ inputs: [VPKTAAEyeInput], output: MTLTexture) -> kl_vulkan_taa_native_frame {
+        var f = kl_vulkan_taa_native_frame()
+        func eye(_ i: VPKTAAEyeInput) -> kl_vulkan_taa_native_eye {
+            var e = kl_vulkan_taa_native_eye()
+            e.color = Unmanaged.passUnretained(i.color).toOpaque()
+            e.color_slice = UInt32(i.slice)
+            if let d = i.depth {
+                e.depth = Unmanaged.passUnretained(d.texture).toOpaque()
+                e.depth_slice = UInt32(d.slice)
+            }
+            if let m = i.motion {
+                e.motion = Unmanaged.passUnretained(m.texture).toOpaque()
+                e.motion_slice = UInt32(m.slice)
+                e.motion_scale = (m.scale.x, m.scale.y)
+            }
+            let q = i.orientation.vector
+            e.orientation = (q.x, q.y, q.z, q.w)
+            e.position = (i.position.x, i.position.y, i.position.z)
+            e.tangents = (i.tangents.x, i.tangents.y, i.tangents.z, i.tangents.w)
+            e.crop = (i.crop.x, i.crop.y, i.cropOff.x, i.cropOff.y)
+            return e
+        }
+        f.eye = (eye(inputs[0]), eye(inputs[1]))
+        f.output = Unmanaged.passUnretained(output).toOpaque()
+        f.output_srgb = 1                 // `output` is the unorm view of the sRGB ring texture
+        let d = inputs[0].depth
+        f.reversed_z = (d?.reversedZ ?? true) ? 1 : 0
+        f.near_z = d?.near ?? nearDefault
+        f.far_z = d?.far ?? farDefault
+        // A new eye size starts the history again (the engine also checks the size).
+        let sz = SIMD2<Int>(inputs[0].color.width, inputs[0].color.height)
+        f.reset = sz != inNativeEye ? 1 : 0
+        inNativeEye = sz
+        return f
     }
 
     /// A resolve's command buffer completed (Metal's thread): publish its output with its own

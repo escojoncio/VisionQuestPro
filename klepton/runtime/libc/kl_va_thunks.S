@@ -72,9 +72,21 @@ KL_VTHUNK klv_android_log_buf_print, klh_android_log_buf_print, 4
 KL_VTHUNK klv_android_log_assert, klh_android_log_assert, 3
 KL_VTHUNK klv_sscanf,             klh_sscanf,            2
 KL_VTHUNK klv_fscanf,             klh_fscanf,            2
+KL_VTHUNK klv_scanf,              klh_scanf,             1
+KL_VTHUNK klv_wprintf,            klh_wprintf,           1
+KL_VTHUNK klv_fwprintf,           klh_fwprintf,          2
+KL_VTHUNK klv_swprintf,           klh_swprintf,          3
+KL_VTHUNK klv_err,                klh_err,               2
+KL_VTHUNK klv_errx,               klh_errx,              2
+KL_VTHUNK klv_warn,               klh_warn,              1
 KL_VTHUNK klv_open,               klh_open,              2
 KL_VTHUNK klv_fcntl,              klh_fcntl,             2
 KL_VTHUNK klv_ioctl,              klh_ioctl,             2
+KL_VTHUNK klv_error,              klh_error,             3
+KL_VTHUNK klv_error_at_line,      klh_error_at_line,     5
+KL_VTHUNK klv_wscanf,             klh_wscanf,            1
+KL_VTHUNK klv_fwscanf,            klh_fwscanf,           2
+KL_VTHUNK klv_swscanf,            klh_swscanf,           2
 
 // ---- JNI's plain varargs Call*Method family ----
 // These are NOT libc. They are JNIEnv vtable slots, and they need thunks for

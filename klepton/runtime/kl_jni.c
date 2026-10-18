@@ -1646,6 +1646,20 @@ static const klj_field g_fields[];
 // different wire protocols on different ports.
 // Presenting a Quest 2 stays the default and the settled decision; this is the
 // A/B, not a new answer.
+static int klj_quest3(void) {
+    const char *t = kl_driver_target_name();
+    return (t && strcmp(t, "batman") == 0) || kl_env_on("KL_QUEST3", 0);
+}
+
+// The Quest 3 ships Android 12L (SDK 32): SDK_INT follows the identity, so the
+// JNI field, UE4's copy and ro.build.version.sdk keep describing one device.
+static int klj_field_ival(const klj_field *f) {
+    if (klj_quest3() && !strcmp(f->cls, "android/os/Build$VERSION")
+        && !strcmp(f->name, "SDK_INT"))
+        return 32;
+    return (int)f->ival;
+}
+
 static const char *klj_field_sval(const klj_field *f) {
     if (!f->sval
         || (strcmp(f->cls, "android/os/Build") != 0
@@ -1665,15 +1679,17 @@ static const char *klj_field_sval(const klj_field *f) {
     // Kept on the Android-10/API-29 base the rest of the surface is built for, so
     // only the hardware identity changes; if a run shows batman also gates on the
     // OS version, bump SDK_INT/RELEASE for it too.
-    const char *t = kl_driver_target_name();
     // KL_QUEST3=1 (VisionQuestPro sets it for every game): the same Quest 3
     // identity for any title, not target by target.
-    if ((t && strcmp(t, "batman") == 0) || kl_env_on("KL_QUEST3", 0)) {
+    if (klj_quest3()) {
+        if (!strcmp(f->name, "RELEASE") || !strcmp(f->name, "RELEASE_OR_CODENAME"))
+            return "12";                                 // Android 12L
+        if (!strcmp(f->name, "SDK"))      return "32";
         if (!strcmp(f->name, "MODEL"))    return "Quest 3";
         if (!strcmp(f->name, "DEVICE"))   return "eureka";
         if (!strcmp(f->name, "PRODUCT"))  return "eureka";
         if (!strcmp(f->name, "FINGERPRINT"))
-            return "oculus/eureka/eureka:10/SQ3A.220605.009.A1/1:user/release-keys";
+            return "oculus/eureka/eureka:12/SQ3A.220605.009.A1/1:user/release-keys";
     }
     return f->sval;
 }
@@ -1681,7 +1697,7 @@ static const char *klj_field_sval(const klj_field *f) {
 // Interned jstrings for constant object fields, parallel to g_fields so the
 // table itself stays const. A static final String read twice is the same object
 // in Java, and some callers do compare identity.
-#define KLJ_MAX_FIELDS 128
+#define KLJ_MAX_FIELDS 256
 static void *g_field_cache[KLJ_MAX_FIELDS];
 
 
@@ -1785,7 +1801,7 @@ static klj_val klj_field_value(void *obj, void *fid, char want) {
             return (klj_val){.l = kl_jni_new_string(klj_field_sval(f))};
         }
         if (want == 'F' || want == 'D') return (klj_val){.d = f->dval};
-        return (klj_val){.j = (uint64_t)f->ival};
+        return (klj_val){.j = (uint64_t)klj_field_ival(f)};
     }
     KLJ_LOG("no host value for field %s.%s %s", w->cls, w->name, w->sig);
     if (!g_permissive) {
@@ -2101,6 +2117,65 @@ static const klj_field g_fields[] = {
     KLJ_FSTR("android/os/Build", "TAGS",         "release-keys"),
     KLJ_FSTR("android/os/Build", "FINGERPRINT",
              "oculus/hollywood/hollywood:10/SQ3A.220605.009.A1/1:user/release-keys"),
+    // The rest of android.os.Build a Quest answers. Unity's SystemInfo and UE's
+    // FAndroidMisc read BOARD/HOST/SERIAL for the device report; none branch.
+    KLJ_FSTR("android/os/Build", "BOARD",        "hollywood"),
+    KLJ_FSTR("android/os/Build", "BOOTLOADER",   "unknown"),
+    KLJ_FSTR("android/os/Build", "HOST",         "oculus-build"),
+    KLJ_FSTR("android/os/Build", "USER",         "build"),
+    KLJ_FSTR("android/os/Build", "RADIO",        "unknown"),
+    KLJ_FSTR("android/os/Build", "SERIAL",       "unknown"),   // what API 29+ answers without READ_PRIVILEGED_PHONE_STATE
+    KLJ_FSTR("android/os/Build", "CPU_ABI",      "arm64-v8a"),
+    KLJ_FSTR("android/os/Build", "CPU_ABI2",     ""),
+    KLJ_FSTR("android/os/Build", "SOC_MANUFACTURER", "Qualcomm"),
+    KLJ_FSTR("android/os/Build", "SOC_MODEL",    "QCS8550"),
+    KLJ_FSTR("android/os/Build$VERSION", "SDK",  "29"),
+    KLJ_FSTR("android/os/Build$VERSION", "BASE_OS", ""),
+    KLJ_FSTR("android/os/Build$VERSION", "SECURITY_PATCH", "2023-06-05"),
+    KLJ_FSTR("android/os/Build$VERSION", "RELEASE_OR_CODENAME", "10"),
+    KLJ_FINT("android/os/Build$VERSION", "PREVIEW_SDK_INT", 0),
+    KLJ_FINT("android/os/Build$VERSION", "MEDIA_PERFORMANCE_CLASS", 0),
+    KLJ_FINT("android/os/Build$VERSION_CODES", "Q", 29),
+    KLJ_FINT("android/os/Build$VERSION_CODES", "R", 30),
+    KLJ_FINT("android/os/Build$VERSION_CODES", "S", 31),
+    KLJ_FINT("android/os/Build$VERSION_CODES", "S_V2", 32),
+    KLJ_FINT("android/os/Build$VERSION_CODES", "TIRAMISU", 33),
+    KLJ_FINT("android/os/Build$VERSION_CODES", "UPSIDE_DOWN_CAKE", 34),
+    // PowerManager / BatteryManager constants, from android-34's android.jar.
+    KLJ_FINT("android/os/PowerManager", "PARTIAL_WAKE_LOCK", 1),
+    KLJ_FINT("android/os/PowerManager", "SCREEN_DIM_WAKE_LOCK", 6),
+    KLJ_FINT("android/os/PowerManager", "SCREEN_BRIGHT_WAKE_LOCK", 10),
+    KLJ_FINT("android/os/PowerManager", "FULL_WAKE_LOCK", 26),
+    KLJ_FINT("android/os/PowerManager", "ACQUIRE_CAUSES_WAKEUP", 0x10000000),
+    KLJ_FINT("android/os/PowerManager", "ON_AFTER_RELEASE", 0x20000000),
+    KLJ_FINT("android/os/PowerManager", "THERMAL_STATUS_NONE", 0),
+    KLJ_FINT("android/os/PowerManager", "THERMAL_STATUS_LIGHT", 1),
+    KLJ_FINT("android/os/PowerManager", "THERMAL_STATUS_MODERATE", 2),
+    KLJ_FINT("android/os/PowerManager", "THERMAL_STATUS_SEVERE", 3),
+    KLJ_FINT("android/os/PowerManager", "THERMAL_STATUS_CRITICAL", 4),
+    KLJ_FINT("android/os/PowerManager", "THERMAL_STATUS_EMERGENCY", 5),
+    KLJ_FINT("android/os/PowerManager", "THERMAL_STATUS_SHUTDOWN", 6),
+    KLJ_FINT("android/os/BatteryManager", "BATTERY_PROPERTY_CHARGE_COUNTER", 1),
+    KLJ_FINT("android/os/BatteryManager", "BATTERY_PROPERTY_CURRENT_NOW", 2),
+    KLJ_FINT("android/os/BatteryManager", "BATTERY_PROPERTY_CURRENT_AVERAGE", 3),
+    KLJ_FINT("android/os/BatteryManager", "BATTERY_PROPERTY_CAPACITY", 4),
+    KLJ_FINT("android/os/BatteryManager", "BATTERY_PROPERTY_ENERGY_COUNTER", 5),
+    KLJ_FINT("android/os/BatteryManager", "BATTERY_PROPERTY_STATUS", 6),
+    KLJ_FINT("android/os/BatteryManager", "BATTERY_STATUS_UNKNOWN", 1),
+    KLJ_FINT("android/os/BatteryManager", "BATTERY_STATUS_CHARGING", 2),
+    KLJ_FINT("android/os/BatteryManager", "BATTERY_STATUS_DISCHARGING", 3),
+    KLJ_FINT("android/os/BatteryManager", "BATTERY_STATUS_NOT_CHARGING", 4),
+    KLJ_FINT("android/os/BatteryManager", "BATTERY_STATUS_FULL", 5),
+    KLJ_FINT("android/os/BatteryManager", "BATTERY_HEALTH_GOOD", 2),
+    KLJ_FINT("android/os/BatteryManager", "BATTERY_PLUGGED_AC", 1),
+    KLJ_FINT("android/os/BatteryManager", "BATTERY_PLUGGED_USB", 2),
+    KLJ_FINT("android/os/Process", "THREAD_PRIORITY_DEFAULT", 0),
+    KLJ_FINT("android/os/Process", "THREAD_PRIORITY_FOREGROUND", -2),
+    KLJ_FINT("android/os/Process", "THREAD_PRIORITY_DISPLAY", -4),
+    KLJ_FINT("android/os/Process", "THREAD_PRIORITY_URGENT_DISPLAY", -8),
+    KLJ_FINT("android/os/Process", "THREAD_PRIORITY_AUDIO", -16),
+    KLJ_FINT("android/os/Process", "THREAD_PRIORITY_URGENT_AUDIO", -19),
+    KLJ_FINT("android/os/Process", "THREAD_PRIORITY_BACKGROUND", 10),
 
 
     KLJ_FINT("android/content/Context", "MODE_PRIVATE", 0),
@@ -2249,7 +2324,7 @@ int kl_jni_build_int(const char *field, int dflt) {
         if (!f->sval && strcmp(f->name, field) == 0
             && (strcmp(f->cls, "android/os/Build") == 0
                 || strcmp(f->cls, "android/os/Build$VERSION") == 0))
-            return (int)f->ival;
+            return klj_field_ival(f);
     return dflt;
 }
 
@@ -2266,6 +2341,7 @@ const klj_binding *const klj_binding_tables[] = {
     klj_bind_net,
     klj_bind_softinput,
     klj_bind_services,
+    klj_bind_sysinfo,
     klj_bind_io,
     klj_bind_prefs,
     klj_bind_sdl,

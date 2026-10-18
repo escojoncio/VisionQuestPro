@@ -177,9 +177,9 @@ enum VQGames {
             game.problems.append(VQL("Motor nativo: no se encuentra su librería de entrada \(game.entryLib).so.",
                                      "Native engine: its entry library \(game.entryLib).so is missing."))
         }
-        if !vulkan {
-            game.problems.append(VQL("Solo OpenGL ES: esta versión solo ejecuta juegos Vulkan.",
-                                     "OpenGL ES only: this version only runs Vulkan games."))
+        if !vulkan && !(VQSettings.shared.glesVPK && VQSettings.shared.useVPKEngine && VQSettings.vpvulkanPath != nil) {
+            game.problems.append(VQL("Solo OpenGL ES: activa «OpenGL ES con VPKEngine (experimental)» en Ajustes para probarlo.",
+                                     "OpenGL ES only: turn on \"OpenGL ES with VPKEngine (experimental)\" in Settings to try it."))
         }
         VQLog.log("Juegos: \(game.id): \(game.package) \(game.version), \(game.engine), \(game.graphics), "
                   + "Quest 3 \(game.quest3 ? "sí" : "no"), driver \(game.guestKind) \(game.entryLib).so, "

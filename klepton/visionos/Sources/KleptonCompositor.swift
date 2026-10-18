@@ -238,9 +238,6 @@ final class KleptonCompositor {
     /// Always-pass, no write — for coplanar draws after the first. See where
     /// `depthState` is built for why the two cannot be one.
     private var depthPassState: MTLDepthStencilState?
-    /// The guest's quad layers in the order it submitted them: no test, and
-    /// depth still written. See `overlaysInSubmitOrder`.
-    private var overlayOrderState: MTLDepthStencilState?
     private var sampler: MTLSamplerState!
     /// Views this GPU can draw in one amplified pass. 2 everywhere real; 1
     /// forces the old per-view passes, and forces foveation off with them
@@ -276,6 +273,52 @@ final class KleptonCompositor {
     private var equirectDepthState: MTLDepthStencilState?
     private var loadingSkyboxDepthState: MTLDepthStencilState?
     private var probePipeline: MTLRenderPipelineState?
+    // Paso 4 — positional timewarp with the guest's per-pixel depth (kl_reproject_ptw.h).
+    // KL_CP_PTW=1 turns it on (off by default); needs the eye depth kl_vulkan files, i.e.
+    // KL_VPKTAA=1 (KL_VPKTAA_DEPTH default 1). Falls back to the rotation-only quad per frame
+    // whenever a view has no usable depth. KL_CP_PTW_GRID (96), KL_CP_PTW_FAR (m, 200),
+    // KL_CP_PTW_DILATE (1).
+    private let ptwWanted = klEnvOn("KL_CP_PTW", default: false)
+    private let ptwGrid = UInt32(max(2, min(Int(klEnvFloat("KL_CP_PTW_GRID", Float(KL_PTW_GRID_DEFAULT))),
+                                            Int(KL_PTW_GRID_MAX))))
+    private let ptwFar = max(klEnvFloat("KL_CP_PTW_FAR", 200), 1)
+    private let ptwDilate = klEnvOn("KL_CP_PTW_DILATE", default: true)
+    private var ptwPipeline: MTLRenderPipelineState?
+    private var ptwViews: [ObjectIdentifier: MTLTexture] = [:]
+    private var ptwFrames = 0, ptwFallbacks = 0
+    private var ptwWhy = ""
+    // GPU ms of whole composite command buffers, split by whether PTW drew in them.
+    private let ptwStatLock = NSLock()
+    private var ptwGpuMs = [0.0, 0.0], ptwGpuN = [0, 0]
+    private var ptwLastReport = Date()
+    private var ptwDrewThisCmd = false
+    // Paso 4b — ASW 2.0 (object extrapolation by the guest's SpaceWarp motion vectors) on top of
+    // PTW. KL_CP_ASW=1 (default 0) AND KL_CP_PTW=1; the user setting «ASW desactivado» reaches
+    // here as KL_CP_ASW_OFF=1 (app/VQLaunch.swift) and wins. Each PTW vertex moves along the MV
+    // (read at its nearest-depth texel) by `fraction` of one guest frame, fraction = how overdue
+    // the picture on screen is: (age - lead) / interval, lead = EMA of a fresh frame's age at
+    // first use, interval = EMA of the guest's submit gap. KL_CP_ASW_MAX (1.5 frames),
+    // KL_CP_ASW_CAP (0.08 of the picture per axis), KL_CP_ASW_SIGN (+1 / -1, KL_VPKTAA_MV_SIGN's
+    // meaning; the auto vote lives in KleptonTAA and is NOT shared), KL_CP_ASW_YFLIP,
+    // KL_CP_ASW_SCALE (0.5 = NDC delta -> uv, as VPKTAA).
+    private let aswRequested = klEnvOn("KL_CP_ASW", default: false)
+    private let aswUserOff = klEnvOn("KL_CP_ASW_OFF", default: false)
+    private var aswWanted: Bool { aswRequested && ptwWanted && !aswUserOff }
+    private let aswMax = max(klEnvFloat("KL_CP_ASW_MAX", 1.5), 0.1)
+    private let aswCap = max(klEnvFloat("KL_CP_ASW_CAP", 0.08), 0.001)
+    private let aswScale: SIMD2<Float> = {
+        let m = klEnvFloat("KL_CP_ASW_SCALE", 0.5)
+        let sg: Float = klEnvFloat("KL_CP_ASW_SIGN", 1) < 0 ? -1 : 1
+        return SIMD2<Float>(m * sg, m * sg * (klEnvOn("KL_CP_ASW_YFLIP", default: false) ? -1 : 1))
+    }()
+    private var aswSerial: UInt64 = 0, aswSubmitNs: UInt64 = 0
+    private var aswIntervalMs: Float = 0, aswLeadMs: Float = 0
+    private var aswViews: [ObjectIdentifier: MTLTexture] = [:]
+    private var aswDummy: MTLTexture?
+    private var aswPasses = 0, aswFracSum: Float = 0
+    private var aswWhy = ""
+    private typealias PTWPass = (u: [kl_ptw_uniforms], d0: MTLTexture, d1: MTLTexture,
+                                 m0: MTLTexture, m1: MTLTexture)
     /// Red, green, blue — one second each, off the wall clock. Deliberately
     /// full-intensity primaries: whatever tone mapping or colour management sits
     /// between the drawable and the display, these stay obviously themselves.
@@ -868,6 +911,29 @@ final class KleptonCompositor {
             desc.maxVertexAmplificationCount = amplification
             pipeline = try device.makeRenderPipelineState(descriptor: desc)
 
+            if ptwWanted {
+                do {
+                    let plib = try device.makeLibrary(source: src + String(cString: kl_reproject_ptw_msl()),
+                                                      options: nil)
+                    let pd = MTLRenderPipelineDescriptor()
+                    pd.vertexFunction   = plib.makeFunction(name: "kl_ptw_v")
+                    pd.fragmentFunction = plib.makeFunction(name: "kl_reproject_f")
+                    pd.colorAttachments[0].pixelFormat = color
+                    pd.depthAttachmentPixelFormat = .depth32Float
+                    pd.maxVertexAmplificationCount = amplification
+                    ptwPipeline = try device.makeRenderPipelineState(descriptor: pd)
+                    NSLog("[cp] PTW (KL_CP_PTW=1): positional timewarp with per-pixel depth, grid "
+                          + "\(ptwGrid)x\(ptwGrid)/eye, far cap \(ptwFar) m, dilate \(ptwDilate)")
+                    if aswRequested {
+                        NSLog("[cp] ASW (KL_CP_ASW=1): "
+                              + (aswUserOff ? "OFF by the user setting (KL_CP_ASW_OFF=1), every frame real"
+                                            : "object extrapolation with SpaceWarp motion vectors, max \(aswMax) frames, cap \(aswCap)"))
+                    }
+                } catch {
+                    NSLog("[cp] PTW pipeline failed, rotation-only stays: \(error)")
+                }
+            }
+
             // Depth WRITES, which this pass never did. visionOS reprojects the
             // submitted frame using its depth buffer, so a pass that writes no
             // depth submits perfect colour with the geometry "nothing is here at
@@ -894,11 +960,6 @@ final class KleptonCompositor {
             dsdAlways.depthCompareFunction = .always
             dsdAlways.isDepthWriteEnabled = false
             depthPassState = device.makeDepthStencilState(descriptor: dsdAlways)
-
-            let dsdOrder = MTLDepthStencilDescriptor()
-            dsdOrder.depthCompareFunction = .always
-            dsdOrder.isDepthWriteEnabled = true
-            overlayOrderState = device.makeDepthStencilState(descriptor: dsdOrder)
 
             // The overlay pass — the guest's non-eye layers, which are the whole
             // of an Unreal title's UI. See encodeOverlays.
@@ -2134,8 +2195,12 @@ final class KleptonCompositor {
         // here. Counted, with the first error printed, because "committed but
         // never completed" is otherwise indistinguishable from "completed and
         // drew black".
+        let ptwDrew = ptwDrewThisCmd
+        ptwDrewThisCmd = false
+        ptwReport()
         cmd.addCompletedHandler { [weak self] b in
             guard let self else { return }
+            if self.ptwWanted { self.ptwNoteGpu(b, ptw: ptwDrew) }
             self.cmdLock.lock()
             self.cmdCompleted += 1
             let n = self.cmdCompleted
@@ -2748,7 +2813,13 @@ final class KleptonCompositor {
                     uniforms[n].grid_eye = 1
                 }
             }
-            enc.setRenderPipelineState(probePipeline ?? pipeline)
+            let ptw = probePipeline == nil
+                ? ptwInputs(viewIndices: viewIndices, drawable: drawable, uniforms: uniforms,
+                            rendered: rendered, haveRendered: haveRendered,
+                            originFromHead: originFromHead)
+                : nil
+            if ptw != nil, let ptwPipeline { enc.setRenderPipelineState(ptwPipeline) }
+            else { enc.setRenderPipelineState(probePipeline ?? pipeline) }
             if let depthState { enc.setDepthStencilState(depthState) }
             enc.setFragmentTexture(bind0, index: 0)
             enc.setFragmentTexture(bind1, index: 1)
@@ -2763,7 +2834,23 @@ final class KleptonCompositor {
             // eye textures are foveated; after that it carries the squeeze this pass
             // has to undo. See unwarpGrid and kl_reproject.h.
             enc.setVertexBuffer(gridBuf, offset: 0, index: 1)
-            enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: gridVerts)
+            if let ptw {
+                ptw.u.withUnsafeBytes { buf in
+                    enc.setVertexBytes(buf.baseAddress!, length: buf.count, index: 2)
+                }
+                enc.setVertexTexture(ptw.d0, index: 0)
+                enc.setVertexTexture(ptw.d1, index: 1)
+                enc.setVertexTexture(ptw.m0, index: 2)
+                enc.setVertexTexture(ptw.m1, index: 3)
+                enc.drawPrimitives(type: .triangle, vertexStart: 0,
+                                   vertexCount: 6 * Int(ptwGrid) * Int(ptwGrid))
+                ptwDrewThisCmd = true
+                // The eye now wrote its REAL depth, not 500 m: overlays drawn over it without
+                // their own depth state must not be depth-tested against the world.
+                if let depthPassState { enc.setDepthStencilState(depthPassState) }
+            } else {
+                enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: gridVerts)
+            }
         }
         let panels = encodeOverlays(enc, viewIndices: viewIndices, drawable: drawable,
                                     originFromHead: originFromHead,
@@ -3104,15 +3191,6 @@ final class KleptonCompositor {
             // The equirect branch above may have swapped the depth state for
             // its behind-everything compare; restore the quad's before drawing.
             if writeDepth, let depthState { enc.setDepthStencilState(depthState) }
-            // ...or, where asked for, the state that lets each quad land over
-            // the ones before it whatever their distances.
-            // Depth WRITES only when the overlays are the frame (writeDepth): over a
-            // live eye picture a write would stamp the panel's near depth over the world
-            // (see encodeOverlays' doc), so there it is compare-always, no write.
-            if Self.overlaysInSubmitOrder {
-                if writeDepth, let overlayOrderState { enc.setDepthStencilState(overlayOrderState) }
-                else if let depthPassState { enc.setDepthStencilState(depthPassState) }
-            }
             enc.setRenderPipelineState(pipe)
             enc.setFragmentTexture(texture, index: 0)
             enc.setFragmentSamplerState(sampler, index: 0)
@@ -3183,20 +3261,6 @@ final class KleptonCompositor {
     /// V flips and sRGB decode differ by how the guest authored the panorama;
     /// both are one device run to settle, so they are env-switchable.
     private static let skipHeadLockedOverlays = klEnvOn("KL_OVERLAY_SKIP_HEADLOCKED", default: false)
-    /// KL_OVERLAY_SUBMIT_ORDER: quad layers are composited in the order the
-    /// guest submitted them, which is what a Quest's compositor does, instead of
-    /// being depth-tested against each other. With `.greater` and writes on, a
-    /// quad stamps its distance over its whole rectangle, transparent parts
-    /// included, and a quad submitted after it that lies farther away is cut off
-    /// along the nearer one's edge - where that edge falls moving with the head
-    /// (Alien: Rogue Incursion's labels, AC Nexus's panels).
-    /// Default on for AC Nexus only (package gate); read once,
-    /// when the compositor first draws, after the game has been configured.
-    private static let overlaysInSubmitOrder: Bool = {
-        let on = klEnvOn("KL_OVERLAY_SUBMIT_ORDER", default: kl_is_ac_nexus() != 0)
-        if on { NSLog("[cp] KL_OVERLAY_SUBMIT_ORDER on: quad layers composited in submit order") }
-        return on
-    }()
     private static let drawEquirectOverlays = klEnvOn("KL_OVERLAY_EQ", default: true)
     private static let eqFlipY = klEnvOn("KL_EQ_FLIP", default: false)
     private static let eqSrgbDecode = klEnvOn("KL_EQ_SRGB", default: false)
@@ -4054,6 +4118,192 @@ final class KleptonCompositor {
     /// wrong rectangle with nothing anywhere reporting it.
     /// Returns the grid, the vertex count, and whether it carries a BLOCK PER
     /// EYE — which it does exactly when the two eyes submitted different rects.
+    /// PTW inputs for this pass, or nil (rotation-only quad) — every visible view needs a
+    /// single-sample depth of the SAME guest frame as `rendered` (tagged with its serial).
+    private func ptwInputs(viewIndices: [Int], drawable: LayerRenderer.Drawable,
+                           uniforms: [kl_reproject_uniforms], rendered: kl_ovrp_render_pose,
+                           haveRendered: Bool, originFromHead: simd_float4x4)
+        -> PTWPass? {
+        guard ptwWanted, ptwPipeline != nil else { return nil }
+        func refuse(_ why: String) -> PTWPass? {
+            ptwFallbacks += 1
+            if why != ptwWhy { ptwWhy = why; NSLog("[cp] PTW off this frame: \(why)") }
+            return nil
+        }
+        guard haveRendered, rendered.serial != 0 else { return refuse("no frame record") }
+        var out: [kl_ptw_uniforms] = []
+        var tex: [MTLTexture?] = []
+        var mvTex: [MTLTexture?] = []
+        let aswFrac: Float = aswWanted ? aswFraction(rendered) : 0
+        var aswWhyNow = aswWanted ? "" : "off"
+        let nearSubmit = rendered.depth_near > 0
+        let near = nearSubmit ? rendered.depth_near : max(kl_ovrp_frustum_near(), 0.001)
+        let far = nearSubmit ? max(rendered.depth_far, 0) : 0
+        for (n, vi) in viewIndices.enumerated() {
+            let eye = vi == 0 ? 0 : 1
+            var info = kl_vulkan_eye_depth()
+            guard kl_vulkan_eye_depth_get(Int32(rendered.stage), Int32(eye), rendered.serial, &info) != 0,
+                  let p = info.mtl else {
+                if uniforms[n].visible == 0 { out.append(kl_ptw_uniforms()); tex.append(nil); mvTex.append(nil); continue }
+                return refuse("no eye depth for serial \(rendered.serial) eye \(eye) "
+                              + "(needs KL_VPKTAA=1, Vulkan guest)")
+            }
+            guard info.samples <= 1 else { return refuse("multisampled eye depth") }
+            let t = Unmanaged<MTLTexture>.fromOpaque(p).takeUnretainedValue() as MTLTexture
+            guard ([.depth16Unorm, .depth32Float, .depth32Float_stencil8] as [MTLPixelFormat]).contains(t.pixelFormat),
+                  t.usage.contains(.shaderRead) else {
+                return refuse("depth texture format \(t.pixelFormat.rawValue) / not readable")
+            }
+            let v: MTLTexture
+            if t.textureType == .type2DArray { v = t }
+            else if let c = ptwViews[ObjectIdentifier(t)] { v = c }
+            else if t.textureType == .type2D,
+                    let c = t.makeTextureView(pixelFormat: t.pixelFormat, textureType: .type2DArray,
+                                              levels: 0..<1, slices: 0..<1) {
+                if ptwViews.count > 32 { ptwViews.removeAll() }
+                ptwViews[ObjectIdentifier(t)] = c; v = c
+            } else { return refuse("depth texture type \(t.textureType.rawValue)") }
+            // Render eye offset = what the guest was told (pushEyeOffsets: view translation
+            // about the eye midpoint, no cant); display eye = this view, with its cant.
+            let c3 = drawable.views[vi].transform.columns.3
+            let off: [Float] = [c3.x - eyeMidpointInDevice.x, c3.y - eyeMidpointInDevice.y,
+                                c3.z - eyeMidpointInDevice.z]
+            let rq: [Float] = [rendered.qx, rendered.qy, rendered.qz, rendered.qw]
+            let rp: [Float] = [rendered.px, rendered.py, rendered.pz]
+            let hfv = Self.headFromView(drawable.views[vi].transform, midpoint: eyeMidpointInDevice)
+            var ofh = originFromHead, hv = hfv
+            var mv = [Float](repeating: 0, count: 16)
+            withUnsafeBytes(of: &ofh) { a in
+                withUnsafeBytes(of: &hv) { b in
+                    kl_ptw_model_view(&mv, rq, rp, kl_ovrp_guest_origin_y(), off,
+                                      a.baseAddress!.assumingMemoryBound(to: Float.self),
+                                      b.baseAddress!.assumingMemoryBound(to: Float.self))
+                }
+            }
+            let rev = info.reversed_z != 0     // -1 (unknown) -> reversed, as VPKTAA does
+            var u = kl_ptw_uniforms()
+            kl_ptw_fill(&u, mv, near, far, rev ? 1 : 0, ptwFar, Int32(v.width), Int32(v.height),
+                        ptwGrid, UInt32(max(info.slice, 0)), ptwDilate ? 1 : 0)
+            // ASW: this view's motion vectors, when the guest wrote them for this very frame.
+            var mvT: MTLTexture? = nil
+            if aswWanted {
+                if aswFrac <= 0 { aswWhyNow = "on time (fraction 0)" }
+                else if let (m, sl) = aswMotion(eye, rendered) {
+                    mvT = m
+                    kl_ptw_fill_asw(&u, aswScale.x, aswScale.y, aswFrac, Int32(m.width), Int32(m.height),
+                                    UInt32(sl), aswCap)
+                } else { aswWhyNow = aswMotionWhy }
+            }
+            out.append(u)
+            tex.append(v)
+            mvTex.append(mvT)
+        }
+        guard let any = tex.compactMap({ $0 }).first else { return refuse("no visible view") }
+        let d0 = tex[0] ?? any
+        if ptwWhy != "" { ptwWhy = ""; NSLog("[cp] PTW on") }
+        ptwFrames += 1
+        // Vertex texture slots 2/3 are always bound (Metal wants the type to match): a 1x1
+        // dummy stands in for a view without motion vectors; its uniforms say asw.w == 0.
+        let dummy = aswDummyTexture()
+        let anyMV = mvTex.compactMap({ $0 }).first
+        if aswWanted {
+            if anyMV != nil { aswPasses += 1; aswFracSum += aswFrac; aswWhyNow = "" }
+            if aswWhyNow != aswWhy { aswWhy = aswWhyNow
+                NSLog(aswWhyNow.isEmpty ? "[cp] ASW extrapolating (fraction \(aswFrac))"
+                                        : "[cp] ASW idle: \(aswWhyNow)") }
+        }
+        let m0 = mvTex[0] ?? anyMV ?? dummy
+        let m1 = (mvTex.count > 1 ? mvTex[1] : nil) ?? mvTex[0] ?? anyMV ?? dummy
+        return (out, d0, (tex.count > 1 ? tex[1] : nil) ?? d0, m0, m1)
+    }
+
+    private var aswMotionWhy = ""
+
+    private func aswDummyTexture() -> MTLTexture {
+        if let d = aswDummy { return d }
+        let td = MTLTextureDescriptor()
+        td.textureType = .type2DArray; td.pixelFormat = .rgba16Float
+        td.width = 1; td.height = 1; td.arrayLength = 1; td.usage = .shaderRead
+        td.storageMode = .shared
+        let t = device.makeTexture(descriptor: td)!
+        aswDummy = t
+        return t
+    }
+
+    /// Fraction of a guest frame the picture in `r` is overdue (see aswRequested). Tracks the
+    /// guest cadence and a fresh frame's first-use age when `r` is a serial not seen before.
+    private func aswFraction(_ r: kl_ovrp_render_pose) -> Float {
+        guard r.submit_ns != 0 else { return 0 }
+        var ts = timespec()
+        clock_gettime(CLOCK_MONOTONIC, &ts)
+        let now = UInt64(ts.tv_sec) * 1_000_000_000 + UInt64(ts.tv_nsec)
+        guard now > r.submit_ns else { return 0 }
+        let age = Float(now - r.submit_ns) / 1_000_000
+        if r.serial != aswSerial {
+            if aswSerial != 0, r.serial > aswSerial, aswSubmitNs != 0, r.submit_ns > aswSubmitNs {
+                let gap = Float(r.submit_ns - aswSubmitNs) / 1_000_000 / Float(r.serial - aswSerial)
+                if gap > 2, gap < 100 { aswIntervalMs = aswIntervalMs == 0 ? gap : aswIntervalMs * 0.9 + gap * 0.1 }
+            }
+            aswSerial = r.serial; aswSubmitNs = r.submit_ns
+            // A fresh frame's age at first use; clamped to one interval so a late first sighting
+            // does not teach "late is normal".
+            let a = aswIntervalMs > 0 ? min(age, aswIntervalMs) : age
+            aswLeadMs = aswLeadMs == 0 ? a : aswLeadMs * 0.9 + a * 0.1
+        }
+        return kl_asw_fraction(age, aswLeadMs, aswIntervalMs, aswMax)
+    }
+
+    /// The motion-vector texture (as a 2D-array view), its slice and why-not, for `eye` of the
+    /// frame in `r`. Same gating as KleptonTAA.motionInput: storage exists and the guest wrote it.
+    private func aswMotion(_ eye: Int, _ r: kl_ovrp_render_pose) -> (MTLTexture, Int)? {
+        guard (r.asw & Int32(KL_OVRP_ASW_STORAGE)) != 0 else { aswMotionWhy = "guest has no SpaceWarp storage"; return nil }
+        guard (r.asw & Int32(KL_OVRP_ASW_MV)) != 0 else { aswMotionWhy = "guest wrote no motion vectors this frame"; return nil }
+        var w: Int32 = 0, h: Int32 = 0, sl: Int32 = 0
+        guard let p = kl_vulkan_spacewarp_mtl(Int32(eye), Int32(r.stage), Int32(KLVK_ASW_MOTION), &w, &h, &sl)
+        else { aswMotionWhy = "no motion-vector texture"; return nil }
+        let t = Unmanaged<MTLTexture>.fromOpaque(p).takeUnretainedValue() as MTLTexture
+        guard t.sampleCount == 1, t.usage.contains(.shaderRead),
+              ([.rgba16Float, .rg16Float, .rgba32Float, .rg32Float] as [MTLPixelFormat]).contains(t.pixelFormat)
+        else { aswMotionWhy = "motion-vector format \(t.pixelFormat.rawValue) not readable"; return nil }
+        if t.textureType == .type2DArray { return (t, Int(max(sl, 0))) }
+        guard t.textureType == .type2D else { aswMotionWhy = "motion-vector texture type"; return nil }
+        if let c = aswViews[ObjectIdentifier(t)] { return (c, 0) }
+        guard let c = t.makeTextureView(pixelFormat: t.pixelFormat, textureType: .type2DArray,
+                                        levels: 0..<1, slices: 0..<1) else { aswMotionWhy = "motion-vector view"; return nil }
+        if aswViews.count > 32 { aswViews.removeAll() }
+        aswViews[ObjectIdentifier(t)] = c
+        return (c, 0)
+    }
+
+    /// GPU ms per composite command buffer, PTW vs rotation-only, every 5 s while KL_CP_PTW=1.
+    private func ptwNoteGpu(_ b: MTLCommandBuffer, ptw: Bool) {
+        let ms = (b.gpuEndTime - b.gpuStartTime) * 1000
+        guard ms > 0, ms < 1000 else { return }
+        ptwStatLock.lock()
+        ptwGpuMs[ptw ? 1 : 0] += ms; ptwGpuN[ptw ? 1 : 0] += 1
+        ptwStatLock.unlock()
+    }
+
+    private func ptwReport() {
+        guard ptwWanted, Date().timeIntervalSince(ptwLastReport) >= 5 else { return }
+        ptwLastReport = Date()
+        ptwStatLock.lock()
+        let m = ptwGpuMs, n = ptwGpuN
+        ptwGpuMs = [0, 0]; ptwGpuN = [0, 0]
+        ptwStatLock.unlock()
+        NSLog(String(format: "[cp] PTW gpu: composite %.3f ms mean with PTW (%d cmdbufs), %.3f ms "
+                     + "rotation-only (%d); %d PTW passes / %d fallbacks in 5 s",
+                     n[1] > 0 ? m[1] / Double(n[1]) : 0, n[1],
+                     n[0] > 0 ? m[0] / Double(n[0]) : 0, n[0], ptwFrames, ptwFallbacks))
+        ptwFrames = 0; ptwFallbacks = 0
+        if aswWanted {
+            NSLog(String(format: "[cp] ASW: %d extrapolated passes in 5 s, mean fraction %.2f; guest interval %.1f ms, "
+                         + "fresh-frame lead %.1f ms", aswPasses, aswPasses > 0 ? aswFracSum / Float(aswPasses) : 0,
+                         aswIntervalMs, aswLeadMs))
+            aswPasses = 0; aswFracSum = 0
+        }
+    }
+
     private func unwarpGrid(_ source: MTLTexture?,
                             viewport0: SIMD4<Float>,
                             viewport1: SIMD4<Float>,
@@ -4614,6 +4864,20 @@ final class KleptonCompositor {
                              + "frame shown %.0fx): latching the panel's %.2f Hz instead",
                              1.0 / mid, (mid / fixed).rounded(), 1.0 / fixed))
                 mid = fixed
+            }
+            // Paso 4: the panel only runs at panel rates, so the guest is never told anything else
+            // (no 59.98, no 50, no last-digit drift): snap to the nearest panelHz within 6 %, or
+            // force one with KL_CP_PANEL_HZ (e.g. 100). KL_CP_PANEL_SNAP=0 keeps the measurement.
+            let forced = Double(klEnvFloat("KL_CP_PANEL_HZ", 0))
+            if forced >= 60 && forced <= 120 {
+                NSLog(String(format: "[cp] panel rate FORCED to %.2f Hz by KL_CP_PANEL_HZ (measured %.3f Hz)",
+                             forced, 1.0 / mid))
+                mid = 1.0 / forced
+            } else if klEnvOn("KL_CP_PANEL_SNAP", default: true),
+                      let c = Self.panelHz.min(by: { abs(1.0 / mid - $0) < abs(1.0 / mid - $1) }),
+                      abs(1.0 / mid - c) <= 0.06 * c, abs(1.0 / mid - c) > 1e-6 {
+                NSLog(String(format: "[cp] display %.3f Hz snapped to the panel rate %.0f Hz", 1.0 / mid, c))
+                mid = 1.0 / c
             }
             displayPeriod = mid          // what the cadence check measures against
             let hz = Float(1.0 / mid)

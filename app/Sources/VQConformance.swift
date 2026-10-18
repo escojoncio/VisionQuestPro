@@ -34,6 +34,8 @@ enum VQConformance {
         setenv("KL_INTENT_EXTRAS", extras.joined(separator: "\n"), 1)
         // A line on the head-locked HUD with the run's progress: the test draws almost nothing.
         setenv("KL_STATUS_HUD", "1", 1)
+        // Spec per-layer xrEndFrame validation (kl_openxr.c); games keep the lax path.
+        setenv("KL_XR_STRICT_LAYERS", "1", 1)
         setenv("VPVK_EXTRA_EXTENSIONS", "1", 1); unsetenv("VPVK_REPORT_GEOM")
         neutralGraphics()
         VQLog.log("Conformidad OpenXR: plugin Vulkan2, sin tests interactivos; progreso en el HUD; resultado en el registro del juego y en openxr_cts.xml")
@@ -456,11 +458,13 @@ enum VQConformance {
     /// scale) may change what they render. Overrides what applyToEnvironment set for this launch.
     static func neutralGraphics() {
         setenv("VPVK_ANISO", "0", 1)
+        setenv("VPVK_FORCE_ANISO", "0", 1)
         setenv("VPVK_TAA_JITTER", "0", 1)
         setenv("VPVK_FORCE_1X", "0", 1)
         setenv("VPVK_MSAA", "0", 1)
         setenv("KL_VPKTAA", "0", 1)
         setenv("KL_AA_MODE", "off", 1)
+        setenv("VPVK_TAA_NATIVE", "0", 1)
         var c = vq_gfx_config()
         c.foveation_mode = 0
         c.vpktaa_enabled = 0

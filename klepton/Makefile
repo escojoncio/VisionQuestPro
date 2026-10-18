@@ -40,25 +40,25 @@ RUNTIME_JNI := runtime/kl_jni.c \
            runtime/jni/kl_jni_looper.c runtime/jni/kl_jni_display.c \
            runtime/jni/kl_jni_bridge.c runtime/jni/kl_jni_window.c \
            runtime/jni/kl_jni_net.c runtime/jni/kl_jni_softinput.c \
-           runtime/jni/kl_jni_services.c runtime/jni/kl_jni_io.c \
+           runtime/jni/kl_jni_services.c runtime/jni/kl_jni_io.c runtime/jni/kl_jni_sysinfo.c \
            runtime/jni/kl_jni_prefs.c runtime/jni/kl_jni_sdl.c \
            runtime/jni/kl_jni_ue4.c runtime/jni/kl_jni_electra.c runtime/jni/kl_jni_fmod.c runtime/jni/kl_jni_jkxr.c \
            runtime/jni/kl_jni_hostvideo.c
 
 RUNTIME_SHIP := runtime/kl_env.c runtime/kl_image.c runtime/kl_stub_cells.S runtime/libc/kl_shim.c runtime/libc/kl_va.c \
            runtime/libc/kl_va_handlers.c runtime/libc/kl_va_thunks.S \
-           runtime/libc/kl_libc.c runtime/libc/kl_libc_slink.c runtime/libc/kl_pthread.c runtime/kl_dl.c \
-           runtime/guest/kl_ndk.c runtime/kl_x18.c runtime/kl_target.c \
+           runtime/libc/kl_libc.c runtime/libc/kl_libc_slink.c runtime/libc/kl_bionic_extra.c runtime/libc/kl_bionic_extra2.c runtime/libc/kl_bionic_extra3.c runtime/libc/kl_bionic_extra4.c runtime/libc/kl_pthread.c runtime/kl_dl.c \
+           runtime/guest/kl_ndk.c runtime/guest/kl_android.c runtime/media/kl_thermal.m runtime/kl_x18.c runtime/kl_target.c \
            $(RUNTIME_JNI) \
            runtime/gfx/kl_egl.c runtime/media/kl_opensl.c runtime/media/kl_audio.c runtime/xr/kl_ovrp.c \
-           runtime/xr/kl_ovrp_sret.S runtime/gfx/kl_reproject.c runtime/gfx/kl_present.c \
+           runtime/xr/kl_ovrp_sret.S runtime/gfx/kl_reproject.c runtime/gfx/kl_reproject_ptw.c runtime/gfx/kl_present.c \
            runtime/xr/kl_ovrplat.c runtime/xr/kl_openxr.c runtime/xr/kl_passthrough.c runtime/media/kl_mediandk.c runtime/media/kl_vtdec.c runtime/media/kl_avdec.m \
            runtime/gfx/kl_vulkan.c \
            runtime/guest/kl_nativeactivity.c runtime/guest/kl_slink.c runtime/guest/kl_ue4.c runtime/guest/kl_obbmap.c \
            runtime/guest/kl_jkxr.c runtime/guest/kl_native.c runtime/guest/kl_exe.c runtime/guest/kl_sdl2.c \
            runtime/guest/kl_gles3jni.c runtime/guest/kl_driver.c \
            runtime/media/kl_aaudio.c runtime/media/kl_mediaplayer.c runtime/media/kl_hostvideo.c \
-           runtime/gfx/kl_glfb.c runtime/gfx/kl_cvmtl.m runtime/gfx/kl_gl_trace.S runtime/gfx/kl_gl_lock.S \
+           runtime/gfx/kl_glfb.c runtime/gfx/kl_gles.c runtime/gfx/kl_cvmtl.m runtime/gfx/kl_gl_trace.S runtime/gfx/kl_gl_lock.S \
            runtime/guest/kl_mono.c \
            runtime/guest/kl_il2cpp.c runtime/kl_fault.c runtime/guest/kl_guestpatch.c \
            runtime/guest/kl_guestpoke.c runtime/kl_cacerts.c runtime/media/kl_phonon_hrtf.S \
@@ -955,6 +955,14 @@ glcaps: build/t_glcaps
 
 reproject: build/t_reproject
 	@./build/t_reproject
+
+# Positional timewarp maths (paso 4), plain C: runs on Linux too.
+build/t_ptw: tests/t_ptw.c runtime/gfx/kl_reproject_ptw.c runtime/gfx/kl_reproject_ptw.h
+	@mkdir -p build
+	$(CC) -O1 -o $@ tests/t_ptw.c runtime/gfx/kl_reproject_ptw.c -lm
+.PHONY: ptw
+ptw: build/t_ptw
+	@./build/t_ptw
 
 # The haptics seam's model, with no guest and no headset: the three
 # OVRPlugin entry points AS THE GUEST RESOLVES THEM (through kl_ovrp_sym, so
