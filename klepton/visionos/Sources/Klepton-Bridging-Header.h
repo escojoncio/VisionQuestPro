@@ -18,6 +18,7 @@
 #import "kl_openxr.h"
 #import "kl_passthrough.h"
 #import "kl_reproject.h"
+#import "kl_reproject_ptw.h"
 // ...and by one more for audio: kl_audio owns the CoreAudio output unit, but
 // the AVAudioSession it needs on this platform can only be configured from
 // Swift (KleptonAudio.swift). Three calls cross: the session's measured rate
