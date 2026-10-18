@@ -147,7 +147,18 @@ static void t_accounts(void) {
     setenv("KLX_A", "1", 1); setenv("KLX_B", "2", 1); CHECK(klx_clearenv() == 0 && getenv("KLX_A") == NULL);
 }
 
+static void t_table(void) {
+    size_t n = sizeof g_extra / sizeof g_extra[0];
+    for (size_t i = 0; i < n; i++) {
+        for (size_t j = i + 1; j < n; j++) if (!strcmp(g_extra[i].name, g_extra[j].name)) { printf("duplicate table name %s\n", g_extra[i].name); bad++; }
+    }
+    CHECK(kl_bionic_extra_lookup("floorl") == NULL);       // not a bionic export: must not be served
+    CHECK(kl_bionic_extra_lookup("pthread_cancel") == NULL);
+    CHECK(kl_bionic_extra_lookup("exp10l") != NULL && kl_bionic_extra_lookup("nosuchsym") == NULL);
+}
+
 int main(void) {
+    t_table();
     t_math(); t_str(); t_utf8(); t_android(); t_accounts();
 #ifdef T_EXTRA_MORE
     t_more();

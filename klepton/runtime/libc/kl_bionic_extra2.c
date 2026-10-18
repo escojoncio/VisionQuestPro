@@ -515,3 +515,300 @@ void klx2_verr_(int eval, const char *fmt, kl_va *va) { klx2_verr(eval, fmt, va,
 void klx2_verrx_(int eval, const char *fmt, kl_va *va) { klx2_verr(eval, fmt, va, 0, 1); }
 void klx2_vwarn_(const char *fmt, kl_va *va) { klx2_verr(0, fmt, va, 1, 0); }
 void klx2_vwarnx_(const char *fmt, kl_va *va) { klx2_verr(0, fmt, va, 0, 0); }
+
+// ---------------------------------------------------------------- clocks and sleeping
+int kl_clock_to_darwin(int clk);            // kl_libc.c
+// clock_nanosleep returns the error NUMBER (Linux numbering), never -1. TIMER_ABSTIME is 1.
+int klb_clock_nanosleep(int clk, int flags, const struct timespec *req, struct timespec *rem) {
+    if (clk != 0 && clk != 1 && clk != 4 && clk != 7) return clk == 2 || clk == 3 ? 95 /* ENOTSUP */ : 22;
+    if (!req || req->tv_nsec < 0 || req->tv_nsec >= 1000000000L || req->tv_sec < 0) return 22;
+    int d = kl_clock_to_darwin(clk);
+    struct timespec rel = *req;
+    if (flags & 1) {                                        // absolute on the named clock
+        struct timespec now;
+        if (clock_gettime(d, &now) != 0) return 22;
+        rel.tv_sec = req->tv_sec - now.tv_sec;
+        rel.tv_nsec = req->tv_nsec - now.tv_nsec;
+        if (rel.tv_nsec < 0) { rel.tv_nsec += 1000000000L; rel.tv_sec--; }
+        if (rel.tv_sec < 0) return 0;                       // already past
+        if (nanosleep(&rel, NULL) == 0) return 0;
+        return kl_errno_to_linux(errno);                    // EINTR: rem is not written for absolute sleeps
+    }
+    if (nanosleep(&rel, rem) == 0) return 0;
+    return kl_errno_to_linux(errno);
+}
+// An app has no CAP_SYS_TIME.
+int klb_clock_settime(int clk, const struct timespec *ts) {
+    (void)ts;
+    if (clk != 0 && clk != 1 && clk != 4 && clk != 7 && clk != 5 && clk != 6 && clk != 8 && clk != 9) { errno = EINVAL; return -1; }
+    errno = EPERM; return -1;
+}
+// clock_getcpuclockid(pid, &clk): the process-CPU clock (bionic id 2) of ourselves; returns the error number.
+int klb_clock_getcpuclockid(int pid, int *clk) {
+    if (pid == 0 || pid == (int)getpid()) { *clk = 2; return 0; }
+    return kill(pid, 0) == 0 ? 1 /* EPERM */ : (errno == EPERM ? 1 : 3 /* ESRCH */);
+}
+int klb_timespec_get(struct timespec *ts, int base) {
+    if (base != 1) return 0;                                 // TIME_UTC
+    return clock_gettime(CLOCK_REALTIME, ts) == 0 ? base : 0;
+}
+
+// ---------------------------------------------------------------- POSIX timers
+// timer_create & co. are real here: one thread per timer (made through klb_pthread_create so the
+// guest callback of SIGEV_THREAD runs on a properly set-up guest thread), sleeping on a condvar
+// until the next expiry. sigevent (bionic, LP64): { sigval value(8); int signo; int notify; union {
+// int tid; struct { void (*fn)(sigval); void *attr; } } }. Notify: SIGNAL 0, NONE 1, THREAD 2,
+// THREAD_ID 4. SIGEV_SIGNAL is delivered to the process with the guest's signal number, the
+// convention klb_sigaction already uses.
+int klb_pthread_create(pthread_t *out, const void *attr, void *(*fn)(void *), void *arg);
+typedef struct kl_timer {
+    int dclk, notify, signo;
+    uint64_t value;
+    void (*fn)(uint64_t);
+    pthread_mutex_t m; pthread_cond_t c;
+    int armed, stop, started;
+    struct timespec expire, interval;     // expire: absolute, on dclk
+    long overrun;
+    pthread_t th;
+} kl_timer;
+#define KLX_MAX_TIMERS 256
+static kl_timer *g_timers[KLX_MAX_TIMERS];
+static pthread_mutex_t g_timers_mu = PTHREAD_MUTEX_INITIALIZER;
+static kl_timer *timer_of(void *id) {
+    kl_timer *t = NULL;
+    pthread_mutex_lock(&g_timers_mu);
+    for (int i = 0; i < KLX_MAX_TIMERS; i++) if (g_timers[i] && g_timers[i] == id) { t = g_timers[i]; break; }
+    pthread_mutex_unlock(&g_timers_mu);
+    return t;
+}
+static void ts_add(struct timespec *a, const struct timespec *b) {
+    a->tv_sec += b->tv_sec; a->tv_nsec += b->tv_nsec;
+    if (a->tv_nsec >= 1000000000L) { a->tv_nsec -= 1000000000L; a->tv_sec++; }
+}
+static int ts_cmp(const struct timespec *a, const struct timespec *b) {
+    if (a->tv_sec != b->tv_sec) return a->tv_sec < b->tv_sec ? -1 : 1;
+    return a->tv_nsec < b->tv_nsec ? -1 : a->tv_nsec > b->tv_nsec ? 1 : 0;
+}
+static void *timer_thread(void *arg) {
+    kl_timer *t = arg;
+    pthread_mutex_lock(&t->m);
+    while (!t->stop) {
+        if (!t->armed) { pthread_cond_wait(&t->c, &t->m); continue; }
+        struct timespec now;
+        clock_gettime(t->dclk, &now);
+        if (ts_cmp(&now, &t->expire) < 0) {
+            struct timespec rel = { t->expire.tv_sec - now.tv_sec, t->expire.tv_nsec - now.tv_nsec };
+            if (rel.tv_nsec < 0) { rel.tv_nsec += 1000000000L; rel.tv_sec--; }
+            pthread_cond_timedwait_relative_np(&t->c, &t->m, &rel);
+            continue;
+        }
+        // expired: count missed periods, re-arm or disarm, then deliver without the lock
+        long missed = 0;
+        if (t->interval.tv_sec || t->interval.tv_nsec) {
+            do { ts_add(&t->expire, &t->interval); missed++; } while (ts_cmp(&now, &t->expire) >= 0);
+            t->overrun = missed - 1;
+        } else { t->armed = 0; t->overrun = 0; }
+        int notify = t->notify, signo = t->signo;
+        void (*fn)(uint64_t) = t->fn; uint64_t val = t->value;
+        pthread_mutex_unlock(&t->m);
+        if (notify == 2 && fn) fn(val);
+        else if (notify == 0 || notify == 4) kill(getpid(), signo);
+        pthread_mutex_lock(&t->m);
+    }
+    pthread_mutex_unlock(&t->m);
+    return NULL;
+}
+int klb_timer_create(int clk, const void *sevp, void **id) {
+    int d = (clk == 0 || clk == 1 || clk == 7 || clk == 8 || clk == 9) ? kl_clock_to_darwin(clk) : -1;   // MONOTONIC_RAW is not a timer clock
+    if (d < 0) { errno = EINVAL; return -1; }
+    kl_timer *t = calloc(1, sizeof *t);
+    if (!t) { errno = ENOMEM; return -1; }
+    t->dclk = d;
+    if (sevp) {
+        const uint8_t *e = sevp;
+        memcpy(&t->value, e, 8); memcpy(&t->signo, e + 8, 4); memcpy(&t->notify, e + 12, 4);
+        if (t->notify == 2) memcpy(&t->fn, e + 16, 8);
+        if (t->notify != 0 && t->notify != 1 && t->notify != 2 && t->notify != 4) { free(t); errno = EINVAL; return -1; }
+    } else { t->notify = 0; t->signo = 14; t->value = (uint64_t)(uintptr_t)t; }   // SIGEV_SIGNAL/SIGALRM, value = timer id
+    pthread_mutex_init(&t->m, NULL); pthread_cond_init(&t->c, NULL);
+    pthread_mutex_lock(&g_timers_mu);
+    int slot = -1;
+    for (int i = 0; i < KLX_MAX_TIMERS; i++) if (!g_timers[i]) { slot = i; break; }
+    if (slot >= 0) g_timers[slot] = t;
+    pthread_mutex_unlock(&g_timers_mu);
+    if (slot < 0) { free(t); errno = EAGAIN; return -1; }
+    if (klb_pthread_create(&t->th, NULL, timer_thread, t) != 0) {
+        pthread_mutex_lock(&g_timers_mu); g_timers[slot] = NULL; pthread_mutex_unlock(&g_timers_mu);
+        free(t); errno = EAGAIN; return -1;
+    }
+    t->started = 1;
+    *id = t;
+    return 0;
+}
+typedef struct { struct timespec interval, value; } kl_itimerspec;
+static void timer_remaining(kl_timer *t, kl_itimerspec *out) {
+    memset(out, 0, sizeof *out);
+    if (!t->armed) return;
+    struct timespec now; clock_gettime(t->dclk, &now);
+    if (ts_cmp(&now, &t->expire) < 0) {
+        out->value.tv_sec = t->expire.tv_sec - now.tv_sec;
+        out->value.tv_nsec = t->expire.tv_nsec - now.tv_nsec;
+        if (out->value.tv_nsec < 0) { out->value.tv_nsec += 1000000000L; out->value.tv_sec--; }
+    } else out->value.tv_nsec = 1;
+    out->interval = t->interval;
+}
+int klb_timer_gettime(void *id, kl_itimerspec *out) {
+    kl_timer *t = timer_of(id);
+    if (!t) { errno = EINVAL; return -1; }
+    pthread_mutex_lock(&t->m); timer_remaining(t, out); pthread_mutex_unlock(&t->m);
+    return 0;
+}
+int klb_timer_settime(void *id, int flags, const kl_itimerspec *nv, kl_itimerspec *ov) {
+    kl_timer *t = timer_of(id);
+    if (!t || !nv) { errno = EINVAL; return -1; }
+    if (flags & ~1) { errno = EINVAL; return -1; }
+    if (nv->value.tv_nsec < 0 || nv->value.tv_nsec >= 1000000000L || nv->interval.tv_nsec < 0 ||
+        nv->interval.tv_nsec >= 1000000000L || nv->value.tv_sec < 0 || nv->interval.tv_sec < 0) { errno = EINVAL; return -1; }
+    pthread_mutex_lock(&t->m);
+    if (ov) timer_remaining(t, ov);
+    if (nv->value.tv_sec == 0 && nv->value.tv_nsec == 0) t->armed = 0;           // it_value zero: disarm
+    else {
+        if (flags & 1) t->expire = nv->value;                                      // TIMER_ABSTIME
+        else { clock_gettime(t->dclk, &t->expire); ts_add(&t->expire, &nv->value); }
+        t->interval = nv->interval;
+        t->armed = 1;
+    }
+    t->overrun = 0;
+    pthread_cond_signal(&t->c);
+    pthread_mutex_unlock(&t->m);
+    return 0;
+}
+int klb_timer_getoverrun(void *id) {
+    kl_timer *t = timer_of(id);
+    if (!t) { errno = EINVAL; return -1; }
+    pthread_mutex_lock(&t->m); long o = t->overrun; pthread_mutex_unlock(&t->m);
+    return (int)(o > INT_MAX ? INT_MAX : o);
+}
+int klb_timer_delete(void *id) {
+    pthread_mutex_lock(&g_timers_mu);
+    int slot = -1;
+    for (int i = 0; i < KLX_MAX_TIMERS; i++) if (g_timers[i] && g_timers[i] == id) { slot = i; break; }
+    if (slot >= 0) g_timers[slot] = NULL;
+    pthread_mutex_unlock(&g_timers_mu);
+    if (slot < 0) { errno = EINVAL; return -1; }
+    kl_timer *t = id;
+    pthread_mutex_lock(&t->m); t->stop = 1; t->armed = 0; pthread_cond_signal(&t->c); pthread_mutex_unlock(&t->m);
+    if (!pthread_equal(t->th, pthread_self())) {                               // a SIGEV_THREAD callback may delete its own timer
+        pthread_join(t->th, NULL);
+        pthread_mutex_destroy(&t->m); pthread_cond_destroy(&t->c); free(t);
+    } else pthread_detach(t->th);                                               // (t is leaked in that case: the thread is still on it)
+    return 0;
+}
+
+// ---------------------------------------------------------------- stdio on the host FILE
+// A guest FILE * is the host's (kl_host_file maps bionic's __sF block onto stdio), so the
+// *_unlocked forms are the host's unlocked calls on the mapped stream.
+int klb_fflush_unlocked(void *f)    { return fflush(f ? kl_host_file(f) : NULL); }
+int klb_feof_unlocked(void *f)      { return feof_unlocked(kl_host_file(f)); }
+int klb_ferror_unlocked(void *f)    { return ferror_unlocked(kl_host_file(f)); }
+void klb_clearerr_unlocked(void *f) { clearerr_unlocked(kl_host_file(f)); }
+int klb_fileno_unlocked(void *f)    { return fileno_unlocked(kl_host_file(f)); }
+int klb_putc_unlocked(int c, void *f) { return putc_unlocked(c, kl_host_file(f)); }
+int klb_putchar_unlocked(int c)     { return putchar_unlocked(c); }
+int klb_getchar_unlocked(void)      { return getchar_unlocked(); }
+wint_t klb_fgetwc_unlocked(void *f) { return fgetwc(kl_host_file(f)); }
+wchar_t *klb_fgetws(wchar_t *s, int n, void *f) { return fgetws(s, n, kl_host_file(f)); }
+int klb_fputws(const wchar_t *s, void *f)       { return fputws(s, kl_host_file(f)); }
+wint_t klb_getwchar(void)           { return getwchar(); }
+wint_t klb_putwchar(wchar_t c)      { return putwchar(c); }
+int klb_fgetpos(void *f, off_t *pos)         { return fgetpos(kl_host_file(f), (fpos_t *)pos); }
+int klb_fsetpos(void *f, const off_t *pos)   { return fsetpos(kl_host_file(f), (const fpos_t *)pos); }
+char *klb_fgetln(void *f, size_t *len)       { return fgetln(kl_host_file(f), len); }
+int klb_fpurge(void *f)             { return fpurge(kl_host_file(f)); }
+void klb_setbuffer(void *f, char *buf, size_t size) { setvbuf(kl_host_file(f), buf, buf ? _IOFBF : _IONBF, size); }
+void klb_setlinebuf(void *f)        { setvbuf(kl_host_file(f), NULL, _IOLBF, 0); }
+int klb_getw(void *f)               { return getw(kl_host_file(f)); }
+int klb_putw(int w, void *f)        { return putw(w, kl_host_file(f)); }
+FILE *klb_fmemopen(void *buf, size_t size, const char *mode) { return fmemopen(buf, size, mode); }
+FILE *klb_open_memstream(char **p, size_t *s) { return open_memstream(p, s); }
+FILE *klb_open_wmemstream(wchar_t **p, size_t *s) { return open_wmemstream(p, s); }
+FILE *klb_tmpfile64(void) { return tmpfile(); }
+
+// fopencookie(cookie, mode, io_funcs): Linux's cookie_io_functions_t is { read, write, seek, close }
+// with 64-bit sizes and an in/out offset for seek; Darwin's funopen wants int-sized callbacks and a
+// return-the-position seek. The wrapper object is freed when the stream is closed.
+typedef struct {
+    ssize_t (*read)(void *, char *, size_t);
+    ssize_t (*write)(void *, const char *, size_t);
+    int (*seek)(void *, int64_t *, int);
+    int (*close)(void *);
+} lx_cookie_io;
+typedef struct { void *cookie; lx_cookie_io io; } cookie_wrap;
+static int cw_read(void *w, char *b, int n)        { cookie_wrap *c = w; return (int)c->io.read(c->cookie, b, (size_t)n); }
+static int cw_write(void *w, const char *b, int n) { cookie_wrap *c = w; return (int)c->io.write(c->cookie, b, (size_t)n); }
+static fpos_t cw_seek(void *w, fpos_t off, int whence) {
+    cookie_wrap *c = w; int64_t o = off;
+    if (c->io.seek(c->cookie, &o, whence) != 0) return -1;
+    return (fpos_t)o;
+}
+static int cw_close(void *w) {
+    cookie_wrap *c = w;
+    int r = c->io.close ? c->io.close(c->cookie) : 0;
+    free(c);
+    return r;
+}
+FILE *klb_fopencookie(void *cookie, const char *mode, lx_cookie_io io) {
+    int rd = strchr(mode, 'r') || strchr(mode, '+'), wr = strchr(mode, 'w') || strchr(mode, 'a') || strchr(mode, '+');
+    if ((rd && !io.read) || (wr && !io.write)) { errno = EINVAL; return NULL; }
+    cookie_wrap *c = malloc(sizeof *c);
+    if (!c) return NULL;
+    c->cookie = cookie; c->io = io;
+    FILE *f = funopen(c, rd ? cw_read : NULL, wr ? cw_write : NULL, io.seek ? cw_seek : NULL, cw_close);
+    if (!f) free(c);
+    return f;
+}
+
+// ---------------------------------------------------------------- malloc extensions
+// struct mallinfo is ten ints in bionic, mallinfo2 the same as size_t.
+#include <malloc/malloc.h>
+typedef struct { int arena, ordblks, smblks, hblks, hblkhd, usmblks, fsmblks, uordblks, fordblks, keepcost; } lx_mallinfo;
+typedef struct { size_t arena, ordblks, smblks, hblks, hblkhd, usmblks, fsmblks, uordblks, fordblks, keepcost; } lx_mallinfo2;
+static void mi_fill(size_t *total, size_t *used, size_t *blocks) {
+    malloc_statistics_t st; memset(&st, 0, sizeof st);
+    malloc_zone_statistics(NULL, &st);
+    *total = st.size_allocated; *used = st.size_in_use; *blocks = st.blocks_in_use;
+}
+lx_mallinfo klb_mallinfo(void) {
+    size_t t, u, b; mi_fill(&t, &u, &b);
+    lx_mallinfo m; memset(&m, 0, sizeof m);
+    m.arena = (int)t; m.ordblks = (int)b; m.uordblks = (int)u; m.fordblks = (int)(t > u ? t - u : 0);
+    return m;
+}
+lx_mallinfo2 klb_mallinfo2(void) {
+    size_t t, u, b; mi_fill(&t, &u, &b);
+    lx_mallinfo2 m; memset(&m, 0, sizeof m);
+    m.arena = t; m.ordblks = b; m.uordblks = u; m.fordblks = t > u ? t - u : 0;
+    return m;
+}
+// mallopt(param, value): Android's parameters are negative. M_PURGE (-101) / M_PURGE_ALL (-104)
+// give memory back; M_DECAY_TIME (-100) is a tuning hint the allocator here has no knob for but
+// accepts. Anything else is refused with 0, as for an unknown option.
+int klb_mallopt(int param, int value) {
+    (void)value;
+    switch (param) {
+    case -101: case -104: malloc_zone_pressure_relief(NULL, 0); return 1;
+    case -100: return 1;
+    }
+    errno = ENOTSUP;
+    return 0;
+}
+void *klb_pvalloc(size_t n) {
+    size_t pg = (size_t)getpagesize();
+    if (n > SIZE_MAX - pg) { errno = ENOMEM; return NULL; }
+    return valloc((n + pg - 1) & ~(pg - 1));
+}
+void *klb_reallocarray(void *p, size_t n, size_t sz) {
+    size_t total;
+    if (__builtin_mul_overflow(n, sz, &total)) { errno = ENOMEM; return NULL; }
+    return realloc(p, total);
+}
