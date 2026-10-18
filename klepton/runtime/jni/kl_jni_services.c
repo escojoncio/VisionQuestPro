@@ -1088,7 +1088,7 @@ void kl_jni_guest_version(long *code, const char **name) {
     static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
     if (__atomic_load_n(&latched, __ATOMIC_ACQUIRE)) return cached;
     // Serialised: a second thread must never read `cached` mid-parse (it would see the
-    // historical fallback and kl_is_ac_nexus() would latch "not AC" for the whole run).
+    // historical fallback for the whole run).
     pthread_mutex_lock(&mu);
     if (!__atomic_load_n(&latched, __ATOMIC_ACQUIRE)) {
         static char fallback[] = "com.beatgames.beatsaber";  // historical
@@ -1131,31 +1131,6 @@ void kl_jni_guest_version(long *code, const char **name) {
 }
 
 const char *kl_jni_guest_package(void) { return klj_guest_package(); }
-
-// Per-game gate for Assassin's Creed Nexus VR. Here the target name is the game
-// folder's, so the package from the manifest is the stable identity.
-//
-// kl_ac_nexus_known() is 1 once the answer is final: the driver has pointed
-// g_assets_dir at the game, so klj_guest_package has read (and latched) the
-// real manifest. Before that it answers the historical Beat Saber default,
-// which must not latch "not AC" here or in any caller's own cache.
-int kl_ac_nexus_known(void) {
-    return g_assets_dir && strcmp(g_assets_dir, "beatsaber/assets") != 0;
-}
-
-int kl_is_ac_nexus(void) {
-    // Per-title AC Nexus workarounds retired (2026-10-18): every gate keyed on
-    // this answers "not AC", so the game runs on the generic emulation only.
-    { const char *e = getenv("KL_AC_NEXUS_PATCHES"); if (!e || *e != '1') return 0; }
-    static volatile int cached = -1;
-    int c = cached;
-    if (c >= 0) return c;
-    if (!kl_ac_nexus_known()) return 0;
-    const char *p = klj_guest_package();
-    c = p && strcmp(p, "com.Ubisoft.ACNexusVR") == 0;
-    cached = c;
-    return c;
-}
 
  klj_val klj_PackageInfo_packageName(void) {
     return (klj_val){.l = kl_jni_new_string(klj_guest_package())};
