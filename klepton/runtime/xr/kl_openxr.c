@@ -56,6 +56,7 @@
 #include "kl_vulkan.h"
 #include "klepton.h"
 #include "kl_passthrough.h"
+#include "../diag/kl_wait.h"   // kl_game_beat: game-thread silence watcher
 
 // ------------------------------------------------------- transcribed from the spec
 // Only what we actually read or write. Every layout below is copied field for
@@ -5675,6 +5676,7 @@ static void klxr_fovea_trace(int eye, float x0, float y0, float x1, float y1,
 static XrResult klxr_WaitFrame(void *session, const XrFrameWaitInfo *info,
                                XrFrameState *state) {
     KLXR_TRACE("xrWaitFrame");
+    kl_game_beat(1);
     // hl2 (KL_HL2_FORCERT): drive the mod's CreateRenderTargets from here — the guest's
     // render/frame thread with its GL context — instead of the log handler (which ran on a
     // worker thread and re-entered logging, faulting). Self-gated: fires once, retries per

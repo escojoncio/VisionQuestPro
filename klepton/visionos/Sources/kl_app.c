@@ -1045,6 +1045,9 @@ int kl_app_guest_state(void) {
     return s;
 }
 
+int kl_app_quit_requested(void) { return kl_jni_quit_requested(); }
+const char *kl_app_quit_reason(void) { return kl_jni_quit_reason(); }
+
 static void guest_set_state(int s) {
     pthread_mutex_lock(&g_guest.mu);
     g_guest.state = s;

@@ -5,6 +5,7 @@
 #ifndef KL_GLES_H
 #define KL_GLES_H
 #include <stdint.h>
+#include <stdio.h>
 
 // 1 when the gate is on and vpgles came up on VPVulkan (lazy, first call does the work).
 int kl_gles_enabled(void);
@@ -22,5 +23,11 @@ uint32_t kl_gles_layer_texture(int is_eye, int eye, int stage, int w, int h, uin
 // End of a guest frame (ovrp EndFrame): the GL work of the frame is submitted and complete before
 // the compositor samples the eye textures.
 void kl_gles_frame_end(void);
+
+// Diagnostics only. Capped log of the context-lifecycle EGL calls (who, which
+// context/surfaces, result), also fed by kl_egl.c's own entry points; the ring is
+// dumped by the [snap] thread snapshot.
+void kl_gles_egl_log(const char *call, const void *ctx, const void *draw, const void *read, long res);
+void kl_gles_egl_dump(FILE *out);
 
 #endif

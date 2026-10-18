@@ -1913,6 +1913,7 @@ extern void (*kl_log_custom_logger)(const struct kl_android_log_message *);
 extern const char *kl_log_default_tag;
 static void kl_android_log_write(int p, const char *t, const char *m) {
     extern void kl_openxr_status_log(const char *, const char *);
+    extern void kl_jni_note_log(int, const char *, const char *);
     if (!t && kl_log_default_tag) t = kl_log_default_tag;
     if (kl_log_custom_logger) {          // the guest replaced liblog's logger: every write goes through it
         struct kl_android_log_message msg = { sizeof msg, 1 /* LOG_ID_MAIN */, p, t, NULL, 0, m };
@@ -1920,6 +1921,7 @@ static void kl_android_log_write(int p, const char *t, const char *m) {
         return;
     }
     kl_openxr_status_log(t, m);   // OpenXR CTS progress (HUD); ignores every other tag
+    kl_jni_note_log(p, t, m);     // the engine's last graphics error, for the launcher
     fprintf(stderr, "[%d/%s] %s\n", p, t ? t : "", m ? m : ""); }
 // liblog: everything at INFO or above is loggable (Oboe gates its verbose output on this).
 static int g_log_min_prio = 4; /* ANDROID_LOG_INFO */

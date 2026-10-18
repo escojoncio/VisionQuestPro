@@ -34,6 +34,7 @@
 #include "klepton.h"
 #include "kl_env.h"
 #include "kl_x18.h"
+#include "../diag/kl_wait.h"   // per-thread "blocked on" registry for the [snap] dumps
 
 // ---------- lazy handle in guest storage ----------
 // CRITICAL: bionic's sync types are `int32_t __private[N]`, so guest objects are only
@@ -640,9 +641,15 @@ int klb_pthread_mutex_init(void *m, const void *a) {
 int klb_pthread_mutex_lock(void *m) {
     if (!m) return mtx_null("lock");
     mtx_entry *e = mtx_entry_for(m);
-    mtx_wait_enter(m, __builtin_return_address(0));
-    int r = px(pthread_mutex_lock(mtx_host(e)));
-    mtx_wait_leave();
+    // Fast path: an uncontended lock registers nothing (no clock read, no slot stores).
+    int r = pthread_mutex_trylock(mtx_host(e));
+    if (r != 0) {
+        mtx_wait_enter(m, __builtin_return_address(0));
+        kl_wait_enter(KLW_MUTEX, m, 0, __builtin_return_address(0));
+        r = px(pthread_mutex_lock(mtx_host(e)));
+        kl_wait_leave();
+        mtx_wait_leave();
+    }
     if (r) {
         static _Atomic int said;
         if (atomic_fetch_add(&said, 1) < 8)
@@ -741,6 +748,19 @@ static void dump_thread_stack(FILE *out, void *pt) {
         pc = (void *)pair[1];
         fp = pair[0];
     }
+}
+
+// Who holds a guest mutex right now, for the "waiting on" lines of the [snap]
+// dumps (kl_sample.c). Returns 1 when held; fills the holder's mach port (0 if
+// it has exited), name and the lock site. Reads only; never blocks.
+int kl_pthread_mutex_holder(void *m, unsigned *act, const char **name, void **site) {
+    mtx_entry *e = mtx_find(m);
+    void *owner = e ? atomic_load(&e->owner) : NULL;
+    if (!owner) return 0;
+    *act = thread_is_alive(owner) ? (unsigned)pthread_mach_thread_np((pthread_t)owner) : 0;
+    *name = thread_name_of(owner);
+    *site = atomic_load(&e->locksite);
+    return 1;
 }
 
 static void kl_tsd_report(FILE *out);    // defined with the key table below
@@ -876,7 +896,9 @@ int klb_pthread_cond_wait(void *c, void *m) {
     atomic_store(&ce->waiter_ra, __builtin_return_address(0));
     atomic_store(&ce->waiter_ra2, kl_caller_ra2(__builtin_frame_address(0)));
     atomic_fetch_add(&ce->waiters, 1);
+    kl_wait_enter(KLW_COND, c, (uintptr_t)m, __builtin_return_address(0));
     int raw = pthread_cond_wait(cnd_host(ce), mtx_host(e));
+    kl_wait_leave();
     atomic_fetch_sub(&ce->waiters, 1);
     cnd_sleep_leave();
     cnd_wait_failed(raw, c, m, __builtin_return_address(0), prev_mtx);
@@ -961,7 +983,9 @@ int klb_pthread_cond_timedwait(void *c, void *m, const struct timespec *ts) {
     atomic_store(&ce->waiter_ra, __builtin_return_address(0));
     atomic_store(&ce->waiter_ra2, kl_caller_ra2(__builtin_frame_address(0)));
     atomic_fetch_add(&ce->waiters, 1);
+    kl_wait_enter(KLW_COND_TIMED, c, (uintptr_t)m, __builtin_return_address(0));
     int raw = pthread_cond_timedwait(cnd_host(ce), mtx_host(e), ts);
+    kl_wait_leave();
     atomic_fetch_sub(&ce->waiters, 1);
     cnd_sleep_leave();
     if (raw != ETIMEDOUT) cnd_wait_failed(raw, c, m, __builtin_return_address(0), NULL);
@@ -1667,9 +1691,14 @@ int klb_sem_post(int *s) {
 int klb_sem_wait(int *s) {
     kl_sem *k = sem_of(s);
     if (!k) { errno = EINVAL; return -1; }
-    sem_wait_enter(s, __builtin_return_address(0));
-    dispatch_semaphore_wait(k->d, DISPATCH_TIME_FOREVER);
-    sem_wait_leave();
+    // Fast path: a token is already there, so nothing blocks and nothing is registered.
+    if (dispatch_semaphore_wait(k->d, DISPATCH_TIME_NOW) != 0) {
+        sem_wait_enter(s, __builtin_return_address(0));
+        kl_wait_enter(KLW_SEM, s, 0, __builtin_return_address(0));
+        dispatch_semaphore_wait(k->d, DISPATCH_TIME_FOREVER);
+        kl_wait_leave();
+        sem_wait_leave();
+    }
     atomic_fetch_sub(&k->count, 1);
     return 0;
 }
@@ -1743,7 +1772,10 @@ int klb_sem_timedwait(int *s, const struct timespec *ts) {
     kl_sem *k = sem_of(s);
     if (!k) { errno = EINVAL; return -1; }
     dispatch_time_t when = dispatch_walltime(ts, 0);
-    if (dispatch_semaphore_wait(k->d, when) != 0) { errno = ETIMEDOUT; return -1; }
+    kl_wait_enter(KLW_SEM_TIMED, s, 0, __builtin_return_address(0));
+    long late = dispatch_semaphore_wait(k->d, when);
+    kl_wait_leave();
+    if (late != 0) { errno = ETIMEDOUT; return -1; }
     atomic_fetch_sub(&k->count, 1);
     return 0;
 }

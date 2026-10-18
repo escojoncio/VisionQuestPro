@@ -28,4 +28,10 @@ void kl_sample_report(FILE *out);
 // periodic sampler. `why` labels the event.
 void kl_sample_snapshot(FILE *out, const char *why);
 
+// Like kl_sample_snapshot but for EVERY thread, guest or not: tid/name, Mach run
+// state, pc/lr and frame chain symbolized, the shim primitive each is blocked on
+// (kl_wait.h), its EGL context / in-GL-call, then the futex words, the pending
+// Oculus platform requests and the EGL/GL call log.
+void kl_sample_snapshot_all(FILE *out, const char *why);
+
 #endif

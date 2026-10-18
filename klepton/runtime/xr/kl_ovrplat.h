@@ -49,5 +49,8 @@ void *kl_ovrplat_sym(const char *name);
 // Which ovr_* the guest resolved and called, and which DRM entry points it asked
 // for — the last of those is worth seeing even when nothing aborted.
 void kl_ovrplat_report(FILE *f);
+// [snap] dump: recent platform requests, whether each completion was queued and
+// read back through ovr_PopMessage. Never blocks.
+void kl_ovrplat_dump_requests(FILE *f);
 
 #endif

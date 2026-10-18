@@ -31,6 +31,7 @@
 #include <time.h>
 #include <unistd.h>
 #include "klepton.h"
+#include "../diag/kl_wait.h"   // per-thread "blocked on" registry for the [snap] dumps
 
 #define GUEST_PATH(p) char _kp[1024]; const char *_p = kl_guest_path((p), _kp, sizeof _kp)
 
@@ -599,10 +600,16 @@ int klb_clock_nanosleep(int clk, int flags, const struct timespec *req, struct t
         rel.tv_nsec = req->tv_nsec - now.tv_nsec;
         if (rel.tv_nsec < 0) { rel.tv_nsec += 1000000000L; rel.tv_sec--; }
         if (rel.tv_sec < 0) return 0;                       // already past
-        if (nanosleep(&rel, NULL) == 0) return 0;
+        kl_wait_enter(KLW_NANOSLEEP, NULL, (uintptr_t)rel.tv_sec * 1000000000u + (uintptr_t)rel.tv_nsec, __builtin_return_address(0));
+        int nr = nanosleep(&rel, NULL);
+        kl_wait_leave();
+        if (nr == 0) return 0;
         return kl_errno_to_linux(errno);                    // EINTR: rem is not written for absolute sleeps
     }
-    if (nanosleep(&rel, rem) == 0) return 0;
+    kl_wait_enter(KLW_NANOSLEEP, NULL, (uintptr_t)rel.tv_sec * 1000000000u + (uintptr_t)rel.tv_nsec, __builtin_return_address(0));
+    int nr = nanosleep(&rel, rem);
+    kl_wait_leave();
+    if (nr == 0) return 0;
     return kl_errno_to_linux(errno);
 }
 // An app has no CAP_SYS_TIME.

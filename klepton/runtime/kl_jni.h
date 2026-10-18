@@ -228,6 +228,13 @@ void kl_jni_add_manifest_env(const char *key, const char *value);
 // Everything the guest asked us for: classes found, natives registered, and
 // every method/field id it wanted. This is the work list.
 void kl_jni_report(FILE *out);
+
+// The engine asked to end the process (UnityPlayer.kill / Process.killProcess / System.exit):
+// the call parks its thread and records why. The host polls these to close the game.
+// kl_jni_note_log feeds the reason (E/Unity graphics errors); the guest log paths call it.
+void kl_jni_note_log(int prio, const char *tag, const char *msg);
+int  kl_jni_quit_requested(void);
+const char *kl_jni_quit_reason(void);
 int  kl_jni_knows_class(const char *cls);   // static coverage: any binding or field for this class
 
 // Runnables queued by Activity.runOnUiThread that nothing has run yet. Non-zero

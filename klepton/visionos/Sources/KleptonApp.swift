@@ -118,6 +118,26 @@ enum Lifecycle {
     static var lastPhase: ScenePhase = .active
     /// Captured from BootView before the launcher window is dismissed, to bring it back.
     static var reopenLauncher: OpenWindowAction?
+    /// Captured the same way: closes the game's space when the engine asked to end the process.
+    static var dismissSpace: DismissImmersiveSpaceAction?
+    private static var quitDispatched = false
+
+    /// The engine asked to terminate (UnityPlayer.kill ...): close the space once, so the run ends
+    /// through the normal path (compositor loop over -> immersiveEnded -> launcher with the reason).
+    /// Returns false when there was no dismiss action to use, so the caller ends the loop itself.
+    @MainActor static func engineQuit() async -> Bool {
+        guard !quitDispatched else { return true }
+        quitDispatched = true
+        NSLog("[app] the engine asked to end — closing the immersive space: \(String(cString: kl_app_quit_reason()))")
+        guard let dismiss = dismissSpace else {
+            NSLog("[app] engine quit: no dismiss action captured — the compositor ends its own loop")
+            return false
+        }
+        NSLog("[app] engine quit: dismissImmersiveSpace")
+        await dismiss()
+        NSLog("[app] engine quit: dismissImmersiveSpace returned")
+        return true
+    }
 
     /// The immersive space has ended (compositor loop over). The guest cannot run twice in one
     /// process, so the launcher comes back in its "game ended" state; if the app is already in
@@ -128,6 +148,7 @@ enum Lifecycle {
         // The game's logs, complete, to QUEST/Registros before anything else can end the process
         // (waited for only on the path that _exit()s below).
         let reopening = lastPhase != .background && reopenLauncher != nil
+        VQModel.shared.endMessage = kl_app_quit_requested() != 0 ? String(cString: kl_app_quit_reason()) : nil
         VQLog.saveSessionEnd(VQLaunch.choice?.game.id, wait: !reopening)
         if reopening, let open = reopenLauncher {
             VQModel.shared.ended = true
@@ -150,7 +171,7 @@ enum Lifecycle {
     }
 
     static func scenePhaseChanged(to phase: ScenePhase) {
-        NSLog("[app] scene phase -> \(phase) (immersive open: \(immersiveOpen))")
+        NSLog("[app] scene phase -> \(phase) at \(Date().formatted(.iso8601)) (immersive open: \(immersiveOpen))")
         lastPhase = phase
         // Coming back is the audio's cue, and it needs one: this OS silently
         // stops calling CoreAudio's render callback across a scene transition —
@@ -349,6 +370,7 @@ struct BootView: View {
     @State private var kbSuppress = false
     @FocusState private var kbFocused: Bool
     @Environment(\.openImmersiveSpace) private var openImmersiveSpace
+    @Environment(\.dismissImmersiveSpace) private var dismissImmersiveSpace
     @Environment(\.openWindow) private var openWindow
     @Environment(\.dismissWindow) private var dismissWindow
     // VisionQuestPro: the boot log stays in the log file; the window shows a loading screen
@@ -442,6 +464,7 @@ struct BootView: View {
         guard case .opened = result else { return }
         Lifecycle.immersiveOpen = true
         Lifecycle.reopenLauncher = openWindow
+        Lifecycle.dismissSpace = dismissImmersiveSpace
         NSLog("[app] immersive space open — dismissing the launcher window")
         dismissWindow(id: VQMainWindow.id)
     }

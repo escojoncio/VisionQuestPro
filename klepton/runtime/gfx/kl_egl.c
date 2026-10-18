@@ -30,6 +30,7 @@
 #include <zlib.h>
 #include "klepton.h"
 #include "kl_env.h"
+#include "../diag/kl_wait.h"   // kl_wait_set_ctx: current EGL context per thread for the [snap] dumps
 #include "kl_egl.h"
 #include "kl_ndk.h"
 #include "kl_glfb.h"
@@ -1431,11 +1432,14 @@ static EGLSurface klegl_CreatePbufferSurface(EGLDisplay dpy, EGLConfig cfg,
         if (a[0] == EGL_WIDTH)  w = a[1];
         if (a[0] == EGL_HEIGHT) h = a[1];
     }
-    return new_surface(w, h, 1);
+    EGLSurface ps = new_surface(w, h, 1);
+    kl_gles_egl_log("eglCreatePbufferSurface", NULL, ps, NULL, (long)(uintptr_t)ps);
+    return ps;
 }
 
 static unsigned klegl_DestroySurface(EGLDisplay dpy, EGLSurface s) {
     KLEGL_TRACE("eglDestroySurface");
+    kl_gles_egl_log("eglDestroySurface", NULL, s, NULL, EGL_TRUE);
     (void)dpy; (void)s; return EGL_TRUE;      // storage is never reclaimed
 }
 
@@ -1505,6 +1509,7 @@ static EGLContext klegl_CreateContext(EGLDisplay dpy, EGLConfig cfg,
         if (a[0] == 0x3098 /* EGL_CONTEXT_CLIENT_VERSION */) c->client_version = a[1];
     fprintf(stderr, "  [egl] context %u = %p, GLES %d (created on t%llu)\n",
             g_nctx - 1, (void *)c, c->client_version, klegl_tid());
+    kl_gles_egl_log("eglCreateContext", c, share, NULL, (long)(uintptr_t)c);
     return (EGLContext)c;
 }
 
@@ -1562,6 +1567,7 @@ static unsigned klegl_DestroyContext(EGLDisplay dpy, EGLContext c) {
     // Only this thread's binding can be cleared here: a context current on
     // ANOTHER thread stays current until that thread releases it, which is what
     // EGL's deferred destruction says too.
+    kl_gles_egl_log("eglDestroyContext", c, NULL, NULL, EGL_TRUE);
     (void)dpy; if (c == g_current) g_current = NULL; return EGL_TRUE;
 }
 
@@ -1576,6 +1582,8 @@ static unsigned klegl_MakeCurrent(EGLDisplay dpy, EGLSurface draw,
         fprintf(stderr, "  [egl] t%llu current context %p -> %p\n",
                 klegl_tid(), (void *)g_current, (void *)ctx);
     (void)dpy; g_draw = draw; g_read = read; g_current = ctx;
+    kl_wait_set_ctx(ctx);
+    kl_gles_egl_log(ctx ? "eglMakeCurrent" : "eglMakeCurrent(NO_CONTEXT)", ctx, draw, read, EGL_TRUE);
     // Remember the last context that is one of ours (a g_contexts[] slot) so the
     // hl2 sticky path below can answer with it after a release. The startup-video
     // teardown makes a bogus (EGLContext)0x1 current for an instant; excluding

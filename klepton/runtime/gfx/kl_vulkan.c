@@ -1429,6 +1429,36 @@ static void eye_publish_mtl(int stage, int eye, int layers) {
     }
 }
 
+// A REASSIGNED eye image (same stage, new size) is not published to the compositor until
+// the guest writes it for the first time: until then it holds uninitialised memory and
+// the compositor keeps the stage's previous (retired, still alive) image. Safety release
+// after KLVK_EYE_HOLD_MAX_S so a guest that renders without framebuffers never goes dark.
+#define KLVK_EYE_HOLD_MAX_S 3.0
+// Written from the guest thread (alloc, writes) and the retire pump; all access is atomic and
+// the release CLAIMS the hold with an exchange, so two racing releasers publish once.
+static uint64_t g_eye_hold_at[KLVK_EYE_STAGES][2]; // 0 = not held, else klvk_now_s() in ns at hold (never 0)
+static double klvk_now_s(void);
+static void klvk_eye_hold_release(int stage, int eye, const char *why) {
+    if (__atomic_exchange_n(&g_eye_hold_at[stage][eye], 0, __ATOMIC_ACQ_REL) == 0) return;
+    int layers = (int)g_eye[stage][eye].layers;
+    if (g_eye[stage][eye].img) eye_publish_mtl(stage, eye, layers ? layers : 1);
+    VKI("[vk] eye stage %d: new image published (%s)\n", stage, why);
+}
+// The guest wrote `img`: if it is a held eye image, publish it now.
+static void klvk_eye_hold_written(VkImage img) {
+    for (int st = 0; st < KLVK_EYE_STAGES; st++) for (int e = 0; e < 2; e++)
+        if (__atomic_load_n(&g_eye_hold_at[st][e], __ATOMIC_ACQUIRE) != 0 && g_eye[st][e].img == img)
+            klvk_eye_hold_release(st, e, "guest's first write");
+}
+static void klvk_eye_hold_timeout(void) {
+    double now = klvk_now_s();
+    for (int st = 0; st < KLVK_EYE_STAGES; st++) for (int e = 0; e < 2; e++) {
+        uint64_t at = __atomic_load_n(&g_eye_hold_at[st][e], __ATOMIC_ACQUIRE);
+        if (at != 0 && now - (double)at / 1e9 >= KLVK_EYE_HOLD_MAX_S)
+            klvk_eye_hold_release(st, e, "no write seen, hold timed out");
+    }
+}
+
 // A registry of every VkImage this process actually created - the guest's via
 // the vkCreateImage wrapper, ours via klvk_image_alloc, and the WSI swapchain's.
 // The image-view wrapper consults it to refuse a handle no create ever produced:
@@ -1512,7 +1542,18 @@ static klvk_prov g_prov[KLVK_PROV_MAX];
 static unsigned g_prov_n, g_prov_serial;
 static pthread_mutex_t g_prov_mu = PTHREAD_MUTEX_INITIALIZER;
 #define KLVK_PROV_CB_MAX 64
-static struct { VkCommandBuffer cb; VkImage img; } g_prov_cb[KLVK_PROV_CB_MAX];   // cb -> att0 of its open pass
+#define KLVK_PROV_ATT 8
+static struct { VkCommandBuffer cb; VkImage imgs[KLVK_PROV_ATT]; unsigned n; } g_prov_cb[KLVK_PROV_CB_MAX];   // cb -> colour/resolve images of its open pass
+// Attachment roles: 1..8 = colour 0..7, 9 = resolve, 10 = other non-depth attachment (render pass
+// compiled before we saw its description). Filled by the framebuffer map further down.
+static unsigned klvk_fb_prov(VkFramebuffer fb, VkImage *imgs, uint8_t *roles);
+static const char *const g_prov_kind_rp[]  = { "render pass", "render pass (colour 0)", "render pass (colour 1)",
+    "render pass (colour 2)", "render pass (colour 3)", "render pass (colour 4)", "render pass (colour 5)",
+    "render pass (colour 6)", "render pass (colour 7)", "render pass (resolve)", "render pass (attachment)" };
+static const char *const g_prov_kind_dyn[] = { "dynamic rendering", "dynamic rendering (colour 0)", "dynamic rendering (colour 1)",
+    "dynamic rendering (colour 2)", "dynamic rendering (colour 3)", "dynamic rendering (colour 4)", "dynamic rendering (colour 5)",
+    "dynamic rendering (colour 6)", "dynamic rendering (colour 7)", "dynamic rendering (resolve)", "dynamic rendering (attachment)" };
+static int klvk_img_info_ext(VkImage img, uint32_t *samples, uint32_t *usage);
 #define KLVK_PIPE_FS_MAX 8192
 static struct { uint64_t pipe, fs; } g_pipe_fs[KLVK_PIPE_FS_MAX];
 static unsigned g_pipe_fs_n;
@@ -1530,25 +1571,43 @@ static void klvk_prov_note(VkImage img, const char *kind, VkImage from) {
     e->kind = kind; e->npipes = 0; e->from = from; e->serial = ++g_prov_serial;
     pthread_mutex_unlock(&g_prov_mu);
 }
-static void klvk_prov_pass_begin(VkCommandBuffer cb, VkImage att0) {
+// Record every colour and resolve image of a pass (not just att0): an MSAA pass writes its
+// visible result into the RESOLVE attachment, which att0-only tracking never saw.
+static void klvk_prov_pass_imgs(VkCommandBuffer cb, const VkImage *imgs, const uint8_t *roles, unsigned n, int dyn) {
     if (!cb) return;
+    if (n > KLVK_PROV_ATT) n = KLVK_PROV_ATT;
     pthread_mutex_lock(&g_prov_mu);
     int slot = -1;
     for (int i = 0; i < KLVK_PROV_CB_MAX; i++) { if (g_prov_cb[i].cb == cb) { slot = i; break; } if (slot < 0 && !g_prov_cb[i].cb) slot = i; }
     if (slot < 0) slot = (int)(((uintptr_t)cb >> 4) % KLVK_PROV_CB_MAX);
-    g_prov_cb[slot].cb = cb; g_prov_cb[slot].img = att0;
-    if (att0) { klvk_prov *e = klvk_prov_slot(att0); e->kind = "render pass"; e->npipes = 0; e->from = 0; e->serial = ++g_prov_serial; }
+    g_prov_cb[slot].cb = cb; g_prov_cb[slot].n = 0;
+    for (unsigned k = 0; k < n; k++) {
+        if (!imgs[k]) continue;
+        int dup = 0; for (unsigned j = 0; j < g_prov_cb[slot].n; j++) if (g_prov_cb[slot].imgs[j] == imgs[k]) dup = 1;
+        if (dup) continue;
+        g_prov_cb[slot].imgs[g_prov_cb[slot].n++] = imgs[k];
+        unsigned r = roles[k] <= 10 ? roles[k] : 10;
+        klvk_prov *e = klvk_prov_slot(imgs[k]);
+        e->kind = dyn ? g_prov_kind_dyn[r] : g_prov_kind_rp[r]; e->npipes = 0; e->from = 0; e->serial = ++g_prov_serial;
+    }
     pthread_mutex_unlock(&g_prov_mu);
+}
+static void klvk_prov_pass_begin(VkCommandBuffer cb, VkFramebuffer fb) {
+    VkImage imgs[KLVK_PROV_ATT]; uint8_t roles[KLVK_PROV_ATT];
+    unsigned n = klvk_fb_prov(fb, imgs, roles);
+    klvk_prov_pass_imgs(cb, imgs, roles, n, 0);
 }
 static void klvk_prov_bind(VkCommandBuffer cb, uint64_t pipe) {
     if (!cb || !pipe) return;
     pthread_mutex_lock(&g_prov_mu);
-    VkImage att0 = 0;
-    for (int i = 0; i < KLVK_PROV_CB_MAX; i++) if (g_prov_cb[i].cb == cb) { att0 = g_prov_cb[i].img; break; }
-    if (att0) {
-        klvk_prov *e = klvk_prov_slot(att0);
-        int dup = 0; for (unsigned i = 0; i < e->npipes; i++) if (e->pipes[i] == pipe) dup = 1;
-        if (!dup && e->npipes < KLVK_PROV_PIPES) e->pipes[e->npipes++] = pipe;
+    for (int c = 0; c < KLVK_PROV_CB_MAX; c++) {
+        if (g_prov_cb[c].cb != cb) continue;
+        for (unsigned k = 0; k < g_prov_cb[c].n; k++) {
+            klvk_prov *e = klvk_prov_slot(g_prov_cb[c].imgs[k]);
+            int dup = 0; for (unsigned i = 0; i < e->npipes; i++) if (e->pipes[i] == pipe) dup = 1;
+            if (!dup && e->npipes < KLVK_PROV_PIPES) e->pipes[e->npipes++] = pipe;
+        }
+        break;
     }
     pthread_mutex_unlock(&g_prov_mu);
 }
@@ -1563,8 +1622,15 @@ static void klvk_prov_report(VkImage src, int layer_key) {
     klvk_prov e; int have = 0;
     for (unsigned i = 0; i < g_prov_n && i < KLVK_PROV_MAX; i++) if (g_prov[i].img == src) { e = g_prov[i]; have = 1; break; }
     pthread_mutex_unlock(&g_prov_mu);
-    if (!have) { VKI("[prov] layer %d source %#llx: no write seen (never a pass target, upload, clear, blit or copy — undefined content)\n",
-                     layer_key, (unsigned long long)(uintptr_t)src); return; }
+    if (!have) {
+        VkFormat f = 0; uint32_t w = 0, h = 0, sm = 0, us = 0;
+        int known = klvk_img_info_get(src, &f, &w, &h);
+        klvk_img_info_ext(src, &sm, &us);
+        VKI("[prov] layer %d source %#llx: no write seen (never a pass target, upload, clear, blit or copy — undefined content)"
+            "%s fmt %d %ux%u samples %u usage %#x\n", layer_key, (unsigned long long)(uintptr_t)src,
+            known ? ";" : "; image unknown to the info table:", (int)f, w, h, sm, us);
+        return;
+    }
     char line[640]; int o = snprintf(line, sizeof line, "[prov] layer %d source %#llx last written by %s (#%u)",
                                      layer_key, (unsigned long long)(uintptr_t)src, e.kind ? e.kind : "?", e.serial);
     if (e.from) o += snprintf(line + o, sizeof line - o, " from %#llx", (unsigned long long)(uintptr_t)e.from);
@@ -1576,7 +1642,7 @@ static void klvk_prov_report(VkImage src, int layer_key) {
         o += snprintf(line + o, sizeof line - o, "%s pipeline %#llx fs %#llx%s", i ? "," : ";",
                       (unsigned long long)e.pipes[i], (unsigned long long)fs, klvk_module_is_magenta(fs) ? " MAGENTA" : "");
     }
-    if (e.kind && !strcmp(e.kind, "render pass") && !e.npipes) o += snprintf(line + o, sizeof line - o, "; no pipeline bound (clear-only pass)");
+    if (e.kind && (!strncmp(e.kind, "render pass", 11) || !strncmp(e.kind, "dynamic rendering", 17)) && !e.npipes) o += snprintf(line + o, sizeof line - o, "; no pipeline bound (clear-only pass)");
     VKI("%s\n", line);
 }
 static void klvk_layer_mark_written(VkImage img) { klvk_layer_mark_written_how(img, "render target", VK_NULL_HANDLE); }
@@ -1928,6 +1994,10 @@ unsigned long long kl_vulkan_layer_image(int layer_key, int stage, int eye,
             slot->w, slot->h, slot->layers, w, h, layers,
             retire ? "retired (freed in a few seconds)" : "kept, not freed");
         if (retire) klvk_retire_image(d, slot->img, slot->mem, "eye image", slot->w, slot->h, slot->layers);
+        if (is_eye) {
+            __atomic_store_n(&g_eye_hold_at[stage][eye], (uint64_t)(klvk_now_s() * 1e9) + 1, __ATOMIC_RELEASE);
+            VKI("[vk] eye stage %d: new image held back until the guest's first write\n", stage);
+        }
         slot->img = VK_NULL_HANDLE;
         slot->mem = VK_NULL_HANDLE;
     }
@@ -2012,7 +2082,7 @@ unsigned long long kl_vulkan_layer_image(int layer_key, int stage, int eye,
     // Only the EYE layer is published into kl_glfb's eye table. That table is
     // what every compositor and every readback samples, so a splash quad
     // announcing itself there would replace the eye on screen with a logo.
-    if (is_eye) eye_publish_mtl(stage, eye, layers);
+    if (is_eye && __atomic_load_n(&g_eye_hold_at[stage][eye], __ATOMIC_ACQUIRE) == 0) eye_publish_mtl(stage, eye, layers);
     VKI("%s stage %d %s = VkImage %p (%ux%u %s)\n",
         is_eye ? "eye image" : "layer image",
         stage,
@@ -2762,16 +2832,34 @@ static void *klvk_overlay_mtl_texture(VkImage img) {
 // Image dimensions/format come from a side table filled by klvk_CreateImage —
 // the registry alone holds bare handles.
 #define KLVK_IMG_INFO_MAX 4096
-static struct { VkImage img; VkFormat fmt; uint32_t w, h; } g_img_info[KLVK_IMG_INFO_MAX];
+static struct { VkImage img; VkFormat fmt; uint32_t w, h, samples, usage; } g_img_info[KLVK_IMG_INFO_MAX];
 static pthread_mutex_t g_img_info_lock = PTHREAD_MUTEX_INITIALIZER;
 static void klvk_img_info_add(VkImage img, VkFormat fmt, uint32_t w, uint32_t h) {
     pthread_mutex_lock(&g_img_info_lock);
     for (int i = 0; i < KLVK_IMG_INFO_MAX; i++)
         if (!g_img_info[i].img || g_img_info[i].img == img) {
             g_img_info[i].img = img; g_img_info[i].fmt = fmt;
-            g_img_info[i].w = w; g_img_info[i].h = h; break;
+            g_img_info[i].w = w; g_img_info[i].h = h; g_img_info[i].samples = 0; g_img_info[i].usage = 0; break;
         }
     pthread_mutex_unlock(&g_img_info_lock);
+}
+static void klvk_img_info_set_ext(VkImage img, uint32_t samples, uint32_t usage) {
+    pthread_mutex_lock(&g_img_info_lock);
+    for (int i = 0; i < KLVK_IMG_INFO_MAX; i++)
+        if (g_img_info[i].img == img) { g_img_info[i].samples = samples; g_img_info[i].usage = usage; break; }
+    pthread_mutex_unlock(&g_img_info_lock);
+}
+static int klvk_img_info_ext(VkImage img, uint32_t *samples, uint32_t *usage) {
+    int ok = 0;
+    pthread_mutex_lock(&g_img_info_lock);
+    for (int i = 0; i < KLVK_IMG_INFO_MAX; i++)
+        if (g_img_info[i].img == img) {
+            if (samples) *samples = g_img_info[i].samples;
+            if (usage) *usage = g_img_info[i].usage;
+            ok = 1; break;
+        }
+    pthread_mutex_unlock(&g_img_info_lock);
+    return ok;
 }
 static int klvk_img_info_get(VkImage img, VkFormat *fmt, uint32_t *w, uint32_t *h) {
     int ok = 0;
@@ -4000,7 +4088,10 @@ static void klvk_retire_pump_ex(klvk_device *d, int force_quick) {
         const char *e = getenv("KL_VK_FREE_AFTER_S");
         after = e && *e ? atof(e) : 5.0;
         if (after < 1.0) after = 1.0;
+        // A retired eye image must outlive the hold that keeps it published as the stage's image.
+        if (after < KLVK_EYE_HOLD_MAX_S + 1.0) after = KLVK_EYE_HOLD_MAX_S + 1.0;
     }
+    klvk_eye_hold_timeout();
     double now = klvk_now_s();
     unsigned long long f = __atomic_load_n(&g_frame_issued, __ATOMIC_ACQUIRE);
     struct { VkImage img; VkDeviceMemory mem; const char *what; uint32_t w, h, layers; } go[KLVK_RETIRE_MAX];
@@ -4464,6 +4555,7 @@ static void VKAPI_CALL klvk_CmdCopyImage(VkCommandBuffer cb, VkImage src,
     klvk_retire_touch(src, "copy source"); klvk_retire_touch(dst, "copy destination");
     if (dst) klvk_prov_note(dst, "vkCmdCopyImage", src);
     if (dst) klvk_layer_mark_written_how(dst, "vkCmdCopyImage", src);
+    if (dst) klvk_eye_hold_written(dst);
     if (dst) klvk_asw_note_write(dst, "vkCmdCopyImage");
     if (klvk_trace() && klvk_trace_once((unsigned long long)(uintptr_t)src,(unsigned long long)(uintptr_t)dst)) {
         int sk=klvk_layer_image_key(src), dk=klvk_layer_image_key(dst);
@@ -4600,6 +4692,7 @@ static void VKAPI_CALL klvk_CmdBlitImage(VkCommandBuffer cb, VkImage src,
     klvk_retire_touch(src, "blit source"); klvk_retire_touch(dst, "blit destination");
     if (dst) klvk_prov_note(dst, "vkCmdBlitImage", src);
     if (dst) klvk_layer_mark_written_how(dst, "vkCmdBlitImage", src);
+    if (dst) klvk_eye_hold_written(dst);
     if (dst) klvk_asw_note_write(dst, "vkCmdBlitImage");
     if (KLVK_IMG_BAD(src) || KLVK_IMG_BAD(dst)) {
         if (!kl_env_on("KL_VK_WILD_REDIRECT", 0)) return;   // drop, as the copy above
@@ -4619,6 +4712,7 @@ static void VKAPI_CALL klvk_CmdResolveImage(VkCommandBuffer cb, VkImage src,
             (unsigned long long)(uintptr_t)src, (unsigned long long)(uintptr_t)dst);
         return;
     }
+    klvk_eye_hold_written(dst);
     if (real) real(cb, src, sl, dst, dl, n, r);
 }
 static void VKAPI_CALL klvk_CmdClearColorImage(VkCommandBuffer cb, VkImage img,
@@ -4630,6 +4724,7 @@ static void VKAPI_CALL klvk_CmdClearColorImage(VkCommandBuffer cb, VkImage img,
         (unsigned long long)(uintptr_t)img); return; }
     klvk_prov_note(img, (c && c->float32[0] > 0.9f && c->float32[1] < 0.1f && c->float32[2] > 0.9f)
                         ? "vkCmdClearColorImage MAGENTA" : "vkCmdClearColorImage", 0);
+    klvk_eye_hold_written(img);
     if (real) real(cb, img, l, c, n, r);
 }
 static int emu_on(void);    // defined below (target/env gate for the mirror + probes)
@@ -4916,8 +5011,10 @@ static VkResult VKAPI_CALL klvk_CreateImage(VkDevice dev, const VkImageCreateInf
         }
     }
     if (r == VK_SUCCESS && out) klvk_img_reg_add(*out);
-    if (r == VK_SUCCESS && out && ci)
+    if (r == VK_SUCCESS && out && ci) {
         klvk_img_info_add(*out, ci->format, ci->extent.width, ci->extent.height);
+        klvk_img_info_set_ext(*out, (uint32_t)ci->samples, (uint32_t)ci->usage);
+    }
     if (r == VK_SUCCESS && out && *out && did_astc_sub) klvk_astc_sub_add(*out);
     if (r == VK_SUCCESS && out && *out && ci && klvk_taa_depth_on() &&
         klvk_is_depth_format(ci->format) &&
@@ -5370,7 +5467,7 @@ typedef struct { const char *name; PFN_vkVoidFunction fn; } entry;
 
 // --- KL_TRACE: framebuffer + render-pass census (what image is rendered INTO) ---
 #define KLVK_FB_MAP_MAX 4096
-static struct { VkFramebuffer fb; VkImage img0; unsigned att; } g_fb_map[KLVK_FB_MAP_MAX];
+static struct { VkFramebuffer fb; VkImage img0; unsigned att; VkImage imgs[KLVK_PROV_ATT]; uint8_t role[KLVK_PROV_ATT]; } g_fb_map[KLVK_FB_MAP_MAX];
 static int g_fb_map_n;
 static pthread_mutex_t g_fb_map_lock = PTHREAD_MUTEX_INITIALIZER;
 static VkImage klvk_fb_image0(VkFramebuffer fb) {
@@ -5379,6 +5476,44 @@ static VkImage klvk_fb_image0(VkFramebuffer fb) {
     for (int i = g_fb_map_n - 1; i >= 0; i--) if (g_fb_map[i].fb == fb) { img = g_fb_map[i].img0; break; }
     pthread_mutex_unlock(&g_fb_map_lock);
     return img;
+}
+// render pass -> role of each attachment (colour k / resolve), for the provenance tracker.
+#define KLVK_RP_ROLE_MAX 1024
+static struct { VkRenderPass rp; uint8_t role[KLVK_PROV_ATT]; } g_rp_role[KLVK_RP_ROLE_MAX];
+static unsigned g_rp_role_n;
+static pthread_mutex_t g_rp_role_lock = PTHREAD_MUTEX_INITIALIZER;
+static void klvk_rp_role_set(uint8_t *role, uint32_t att, unsigned r, uint32_t count) {
+    if (att < count && att < KLVK_PROV_ATT && !role[att]) role[att] = (uint8_t)r;
+}
+static void klvk_rp_role_commit(VkRenderPass rp, const uint8_t *role) {
+    if (!rp) return;
+    pthread_mutex_lock(&g_rp_role_lock);
+    unsigned i = g_rp_role_n++ % KLVK_RP_ROLE_MAX;
+    g_rp_role[i].rp = rp; memcpy(g_rp_role[i].role, role, KLVK_PROV_ATT);
+    pthread_mutex_unlock(&g_rp_role_lock);
+}
+static int klvk_rp_role_get(VkRenderPass rp, uint8_t *role) {
+    int ok = 0;
+    pthread_mutex_lock(&g_rp_role_lock);
+    unsigned n = g_rp_role_n < KLVK_RP_ROLE_MAX ? g_rp_role_n : KLVK_RP_ROLE_MAX;
+    for (unsigned k = 0; k < n && !ok; k++) {
+        unsigned i = (g_rp_role_n - 1 - k) % KLVK_RP_ROLE_MAX;
+        if (g_rp_role[i].rp == rp) { memcpy(role, g_rp_role[i].role, KLVK_PROV_ATT); ok = 1; }
+    }
+    pthread_mutex_unlock(&g_rp_role_lock);
+    return ok;
+}
+// Colour/resolve images of a framebuffer with their roles (provenance tracker).
+static unsigned klvk_fb_prov(VkFramebuffer fb, VkImage *imgs, uint8_t *roles) {
+    unsigned n = 0;
+    pthread_mutex_lock(&g_fb_map_lock);
+    for (int i = g_fb_map_n - 1; i >= 0; i--) if (g_fb_map[i].fb == fb) {
+        n = g_fb_map[i].att < KLVK_PROV_ATT ? g_fb_map[i].att : KLVK_PROV_ATT;
+        for (unsigned k = 0; k < n; k++) { imgs[k] = g_fb_map[i].imgs[k]; roles[k] = g_fb_map[i].role[k]; }
+        break;
+    }
+    pthread_mutex_unlock(&g_fb_map_lock);
+    return n;
 }
 // SpaceWarp write tracking (kl_vulkan_spacewarp_writes): framebuffers that have
 // a SpaceWarp image among their attachments, so a vkCmdBeginRenderPass on one
@@ -5427,6 +5562,28 @@ static void klvk_retire_note_pass(const VkRenderPassBeginInfo *bi) {
     if (!n) { im[0] = klvk_fb_image0(bi->framebuffer); n = im[0] ? 1 : 0; }
     for (uint32_t k = 0; k < n; k++) klvk_retire_touch(im[k], "render pass attachment");
 }
+// A render pass begins on `bi->framebuffer`: its colour images are being written (eye-hold release).
+static void klvk_eye_hold_pass(const VkRenderPassBeginInfo *bi) {
+    if (!bi) return;
+    int held = 0;
+    for (int st = 0; st < KLVK_EYE_STAGES; st++) for (int e = 0; e < 2; e++)
+        if (__atomic_load_n(&g_eye_hold_at[st][e], __ATOMIC_ACQUIRE)) held = 1;
+    if (!held) return;
+    VkImage im[8] = { 0 };
+    uint32_t n = 0;
+    for (const VkBaseInStructure *p = bi->pNext; p; p = p->pNext) {
+        if (p->sType != VK_STRUCTURE_TYPE_RENDER_PASS_ATTACHMENT_BEGIN_INFO) continue;
+        const VkRenderPassAttachmentBeginInfo *ab = (const VkRenderPassAttachmentBeginInfo *)p;
+        for (uint32_t k = 0; ab->pAttachments && k < ab->attachmentCount && n < 8; k++)
+            im[n++] = klvk_view_image(ab->pAttachments[k]);
+    }
+    if (!n) {
+        VkImage fi[KLVK_PROV_ATT]; uint8_t fr[KLVK_PROV_ATT];
+        unsigned fn = klvk_fb_prov(bi->framebuffer, fi, fr);
+        for (unsigned k = 0; k < fn && n < 8; k++) im[n++] = fi[k];
+    }
+    for (uint32_t k = 0; k < n; k++) klvk_eye_hold_written(im[k]);
+}
 static void klvk_asw_note_pass(const VkRenderPassBeginInfo *bi, const char *how) {
     klvk_retire_note_pass(bi);
     if (!bi || !__atomic_load_n(&g_asw_any, __ATOMIC_ACQUIRE)) return;
@@ -5472,7 +5629,18 @@ static VkResult VKAPI_CALL klvk_CreateFramebuffer(VkDevice dev,
         pthread_mutex_lock(&g_fb_map_lock);
         if (g_fb_map_n < KLVK_FB_MAP_MAX) {
             g_fb_map[g_fb_map_n].fb = *out; g_fb_map[g_fb_map_n].img0 = img0;
-            g_fb_map[g_fb_map_n].att = ci->attachmentCount; g_fb_map_n++;
+            g_fb_map[g_fb_map_n].att = ci->attachmentCount;
+            uint8_t role[KLVK_PROV_ATT] = { 0 };
+            int have_role = klvk_rp_role_get(ci->renderPass, role);
+            for (uint32_t k = 0; ci->pAttachments && k < ci->attachmentCount && k < KLVK_PROV_ATT; k++) {
+                VkImage ak = k == 0 ? img0 : klvk_view_image(ci->pAttachments[k]);
+                VkFormat af = 0;
+                // Depth/stencil images are skipped; without a description every other attachment counts.
+                int depth = klvk_img_info_get(ak, &af, NULL, NULL) && klvk_is_depth_format(af);
+                g_fb_map[g_fb_map_n].imgs[k] = depth ? VK_NULL_HANDLE : ak;
+                g_fb_map[g_fb_map_n].role[k] = have_role ? role[k] : 10;
+            }
+            g_fb_map_n++;
         }
         pthread_mutex_unlock(&g_fb_map_lock);
         // KL_RT_DEBUG: remember the latest substantial UI render target (the guest
@@ -5576,9 +5744,10 @@ static void VKAPI_CALL klvk_CmdBeginRenderPass(VkCommandBuffer cb,
             (unsigned long long)(uintptr_t)im, klvk_img_tag(im), klvk_layer_image_key(im),
             bi->renderArea.extent.width, bi->renderArea.extent.height);
     }
+    klvk_eye_hold_pass(bi);
     klvk_asw_note_pass(bi, "render pass");
     klvk_ed_note_pass(bi);
-    if (bi) klvk_prov_pass_begin(cb, klvk_fb_image0(bi->framebuffer));
+    if (bi) klvk_prov_pass_begin(cb, bi->framebuffer);
     VkRenderPassBeginInfo tmp; VkClearValue *inj = klvk_probe_inject_clears(bi, &tmp);
     if (real) real(cb, inj ? &tmp : bi, c);
     free(inj);
@@ -5595,8 +5764,9 @@ static void VKAPI_CALL klvk_CmdBeginRenderPass2(VkCommandBuffer cb,
             (unsigned long long)(uintptr_t)im, klvk_img_tag(im), klvk_layer_image_key(im),
             bi->renderArea.extent.width, bi->renderArea.extent.height);
     }
+    klvk_eye_hold_pass(bi);
     klvk_asw_note_pass(bi, "render pass 2");
-    if (bi) klvk_prov_pass_begin(cb, klvk_fb_image0(bi->framebuffer));
+    if (bi) klvk_prov_pass_begin(cb, bi->framebuffer);
     klvk_ed_note_pass(bi);
     VkRenderPassBeginInfo tmp; VkClearValue *inj = klvk_probe_inject_clears(bi, &tmp);
     if (real) real(cb, inj ? &tmp : bi, sbi);
@@ -5638,6 +5808,17 @@ static VkResult VKAPI_CALL klvk_CreateRenderPass(VkDevice dev,
     }
     VkResult r = real ? real(dev, ci, a, out) : VK_ERROR_INITIALIZATION_FAILED;
     if (r == VK_SUCCESS && out && ed_att >= 0) klvk_rpd_add(*out, ed_att, ed_clear);
+    if (r == VK_SUCCESS && out && ci) {   // provenance: which attachments are colour / resolve
+        uint8_t role[KLVK_PROV_ATT] = { 0 };
+        for (uint32_t sp = 0; sp < ci->subpassCount; sp++) {
+            const VkSubpassDescription *d = &ci->pSubpasses[sp];
+            for (uint32_t k = 0; d->pColorAttachments && k < d->colorAttachmentCount; k++)
+                klvk_rp_role_set(role, d->pColorAttachments[k].attachment, 1 + (k < 7 ? k : 7), ci->attachmentCount);
+            for (uint32_t k = 0; d->pResolveAttachments && k < d->colorAttachmentCount; k++)
+                klvk_rp_role_set(role, d->pResolveAttachments[k].attachment, 9, ci->attachmentCount);
+        }
+        klvk_rp_role_commit(*out, role);
+    }
     if (ci && (r != VK_SUCCESS || klvk_trace())) {
         unsigned inputs = 0;
         for (uint32_t i = 0; i < ci->subpassCount; i++)
@@ -5751,6 +5932,17 @@ static VkResult VKAPI_CALL klvk_CreateRenderPass2(VkDevice dev,
     if (r == VK_SUCCESS && out && ed_att >= 0) klvk_rpd_add(*out, ed_att, ed_clear);
     if (r == VK_SUCCESS && out && probe_att != VK_ATTACHMENT_UNUSED)
         klvk_clearpass_add(*out, probe_att);
+    if (r == VK_SUCCESS && out && ci) {   // provenance: which attachments are colour / resolve
+        uint8_t role[KLVK_PROV_ATT] = { 0 };
+        for (uint32_t sp = 0; sp < ci->subpassCount; sp++) {
+            const VkSubpassDescription2 *d = &ci->pSubpasses[sp];
+            for (uint32_t k = 0; d->pColorAttachments && k < d->colorAttachmentCount; k++)
+                klvk_rp_role_set(role, d->pColorAttachments[k].attachment, 1 + (k < 7 ? k : 7), ci->attachmentCount);
+            for (uint32_t k = 0; d->pResolveAttachments && k < d->colorAttachmentCount; k++)
+                klvk_rp_role_set(role, d->pResolveAttachments[k].attachment, 9, ci->attachmentCount);
+        }
+        klvk_rp_role_commit(*out, role);
+    }
     if (ci && (r != VK_SUCCESS || klvk_trace())) {
         unsigned inputs = 0;
         for (uint32_t i = 0; i < ci->subpassCount; i++)
@@ -5805,6 +5997,20 @@ static void VKAPI_CALL klvk_CmdBeginRendering(VkCommandBuffer cb,
                 i, (unsigned long long)(uintptr_t)v,
                 (unsigned long long)(uintptr_t)im, klvk_img_tag(im), klvk_layer_image_key(im));
         }
+    }
+    if (ri && ri->pColorAttachments) {   // eye-hold release: the guest renders into these
+        for (uint32_t i = 0; i < ri->colorAttachmentCount; i++) {
+            klvk_eye_hold_written(klvk_view_image(ri->pColorAttachments[i].imageView));
+            klvk_eye_hold_written(klvk_view_image(ri->pColorAttachments[i].resolveImageView));
+        }
+    }
+    if (ri && ri->pColorAttachments) {   // provenance: colour + resolve images (interleaved: 2 per colour slot)
+        VkImage pi[KLVK_PROV_ATT]; uint8_t pr[KLVK_PROV_ATT]; unsigned pn = 0;
+        for (uint32_t i = 0; i < ri->colorAttachmentCount && i < KLVK_PROV_ATT / 2; i++) {
+            pi[pn] = klvk_view_image(ri->pColorAttachments[i].imageView); pr[pn++] = (uint8_t)(1 + i);
+            pi[pn] = klvk_view_image(ri->pColorAttachments[i].resolveImageView); pr[pn++] = 9;
+        }
+        klvk_prov_pass_imgs(cb, pi, pr, pn, 1);
     }
     if (ri && __atomic_load_n(&g_retire_live, __ATOMIC_ACQUIRE)) {
         for (uint32_t i = 0; i < ri->colorAttachmentCount && ri->pColorAttachments; i++) {

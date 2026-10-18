@@ -18,6 +18,9 @@
 #include "kl_gles.h"
 #include "kl_glfb.h"
 #include "kl_vulkan.h"
+#include "../diag/kl_wait.h"   // per-thread EGL context / in-GL-call marks for the [snap] dumps
+#include <stdatomic.h>
+#include <time.h>
 
 #if defined(__has_include)
 #if __has_include(<vulkan/vulkan.h>)
@@ -41,14 +44,171 @@ static void            *g_vk_gipa;
 static int              g_state;  // 0 unknown, 1 up, -1 off/failed
 static pthread_once_t   g_once = PTHREAD_ONCE_INIT;
 
+// ---- diagnostics (no behaviour change) -------------------------------------
+// Capped event ring of the EGL context-lifecycle calls plus any glFinish /
+// glClientWaitSync / eglClientWaitSync that blocks > 100 ms. Written lock-free
+// (a torn entry costs one garbled dump line); the first KL_GLES_LOG_N events
+// (default 300) are also printed live, slow waits and failures always are.
+#define GLES_RING 256
+typedef struct {
+    uint64_t t_ns, tid; const char *call;
+    const void *ctx, *draw, *read; long res;
+} gles_ev;
+static gles_ev         g_ev[GLES_RING];
+static _Atomic unsigned g_nev;
+static uint64_t gles_tid(void) { uint64_t t = 0; pthread_threadid_np(NULL, &t); return t; }
+
+void kl_gles_egl_log(const char *call, const void *ctx, const void *draw, const void *read, long res) {
+    unsigned n = atomic_fetch_add(&g_nev, 1);
+    gles_ev *e = &g_ev[n % GLES_RING];
+    e->t_ns = clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW); e->tid = gles_tid();
+    e->call = call; e->ctx = ctx; e->draw = draw; e->read = read; e->res = res;
+    static unsigned cap = ~0u;
+    if (cap == ~0u) cap = kl_env_uint("KL_GLES_LOG_N", 300u);
+    if (n < cap)
+        fprintf(stderr, "  [gles] t%llu %s ctx=%p draw=%p read=%p -> %#lx\n",
+                (unsigned long long)e->tid, call, ctx, draw, read, res);
+}
+
+void kl_gles_egl_dump(FILE *out) {
+    unsigned n = atomic_load(&g_nev);
+    uint64_t now = clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW);
+    fprintf(out, "  [snap] EGL/GL call log (last %u of %u):\n", n < 64 ? n : 64, n);
+    for (unsigned k = n < 64 ? n : 64; k > 0; k--) {
+        const gles_ev *e = &g_ev[(n - k) % GLES_RING];
+        fprintf(out, "    -%6.1f s t%llu %-24s ctx=%p draw=%p read=%p -> %#lx\n",
+                (double)(now - e->t_ns) / 1e9, (unsigned long long)e->tid, e->call ? e->call : "?",
+                e->ctx, e->draw, e->read, e->res);
+    }
+}
+
+static void gles_slow(const char *call, uint64_t t0) {
+    uint64_t dt = clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW) - t0;
+    if (dt < 100000000ull) return;
+    fprintf(stderr, "  [gles] SLOW %s on t%llu took %llu ms\n", call,
+            (unsigned long long)gles_tid(), (unsigned long long)(dt / 1000000ull));
+    kl_gles_egl_log(call, NULL, NULL, NULL, (long)(dt / 1000000ull));
+}
+
+// Wrappers around the vpgles entry points; each forwards the arguments
+// untouched and returns the real result. `kl_gl_enter/leave` mark the thread as
+// being inside the call, which is what the thread snapshot prints.
+static void *r_MakeCurrent, *r_CreateContext, *r_DestroyContext, *r_CreatePbuf,
+            *r_DestroySurface, *r_GetError, *r_Finish, *r_CWaitSync, *r_ECWaitSync;
+static __thread const char *t_last_egl;      // last wrapped EGL call, to name an eglGetError
+
+static unsigned w_MakeCurrent(void *d, void *dr, void *rd, void *c) {
+    kl_gl_enter("eglMakeCurrent");
+    unsigned r = ((unsigned (*)(void *, void *, void *, void *))r_MakeCurrent)(d, dr, rd, c);
+    kl_gl_leave();
+    t_last_egl = c ? "eglMakeCurrent" : "eglMakeCurrent(NO_CONTEXT)";
+    if (r) kl_wait_set_ctx(c);
+    kl_gles_egl_log(t_last_egl, c, dr, rd, (long)r);
+    return r;
+}
+static void *w_CreateContext(void *d, void *cfg, void *share, const int32_t *a) {
+    kl_gl_enter("eglCreateContext");
+    void *r = ((void *(*)(void *, void *, void *, const int32_t *))r_CreateContext)(d, cfg, share, a);
+    kl_gl_leave();
+    t_last_egl = "eglCreateContext";
+    kl_gles_egl_log(t_last_egl, r, share, NULL, (long)(uintptr_t)r);
+    return r;
+}
+static unsigned w_DestroyContext(void *d, void *c) {
+    kl_gl_enter("eglDestroyContext");
+    unsigned r = ((unsigned (*)(void *, void *))r_DestroyContext)(d, c);
+    kl_gl_leave();
+    t_last_egl = "eglDestroyContext";
+    kl_gles_egl_log(t_last_egl, c, NULL, NULL, (long)r);
+    return r;
+}
+static void *w_CreatePbuf(void *d, void *cfg, const int32_t *a) {
+    kl_gl_enter("eglCreatePbufferSurface");
+    void *r = ((void *(*)(void *, void *, const int32_t *))r_CreatePbuf)(d, cfg, a);
+    kl_gl_leave();
+    t_last_egl = "eglCreatePbufferSurface";
+    kl_gles_egl_log(t_last_egl, NULL, r, NULL, (long)(uintptr_t)r);
+    return r;
+}
+static unsigned w_DestroySurface(void *d, void *s) {
+    kl_gl_enter("eglDestroySurface");
+    unsigned r = ((unsigned (*)(void *, void *))r_DestroySurface)(d, s);
+    kl_gl_leave();
+    t_last_egl = "eglDestroySurface";
+    kl_gles_egl_log(t_last_egl, NULL, s, NULL, (long)r);
+    return r;
+}
+// The error the GUEST reads is the one logged; the wrapper never calls the real
+// eglGetError on its own, because that would consume the error.
+static int w_GetError(void) {
+    int e = ((int (*)(void))r_GetError)();
+    if (e != 0x3000) {
+        kl_gles_egl_log("eglGetError", NULL, NULL, NULL, e);
+        fprintf(stderr, "  [gles] t%llu eglGetError -> %#x after %s\n",
+                (unsigned long long)gles_tid(), e, t_last_egl ? t_last_egl : "?");
+    }
+    return e;
+}
+static void w_Finish(void) {
+    uint64_t t0 = clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW);
+    kl_gl_enter("glFinish");
+    ((void (*)(void))r_Finish)();
+    kl_gl_leave();
+    gles_slow("glFinish", t0);
+}
+static uint32_t w_ClientWaitSync(void *sync, uint32_t flags, uint64_t timeout) {
+    uint64_t t0 = clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW);
+    kl_gl_enter("glClientWaitSync");
+    uint32_t r = ((uint32_t (*)(void *, uint32_t, uint64_t))r_CWaitSync)(sync, flags, timeout);
+    kl_gl_leave();
+    gles_slow("glClientWaitSync", t0);
+    return r;
+}
+static int32_t w_EglClientWaitSync(void *d, void *sync, int32_t flags, uint64_t timeout) {
+    uint64_t t0 = clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW);
+    kl_gl_enter("eglClientWaitSync");
+    int32_t r = ((int32_t (*)(void *, void *, int32_t, uint64_t))r_ECWaitSync)(d, sync, flags, timeout);
+    kl_gl_leave();
+    gles_slow("eglClientWaitSync", t0);
+    return r;
+}
+
+// Returns the wrapper for the entry points above, else `p` unchanged.
+static void *gles_diag_wrap(const char *name, void *p) {
+#define W(n, real, wrap) if (!strcmp(name, n)) { if (!real) real = p; return real == p ? (void *)wrap : p; }
+    W("eglMakeCurrent", r_MakeCurrent, w_MakeCurrent)
+    W("eglCreateContext", r_CreateContext, w_CreateContext)
+    W("eglDestroyContext", r_DestroyContext, w_DestroyContext)
+    W("eglCreatePbufferSurface", r_CreatePbuf, w_CreatePbuf)
+    W("eglDestroySurface", r_DestroySurface, w_DestroySurface)
+    W("eglGetError", r_GetError, w_GetError)
+    W("glFinish", r_Finish, w_Finish)
+    W("glClientWaitSync", r_CWaitSync, w_ClientWaitSync)
+    W("eglClientWaitSync", r_ECWaitSync, w_EglClientWaitSync)
+#undef W
+    return p;
+}
+
+// The route line the log was missing: which GLES stack serves the guest, and why.
+static void gles_route(const char *route, const char *why) {
+    fprintf(stderr, "[gles] ruta: %s — %s\n", route, why);
+}
+
 static void kl_gles_bringup(void) {
     g_state = -1;
-    if (!kl_env_on("KL_GLES_VPK", 0)) return;
+    if (!kl_env_on("KL_GLES_VPK", 0)) {
+        gles_route(kl_glfb_enabled() ? "ANGLE" : "otra (gateway nulo de kl_egl.c, sin GL real)",
+                   kl_glfb_enabled() ? "KL_GLES_VPK=0 (OpenGL ES con VPKEngine desactivado), KL_GLFB activo"
+                                     : "KL_GLES_VPK=0 y KL_GLFB inactivo");
+        return;
+    }
     const char *path = kl_env_str("KL_MVK_DYLIB", NULL);
     void *h = path ? dlopen(path, RTLD_NOW | RTLD_LOCAL) : NULL;
     if (!h) {
         fprintf(stderr, "  [gles] KL_GLES_VPK=1 but VPVulkan is not loaded (KL_MVK_DYLIB=%s): "
                         "GLES stays on the previous gateway\n", path ? path : "(unset)");
+        gles_route(kl_glfb_enabled() ? "ANGLE" : "otra (gateway nulo de kl_egl.c)",
+                   "KL_GLES_VPK=1 pero VPVulkan no carga (fallback)");
         return;
     }
     vpgles_init_fn init = (vpgles_init_fn)dlsym(h, "vpgles_init");
@@ -60,14 +220,19 @@ static void kl_gles_bringup(void) {
     if (!init || !g_proc || !g_device || !g_wrap || !g_flush || !g_vk_gipa) {
         fprintf(stderr, "  [gles] this VPVulkan has no vpgles entry points — GLES stays on the "
                         "previous gateway\n");
+        gles_route(kl_glfb_enabled() ? "ANGLE" : "otra (gateway nulo de kl_egl.c)",
+                   "KL_GLES_VPK=1 pero a este VPVulkan le faltan los puntos de entrada vpgles (fallback)");
         return;
     }
     if (!init(g_vk_gipa)) {
         fprintf(stderr, "  [gles] vpgles_init failed (see gles.err) — GLES stays on the previous gateway\n");
+        gles_route(kl_glfb_enabled() ? "ANGLE" : "otra (gateway nulo de kl_egl.c)",
+                   "KL_GLES_VPK=1 pero vpgles_init fallo (fallback)");
         return;
     }
     g_state = 1;
     fprintf(stderr, "  [gles] guest GLES served by VPKEngine (vpgles on VPVulkan)\n");
+    gles_route("VPKEngine (vpgles)", "KL_GLES_VPK=1 y vpgles_init correcto; las entradas gl*/egl* vienen de vpgles");
 }
 
 int kl_gles_enabled(void) {
@@ -77,7 +242,8 @@ int kl_gles_enabled(void) {
 
 void *kl_gles_sym(const char *name) {
     if (!name || !kl_gles_enabled()) return NULL;
-    return g_proc(name);
+    void *p = g_proc(name);
+    return p ? gles_diag_wrap(name, p) : NULL;
 }
 
 void kl_gles_frame_end(void) {

@@ -1521,6 +1521,13 @@ final class KleptonCompositor {
         NSLog("[cp] minimal loop ended after \(n) frames")
     }
 
+    // Engine-quit state (see the top of the render loop). quitDispatched/quitAt: render thread only.
+    private var quitDispatched = false
+    private var quitAt = Date()
+    private var quitForceEnd = false
+    private let quitLock = NSLock()
+    private func setQuitForceEnd() { quitLock.lock(); quitForceEnd = true; quitLock.unlock() }
+
     private func renderLoop() {
         layerRenderer.waitUntilRunning()
         lastRepeatCount = layerRenderer.minimumFrameRepeatCount
@@ -1577,13 +1584,36 @@ final class KleptonCompositor {
         var nextReport = Date()
         NSLog("[cp] render loop entered (startup frame-trace on; build has fence content-gate + diag)")
         loop: while true {
+            // The engine asked to terminate (fatal error): close the space instead of freezing on its
+            // last picture. Checked here, not in renderFrame, so the sync and async guest paths share it.
+            if !quitDispatched && kl_app_quit_requested() != 0 {
+                quitDispatched = true
+                quitAt = Date()
+                Task { @MainActor [weak self] in
+                    let ok = await Lifecycle.engineQuit()
+                    if !ok { self?.setQuitForceEnd() }
+                }
+            }
+            if quitDispatched {
+                // The dismiss action was missing, or the system did not end the space in time:
+                // end the loop ourselves (immersiveEnded then brings the launcher back).
+                quitLock.lock(); let force = quitForceEnd; quitLock.unlock()
+                if force || Date().timeIntervalSince(quitAt) > 5 {
+                    NSLog("[cp] engine quit: space did not end by itself (force \(force)) — ending the render loop")
+                    break loop
+                }
+            }
             switch layerRenderer.state {
             case .invalidated:
+                NSLog("[cp] layer invalidated at \(Date().formatted(.iso8601)) (iteration \(iterations))")
                 break loop
             case .paused:
-                NSLog("[cp] layer paused at iteration \(iterations) — waiting")
+                // visionOS cut the space (Crown press, window closed, system UI): time it.
+                let pausedAt = Date()
+                NSLog("[cp] layer paused at \(pausedAt.formatted(.iso8601)), iteration \(iterations) — waiting")
                 layerRenderer.waitUntilRunning()
-                NSLog("[cp] layer running again")
+                NSLog("[cp] layer running again at \(Date().formatted(.iso8601)) "
+                      + "(paused \(String(format: "%.2f", Date().timeIntervalSince(pausedAt))) s)")
                 // ...and the audio, which does NOT come back on its own.
                 //
                 // This transition is the immersive space being temporarily
@@ -2580,16 +2610,25 @@ final class KleptonCompositor {
             // The menu is the video backdrop PLUS the guest's UI quad overlays on
             // top (once it can allocate its layers). Draw them over the skybox so
             // the menu shows through instead of only the loading environment.
+            noteBackfill(nil)
             _ = encodeOverlays(enc, viewIndices: viewIndices, drawable: drawable,
                                originFromHead: originFromHead, writeDepth: true)
+            drawFpsHud(enc, viewIndices: viewIndices, drawable: drawable, originFromHead: originFromHead)
             enc.endEncoding()
             return viewIndices.count
         } else if loadingVideo != nil {
             // Player up, no video frame yet (start, loop wrap): black + the guest's
             // overlays. Falling through to the eye showed its stale frame-0 picture
             // (AC Nexus log 34: purple flashes while the loading video started).
+            // Black far plane first: with the depth cleared to 0 the gaps would show the room.
+            if kl_passthrough_active() == 0 {
+                drawBlackBackfill(enc, viewIndices: viewIndices, drawable: drawable,
+                                  layered: layered, originFromHead: originFromHead)
+                noteBackfill("loading video player up, no frame yet")
+            } else { noteBackfill(nil) }
             _ = encodeOverlays(enc, viewIndices: viewIndices, drawable: drawable,
                                originFromHead: originFromHead, writeDepth: true)
+            drawFpsHud(enc, viewIndices: viewIndices, drawable: drawable, originFromHead: originFromHead)
             enc.endEncoding()
             return viewIndices.count
         }
@@ -2725,6 +2764,21 @@ final class KleptonCompositor {
         // files no list, which is every guest but Steam Link and every run
         // under KL_XR_LAYERS=0, and those take the eye pass unchanged.
         let nproj = projLayerCount
+        // Nothing of the guest's eye will be drawn this frame and no passthrough: without
+        // this the pass is a black clear with depth 0, which visionOS reads as "nothing
+        // there" and fills with the room. Quest/OpenXR never shows the room without
+        // passthrough, so lay down an opaque black plane at a finite far depth first.
+        if nproj == 0, visible == 0, kl_passthrough_active() == 0 {
+            drawBlackBackfill(enc, viewIndices: viewIndices, drawable: drawable,
+                              layered: layered, originFromHead: originFromHead)
+            let why = taaHide ? "taa hidden"
+                : completeStage < 0 ? "no complete stage"
+                : kl_ovrp_eye_layer_live() == 0 ? "eye layer not live"
+                : !haveEyes ? "no eye texture" : "views not visible"
+            noteBackfill(why)
+        } else {
+            noteBackfill(nil)
+        }
         if nproj > 0 {
             visible = encodeProjLayers(enc, viewIndices: viewIndices,
                                        drawable: drawable,
@@ -3793,6 +3847,67 @@ final class KleptonCompositor {
                   + "\(Int((lay.hspan * 180 / Float.pi).rounded()))x\(Int((lay.vspan * 180 / Float.pi).rounded())) deg")
         }
         return lay
+    }
+
+    private var blackBackfillTex: MTLTexture?
+    private var backfillReason: String?
+    private var backfillLogs = 0
+
+    /// Log (capped) when the black far-plane backfill starts, changes reason, or stops.
+    private func noteBackfill(_ reason: String?) {
+        guard reason != backfillReason else { return }
+        backfillReason = reason
+        guard backfillLogs < 60 else { return }
+        backfillLogs += 1
+        NSLog("[cp] backfill: black far plane (" + (reason.map { "reason \($0)" } ?? "off") + ")")
+    }
+
+    /// Opaque black at the loading skybox's finite far depth, every view: the pass
+    /// clears depth to 0 (reverse-Z infinity), which visionOS treats as empty and
+    /// replaces with the room. Same pipeline, depth state and vertex path as the skybox.
+    private func drawBlackBackfill(_ enc: MTLRenderCommandEncoder, viewIndices: [Int],
+                                   drawable: LayerRenderer.Drawable, layered: Bool,
+                                   originFromHead: simd_float4x4) {
+        guard let pipe = equirectPipeline, let sampler else { return }
+        if blackBackfillTex == nil {
+            let d = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .bgra8Unorm,
+                                                             width: 1, height: 1, mipmapped: false)
+            d.usage = .shaderRead
+            if let t = device.makeTexture(descriptor: d) {
+                var px: [UInt8] = [0, 0, 0, 255]
+                t.replace(region: MTLRegionMake2D(0, 0, 1, 1), mipmapLevel: 0,
+                          withBytes: &px, bytesPerRow: 4)
+                blackBackfillTex = t
+            }
+        }
+        guard let tex = blackBackfillTex else { return }
+        enc.setViewports(viewIndices.map { drawable.views[$0].textureMap.viewport })
+        if layered && viewIndices.count > 1 {
+            var mappings = viewIndices.enumerated().map { (n, vi) in
+                MTLVertexAmplificationViewMapping(
+                    viewportArrayIndexOffset: UInt32(n),
+                    renderTargetArrayIndexOffset: UInt32(drawable.views[vi].textureMap.sliceIndex))
+            }
+            enc.setVertexAmplificationCount(viewIndices.count, viewMappings: &mappings)
+        }
+        var uniforms: [KLEqUniform] = []
+        for vi in viewIndices {
+            var u = KLEqUniform()
+            u.invProj = drawable.computeProjection(viewIndex: vi).inverse
+            u.worldRot = Self.rotationOnly(originFromHead
+                * Self.headFromView(drawable.views[vi].transform, midpoint: eyeMidpointInDevice))
+            u.visible = 1
+            uniforms.append(u)
+        }
+        enc.setRenderPipelineState(pipe)
+        if let loadingSkyboxDepthState { enc.setDepthStencilState(loadingSkyboxDepthState) }
+        enc.setFragmentTexture(tex, index: 0)
+        enc.setFragmentSamplerState(sampler, index: 0)
+        uniforms.withUnsafeBytes { buf in
+            enc.setVertexBytes(buf.baseAddress!, length: buf.count, index: 0)
+            enc.setFragmentBytes(buf.baseAddress!, length: buf.count, index: 0)
+        }
+        enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
     }
 
     /// Draw a video frame as a 360 equirect environment filling every view -

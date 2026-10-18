@@ -8,6 +8,7 @@
 #include <sys/stat.h>              // the cloud-save directory is created
 #include <dirent.h>                // asset files: the obb dir is scanned
 #include <strings.h>               // strcasecmp
+#include <time.h>
 #include "klepton.h"
 #include "kl_jni.h"
 #include "guest/kl_driver.h"   // target name, for the per-target KL_PLAT_USER default
@@ -353,6 +354,33 @@ static uint64_t        g_next_request = 1;
 static int             g_platform_up;
 static pthread_mutex_t g_msg_mu = PTHREAD_MUTEX_INITIALIZER;
 
+// Request ledger for the [snap] dumps (kl_ovrplat_dump_requests): the last 64
+// requests, with whether the completion was queued and whether the guest has
+// read it back through ovr_PopMessage. A guest waiting on a request id that is
+// "queued, never popped" is not draining the pump; "not queued" means the ring
+// was full. All access under g_msg_mu.
+#define KLPLAT_LEDGER 64
+typedef struct {
+    uint64_t id; uint32_t type; char what[48]; uint64_t t_ns;   // `what` is COPIED: callers pass stack buffers
+    int queued, popped, is_error;
+} klplat_req;
+static klplat_req g_ledger[KLPLAT_LEDGER];
+static unsigned   g_nledger;
+static uint64_t   g_last_pop_ns, g_npops, g_nrequests;
+static void plat_ledger_add(uint64_t id, const char *what, uint32_t type, int queued, int is_error) {
+    klplat_req *r = &g_ledger[g_nledger++ % KLPLAT_LEDGER];
+    r->id = id; r->type = type;
+    snprintf(r->what, sizeof r->what, "%s", what ? what : ""); r->queued = queued; r->popped = 0;
+    r->is_error = is_error; r->t_ns = clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW);
+    g_nrequests++;
+}
+static void plat_ledger_popped(uint64_t id) {
+    g_last_pop_ns = clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW);
+    g_npops++;
+    for (unsigned i = 0; i < KLPLAT_LEDGER; i++)
+        if (g_ledger[i].id == id) { g_ledger[i].popped = 1; return; }
+}
+
 // Issue a request and queue its completion. Returns the ovrRequest the guest
 // will wait on — non-zero, and matched by the message, which together are the
 // whole point.
@@ -368,6 +396,7 @@ static uint64_t klplat_request_str(const char *what, uint32_t type,
     } else {
         full = 1;
     }
+    plat_ledger_add(id, what, type, !full, 0);
     pthread_mutex_unlock(&g_msg_mu);
     if (full)
         fprintf(stderr, "  [plat] WARN message queue full (%d): completion of %s "
@@ -392,7 +421,11 @@ static void *klplat_PopMessage(void) {
     plat_hit("ovr_PopMessage");
     void *out = NULL;
     pthread_mutex_lock(&g_msg_mu);
-    if (g_msg_head != g_msg_tail) out = &g_msgq[g_msg_head++ % KLPLAT_MSGQ];
+    if (g_msg_head != g_msg_tail) {
+        klplat_msg *m = &g_msgq[g_msg_head++ % KLPLAT_MSGQ];
+        plat_ledger_popped(m->request);
+        out = m;
+    }
     pthread_mutex_unlock(&g_msg_mu);
     return out;
 }
@@ -575,6 +608,7 @@ static uint64_t klplat_offline_request(const char *name) {
     } else {
         full = 1;
     }
+    plat_ledger_add(id, name, type, !full, 1);
     pthread_mutex_unlock(&g_msg_mu);
     if (full) {
         fprintf(stderr, "  [plat] WARN message queue full (%d): %s -> 0\n", KLPLAT_MSGQ, name);
@@ -757,6 +791,7 @@ static uint64_t klplat_User_GetAccessToken(void) {
                 klplat_msg *m = &g_msgq[g_msg_tail++ % KLPLAT_MSGQ];
                 m->type = KLPLAT_MSG_ACCESS_TOKEN; m->request = id; m->payload = 0;
                 m->str = g_plat_offline_text; m->is_error = 1;
+                plat_ledger_add(id, "ovr_User_GetAccessToken", KLPLAT_MSG_ACCESS_TOKEN, 1, 1);
             }
             pthread_mutex_unlock(&g_msg_mu);
             if (full) { fprintf(stderr, "  [plat] WARN message queue full: ovr_User_GetAccessToken -> 0\n"); return 0; }
@@ -1758,4 +1793,27 @@ void kl_ovrplat_report(FILE *f) {
     fprintf(f, "  --- resolved but never called ---\n");
     for (unsigned i = 0; i < g_nplat; i++)
         if (!g_plat[i].calls && !g_plat[i].drm) fprintf(f, "    %s\n", g_plat[i].name);
+}
+
+// [snap] dump of the platform request ledger (kl_sample.c). Never blocks: a
+// ring lock that is busy is reported rather than waited for.
+void kl_ovrplat_dump_requests(FILE *f) {
+    fprintf(f, "  [snap] Oculus platform requests:\n");
+    if (pthread_mutex_trylock(&g_msg_mu) != 0) { fprintf(f, "    (message ring busy)\n"); return; }
+    uint64_t now = clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW);
+    fprintf(f, "    issued %llu, ovr_PopMessage returned %llu messages (last %s%.1f s ago), "
+               "ring %u/%d unread\n",
+            (unsigned long long)g_nrequests, (unsigned long long)g_npops,
+            g_last_pop_ns ? "" : "never ", g_last_pop_ns ? (double)(now - g_last_pop_ns) / 1e9 : 0.0,
+            g_msg_tail - g_msg_head, KLPLAT_MSGQ);
+    unsigned n = g_nledger < KLPLAT_LEDGER ? g_nledger : KLPLAT_LEDGER;
+    for (unsigned k = 0; k < n; k++) {
+        const klplat_req *r = &g_ledger[(g_nledger - 1 - k) % KLPLAT_LEDGER];   // newest first
+        fprintf(f, "    request %llu  %-40s type 0x%08x%s  %.1f s ago  completion %s, %s\n",
+                (unsigned long long)r->id, r->what[0] ? r->what : "?", r->type,
+                r->is_error ? " (offline error)" : "", (double)(now - r->t_ns) / 1e9,
+                r->queued ? "queued" : "NOT QUEUED (ring full)",
+                r->popped ? "read via ovr_PopMessage" : (r->queued ? "NOT READ YET" : "never delivered"));
+    }
+    pthread_mutex_unlock(&g_msg_mu);
 }

@@ -297,7 +297,15 @@ final class VQSettings: ObservableObject {
         setenv("MVK_CONFIG_FULL_IMAGE_VIEW_SWIZZLE", "1", 1)  // MoltenVK: honour VkComponentMapping (R8 font atlases)
         // Unity player argument (the "unity" launch extra): use Vulkan even when Unity's own
         // device detection would fall back to GLES, which has no driver here.
-        if forceVulkan { setenv("KL_UNITY_ARGS", "-force-vulkan", 1) } else { unsetenv("KL_UNITY_ARGS") }
+        // -force-vulkan is only valid when the build ships Vulkan: otherwise Unity fails with
+        // "Forced GfxDevice 'Vulkan' was not built from editor" and cannot create its device.
+        let unityVulkan = forceVulkan && (game?.guestKind != "unity" || game?.hasVulkan == true)
+        if unityVulkan { setenv("KL_UNITY_ARGS", "-force-vulkan", 1) } else { unsetenv("KL_UNITY_ARGS") }
+        if let g = game {
+            let used = g.hasVulkan ? "Vulkan" : "OpenGL ES"
+            VQLog.log("Gráficos: APIs del juego \(g.apiList) → se usa \(used)"
+                      + (g.guestKind == "unity" ? (unityVulkan ? " (-force-vulkan)" : " (sin -force-vulkan)") : ""))
+        }
         VQLog.log("Gráficos: forzar Vulkan en Unity \(forceVulkan)")
         // VPKEngine's own GLES (Klepton kl_gles.c): needs VPVulkan, so only with the VPKEngine driver.
         let gles = glesVPK && useVPKEngine && VQSettings.vpvulkanPath != nil

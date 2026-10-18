@@ -123,6 +123,11 @@ void kl_app_guest_stop(void);
 // last case kl_app_status() says why.
 int  kl_app_guest_state(void);
 
+// The engine asked to end the process (UnityPlayer.kill, Process.killProcess, System.exit):
+// non-zero once it did, and why (a message for the person, valid for the process's life).
+int         kl_app_quit_requested(void);
+const char *kl_app_quit_reason(void);
+
 // Which guest this app was built for, and whether it is the Steam Link one.
 //
 // Valid after kl_app_configure; before that the name is "(unconfigured)" and the

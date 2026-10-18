@@ -18,6 +18,7 @@ final class VQModel: ObservableObject {
     @Published var progressText = ""
     @Published var running = false        // BootView is showing
     @Published var ended = false          // the game's immersive space has closed
+    @Published var endMessage: String?    // why it closed when the engine asked to quit
     @Published var certificate: String? = VQSigner.current
 
     private init() {
@@ -451,6 +452,9 @@ struct VQEndedView: View {
             Spacer()
             Image(systemName: "checkmark.circle").font(.system(size: 60, weight: .light)).foregroundStyle(.secondary)
             Text(VQLaunch.choice?.game.name ?? "VisionQuestPro").font(.largeTitle.bold()).multilineTextAlignment(.center)
+            if let why = VQModel.shared.endMessage {
+                Text(why).font(.title3).foregroundStyle(.red).multilineTextAlignment(.center)
+            }
             Text(VQL("Partida cerrada. Para volver a jugar, cierra la app y ábrela de nuevo.",
                      "Game closed. To play again, close the app and open it again."))
                 .font(.title3).foregroundStyle(.secondary).multilineTextAlignment(.center)

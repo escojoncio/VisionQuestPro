@@ -4,8 +4,13 @@
 // (an .obb or a folder of loose files). The card's facts come from the APK itself, read in place
 // (vq_apk.c: its ZIP directory and its binary AndroidManifest.xml):
 //   engine      Unity (libunity.so / libil2cpp.so), Unreal (libUE4.so / libUnreal.so), other
-//   graphics    Vulkan if the manifest asks for android.hardware.vulkan.version or Unity's
-//               boot.config says gfx-enable-vulkan / vulkan first; else OpenGL ES
+//   graphics    Vulkan if the manifest declares android.hardware.vulkan.version, else OpenGL ES.
+//               Unity writes that <uses-feature> exactly when Vulkan is in the build's Graphics APIs
+//               (required="true" when it is the only one) and a glEsVersion one when GLES is listed
+//               (checked on real Quest APKs: AC Nexus has both, Batman is Vulkan-only/required).
+//               boot.config and globalgamemanagers do NOT carry the API list (PlayerSettings in the
+//               player has no m_GraphicsAPIs), and "vulkan" substrings in boot.config are false
+//               positives (xr-vulkan-extension-..., gfx-enable-vulkan=0).
 //   Quest 3     com.oculus.supportedDevices lists quest3
 //   compatible  arm64-v8a libraries, Unity (Klepton's synthesized target), Vulkan (no GLES in v1)
 
@@ -20,12 +25,17 @@ struct VQGame: Identifiable, Equatable {
     var version: String
     var engine: String
     var graphics: String
+    var hasVulkan = false   // the build ships Vulkan (manifest feature)
+    var hasGLES = false     // the build ships OpenGL ES
     var quest3: Bool
     var libraries: [String] // lib/arm64-v8a/*.so entries
     var obbs: [URL]
     var problems: [String]  // why it cannot run; empty when it can
     var manifestText: String
     var contentNames: [String] = []  // lowercased APK entries + data file names (language detection)
+
+    /// The build's graphics APIs for the log, e.g. "Vulkan+GLES".
+    var apiList: String { [hasVulkan ? "Vulkan" : nil, hasGLES ? "GLES" : nil].compactMap { $0 }.joined(separator: "+") }
 
     var compatible: Bool { problems.isEmpty }
 
@@ -160,14 +170,11 @@ enum VQGames {
         if let devices = metaData(m, "com.oculus.supportedDevices") {
             game.quest3 = devices.lowercased().contains("quest3")
         }
-        // Unity's own choice of graphics API.
-        let bi = vq_zip_find(zip, "assets/bin/Data/boot.config")
-        if bi >= 0, let raw = vq_zip_read(zip, bi, 1 << 20, &len, &err, err.count) {
-            let text = String(cString: UnsafeRawPointer(raw).assumingMemoryBound(to: CChar.self))
-            free(raw)
-            if text.contains("gfx-enable-vulkan=1") || text.contains("vulkan") { vulkan = true }
-        }
+        // The build's real API list is only visible through the manifest features (see the header).
+        let glesDeclared = m.contains("android:glEsVersion")
         game.graphics = vulkan ? "Vulkan" : "OpenGL ES"
+        game.hasVulkan = vulkan
+        game.hasGLES = !vulkan || glesDeclared
 
         if game.libraries.isEmpty {
             game.problems.append(VQL("El APK no trae librerías arm64-v8a.", "The APK has no arm64-v8a libraries."))
@@ -182,7 +189,7 @@ enum VQGames {
                                      "OpenGL ES only: turn on \"OpenGL ES with VPKEngine (experimental)\" in Settings to try it."))
         }
         VQLog.log("Juegos: \(game.id): \(game.package) \(game.version), \(game.engine), \(game.graphics), "
-                  + "Quest 3 \(game.quest3 ? "sí" : "no"), driver \(game.guestKind) \(game.entryLib).so, "
+                  + "APIs \(game.apiList), Quest 3 \(game.quest3 ? "sí" : "no"), driver \(game.guestKind) \(game.entryLib).so, "
                   + "\(game.libraries.count) .so, \(game.obbs.count) OBB, "
                   + (game.compatible ? "compatible" : "NO compatible: \(game.problems.joined(separator: " / "))"))
         return game

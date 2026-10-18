@@ -3,7 +3,44 @@
 Historial completo: `git log -p bitacora.md` (compactada el 2026-10-18; detalle de cada paso en los commits
 «Integrar paso-aN» y en las ramas `paso-aN` de GitHub).
 
-## EMPEZAR AQUÍ — 2026-10-18 (noche): primera prueba en el visor (AoT + AC) → 5 frentes; BUILD SUCCEEDED 3e7a30c (run 39156514064, VPKEngine c920e54), sin probar
+## EMPEZAR AQUÍ — 2026-10-19: lote nocturno sin probar (build lanzada)
+Estado: cambios en el árbol de trabajo (25 ficheros, +1017/-48) sobre fc2f217; VPKEngine con cambios propios (11 ficheros, +770/-64). Nada verificado en el visor.
+
+### Cambios (visionquestpro)
+- Orden de envío de quads: ya en 5cf8922 (`KleptonCompositor.swift`, `KL_OVERLAY_SUBMIT_ORDER` def. 1).
+- HUD en las ramas del loading skybox: `KleptonCompositor.swift`.
+- Fondo negro `drawBlackBackfill` cuando no hay ojo ni vídeo y no hay passthrough: `KleptonCompositor.swift`.
+- Ojo reasignado retenido hasta su primera escritura (pases/copias/clears); tope 3 s; la textura vieja no se libera antes de 4 s: `KleptonCompositor.swift`.
+- Logs de pausa/invalidación del LayerRenderer (`[cp] layer paused/invalidated`): `KleptonCompositor.swift`, `KleptonApp.swift`.
+- Procedencia ampliada (todos los adjuntos/resolve, dynamic rendering): `gfx/kl_vulkan.c`.
+- APIs gráficas por manifiesto (`android.hardware.vulkan.version`, `glEsVersion`); `-force-vulkan` solo si el juego trae Vulkan: `VQGames.swift`, `VQLaunch.swift`, `VQLauncher.swift` (aviso «APIs del juego»).
+- Cierre limpio del motor (UnityPlayer.kill / killProcess / System.exit vía JNI, mensaje en el launcher, cierre robusto del espacio): `jni/kl_jni_sysinfo.c`, `kl_jni.h`, `KleptonApp.swift`, `kl_app.c/h`.
+- Diagnóstico de bloqueos: `[snap] game thread silent` a 10/30 s (`diag/kl_sample.c/h`); registro de esperas por hilo `kl_wait.h` (`libc/kl_pthread.c`, `kl_libc.c`, `kl_shim.c`, `kl_va_handlers.c`, `kl_bionic_extra2.c`); peticiones Oculus pendientes (`xr/kl_ovrplat.c/h`, `kl_ovrp.c`, `kl_openxr.c`); `[gles] ruta:` y log EGL/GL (`gfx/kl_gles.c/h`, `kl_egl.c`).
+- Carátulas de tienda: ya en fc2f217.
+
+### Cambios (VPKEngine, /home/claude/vpkengine, sin commit)
+- Memoria nueva a cero perezosa (`vk.zeroinit`): `gpu/vulkan/src/entry.cpp`, `metal_backend.mm`.
+- MSL reutilizado con receta (registro 'F' + id del traductor; log `gpu.shader.msl cached=`): `recipes.cpp/h`, `pipelines.cpp`.
+- Corte entre encoders cada 256 draws (`VPVK_MAX_DRAWS_PER_CB`): `commands.cpp/h`.
+- `gpu.slowcb` si CB > 8 ms; cola Metal de 256 CB: `metal_backend.mm`.
+- Tests: `gpu/vulkan/tests/vk_tests.cpp`.
+
+### Causas medidas
+- Cuadrados rosas: capas OVROverlay copiadas de imágenes nunca escritas (memoria Metal reciclada; Android entrega ceros) → zero-init perezoso + ojo retenido.
+- Corte del inmersivo en AC: ShaderWarmup (~5 s retraduciendo 3392 shaders con receta + frame de 199-543 ms de GPU) → MSL reutilizado, corte cada 256 draws.
+- Demeo: `-force-vulkan` sin Vulkan en el build + kill no-op → SIGTRAP → APIs por manifiesto + cierre limpio.
+- TRIANGLE STRATEGY (primer juego GLES): hilo de juego de Unreal bloqueado en carga de nivel tras destruir el passthrough; causa por confirmar con `[snap]`. El cambio mixed→full funciona.
+
+### Qué mirar en el siguiente log
+`vk.zeroinit`; ausencia de capas magenta; `gpu.shader.msl cached=`; `gpu.slowcb`; `[cp] backfill`; `eye stage N … held back/published`; `[cp] layer paused/invalidated`; `[gles] ruta:`; `[snap] game thread silent`; «APIs del juego».
+
+### Pendiente para la siguiente build
+- Pausa con la Corona. Hoy: background → LayerRenderer `.invalidated` en ~5 ms → `kl_app_guest_stop` → `_exit(0)`; guest de una sola ejecución; `ovrp_GetAppHasInputFocus` siempre 1.
+- Diseño: no parar el guest al invalidarse por Corona; foco perdido al juego (ovrp InputFocus/VrFocus, estados OpenXR, onPause/onResume por JNI); cortar envíos de GPU en pausa; launcher con «Reanudar» que reabre el espacio y reengancha un compositor nuevo a las texturas existentes.
+- Primer paso: experimento con `KL_EXIT_ON_BACKGROUND=0` y `guest_stop` condicionado para ver si el proceso sobrevive.
+- Otros: OVRInput `connected=0x0` en AC (no bloquea); regulador de GPU del guest; rosa/1 s en tutoriales 2D de AoT (debería ir con zero-init).
+
+## 2026-10-18 (noche): primera prueba en el visor (AoT + AC) → 5 frentes; BUILD SUCCEEDED 3e7a30c (run 39156514064, VPKEngine c920e54), sin probar
 Logs: `…-fin-Attack_on_Titan…` y `…-fin-Assassins_Creed_Nexus_VR` (19:55-20:03). Hallazgos y cambios:
 1. **Audio AC roto** (514 «Voice Starvation», `[aaudio] burst 256`): `klaa_guest_wwise` (kl_aaudio.c) miraba
    `access(<g_native_lib_dir>/libAkSoundEngine.so)`, pero en la app `tree/lib` nunca tiene `.so` (VQPrepare extrae a

@@ -19,6 +19,7 @@
 #include "../guest/kl_slink.h"
 #include "../guest/kl_il2cpp.h"   // kl_il2cpp_method_at, for ovrp_log_chain
 #include "../diag/kl_sample.h"     // kl_sample_snapshot, at the display teardown
+#include "../diag/kl_wait.h"       // kl_game_beat: game-thread silence watcher
 // kl_glfb_note_eye_texture (the capture's eye-FBO seam) and
 // kl_glfb_last_render_stage (which stage the guest actually drew into — see
 // klovrp_EndFrame). Up here rather than beside SetupEyeTexture2 now that the
@@ -584,6 +585,7 @@ static uint64_t klovrp_SetAppEngineInfo(const char *name, const char *version,
 // the caller doing a `tbnz` on whatever was in its stack slot.
 static uint64_t klovrp_GetAppShouldQuit2(int *out) {
     ovrp_hit("ovrp_GetAppShouldQuit2");
+    kl_game_beat(0);
     if (!out) return OVRP_FAIL_INVALID_PARAM;
     *out = 0;
     return OVRP_SUCCESS;
@@ -2012,6 +2014,7 @@ static uint64_t klovrp_SetTrackingOriginType2(int origin) {
 // Deliberately NOT a shared-handler entry: the out-params are the whole call.
 static uint64_t klovrp_PollEvent2(uint32_t *type, void **data) {
     ovrp_hit("ovrp_PollEvent2");
+    kl_game_beat(0);
     if (!type || !data) return OVRP_FAIL_INVALID_PARAM;
     return OVRP_FAIL_OPERATION;                    // the queue is empty
 }
@@ -2020,6 +2023,7 @@ static uint64_t klovrp_PollEvent2(uint32_t *type, void **data) {
 // it; same empty answer, and the same refusal for a NULL.
 static uint64_t klovrp_PollEvent(void *buf) {
     ovrp_hit("ovrp_PollEvent");
+    kl_game_beat(0);
     if (!buf) return OVRP_FAIL_INVALID_PARAM;
     return OVRP_FAIL_OPERATION;
 }
@@ -2810,6 +2814,7 @@ static int klovrp_fring_get(int frame, int part, klovrp_pose *out) {
 
 static uint64_t klovrp_Update2(int step, int frame_index, double prediction) {
     ovrp_hit("ovrp_Update2");
+    kl_game_beat(0);          // also covers ovrp_Update3, which calls this
     { static unsigned n; if (n < 48 || n % 600 == 0)
         fprintf(stderr, "  [ovrp] frameloop Update2 #%u step=%d\n", n, step); n++; }
     (void)prediction;

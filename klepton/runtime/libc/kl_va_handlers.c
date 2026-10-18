@@ -161,6 +161,15 @@ int klh_android_log_print(int prio, const char *tag, const char *fmt, kl_va *va)
         extern void kl_openxr_status_log(const char *, const char *);
         kl_openxr_status_log(tag, text);
     }
+    if (tag && prio >= 6 && strcmp(tag, "Unity") == 0) {   // the engine's graphics error, for the launcher
+        char text[512];
+        va_list cp;
+        va_copy(cp, _ap);
+        vsnprintf(text, sizeof text, fmt, cp);
+        va_end(cp);
+        extern void kl_jni_note_log(int, const char *, const char *);
+        kl_jni_note_log(prio, tag, text);
+    }
     int n = vfprintf(stderr, fmt, _ap);
     fputc('\n', stderr);
     // hl2 eye-copy RT probe: the guest logs "began eye submission" on the eye-submission

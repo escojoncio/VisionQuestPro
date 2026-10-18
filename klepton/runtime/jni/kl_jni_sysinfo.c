@@ -5,6 +5,7 @@
 // Everything here is the Quest's, not a phone's: the screen is always on, there
 // is no power-saver mode, wake locks are honoured by existing (the visor does not
 // sleep while a game runs), and the thermal state is the visor's own.
+#include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -12,6 +13,7 @@
 #include <time.h>
 #include <unistd.h>
 #include <math.h>
+#include <pthread.h>
 #include "klepton.h"
 #include "kl_jni.h"
 #include "kl_android.h"
@@ -80,6 +82,70 @@ static klj_val klj_Proc_cpuMs(void *e, void *s, const klj_val *a, int n) {
     struct timespec ts;
     clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &ts);
     return (klj_val){.j = (uint64_t)((int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000)};
+}
+
+// ---- The engine asking to end the process ----
+// On Android UnityPlayer.kill() -> Process.killProcess(myPid()) (and System.exit) never returns:
+// a fatal engine error (no usable graphics API, ...) ends the process cleanly. As a no-op the
+// engine kept running with a null graphics device and died on SIGTRAP. Here the request is
+// recorded for the host (kl_jni_quit_requested / kl_jni_quit_reason: the compositor closes the
+// space and the launcher shows the reason) and the calling thread is parked for good. The
+// process itself is not exited, for the same reason as jkxr_shutdown: the driver owns that
+// (reports to print, frame pump on another thread); kl_app_guest_stop gives up on a parked
+// guest thread after its 10 s bound.
+static _Atomic int g_quit_requested;   // release-stored AFTER g_quit_reason is written; readers acquire
+static char g_quit_reason[400];
+static char g_gfx_err[300];
+static pthread_mutex_t g_quit_lock = PTHREAD_MUTEX_INITIALIZER;
+
+// Every guest log line passes here (kl_shim.c / kl_va_handlers.c): remembers the engine's
+// graphics error so the launcher can say why the game stopped. A "GfxDevice" line (the root
+// cause) is kept over later generic ones.
+void kl_jni_note_log(int prio, const char *tag, const char *msg) {
+    if (prio < 6 || !tag || !msg || strcmp(tag, "Unity") != 0) return;
+    int root = strstr(msg, "GfxDevice") != NULL;
+    if (!root && !strstr(msg, "Graphics API") && !strstr(msg, "Graphics device") && !strstr(msg, "graphics device")) return;
+    pthread_mutex_lock(&g_quit_lock);
+    if (root || !strstr(g_gfx_err, "GfxDevice")) {
+        snprintf(g_gfx_err, sizeof g_gfx_err, "%s", msg);
+        size_t n = strlen(g_gfx_err);
+        while (n && (g_gfx_err[n - 1] == '\n' || g_gfx_err[n - 1] == '\r')) g_gfx_err[--n] = 0;
+    }
+    pthread_mutex_unlock(&g_quit_lock);
+}
+
+int kl_jni_quit_requested(void) { return atomic_load_explicit(&g_quit_requested, memory_order_acquire); }
+const char *kl_jni_quit_reason(void) { return g_quit_reason; }
+
+static void klj_engine_quit(const char *who) {
+    pthread_mutex_lock(&g_quit_lock);
+    if (!atomic_load_explicit(&g_quit_requested, memory_order_relaxed)) {
+        if (g_gfx_err[0])
+            snprintf(g_quit_reason, sizeof g_quit_reason,
+                     "El juego no pudo iniciar su API gráfica: %s", g_gfx_err);
+        else
+            snprintf(g_quit_reason, sizeof g_quit_reason, "El juego se cerró");
+        atomic_store_explicit(&g_quit_requested, 1, memory_order_release);
+    }
+    pthread_mutex_unlock(&g_quit_lock);
+    fprintf(stderr, "  [jni] el motor pidió terminar (%s): %s\n", who, g_quit_reason);
+    fflush(stderr);
+    for (;;) sleep(3600);   // like killProcess: this thread never runs again
+}
+static klj_val klj_UnityPlayer_kill(void *e, void *s, const klj_val *a, int n) {
+    (void)e; (void)s; (void)a; (void)n;
+    klj_engine_quit("UnityPlayer.kill");
+    return (klj_val){.j = 0};
+}
+static klj_val klj_Proc_killProcess(void *e, void *s, const klj_val *a, int n) {
+    (void)e; (void)s; (void)a; (void)n;
+    klj_engine_quit("Process.killProcess");
+    return (klj_val){.j = 0};
+}
+static klj_val klj_System_exit(void *e, void *s, const klj_val *a, int n) {
+    (void)e; (void)s; (void)a; (void)n;
+    klj_engine_quit("System.exit");
+    return (klj_val){.j = 0};
 }
 
 // ---- PowerManager ----
@@ -264,6 +330,9 @@ const klj_binding klj_bind_sysinfo[] = {
     {"android/os/Process", "isApplicationUid", "(I)Z", klj_Proc_true},
     {"android/os/Process", "getThreadPriority", "(I)I", klj_Proc_zero},
     {"android/os/Process", "getElapsedCpuTime", "()J", klj_Proc_cpuMs},
+    {"android/os/Process", "killProcess",    "(I)V", klj_Proc_killProcess},
+    {"java/lang/System", "exit",             "(I)V", klj_System_exit},
+    {"com/unity3d/player/UnityPlayer", "kill", "()V", klj_UnityPlayer_kill},
 
     {"android/os/PowerManager", "isInteractive",     "()Z", klj_PM_interactive},
     {"android/os/PowerManager", "isScreenOn",        "()Z", klj_PM_interactive},

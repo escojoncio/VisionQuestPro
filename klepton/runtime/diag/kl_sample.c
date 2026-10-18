@@ -33,6 +33,12 @@
 #include "klepton.h"
 #include "kl_il2cpp.h"
 #include "kl_sample.h"
+#include "kl_wait.h"
+#include "kl_jni.h"        // kl_jni_quit_requested
+#include <stdatomic.h>
+#include "kl_env.h"
+#include "../xr/kl_ovrplat.h"   // kl_ovrplat_dump_requests
+#include "../gfx/kl_gles.h"     // kl_gles_egl_dump
 
 #define KL_SAMPLE_DEPTH 16          // frames walked per thread per sample
 #define KL_MAX_THREADS  128
@@ -588,6 +594,7 @@ void kl_sample_stop_report(FILE *out) {
 // loader deinit) is on the main/managed thread. Works with or without the
 // periodic sampler; threads are not suspended (a torn read costs one frame).
 void kl_sample_snapshot(FILE *out, const char *why) {
+    if (kl_jni_quit_requested()) return;   // the engine is ending: its stalled threads are expected, not news
     thread_act_array_t list;
     mach_msg_type_number_t nlist = 0;
     if (task_threads(mach_task_self(), &list, &nlist) != KERN_SUCCESS) return;
@@ -655,4 +662,209 @@ void kl_sample_snapshot(FILE *out, const char *why) {
     // tells a lost wakeup from a waker that never ran.
     kl_futex_dump(out);
     fflush(out);
+}
+
+// ---------------------------------------------------------------------------
+// Blocked-on registry + game-thread silence watcher + full-thread snapshot.
+// Diagnostics only; nothing here changes what a guest sees.
+// ---------------------------------------------------------------------------
+kl_wait_slot g_kl_wait[KL_WAIT_SLOTS];
+_Atomic unsigned g_kl_wait_n;
+__thread kl_wait_slot *kl_wait_tls;
+
+kl_wait_slot *kl_wait_slot_get(void) {
+    if (kl_wait_tls) return kl_wait_tls;
+    unsigned i = atomic_fetch_add(&g_kl_wait_n, 1);
+    if (i >= KL_WAIT_SLOTS) { atomic_store(&g_kl_wait_n, KL_WAIT_SLOTS); return NULL; }
+    atomic_store(&g_kl_wait[i].act, (uint32_t)pthread_mach_thread_np(pthread_self()));
+    kl_wait_tls = &g_kl_wait[i];
+    return kl_wait_tls;
+}
+
+static uint64_t mono_ns(void) { return clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW); }
+
+static int read_i32(const void *a, int32_t *v) {
+    vm_size_t got = 0;
+    return vm_read_overwrite(mach_task_self(), (vm_address_t)(uintptr_t)a, sizeof *v,
+                             (vm_address_t)v, &got) == KERN_SUCCESS && got == sizeof *v;
+}
+
+static const char *run_state_name(int st) {
+    switch (st) {
+        case TH_STATE_RUNNING: return "RUNNING";
+        case TH_STATE_STOPPED: return "STOPPED";
+        case TH_STATE_WAITING: return "WAITING";
+        case TH_STATE_UNINTERRUPTIBLE: return "UNINTERRUPTIBLE";
+        case TH_STATE_HALTED: return "HALTED";
+        default: return "?";
+    }
+}
+
+static void print_wait(FILE *out, kl_wait_slot *w, uint64_t now) {
+    unsigned kind = atomic_load(&w->kind);
+    uintptr_t addr = atomic_load(&w->addr), aux = atomic_load(&w->aux);
+    char b[160];
+    if (kind != KLW_NONE) {
+        double secs = (double)(now - atomic_load(&w->since_ns)) / 1e9;
+        void *ra = (void *)atomic_load(&w->ra);
+        switch (kind) {
+        case KLW_MUTEX: {
+            unsigned hact = 0; const char *hname = NULL; void *site = NULL;
+            if (kl_pthread_mutex_holder((void *)addr, &hact, &hname, &site))
+                fprintf(out, "      waiting: mutex %#lx held by thread %#x%s%s%s%s (locked from %s) for %.1f s",
+                        (unsigned long)addr, hact, hname ? " \"" : "", hname ? hname : "",
+                        hname ? "\"" : "", hact ? "" : " [EXITED]", label_pc(site, b, sizeof b), secs);
+            else
+                fprintf(out, "      waiting: mutex %#lx (no tracked holder) for %.1f s",
+                        (unsigned long)addr, secs);
+            break;
+        }
+        case KLW_SEM:
+        case KLW_SEM_TIMED:
+            fprintf(out, "      waiting: %s %#lx for %.1f s",
+                    kind == KLW_SEM ? "sem_wait" : "sem_timedwait", (unsigned long)addr, secs);
+            break;
+        case KLW_COND:
+        case KLW_COND_TIMED:
+            fprintf(out, "      waiting: %s cond %#lx (mutex %#lx) for %.1f s",
+                    kind == KLW_COND ? "cond_wait" : "cond_timedwait",
+                    (unsigned long)addr, (unsigned long)aux, secs);
+            break;
+        case KLW_FUTEX: {
+            int32_t v; int ok = read_i32((const void *)addr, &v);
+            fprintf(out, "      waiting: futex %#lx expected %d, now %s", (unsigned long)addr, (int32_t)aux, "");
+            if (ok) fprintf(out, "%d", v); else fprintf(out, "?");
+            fprintf(out, " for %.1f s", secs);
+            break;
+        }
+        case KLW_NANOSLEEP:
+            fprintf(out, "      waiting: nanosleep %.3f s (asked) for %.1f s", (double)aux / 1e9, secs);
+            break;
+        default:
+            fprintf(out, "      waiting: kind %u %#lx for %.1f s", kind, (unsigned long)addr, secs);
+        }
+        fprintf(out, " from %s\n", label_pc(ra, b, sizeof b));
+    }
+    uintptr_t ctx = atomic_load(&w->egl_ctx);
+    const char *gl = atomic_load(&w->gl_call);
+    if (ctx || gl) {
+        fprintf(out, "      egl: current context %#lx", (unsigned long)ctx);
+        if (gl) fprintf(out, ", INSIDE %s for %.1f s", gl, (double)(now - atomic_load(&w->gl_since_ns)) / 1e9);
+        fputc('\n', out);
+    }
+}
+
+// Every thread of the process, guest or not.
+void kl_sample_snapshot_all(FILE *out, const char *why) {
+    if (kl_jni_quit_requested()) return;   // the engine is ending: its stalled threads are expected, not news
+    thread_act_array_t list;
+    mach_msg_type_number_t nlist = 0;
+    if (task_threads(mach_task_self(), &list, &nlist) != KERN_SUCCESS) return;
+    mach_port_t self = mach_thread_self();
+    uint64_t now = mono_ns();
+    fprintf(out, "  [snap] %s — all %u threads:\n", why ? why : "?", (unsigned)nlist);
+    for (mach_msg_type_number_t i = 0; i < nlist && i < 256; i++) {
+        thread_act_t act = list[i];
+        pthread_t pt = pthread_from_mach_thread_np(act);
+        uint64_t tid = 0;
+        char nm[64] = {0};
+        if (pt) { pthread_threadid_np(pt, &tid); pthread_getname_np(pt, nm, sizeof nm); }
+        thread_basic_info_data_t bi; mach_msg_type_number_t bn = THREAD_BASIC_INFO_COUNT;
+        int have_bi = thread_info(act, THREAD_BASIC_INFO, (thread_info_t)&bi, &bn) == KERN_SUCCESS;
+        fprintf(out, "    thread %#x tid=%llu%s%s%s  mach=%s%s susp=%d cpu=%d.%d%%%s\n", act,
+                (unsigned long long)tid, nm[0] ? " \"" : "", nm, nm[0] ? "\"" : "",
+                have_bi ? run_state_name(bi.run_state) : "?",
+                have_bi && (bi.flags & TH_FLAGS_IDLE) ? "/idle" : "",
+                have_bi ? bi.suspend_count : -1, have_bi ? bi.cpu_usage / 10 : 0,
+                have_bi ? bi.cpu_usage % 10 : 0,
+                act == self ? "  (watcher)" : act == g_main_act ? "  (pump)" : "");
+        if (act != self) {
+            arm_thread_state64_t ts; mach_msg_type_number_t cnt = ARM_THREAD_STATE64_COUNT;
+            if (thread_get_state(act, ARM_THREAD_STATE64, (thread_state_t)&ts, &cnt) == KERN_SUCCESS) {
+                char b1[160], b2[160];
+                uint64_t pc = (uint64_t)ts.__pc & 0x0000ffffffffffffULL;
+                uint64_t lr = (uint64_t)ts.__lr & 0x0000ffffffffffffULL;
+                fprintf(out, "      pc=%s  lr=%s\n", label_pc((void *)pc, b1, sizeof b1),
+                        label_pc((void *)lr, b2, sizeof b2));
+                void *frames[16]; unsigned nf = 0;
+                uint64_t fp = (uint64_t)ts.__fp;
+                while (fp && nf < 16 && !(fp & 7)) {
+                    uint64_t pair[2]; vm_size_t got = 0;
+                    if (vm_read_overwrite(mach_task_self(), fp, sizeof pair, (vm_address_t)pair,
+                                          &got) != KERN_SUCCESS || got != sizeof pair) break;
+                    if (!pair[1] || pair[0] <= fp) break;
+                    frames[nf++] = (void *)(pair[1] & 0x0000ffffffffffffULL);
+                    fp = pair[0];
+                }
+                for (unsigned f = 0; f < nf; f++) {
+                    char b[160];
+                    fprintf(out, "        #%-2u %s\n", f, label_pc(frames[f], b, sizeof b));
+                }
+            }
+        }
+        unsigned n = atomic_load(&g_kl_wait_n);
+        if (n > KL_WAIT_SLOTS) n = KL_WAIT_SLOTS;
+        for (unsigned k = 0; k < n; k++)
+            if (atomic_load(&g_kl_wait[k].act) == act) print_wait(out, &g_kl_wait[k], now);
+    }
+    for (mach_msg_type_number_t i = 0; i < nlist; i++)
+        mach_port_deallocate(mach_task_self(), list[i]);
+    vm_deallocate(mach_task_self(), (vm_address_t)list, nlist * sizeof list[0]);
+    mach_port_deallocate(mach_task_self(), self);
+    kl_futex_dump(out);
+    kl_ovrplat_dump_requests(out);
+    kl_gles_egl_dump(out);
+    fflush(out);
+}
+
+// Game-thread silence watcher. The per-frame OVRPlugin / OpenXR entry points call
+// kl_game_beat(); the first caller is "the game thread". If it stops calling for
+// KL_SNAP_GAME_STALL_S seconds (default 10; 0 = off) the process is alive but the
+// game logic is parked somewhere: one all-thread snapshot, and another at 30 s.
+static _Atomic uint64_t  g_beat_ns;
+static _Atomic uintptr_t g_game_pt;
+static _Atomic int       g_game_src = -1;
+static _Atomic int       g_watch_state;      // 0 not started, 1 started, -1 disabled
+static _Atomic uint32_t  g_game_act;
+
+static void *game_watch_main(void *arg) {
+    (void)arg;
+    unsigned thr = kl_env_uint("KL_SNAP_GAME_STALL_S", 10u);
+    unsigned second = thr >= 30u ? thr * 3u : 30u;
+    uint64_t seen = 0; int shots = 0;
+    for (;;) {
+        usleep(500000);
+        uint64_t b = atomic_load(&g_beat_ns);
+        if (b != seen) { seen = b; shots = 0; continue; }
+        double silent = (double)(mono_ns() - b) / 1e9;
+        if ((shots == 0 && silent >= thr) || (shots == 1 && silent >= second)) {
+            char why[96];
+            snprintf(why, sizeof why, "game thread silent %u s", (unsigned)silent);
+            fprintf(stderr, "  [snap] game thread silent %u s (thread %#x, last OVRPlugin/OpenXR frame call)\n",
+                    (unsigned)silent, atomic_load(&g_game_act));
+            kl_sample_snapshot_all(stderr, why);
+            shots++;
+        }
+    }
+    return NULL;
+}
+
+void kl_game_beat(int src) {
+    pthread_t self = pthread_self();
+    uintptr_t cur = atomic_load_explicit(&g_game_pt, memory_order_relaxed);
+    if (!cur || (src == 0 && atomic_load(&g_game_src) == 1)) {
+        atomic_store(&g_game_pt, (uintptr_t)self);
+        atomic_store(&g_game_src, src);
+        atomic_store(&g_game_act, (uint32_t)pthread_mach_thread_np(self));
+        cur = (uintptr_t)self;
+    }
+    if (cur != (uintptr_t)self) return;
+    atomic_store_explicit(&g_beat_ns, mono_ns(), memory_order_relaxed);
+    int expect = 0;
+    if (atomic_load_explicit(&g_watch_state, memory_order_relaxed) == 0 &&
+        atomic_compare_exchange_strong(&g_watch_state, &expect, 1)) {
+        if (kl_env_uint("KL_SNAP_GAME_STALL_S", 10u) == 0) { atomic_store(&g_watch_state, -1); return; }
+        pthread_t th;
+        if (pthread_create(&th, NULL, game_watch_main, NULL) == 0) pthread_detach(th);
+    }
 }

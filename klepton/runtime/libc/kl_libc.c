@@ -22,6 +22,7 @@
 #include <sys/sysctl.h>
 #include <mach/mach.h>
 #include <dispatch/dispatch.h>
+#include "../diag/kl_wait.h"   // per-thread "blocked on" registry for the [snap] dumps
 #include <sys/utsname.h>
 #include <sys/time.h>    // utimes (klb_utimes)
 #include <utime.h>       // struct utimbuf (klb_utime)
@@ -3787,6 +3788,7 @@ static long kl_futex_impl(int32_t *uaddr, int op, uint32_t val, const struct tim
         kl_futex_stat *s = futex_stat(b, uaddr);
         s->waits++;
         s->last_wait_ns = w->since_ns;
+        kl_wait_enter(KLW_FUTEX, uaddr, val, ra);
         while (!w->woken) {
             if (deadline >= KL_FUTEX_FOREVER) {
                 pthread_cond_wait(&g_futex[b].c, &g_futex[b].m);
@@ -3806,6 +3808,7 @@ static long kl_futex_impl(int32_t *uaddr, int op, uint32_t val, const struct tim
             if (abs.tv_nsec >= 1000000000L) { abs.tv_nsec -= 1000000000L; abs.tv_sec++; }
             pthread_cond_timedwait(&g_futex[b].c, &g_futex[b].m, &abs);
         }
+        kl_wait_leave();
         // A wake that marked us is a wake, even if the deadline passed while the
         // lock was being reacquired: the waker already counted us as woken.
         int woken = w->woken;
