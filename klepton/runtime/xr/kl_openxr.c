@@ -5864,6 +5864,74 @@ static void klxr_pose_trace_report(klxr_session *s) {
 }
 
 static void klxr_passthrough_scan(const XrFrameEndInfo *info);   // XR_FB_passthrough section
+
+// ---- KL_XR_STRICT_LAYERS: the spec's per-layer xrEndFrame validation --------
+//
+// OpenXR 1.1 §10.5 (xrEndFrame) and the CTS (`xrEndFrame` / composition tests)
+// require, per submitted layer, in this order of severity:
+//   - space handle valid                       -> XR_ERROR_HANDLE_INVALID
+//   - projection viewCount == view config's (2) -> XR_ERROR_VALIDATION_FAILURE
+//   - every sub-image's swapchain handle valid -> XR_ERROR_HANDLE_INVALID
+//   - that swapchain has a released image      -> XR_ERROR_LAYER_INVALID
+//   - imageArrayIndex < arraySize              -> XR_ERROR_VALIDATION_FAILURE
+//   - imageRect inside the image, non-negative -> XR_ERROR_SWAPCHAIN_RECT_INVALID
+//   - pose orientation unit-length             -> XR_ERROR_POSE_INVALID
+// A real Quest runtime enforces these. Off by default here because games that
+// already run were never checked against them and a guest relying on a lax
+// runtime would lose its picture; the conformance launcher turns it on.
+enum { KLXR_ERROR_SWAPCHAIN_RECT_INVALID = -25, KLXR_ERROR_POSE_INVALID = -39 };
+
+static int klxr_quat_unit(const XrPosef *p) {
+    const XrQuaternionf *q = &p->orientation;
+    float n = q->x * q->x + q->y * q->y + q->z * q->z + q->w * q->w;
+    return fabsf(n - 1.0f) <= 0.01f;   // CTS tolerance is ~1e-5 rejected / normalised ok
+}
+
+static XrResult klxr_check_subimage(const XrSwapchainSubImage *si) {
+    klxr_swapchain *sc = klxr_swapchain_of(si->swapchain);
+    if (!sc) return KLXR_ERROR_HANDLE_INVALID;
+    if (sc->last_released < 0) return KLXR_ERROR_LAYER_INVALID;
+    if (si->imageArrayIndex >= sc->array_size) return KLXR_ERROR_VALIDATION_FAILURE;
+    const XrRect2Di *r = &si->imageRect;
+    if (r->offset.x < 0 || r->offset.y < 0 || r->extent.width <= 0 || r->extent.height <= 0 ||
+        (int64_t)r->offset.x + r->extent.width  > (int64_t)sc->width ||
+        (int64_t)r->offset.y + r->extent.height > (int64_t)sc->height)
+        return KLXR_ERROR_SWAPCHAIN_RECT_INVALID;
+    return KLXR_SUCCESS;
+}
+
+static XrResult klxr_validate_layer(const XrCompositionLayerBaseHeader *l) {
+    if (!klxr_space_of(l->space)) return KLXR_ERROR_HANDLE_INVALID;
+    XrResult r;
+    switch (l->type) {
+    case XR_TYPE_COMPOSITION_LAYER_PROJECTION: {
+        const XrCompositionLayerProjection *p = (const XrCompositionLayerProjection *)l;
+        if (p->viewCount != 2 || !p->views) return KLXR_ERROR_VALIDATION_FAILURE;
+        for (uint32_t v = 0; v < p->viewCount; v++) {
+            if (p->views[v].type != XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW)
+                return KLXR_ERROR_VALIDATION_FAILURE;
+            if ((r = klxr_check_subimage(&p->views[v].subImage)) != KLXR_SUCCESS) return r;
+            if (!klxr_quat_unit(&p->views[v].pose)) return KLXR_ERROR_POSE_INVALID;
+        }
+        return KLXR_SUCCESS;
+    }
+    case XR_TYPE_COMPOSITION_LAYER_QUAD: {
+        const XrCompositionLayerQuad *q = (const XrCompositionLayerQuad *)l;
+        if ((r = klxr_check_subimage(&q->subImage)) != KLXR_SUCCESS) return r;
+        if (!klxr_quat_unit(&q->pose)) return KLXR_ERROR_POSE_INVALID;
+        return KLXR_SUCCESS;
+    }
+    case XR_TYPE_COMPOSITION_LAYER_CYLINDER_KHR: {
+        const XrCompositionLayerCylinderKHR *c = (const XrCompositionLayerCylinderKHR *)l;
+        if ((r = klxr_check_subimage(&c->subImage)) != KLXR_SUCCESS) return r;
+        if (!klxr_quat_unit(&c->pose)) return KLXR_ERROR_POSE_INVALID;
+        return KLXR_SUCCESS;
+    }
+    default:
+        return KLXR_SUCCESS;   // other extension layers: not validated here
+    }
+}
+
 static XrResult klxr_EndFrame(void *session, const XrFrameEndInfo *info) {
     KLXR_TRACE("xrEndFrame");
     pthread_mutex_lock(&g_st_mu); g_st_frames++; pthread_mutex_unlock(&g_st_mu);
@@ -5883,6 +5951,14 @@ static XrResult klxr_EndFrame(void *session, const XrFrameEndInfo *info) {
     if (info->layerCount && !info->layers) KLXR_RET(KLXR_ERROR_LAYER_INVALID);
     for (uint32_t i = 0; i < info->layerCount; i++)
         if (!info->layers[i]) KLXR_RET(KLXR_ERROR_LAYER_INVALID);
+    {
+        static int strict = -1;
+        if (strict < 0) strict = kl_env_on("KL_XR_STRICT_LAYERS", 0);
+        for (uint32_t i = 0; strict && i < info->layerCount; i++) {
+            XrResult lr = klxr_validate_layer(info->layers[i]);
+            if (lr != KLXR_SUCCESS) KLXR_RET(lr);
+        }
+    }
     klxr_passthrough_scan(info);
     s->frame_begun = 0;
     s->frames_ended++;

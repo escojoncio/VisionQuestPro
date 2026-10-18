@@ -361,6 +361,22 @@ Vulkan CTS desde la app; el informe de capacidades (vulkaninfo) de un Quest 3 re
      protected memory props, submit_wait_many_semaphores.
   4. NotSupported: implementar según «No soportados por motivo», con objetivo el perfil Adreno 740 (no todo).
   5. OpenXR CTS en el visor.
+  5a. (paso 2, rama paso-a1) `kl_openxr.c` xrEndFrame: validación por capa según spec 1.1 tras `KL_XR_STRICT_LAYERS`
+     (def. 0): space inválido/swapchain inválido → HANDLE_INVALID; projection viewCount≠2 o view.type malo o
+     imageArrayIndex≥arraySize → VALIDATION_FAILURE; swapchain sin imagen liberada → LAYER_INVALID; imageRect fuera
+     → SWAPCHAIN_RECT_INVALID (-25); cuaternión no unitario (±0,01) → POSE_INVALID (-39). Solo compilado en Linux; falta pasar el CTS.
+     5b. `kl_ovrp.c`: `KL_OVRP_QUEST3_ID` (def. 0): con `KL_QUEST3` activo, ovrpSystemHeadset=11 (Meta_Quest_3) y
+     producto «Meta Quest 3» en GetSystemProductName/2, para que OVRPlugin no contradiga a Build.MODEL.
+     `VQConformance.prepareOpenXR` exporta `KL_XR_STRICT_LAYERS=1`; `VQLaunch` lo quita para juegos.
+     5c. `KL_OVRP_PRED_FRAMEIDX` (def. 0): GetPredictedDisplayTime(frameIndex) y Time (+0x50) de GetNodePoseState3
+     (Render) suman k/hz por frame futuro respecto a `g_fring_begin` (k≤3). Arnés `klepton/runtime/xr/tests/
+     pred_frame_offset_test.c` OK. `KL_OVRP_LATENCY` (def. 0): GetAppLatencyTimings2 implementado (Render = EMA
+     BeginFrame→GPU done + 1 periodo; Timewarp = 1 periodo; resto 0); apagado sigue Unsupported.
+     5d. GetNodePoseState3(Render) con `KL_OVRP_PRED_FRAMEIDX`: `klovrp_extrapolate_pose` (p+=v·dt, q=exp(ω·dt/2)·q,
+     dt≤50 ms) al mismo Time; caso en el arnés OK. `ovrp_Start/StopEyeTracking` → Unsupported (sin puerta: Quest 3
+     no tiene eye tracking).
+     Sin cambiar (no verificable sin OVR_Plugin_Types.h: raw.githubusercontent y repos de Oculus-VR no accesibles): flags SpaceWarp (1<<8|1<<12, 1<<9|1<<13),
+     aceleraciones de pose a 0 (velocidades sí), listas bool_yes/result_ok (no mienten sobre passthrough/anclas).
 
 ## Juegos: problemas abiertos (resto)
 - Congelado tras `ShaderWarmupManager.WarmUpShaders` (AC, logs 53–55): `[futex]` en el `[snap]` para diagnosticar.
