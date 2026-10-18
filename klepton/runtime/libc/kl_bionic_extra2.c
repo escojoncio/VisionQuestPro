@@ -116,7 +116,18 @@ int klb_setrlimit(int res, const lx_rlimit *in) {
     struct rlimit r = { rl_from_lx(in->cur), rl_from_lx(in->max) };
     // macOS refuses a RLIMIT_NOFILE soft limit above OPEN_MAX unless the hard limit is
     // infinity; Linux has no such cap. Clamp rather than fail a guest that asks for 1 M fds.
-    if (d == RLIMIT_NOFILE && r.rlim_cur > (rlim_t)OPEN_MAX && r.rlim_cur != RLIM_INFINITY) r.rlim_cur = OPEN_MAX;
+    // The hard limit gets the same treatment, but it must never be LOWERED to make the call
+    // succeed: a hard limit cannot be raised back, so a guest asking for {65536, 65536} would
+    // otherwise cap the whole process at OPEN_MAX for good. Keep the current hard limit when the
+    // request is above what Darwin takes.
+    if (d == RLIMIT_NOFILE) {
+        struct rlimit now;
+        if (getrlimit(d, &now) == 0) {
+            if (r.rlim_cur > (rlim_t)OPEN_MAX && r.rlim_cur != RLIM_INFINITY) r.rlim_cur = OPEN_MAX;
+            if (r.rlim_max > (rlim_t)OPEN_MAX && r.rlim_max != RLIM_INFINITY) r.rlim_max = now.rlim_max;
+            if (r.rlim_max != RLIM_INFINITY && r.rlim_cur > r.rlim_max) r.rlim_cur = r.rlim_max;
+        }
+    }
     return setrlimit(d, &r);
 }
 // prlimit(pid, resource, new, old): only ourselves (0 or our pid) can be reached.
@@ -618,7 +629,7 @@ static void *timer_thread(void *arg) {
     pthread_mutex_unlock(&t->m);
     return NULL;
 }
-int klb_timer_create(int clk, const void *sevp, void **id) {
+int kl_xt_timer_create(int clk, const void *sevp, void **id) {
     int d = (clk == 0 || clk == 1 || clk == 7 || clk == 8 || clk == 9) ? kl_clock_to_darwin(clk) : -1;   // MONOTONIC_RAW is not a timer clock
     if (d < 0) { errno = EINVAL; return -1; }
     kl_timer *t = calloc(1, sizeof *t);
@@ -657,13 +668,13 @@ static void timer_remaining(kl_timer *t, kl_itimerspec *out) {
     } else out->value.tv_nsec = 1;
     out->interval = t->interval;
 }
-int klb_timer_gettime(void *id, kl_itimerspec *out) {
+int kl_xt_timer_gettime(void *id, kl_itimerspec *out) {
     kl_timer *t = timer_of(id);
     if (!t) { errno = EINVAL; return -1; }
     pthread_mutex_lock(&t->m); timer_remaining(t, out); pthread_mutex_unlock(&t->m);
     return 0;
 }
-int klb_timer_settime(void *id, int flags, const kl_itimerspec *nv, kl_itimerspec *ov) {
+int kl_xt_timer_settime(void *id, int flags, const kl_itimerspec *nv, kl_itimerspec *ov) {
     kl_timer *t = timer_of(id);
     if (!t || !nv) { errno = EINVAL; return -1; }
     if (flags & ~1) { errno = EINVAL; return -1; }
@@ -683,13 +694,13 @@ int klb_timer_settime(void *id, int flags, const kl_itimerspec *nv, kl_itimerspe
     pthread_mutex_unlock(&t->m);
     return 0;
 }
-int klb_timer_getoverrun(void *id) {
+int kl_xt_timer_getoverrun(void *id) {
     kl_timer *t = timer_of(id);
     if (!t) { errno = EINVAL; return -1; }
     pthread_mutex_lock(&t->m); long o = t->overrun; pthread_mutex_unlock(&t->m);
     return (int)(o > INT_MAX ? INT_MAX : o);
 }
-int klb_timer_delete(void *id) {
+int kl_xt_timer_delete(void *id) {
     pthread_mutex_lock(&g_timers_mu);
     int slot = -1;
     for (int i = 0; i < KLX_MAX_TIMERS; i++) if (g_timers[i] && g_timers[i] == id) { slot = i; break; }

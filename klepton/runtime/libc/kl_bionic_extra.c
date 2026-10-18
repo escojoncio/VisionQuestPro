@@ -489,7 +489,7 @@ static size_t klx_wcrtomb(char *s, wchar_t wc, bmbstate *st) {
     if (!r) { errno = EILSEQ; return (size_t)-1; }
     return r;
 }
-static int klx_mbsinit(const bmbstate *st) { return !st || st->rsv[0] == 0; }
+static int klx_mbsinit(const bmbstate *st) { return !st || (st->rsv[0] == 0 && st->rsv[1] == 0); }   // rsv[1]: a UTF-16 surrogate is pending (mbrtoc16)
 static int klx_mblen(const char *s, size_t n) {
     if (!s) { memset(&g_mbs_private, 0, sizeof g_mbs_private); return 0; }
     uint32_t c; size_t r = u8_decode(&c, s, n, NULL);
@@ -1349,11 +1349,11 @@ DECLX(klb_clock_nanosleep)
 DECLX(klb_clock_settime)
 DECLX(klb_clock_getcpuclockid)
 DECLX(klb_timespec_get)
-DECLX(klb_timer_create)
-DECLX(klb_timer_settime)
-DECLX(klb_timer_gettime)
-DECLX(klb_timer_getoverrun)
-DECLX(klb_timer_delete)
+DECLX(kl_xt_timer_create)
+DECLX(kl_xt_timer_settime)
+DECLX(kl_xt_timer_gettime)
+DECLX(kl_xt_timer_getoverrun)
+DECLX(kl_xt_timer_delete)
 DECLX(klb_fflush_unlocked)
 DECLX(klb_feof_unlocked)
 DECLX(klb_ferror_unlocked)
@@ -1573,11 +1573,11 @@ static const kl_xentry g_extra[] = {
     XE("clock_settime", klb_clock_settime)
     XE("clock_getcpuclockid", klb_clock_getcpuclockid)
     XE("timespec_get", klb_timespec_get)
-    XE("timer_create", klb_timer_create)
-    XE("timer_settime", klb_timer_settime)
-    XE("timer_gettime", klb_timer_gettime)
-    XE("timer_getoverrun", klb_timer_getoverrun)
-    XE("timer_delete", klb_timer_delete)
+    XE("timer_create", kl_xt_timer_create)
+    XE("timer_settime", kl_xt_timer_settime)
+    XE("timer_gettime", kl_xt_timer_gettime)
+    XE("timer_getoverrun", kl_xt_timer_getoverrun)
+    XE("timer_delete", kl_xt_timer_delete)
     XE("fflush_unlocked", klb_fflush_unlocked)
     XE("feof_unlocked", klb_feof_unlocked)
     XE("ferror_unlocked", klb_ferror_unlocked)
