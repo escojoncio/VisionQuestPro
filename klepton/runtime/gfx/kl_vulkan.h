@@ -120,6 +120,9 @@ unsigned long long kl_vulkan_layer_image(int layer_key, int stage, int eye,
 // per-eye ViewportRect selecting the part — answers eye 1 from it rather than
 // with nothing. NULL when the layer has no storage for that stage.
 void *kl_vulkan_mtl_for_handle(unsigned long long h);
+// 1 if `mtl` (a game texture the compositor is about to sample) is still zero-init pending in
+// VPKEngine; the clear is requested and the caller skips it this frame. 0 = safe to sample.
+int kl_vulkan_mtl_zero_pending(void *mtl);
 // 1 once the guest has rendered/copied into layer `layer_key`'s own image.
 int kl_vulkan_layer_written(int layer_key);
 void *kl_vulkan_layer_mtl_texture(int layer_key, int stage, int eye,

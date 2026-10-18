@@ -3674,6 +3674,9 @@ static struct {
     int   (*taa_native_enabled)(void);
     int   (*taa_native_encode)(const void *frame, void *mtl_cmdbuf);
     void *(*depth_resolve_encode)(void *mtl_cmdbuf, void *depth_ms, int reversed_z, int mode, int key);
+    // weak: VPKEngine with the zero-init queries (vpvk/config.h "vpvk_image_zero_pending")
+    int   (*image_zero_pending)(void *mtl);
+    int   (*image_zero_clear)(void *mtl);
 } g_vpvk;
 static pthread_mutex_t g_vpvk_mu = PTHREAD_MUTEX_INITIALIZER;
 
@@ -3694,9 +3697,25 @@ static void klvk_vpvk_resolve(void) {
         g_vpvk.taa_native_encode = (int (*)(const void *, void *))mvk_sym("vpvk_taa_native_encode");
         g_vpvk.depth_resolve_encode =
             (void *(*)(void *, void *, int, int, int))mvk_sym("vpvk_depth_resolve_encode");
+        g_vpvk.image_zero_pending = (int (*)(void *))mvk_sym("vpvk_image_zero_pending");
+        g_vpvk.image_zero_clear   = (int (*)(void *))mvk_sym("vpvk_image_zero_clear");
         __atomic_store_n(&g_vpvk.resolved, 1, __ATOMIC_RELEASE);
     }
     pthread_mutex_unlock(&g_vpvk_mu);
+}
+
+// A game texture the compositor is about to sample may still hold recycled Metal memory: VPKEngine
+// zeroes new images lazily, at the next Vulkan submit that uses them, and the compositor reads
+// outside that flow (AC Nexus: pink squares). 1 = still pending: the clear has been requested on
+// VPKEngine's queue (never waits; a busy submit retries next call) and the caller must skip the
+// texture this frame. It runs on VPKEngine's queue, not the compositor's, so the texture is not
+// sampled in the same frame even when the clear is already committed. 0 = safe (or no VPKEngine).
+int kl_vulkan_mtl_zero_pending(void *mtl) {
+    if (!mtl) return 0;
+    klvk_vpvk_resolve();
+    if (!g_vpvk.image_zero_pending || !g_vpvk.image_zero_pending(mtl)) return 0;
+    if (g_vpvk.image_zero_clear) g_vpvk.image_zero_clear(mtl);
+    return 1;
 }
 
 static int g_taa_inline = -1;    // -1 undecided

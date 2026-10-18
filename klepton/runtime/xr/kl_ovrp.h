@@ -25,6 +25,7 @@ void *kl_ovrp_dlopen(const char *soname);   // NULL if this is not OVRPlugin
 int   kl_ovrp_claims(const char *soname);   // the same test, without opening
 int   kl_ovrp_is_handle(const void *h);
 void *kl_ovrp_sym(const char *name);
+int   kl_ovrp_status(const char *name);   // static coverage: 2 own impl, 1 shared ok/yes/no, 3 shared unsupported, 0 named stub
 
 // Which ovrp_* the guest resolved and which it called — the work list.
 void kl_ovrp_report(FILE *f);

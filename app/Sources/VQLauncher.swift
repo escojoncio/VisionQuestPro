@@ -36,6 +36,7 @@ final class VQModel: ObservableObject {
         folderPath = VQFolder.shared.url?.path
         let found = folderPath == nil ? [] : VQGames.scan()
         games = found
+        VQApiScan.inventoryAll(found)
     }
 
     func choose(_ url: URL) {

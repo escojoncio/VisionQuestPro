@@ -572,9 +572,11 @@ static void *heartbeat(void *arg) {
             if (ticks % 64 == 0) {
                 int ports, fds;
                 kl_ipc_counts(&ports, &fds);
-                fprintf(stderr, "[hb] %02d:%02d:%02d  phase=%s  foot=%lldM avail=%lldM ports=%d fds=%d\n",
+                char mb[160];
+                kl_mem_breakdown(mb, sizeof mb);
+                fprintf(stderr, "[hb] %02d:%02d:%02d  phase=%s  foot=%lldM avail=%lldM ports=%d fds=%d  %s\n",
                         tm.tm_hour, tm.tm_min, tm.tm_sec, phase,
-                        kl_phys_footprint() >> 20, kl_avail_memory() >> 20, ports, fds);
+                        kl_phys_footprint() >> 20, kl_avail_memory() >> 20, ports, fds, mb);
             } else
             fprintf(stderr, "[hb] %02d:%02d:%02d  phase=%s  foot=%lldM avail=%lldM\n",
                     tm.tm_hour, tm.tm_min, tm.tm_sec, phase,

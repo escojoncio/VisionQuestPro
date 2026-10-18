@@ -7508,9 +7508,12 @@ static void klxr_ext_selfcheck(void) {
 // by one door and refused by the other — kl_openxr_lookup (relocation time) and
 // xrGetInstanceProcAddr (run time) both read these rows.
 static void klxr_install(void) {
+    // Callable from the launcher's background inventory (kl_openxr_status) and from the guest:
+    // `done` is set only after the rows are filled, under a lock.
+    static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
     static int done;
-    if (done) return;
-    done = 1;
+    pthread_mutex_lock(&mu);
+    if (done) { pthread_mutex_unlock(&mu); return; }
     struct { const char *name; void *fn; } impl[] = {
         {"xrGetInstanceProcAddr",  (void *)klxr_GetInstanceProcAddr},
         {"xrInitializeLoaderKHR",  (void *)klxr_InitializeLoaderKHR},
@@ -7658,6 +7661,8 @@ static void klxr_install(void) {
         klxr_row *r = klxr_row_for(impl[i].name);
         if (r) r->fn = impl[i].fn;
     }
+    done = 1;
+    pthread_mutex_unlock(&mu);
 }
 
 // ---- trampolines: one indirect jump per row ---------------------------------
@@ -7702,6 +7707,13 @@ static void *klxr_guest_fn(klxr_row *row) {
     }
 #endif
     return row->fn;
+}
+
+int kl_openxr_status(const char *name) {
+    klxr_install();
+    klxr_row *row = name ? klxr_row_for(name) : NULL;
+    if (!row) return -1;
+    return row->fn == g_xr_stub_fn[row - g_xr] ? 0 : 2;
 }
 
 // The layer's `next` getInstanceProcAddr: the real rows, never the trampolines

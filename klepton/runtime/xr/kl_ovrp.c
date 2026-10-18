@@ -9640,6 +9640,23 @@ static void *klovrp_shared(const char *name) {
     return NULL;
 }
 
+// Static coverage of an ovrp_* name, with no side effect (no stub is made): 2 own implementation,
+// 1 shared "success / yes / no" answer, 3 shared "unsupported" answer, 0 only the named stub.
+int kl_ovrp_status(const char *name) {
+    if (!name) return 0;
+    for (size_t i = 0; i < sizeof g_ovrp_impl / sizeof g_ovrp_impl[0]; i++)
+        if (g_ovrp_impl[i].name && strcmp(g_ovrp_impl[i].name, name) == 0) return 2;
+    for (size_t i = 0; i < sizeof g_ovrp_result_ok / sizeof g_ovrp_result_ok[0]; i++)
+        if (g_ovrp_result_ok[i] && strcmp(g_ovrp_result_ok[i], name) == 0) return 1;
+    for (size_t i = 0; i < sizeof g_ovrp_result_unsupported / sizeof g_ovrp_result_unsupported[0]; i++)
+        if (g_ovrp_result_unsupported[i] && strcmp(g_ovrp_result_unsupported[i], name) == 0) return 3;
+    for (size_t i = 0; i < sizeof g_ovrp_bool_yes / sizeof g_ovrp_bool_yes[0]; i++)
+        if (g_ovrp_bool_yes[i] && strcmp(g_ovrp_bool_yes[i], name) == 0) return 1;
+    for (size_t i = 0; i < sizeof g_ovrp_bool_no / sizeof g_ovrp_bool_no[0]; i++)
+        if (g_ovrp_bool_no[i] && strcmp(g_ovrp_bool_no[i], name) == 0) return 1;
+    return 0;
+}
+
 void *kl_ovrp_sym(const char *name) {
     if (!name) return NULL;
     ovrp_slot(name);          // before the impl check, so "resolved" counts everything

@@ -195,3 +195,35 @@ char *vq_java_classes(const char *path) {
     if (!o.buf) o.buf = calloc(1, 1);
     return o.buf;
 }
+
+static int ident_char(uint8_t c) {
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_';
+}
+
+char *vq_api_names(const char *path) {
+    size_t size = 0;
+    const uint8_t *m = map_file(path, &size);
+    if (!m) return NULL;
+    Out o = {0};
+    Set seen = {0};
+    char name[160];
+    size_t i = 0;
+    while (i < size) {
+        if (!ident_char(m[i])) { i++; continue; }
+        size_t start = i;
+        while (i < size && ident_char(m[i])) i++;
+        size_t len = i - start;
+        if (len < 6 || len >= sizeof name) continue;
+        const uint8_t *s = m + start;
+        int ovrp = len > 5 && !memcmp(s, "ovrp_", 5);
+        int xr = s[0] == 'x' && s[1] == 'r' && s[2] >= 'A' && s[2] <= 'Z' && len >= 8;
+        if (!ovrp && !xr) continue;
+        memcpy(name, s, len);
+        name[len] = '\0';
+        if (set_add(&seen, name)) out_add(&o, name, len);
+    }
+    set_free(&seen);
+    munmap((void *)m, size);
+    if (!o.buf) o.buf = calloc(1, 1);
+    return o.buf;
+}

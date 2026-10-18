@@ -237,3 +237,13 @@ VPKEngine `main` = e6c3f3b.
 - .ips 00:48:38 (Demeo): SIGKILL CODESIGNING, pc=x8=-1004 llamado desde libUnityOpenXR+0xef73c. `ovrp_UnityOpenXR_HookGetInstanceProcAddr` caía en `klovrp_called` (-1004) y Unity lo usaba como `xrGetInstanceProcAddr`.
 - `klepton/runtime/xr/kl_ovrp.c`: `klovrp_UnityOpenXR_HookGetInstanceProcAddr` pass-through del argumento (en `g_ovrp_impl`); `ovrp_UnityOpenXR_*` (SetClientVersion, On*Instance*/Session*/AppSpaceChange) y `ovrp_AllowVisibilityMask` → `g_ovrp_result_ok`; `klovrp_called` devuelve 0 (no -1004) si el nombre contiene ProcAddr/Hook o es `ovrp_Get*Ptr/Pointer`.
 - .ips 00:23:52 (TRIANGLE, build 650083e): SIGSEGV 0x34 en slowLog → ya corregido en VPKEngine a316f28.
+
+## Lote 2026-10-19 (2): inventario Meta API, memoria, cámara, zero-pending, carátulas, hash
+- Logs previos de Demeo eran de la build af9d6b7 (sin el pass-through); el arreglo de b4527ad sigue sin probar.
+- Inventario Meta API al abrir la app (todos los juegos de QUEST/Juegos, lee el APK): `app/Native/vq_scan.c` `vq_api_names`, `kl_ovrp_status` (kl_ovrp.c), `kl_openxr_status` (kl_openxr.c, `klxr_install` ahora con mutex y done=1 al final), `app/Sources/VQApiScan.swift` `inventory`/`inventoryAll`, `VQLauncher.refresh()`. Salida: `app.txt` "Meta API: …"/"Meta API global: …", `QUEST/Cache/<juego>/meta-api.txt`, `Documents/Registros/meta-api.txt` (compartible).
+- Memoria (AC jetsam a ~6.5 GB por presión del sistema, no por límite propio): timer dispatch 100 ms → `kl_mem_pressure_poll`; `proc_free_bytes` = min(headroom SO, budget−footprint); `kl_mem_breakdown` en `[hb]` largo (kl_app.c); `kl_jni_low_memory` entre local frame push/pop; rearmado si no hay nativeLowMemory registrado (`g_lowmem_untold`).
+- Cámara: `klepton/runtime/media/kl_camera.c/.h` (camera2ndk "sin cámaras"), enganchado en kl_shim.c y Makefile.
+- Compositor: `kl_vulkan_mtl_zero_pending` (kl_vulkan.c) + `skipZeroPending` en KleptonCompositor.swift (quads y equirect): pide clear y omite la capa ese frame; log `[zero] compositor leyó imagen pendiente`.
+- Carátulas (VQCover.swift): log de resultados de búsqueda, búsqueda de reserva por nombre con puntuación, marcador `soon` 12 h, todas las claves y URLs de la ficha al log, clave `img`, markerVersion v4.
+- Hash de build: `vqBuildCommit` en VQBuildInfo.swift (CI escribe GITHUB_SHA::7), primera línea del log.
+- Pendiente: entitlement increased-memory-limit y medir sobrecoste de memoria propio; Demeo en AR (anclas/planos vía ARKit según inventario); pausa con corona.

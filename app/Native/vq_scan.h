@@ -22,10 +22,17 @@ char *vq_elf_symbols(const char *path, int defined);
 // java/, javax/, dalvik/, com/oculus/, com/meta/, com/android/, com/google/android/.
 char *vq_java_classes(const char *path);
 
+// Newline-separated, de-duplicated names of the Meta APIs found as strings in any file: `ovrp_*`
+// (OVRPlugin: DllImport names in IL2CPP metadata / Mono DLLs, imports of Unreal code) and `xr*`
+// (OpenXR). Strings only: it cannot tell a call from a mention.
+char *vq_api_names(const char *path);
+
 // Klepton's own answers (libklepton.a; kl_shim.c and kl_jni.c): 1 shim / 2 served family / 0 none,
 // and whether any JNI binding or field exists for a class.
 int kl_shim_known(const char *name);
 int kl_jni_knows_class(const char *cls);
+int kl_ovrp_status(const char *name);      // 2 own impl / 1 shared ok-yes-no / 3 shared "unsupported" / 0 named stub
+int kl_openxr_status(const char *name);    // 2 implemented / 0 refused (UNSUPPORTED) / -1 not served
 
 #ifdef __cplusplus
 }

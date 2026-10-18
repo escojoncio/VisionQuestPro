@@ -87,6 +87,7 @@ int getentropy(void *buffer, size_t size);
 #include "kl_openxr.h"
 #include "kl_mediandk.h"
 #include "kl_aaudio.h"
+#include "kl_camera.h"
 #include "kl_vulkan.h"
 #include "kl_ovrp.h"
 #include "kl_ovrplat.h"
@@ -2492,6 +2493,9 @@ int kl_shim_known(const char *name) {
     // every AMedia*/AImage*/AHardwareBuffer_*/AAudio* import as served although most are not
     // in the table, which hid the gaps from the scanner (and kl_shim_lookup says no to them).
     if (!strncmp(name, "AAudio", 6)) return kl_aaudio_lookup(name) ? 2 : 0;
+    if (!strncmp(name, "ACamera", 7) || !strncmp(name, "ACaptureRe", 10) ||
+        !strncmp(name, "ACaptureSession", 15) || !strcmp(name, "ANativeWindow_toSurface"))
+        return kl_camera_lookup(name) ? 2 : 0;
     if (!strncmp(name, "AMedia", 6) || !strncmp(name, "AImage", 6) ||
         !strncmp(name, "AHardwareBuffer_", 16) || !strncmp(name, "ATrace_", 7) ||
         !strncmp(name, "AMEDIAFORMAT_", 13))
@@ -2602,6 +2606,13 @@ void *kl_shim_lookup(const char *name) {
     // so the order of these two tests does not matter.
     if (!strncmp(name, "AAudio", 6))
         return kl_aaudio_lookup(name);
+
+    // libcamera2ndk: a device with no cameras (kl_camera.c), plus the one
+    // ANativeWindow entry that exists only for it.
+    if (name[0] == 'A' &&
+        (!strncmp(name, "ACamera", 7) || !strncmp(name, "ACaptureRe", 10) ||
+         !strncmp(name, "ACaptureSession", 15) || !strcmp(name, "ANativeWindow_toSurface")))
+        return kl_camera_lookup(name);
 
     // Tier 10: Vulkan (BONELAB). libvulkan.so is REPLACED for the same reason
     // libopenxr_loader is — the real one is Android's loader, looking for an ICD

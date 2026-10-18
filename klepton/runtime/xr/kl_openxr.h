@@ -68,6 +68,7 @@ int   kl_openxr_claims(const char *soname);
 void *kl_openxr_dlopen(const char *soname);
 int   kl_openxr_is_handle(const void *h);
 void *kl_openxr_sym(const char *name);
+int   kl_openxr_status(const char *name);   // static coverage: 2 implemented, 0 refused (UNSUPPORTED), -1 not served at all
 
 // Which xr* the guest resolved and which it called — the work list, in the
 // shape kl_ovrp_report prints.

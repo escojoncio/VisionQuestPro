@@ -3250,6 +3250,7 @@ final class KleptonCompositor {
                 if t == nil { t = ownLayerFallback(ov.layer_id, stage: ov.stage, view: Int32(vi),
                                                    written: ownFirst, w: &w, h: &h); how = "own image (unwritten fallback)" }
                 if t == nil { t = kl_glfb_layer_mtl_texture(ov.layer_id, ov.stage, &w, &h); how = "glfb" }
+                if let p = t, skipZeroPending(p, layer: ov.layer_id, how: how) { t = nil }
                 if t != nil { overlaySource[ov.layer_id] = how }
                 if texture == nil, let t { texture = Unmanaged<MTLTexture>
                     .fromOpaque(t).takeUnretainedValue() }
@@ -3412,7 +3413,7 @@ final class KleptonCompositor {
             ?? ownLayerFallback(ov.layer_id, stage: ov.stage, view: Int32(viewIndices.first ?? 0),
                                 written: ownFirst, w: &w, h: &h)
             ?? kl_glfb_layer_mtl_texture(ov.layer_id, ov.stage, &w, &h)
-        guard let t else {
+        guard let t, !skipZeroPending(t, layer: ov.layer_id, how: "equirect") else {
             if !loggedOverlayMiss.contains(ov.layer_id) {
                 loggedOverlayMiss.insert(ov.layer_id)
                 NSLog("[cp] equirect overlay layer \(ov.layer_id) (stage "
@@ -3996,6 +3997,22 @@ final class KleptonCompositor {
     /// "show" = old behaviour (samples whatever the memory holds).
     private static let unwrittenMode: String =
         ProcessInfo.processInfo.environment["KL_OVERLAY_UNWRITTEN"] ?? "clear"
+
+    private var loggedZeroPending = Set<Int32>()
+
+    /// A game texture VPKEngine has not zeroed yet (it does so lazily at the next Vulkan submit that
+    /// uses it) holds recycled Metal memory. Asks for the clear and tells the caller to skip the
+    /// layer this frame; it composites once the clear has landed.
+    private func skipZeroPending(_ p: UnsafeMutableRawPointer, layer: Int32, how: String) -> Bool {
+        guard kl_vulkan_mtl_zero_pending(p) != 0 else { return false }
+        if !loggedZeroPending.contains(layer) {
+            loggedZeroPending.insert(layer)
+            let tex = Unmanaged<MTLTexture>.fromOpaque(p).takeUnretainedValue()
+            NSLog("[zero] compositor leyó imagen pendiente: layer \(layer) \(how) \(tex.width)x\(tex.height) "
+                  + "-> clear pedido a VPKEngine, capa omitida este frame")
+        }
+        return true
+    }
 
     /// Rung 3 of the overlay texture ladder: the layer's own Vulkan image, which
     /// since the clear on allocation was dropped (KL_VK_LAYER_NOCLEAR, game-thread

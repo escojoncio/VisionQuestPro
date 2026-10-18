@@ -281,15 +281,17 @@ static klj_val klj_ActivityManager_getMemoryInfo(void *env, void *self,
     if (!mi) return (klj_val){.j = 0};
     uint64_t total = kl_mem_budget_bytes(), avail = kl_mem_available_bytes();
     uint64_t thresh = total / 100 * (uint64_t)(100 - kl_env_int("KL_LOWMEM_AT", 80));
+    // Same trigger as kl_mem_pressure_poll's headroom test, so lowMemory agrees with the notification.
+    uint64_t floor = (uint64_t)kl_env_int("KL_LOWMEM_FREE_MB", 384) << 20;
     void *cls = klj_class_object("android/app/ActivityManager$MemoryInfo");
     klj_field_store(mi, klj_want(cls, "availMem",  "J", 'f'), (klj_val){.j = avail});
     klj_field_store(mi, klj_want(cls, "totalMem",  "J", 'f'), (klj_val){.j = total});
     klj_field_store(mi, klj_want(cls, "threshold", "J", 'f'), (klj_val){.j = thresh});
     klj_field_store(mi, klj_want(cls, "lowMemory", "Z", 'f'),
-                    (klj_val){.j = avail < thresh});
+                    (klj_val){.j = avail < thresh || avail <= floor});
     KLJ_LOG("ActivityManager.getMemoryInfo -> avail %llu MiB of %llu, threshold %llu, low=%d",
             (unsigned long long)(avail >> 20), (unsigned long long)(total >> 20),
-            (unsigned long long)(thresh >> 20), (int)(avail < thresh));
+            (unsigned long long)(thresh >> 20), (int)(avail < thresh || avail <= floor));
     return (klj_val){.j = 0};
 }
 

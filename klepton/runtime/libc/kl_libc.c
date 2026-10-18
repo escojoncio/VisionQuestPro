@@ -22,6 +22,7 @@
 #include <sys/sysctl.h>
 #include <mach/mach.h>
 #include <dispatch/dispatch.h>
+#include <malloc/malloc.h>   // malloc_zone_statistics (kl_mem_breakdown)
 #include "../diag/kl_wait.h"   // per-thread "blocked on" registry for the [snap] dumps
 #include <sys/utsname.h>
 #include <sys/time.h>    // utimes (klb_utimes)
@@ -1149,7 +1150,15 @@ static void kl_mem_log_maybe_start(void) {
 }
 
 static uint64_t proc_free_bytes(void) {
+    // Room before the kill: the smaller of the OS's own headroom and what is left of
+    // our budget. The OS figure alone said "avail 6183 MiB of 6144" (above the budget
+    // we report), and the budget figure alone ignores that jetsam fires under it.
+    // This is the single answer behind /proc/meminfo, sysinfo and getMemoryInfo.
+    uint64_t os = kl_proc_available();
     uint64_t total = kl_mem_total(), used = kl_mem_footprint();
+    uint64_t left = used < total ? total - used : 0;
+    if (os && used) return os < left ? os : left;
+    if (os) return os < total ? os : total;
     if (!used) {
         // No footprint to subtract: fall back to the host's own free pages
         // rather than claiming the whole budget is free.
@@ -1246,6 +1255,7 @@ int klb_sysinfo(void *out) {
 // once rather than every frame.
 static _Atomic int g_lowmem_armed = 1;
 static _Atomic uint64_t g_lowmem_fired;
+static _Atomic int g_lowmem_untold;   // last attempt found no nativeLowMemory registered yet
 
 void kl_vulkan_trim(const char *why);   // kl_vulkan.c: destroyed OpenXR images, no grace
 
@@ -1253,13 +1263,24 @@ void kl_mem_pressure_fire(const char *why) {
     // Our own garbage first, whatever the guest does: destroyed OpenXR swapchain images still
     // waiting out their grace period (the OpenXR CTS was killed holding them, log 61).
     kl_vulkan_trim(why);
-    if (!kl_jni_low_memory()) {
+    // Callable from the timer / OS-pressure queues as well as the game thread: kl_jni_env()
+    // and the local-frame stack are per thread (TLS), so a frame of our own keeps whatever
+    // refs the native creates from leaking on a thread that never pops.
+    kl_jni_local_frame_push();
+    int told = kl_jni_low_memory();
+    kl_jni_local_frame_pop();
+    if (!told) {
         static _Atomic int said;
         if (atomic_fetch_add(&said, 1) == 0)
             fprintf(stderr, "  [mem] pressure (%s) and the guest registered no "
                             "nativeLowMemory — nothing to notify\n", why);
+        // The 100 ms timer can fire before JNI_OnLoad / RegisterNatives: do not spend the
+        // episode on nobody, retry on the next poll (the log line below is muted meanwhile).
+        atomic_store(&g_lowmem_untold, 1);
+        atomic_store(&g_lowmem_armed, 1);
         return;
     }
+    atomic_store(&g_lowmem_untold, 0);
     uint64_t n = atomic_fetch_add(&g_lowmem_fired, 1) + 1;
     fprintf(stderr, "  [mem] low memory (%s): told the guest (%llu MiB of %llu, "
                     "notification %llu)\n", why,
@@ -1300,6 +1321,7 @@ void kl_mem_pressure_poll(void) {
     }
     if (hot) {
         if (atomic_exchange(&g_lowmem_armed, 0)) {
+            if (!atomic_load(&g_lowmem_untold))
             fprintf(stderr, "  [mem] threshold (%s): footprint %llu MiB of %llu MiB budget "
                             "(%d%%), OS headroom %llu MiB\n", why,
                     (unsigned long long)(used >> 20), (unsigned long long)(total >> 20),
@@ -1314,6 +1336,21 @@ void kl_mem_pressure_poll(void) {
 void kl_mem_pressure_init(void) {
     static _Atomic int done;
     if (atomic_exchange(&done, 1)) return;
+    // Own 100 ms timer: the frame loop only polls between frames, and a synchronous level
+    // load can add 1.6 GB in 2 s with the game thread blocked (AC Nexus, jetsam at 6.5 GB).
+    // The notification is a plain call into the guest's nativeLowMemory (kl_jni_low_memory),
+    // made on this queue's thread exactly as the OS-pressure source below already does —
+    // it does not need the game thread. The armed flag keeps the frame-loop poll and this
+    // timer from both firing for one episode.
+    dispatch_source_t tmr = dispatch_source_create(
+        DISPATCH_SOURCE_TYPE_TIMER, 0, 0,
+        dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_HIGH, 0));
+    if (tmr) {
+        dispatch_source_set_timer(tmr, dispatch_time(DISPATCH_TIME_NOW, 100 * NSEC_PER_MSEC),
+                                  100 * NSEC_PER_MSEC, 10 * NSEC_PER_MSEC);
+        dispatch_source_set_event_handler(tmr, ^{ kl_mem_pressure_poll(); });
+        dispatch_resume(tmr);
+    }
     dispatch_source_t src = dispatch_source_create(
         DISPATCH_SOURCE_TYPE_MEMORYPRESSURE, 0,
         DISPATCH_MEMORYPRESSURE_WARN | DISPATCH_MEMORYPRESSURE_CRITICAL,
@@ -1335,6 +1372,31 @@ void kl_mem_pressure_init(void) {
                             // the process, and there is nothing to release it to
 }
 
+// One-line breakdown of the footprint for the [hb] heartbeat. Cheap: one task_info and one
+// malloc_zone_statistics(NULL) (sums every zone). heap = malloc bytes in use (the guest's
+// allocator runs on these zones), internal = dirty anonymous, comp = compressed,
+// file = file-backed mappings (task_vm_info "external"). GPU/Metal has no counter reachable
+// from C, and mmap'd files are not tallied (no munmap hook), so neither is reported.
+void kl_mem_breakdown(char *buf, size_t n) {
+    if (!buf || !n) return;
+    buf[0] = 0;
+    malloc_statistics_t ms;
+    memset(&ms, 0, sizeof ms);
+    malloc_zone_statistics(NULL, &ms);
+    task_vm_info_data_t    ti;
+    mach_msg_type_number_t cnt = TASK_VM_INFO_COUNT;
+    if (task_info(mach_task_self(), TASK_VM_INFO, (task_info_t)&ti, &cnt) != KERN_SUCCESS) {
+        snprintf(buf, n, "heap=%lluM", (unsigned long long)(ms.size_in_use >> 20));
+        return;
+    }
+    snprintf(buf, n, "heap=%lluM(res %lluM) internal=%lluM comp=%lluM file=%lluM",
+             (unsigned long long)(ms.size_in_use >> 20),
+             (unsigned long long)(ms.size_allocated >> 20),
+             (unsigned long long)((uint64_t)ti.internal >> 20),
+             (unsigned long long)((uint64_t)ti.compressed >> 20),
+             (unsigned long long)((uint64_t)ti.external >> 20));
+}
+
 void kl_mem_report(void) {
     uint64_t total = kl_mem_total(), used = kl_mem_footprint();
     fprintf(stderr, "  memory: %llu MiB footprint (peak %llu) of a %llu MiB budget, "
@@ -1347,8 +1409,7 @@ void kl_mem_report(void) {
 
 uint64_t kl_mem_budget_bytes(void)    { return kl_mem_total(); }
 uint64_t kl_mem_available_bytes(void) {
-    uint64_t a = kl_proc_available();      // real jetsam headroom when available
-    return a ? a : proc_free_bytes();
+    return proc_free_bytes();   // min(OS headroom, budget - footprint)
 }
 
 // meminfo, statm and status are rebuilt on every read. They were written once

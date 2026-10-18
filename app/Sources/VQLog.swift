@@ -35,7 +35,7 @@ enum VQLog {
         FileManager.default.createFile(atPath: appLog.path, contents: nil)
         handle = try? FileHandle(forWritingTo: appLog)
         let info = Bundle.main.infoDictionary ?? [:]
-        let line = "VisionQuestPro \(info["CFBundleShortVersionString"] ?? "?") (\(info["CFBundleVersion"] ?? "?")), "
+        let line = "VisionQuestPro \(info["CFBundleShortVersionString"] ?? "?") (\(info["CFBundleVersion"] ?? "?")) commit \(vqBuildCommit.isEmpty ? "local" : vqBuildCommit), "
             + "visionOS \(ProcessInfo.processInfo.operatingSystemVersionString)\n"
         handle?.write(Data(line.utf8))
     }
@@ -51,7 +51,8 @@ enum VQLog {
     static var shareable: [URL] {
         [appLog, directory.appendingPathComponent("app-anterior.txt"), bootLog, crashLog,
          directory.appendingPathComponent("conformidad-vulkan.txt"),
-         directory.appendingPathComponent("conformidad-detalle.txt")]
+         directory.appendingPathComponent("conformidad-detalle.txt"),
+         directory.appendingPathComponent("meta-api.txt")]
             .filter { FileManager.default.fileExists(atPath: $0.path) }
             + captures
     }

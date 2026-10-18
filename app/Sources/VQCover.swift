@@ -187,14 +187,16 @@ enum VQCover {
 /// the first that really decodes as ~16:9 is kept. Signed oculuscdn URLs expire: 401/403 on them is an
 /// "expired candidate", not a network failure. With no 16:9 picture, the best square one (>= 256 px) is
 /// kept as the store cover (VQCoverView centres it over a blur). Result file: cover-store.<ext>;
-/// marker cover-store.none = "<unix time> <absent|net> v3"
-/// (absent: the store does not know the package or has no picture, retry after 3 days; net: retry after 7 days; a marker
+/// marker cover-store.none = "<unix time> <absent|soon|net> v4"
+/// (absent: the store does not know the package or has no picture, retry after 3 days; soon: first miss, retry after 12 h
+/// (a second miss becomes absent); net: retry after 7 days; a marker
 /// without the current version tag was written by older code and counts as missing).
 enum VQCoverStore {
     private static let host = "https://oculusdb.rui2015.me"
     private static let retryAfter: TimeInterval = 7 * 24 * 3600
     private static let retryAbsentAfter: TimeInterval = 3 * 24 * 3600
-    private static let markerVersion = "v3"
+    private static let retryAfterSoon: TimeInterval = 12 * 3600
+    private static let markerVersion = "v4"
     private static let maxBytes = 16 << 20
     private static let maxWidth = 1920
     private static let lock = NSLock()
@@ -211,7 +213,7 @@ enum VQCoverStore {
             let parts = text.split(separator: " ")
             if parts.count >= 3, parts[2] == markerVersion, let t = TimeInterval(parts[0]) {
                 let age = Date().timeIntervalSince1970 - t
-                let limit = parts[1] == "absent" ? retryAbsentAfter : retryAfter
+                let limit = parts[1] == "absent" ? retryAbsentAfter : (parts[1] == "soon" ? retryAfterSoon : retryAfter)
                 if age < limit {
                     VQCover.logOnce(game.id, "Carátula de tienda: \(package): omitida, marcador \(parts[1]) de hace \(Int(age / 3600)) h (reintento a las \(Int(limit / 3600)) h)")
                     return
@@ -227,7 +229,7 @@ enum VQCoverStore {
         }
         VQLog.log("Carátula de tienda: \(package): inicio de la descarga")
         Task.detached(priority: .utility) {
-            await run(id: game.id, package: package, cache: cache, marker: marker)
+            await run(id: game.id, package: package, name: game.name, cache: cache, marker: marker)
             _ = setRunning(game.id, false)
         }
     }
@@ -238,11 +240,12 @@ enum VQCoverStore {
         return on ? running.insert(id).inserted : (running.remove(id) != nil)
     }
 
-    private static func run(id: String, package: String, cache: URL, marker: URL) async {
+    private static func run(id: String, package: String, name: String, cache: URL, marker: URL) async {
         let cfg = URLSessionConfiguration.ephemeral
         cfg.timeoutIntervalForRequest = 15
         cfg.timeoutIntervalForResource = 40
         let session = URLSession(configuration: cfg)
+        let wasSoon = ((try? String(contentsOf: marker, encoding: .utf8))?.split(separator: " ").dropFirst().first).map { $0 == "soon" } ?? false
         func mark(_ why: String) {
             try? "\(Int(Date().timeIntervalSince1970)) \(why) \(markerVersion)".write(to: marker, atomically: true, encoding: .utf8)
         }
@@ -258,10 +261,13 @@ enum VQCoverStore {
                 VQLog.log("Carátula de tienda: \(package): respuesta inesperada de la búsqueda")
                 mark("net"); return
             }
-            let list = (json as? [[String: Any]]) ?? ((json as? [String: Any])?["applications"] as? [[String: Any]]) ?? []
-            guard let app = list.first(where: { ($0["packageName"] as? String)?.lowercased() == package.lowercased() }) else {
-                VQLog.log("Carátula de tienda: \(package): la tienda no tiene este paquete")
-                mark("absent"); return
+            let list = searchResults(json)
+            VQLog.log("Carátula de tienda: \(package): búsqueda por paquete: \(list.count) resultado(s)" + describe(list))
+            var found = list.first(where: { ($0["packageName"] as? String)?.lowercased() == package.lowercased() })
+            if found == nil { found = await searchByName(session, name: name, package: package) }
+            guard let app = found else {
+                VQLog.log("Carátula de tienda: \(package): la tienda no tiene este paquete (ni por nombre \"\(name)\"); marcador " + (wasSoon ? "absent (2.ª vez)" : "soon (12 h)"))
+                mark(wasSoon ? "absent" : "soon"); return
             }
             var netFailure = false
             var square: (data: Data, px: Int)?
@@ -272,7 +278,13 @@ enum VQCoverStore {
                     let (d, r) = try await session.data(from: durl)
                     let code = (r as? HTTPURLResponse)?.statusCode ?? -1
                     detail = (try? JSONSerialization.jsonObject(with: d)) as? [String: Any]
-                    VQLog.log("Carátula de tienda: \(package): ficha /api/v1/id/\(appId): HTTP \(code), \(d.count) bytes, " + (detail.map { "campos: " + $0.keys.sorted().prefix(40).joined(separator: ",") } ?? "no es un objeto JSON"))
+                    VQLog.log("Carátula de tienda: \(package): ficha /api/v1/id/\(appId): HTTP \(code), \(d.count) bytes, " + (detail.map { "campos: " + $0.keys.sorted().joined(separator: ",") } ?? "no es un objeto JSON"))
+                    if let detail {
+                        var urls: [String] = []
+                        urlFields(detail, path: "", into: &urls)
+                        VQLog.log("Carátula de tienda: \(package): ficha: \(urls.count) campo(s) con URL o /cdn/")
+                        for u in urls.prefix(80) { VQLog.log("Carátula de tienda: \(package): ficha URL \(u)") }
+                    }
                     if code != 200 { detail = nil }
                 } catch {
                     VQLog.log("Carátula de tienda: \(package): ficha /api/v1/id/\(appId): error de red: \(error.localizedDescription)")
@@ -348,6 +360,79 @@ enum VQCoverStore {
         }
     }
 
+    private static func searchResults(_ json: Any) -> [[String: Any]] {
+        (json as? [[String: Any]]) ?? ((json as? [String: Any])?["applications"] as? [[String: Any]]) ?? []
+    }
+
+    private static let nameKeys = ["displayName", "display_name", "name", "title"]
+    private static func resultName(_ r: [String: Any]) -> String? { nameKeys.lazy.compactMap { r[$0] as? String }.first }
+
+    /// First 5 results as " [pkg | name; ...]" for the log.
+    private static func describe(_ list: [[String: Any]]) -> String {
+        list.isEmpty ? "" : ": " + list.prefix(5).map { "\($0["packageName"] as? String ?? "?") | \(resultName($0) ?? "?")" }.joined(separator: "; ")
+    }
+
+    /// Every string value at any depth that is an http URL or starts with /cdn/, as "key.path=value".
+    private static func urlFields(_ node: Any, path: String, into out: inout [String]) {
+        if let d = node as? [String: Any] {
+            for k in d.keys.sorted() { urlFields(d[k]!, path: path.isEmpty ? k : "\(path).\(k)", into: &out) }
+        } else if let a = node as? [Any] {
+            for (i, v) in a.enumerated() { urlFields(v, path: "\(path)[\(i)]", into: &out) }
+        } else if let s = node as? String, s.hasPrefix("http") || s.hasPrefix("/cdn/") {
+            out.append("\(path)=\(s.count > 160 ? String(s.prefix(160)) + "…" : s)")
+        }
+    }
+
+    /// Lowercase, no accents, letters/digits only, single spaces.
+    private static func normalize(_ s: String) -> String {
+        let folded = s.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: nil).lowercased()
+        return folded.map { $0.isLetter || $0.isNumber ? String($0) : " " }.joined()
+            .split(separator: " ").joined(separator: " ")
+    }
+
+    /// Fallback when the package is not in the search: search by the game's visible name (and the
+    /// name cut at ":", " x ", " - "), keep the best name match (+ same organisation: first two package parts).
+    private static func searchByName(_ session: URLSession, name: String, package: String) async -> [String: Any]? {
+        var variants: [String] = []
+        for sep in [":", " x ", " - "] {
+            if let r = name.range(of: sep) { variants.append(String(name[..<r.lowerBound])) }
+        }
+        variants.insert(name, at: 0)
+        var targets: [String] = []
+        for v in variants {
+            let n = normalize(v)
+            if n.count >= 3, !targets.contains(n) { targets.append(n) }
+        }
+        let org = package.lowercased().split(separator: ".").prefix(2).joined(separator: ".")
+        var best: (score: Int, app: [String: Any])?
+        for t in targets {
+            guard let enc = t.addingPathComponentEncoded, let url = URL(string: "\(host)/api/v1/search/\(enc)"),
+                  let (body, resp) = try? await session.data(from: url),
+                  (resp as? HTTPURLResponse)?.statusCode == 200,
+                  let json = try? JSONSerialization.jsonObject(with: body) else {
+                VQLog.log("Carátula de tienda: \(package): búsqueda por nombre \"\(t)\": sin respuesta válida"); continue
+            }
+            let list = searchResults(json)
+            VQLog.log("Carátula de tienda: \(package): búsqueda por nombre \"\(t)\": \(list.count) resultado(s)" + describe(list))
+            for r in list {
+                guard let rn = resultName(r).map(normalize), !rn.isEmpty else { continue }
+                var score = 0
+                for (i, tt) in targets.enumerated() {
+                    if rn == tt { score = max(score, i == 0 ? 100 : 90) }
+                    else if " \(rn) ".contains(" \(tt) ") || (rn.count >= 4 && " \(tt) ".contains(" \(rn) ")) { score = max(score, 50) }
+                }
+                guard score > 0 else { continue }
+                if !org.isEmpty, (r["packageName"] as? String)?.lowercased().hasPrefix(org + ".") == true { score += 30 }
+                if score > (best?.score ?? 0) { best = (score, r) }
+            }
+        }
+        if let best, best.score >= 50 {
+            VQLog.log("Carátula de tienda: \(package): coincidencia por nombre: \(best.app["packageName"] as? String ?? "?") | \(resultName(best.app) ?? "?") (puntuación \(best.score))")
+            return best.app
+        }
+        return nil
+    }
+
     /// Signed CDN links (expire): the Meta CDN host or a signature/expiry query item.
     private static func isSigned(_ u: URL) -> Bool {
         let q = u.query ?? ""
@@ -374,7 +459,7 @@ enum VQCoverStore {
         } else if let s = node as? String, let u = url(s) {
             if ["icon", "square", "portrait", "logo", "avatar", "trailer", "video"].contains(where: { key.contains($0) }) { return }
             if ["landscape", "hero", "cover", "banner", "wide"].contains(where: { key.contains($0) }) { out.append((0, 0, u)) }
-            else if ["screenshot", "image", "poster", "background", "thumb", "promo"].contains(where: { key.contains($0) }) { out.append((1, 0, u)) }
+            else if ["screenshot", "image", "img", "poster", "background", "thumb", "promo"].contains(where: { key.contains($0) }) { out.append((1, 0, u)) }
         }
     }
 
