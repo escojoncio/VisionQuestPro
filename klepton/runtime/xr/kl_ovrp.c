@@ -852,7 +852,8 @@ static int klovrp_headset_type(void) {
         // KL_OVRP_QUEST3_ID=1 (default 0): when JNI already presents a Quest 3
         // (KL_QUEST3, Build.MODEL "Quest 3"), answer OVRPlugin with the same
         // device - ovrpSystemHeadset Meta_Quest_3 = 11 (OVRPlugin.cs: Quest 8,
-        // Quest_2 9, Quest_Pro 10, Quest_3 11, Quest_3S 12) and product name
+        // Quest_2 9, Quest_Pro 10, Quest_3 11, Quest_3S 12 - order verified against
+        // Meta v71 OVRManager docs + Unity SystemHeadset values) and product name
         // "Meta Quest 3" - so the two surfaces stop disagreeing. Gated: titles
         // that run today were tuned against the Quest 2 answer.
         if (kl_env_on("KL_OVRP_QUEST3_ID", 0) && kl_env_on("KL_QUEST3", 0)) dflt = 11;
@@ -1151,6 +1152,14 @@ static uint64_t klovrp_GetAppShouldRecenter(void) {   // ovrpBool
     return (uint64_t)klovrp_take_recenter();
 }
 
+// Seconds to add for frame `idx` when `cur` is the newest begun frame. Pure so
+// it can be tested on the host (tests/xr harness).
+static double klovrp_pred_frame_offset(int on, int idx, int cur, float hz) {
+    if (!on || cur < 0 || idx <= cur || !(hz > 1.0f)) return 0.0;
+    int k = idx - cur; if (k > 3) k = 3;
+    return (double)k / (double)hz;
+}
+static int g_fring_begin;
 // The time (seconds, monotonic) the guest is told the next frame will be shown,
 // for its timewarp pose prediction. Real signature (0x171fd0) is
 // ovrpResult + double* out — s0 is NOT the return, the value goes through the
@@ -1161,6 +1170,17 @@ static uint64_t klovrp_GetPredictedDisplayTime(int node, double *out) {
     (void)node;
     if (!out) return -1001;
     double t = kl_ovrp_predicted_display_time();
+    // KL_OVRP_PRED_FRAMEIDX (def. 0): the real plugin's argument is a frame
+    // index, and a guest asking about frame N+k (Unity's render thread runs one
+    // ahead of the main thread) is told the display time k periods later.
+    // Measured relative to the newest frame begun (g_fring_begin); clamped to
+    // 0..3 periods so a bogus index never predicts the past or far future.
+    {
+        static int on = -1;
+        if (on < 0) on = kl_env_on("KL_OVRP_PRED_FRAMEIDX", 0);
+        t += klovrp_pred_frame_offset(on, node, __atomic_load_n(&g_fring_begin, __ATOMIC_ACQUIRE),
+                                      kl_ovrp_display_frequency());
+    }
     if (!isfinite(t) || t <= 0.0) {
         static int nf; if (!nf++)
             fprintf(stderr, "  [ovrp] NONFINITE ovrp_GetPredictedDisplayTime %f -> monotonic\n", t);
@@ -3068,7 +3088,19 @@ int kl_ovrp_stage_count(void) {
 // our own counter is what the ring is indexed by, so a guest that numbers
 // frames differently — or restarts them — cannot desynchronise the ring from
 // the records in it.
+// ---- frame latency samples for ovrp_GetAppLatencyTimings2 (KL_OVRP_LATENCY) ----
+// begin = BeginFrame (pose latch), end = GPU done (Vulkan) or EndFrame (GL).
+static uint64_t g_lat_begin_ns, g_lat_end_ns;
+static float    g_lat_render_s;   // EMA of end - begin, seconds
+static void klovrp_lat_end(uint64_t now) {
+    uint64_t b = __atomic_load_n(&g_lat_begin_ns, __ATOMIC_ACQUIRE);
+    if (!b || now <= b) return;
+    float d = (float)((double)(now - b) * 1e-9);
+    g_lat_render_s = g_lat_render_s > 0.0f ? g_lat_render_s * 0.9f + d * 0.1f : d;
+    __atomic_store_n(&g_lat_end_ns, now, __ATOMIC_RELEASE);
+}
 static uint64_t klovrp_begin_frame_impl(int guest_frame_index) {
+    __atomic_store_n(&g_lat_begin_ns, klovrp_mono_ns(), __ATOMIC_RELEASE);
 // The RENDER step's sample — the pose the guest was handed for this frame
     // and rendered every eye from. Not a fresh read: a fresh read at this
     // moment is a pose the picture was never drawn with, and reprojection
@@ -3299,6 +3331,7 @@ static void klovrp_record_last_sample(int frame) {
 static uint64_t klovrp_end_frame_impl(int guest_frame_index, const int *viewports,
                                       const int *viewport_of, int named_stage) {
     klovrp_record_last_sample(guest_frame_index);
+    if (!kl_vulkan_guest_active()) klovrp_lat_end(klovrp_mono_ns());
 // Close the observation window opened at BeginFrame. `observed` is still
     // the sticky answer; `mask`/`binds` are what say whether it belongs to this
     // frame, and they are the difference between an association that is known
@@ -3637,7 +3670,8 @@ static uint64_t klovrp_EndFrame4(int guest_frame_index, const void *layer_submit
         // frame-completion point either way.
         uint64_t t_wait = klovrp_mono_ns();
         kl_vulkan_frame_done(named < 0 ? 0 : named);
-        klovrp_publish_deferred();   // the picture exists now: the compositor may take it
+        klovrp_publish_deferred();
+        klovrp_lat_end(klovrp_mono_ns());   // the picture exists now: the compositor may take it
         {
             static double sum_ms, worst_ms; static unsigned n;
             double ms = (double)(klovrp_mono_ns() - t_wait) / 1e6;
@@ -4527,6 +4561,17 @@ uint64_t klovrp_GetNodePoseState_impl(int step, int node, void *out) {
         if (!isfinite(tm) || tm <= 0.0) {
             struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
             tm = (double)ts.tv_sec + (double)ts.tv_nsec * 1e-9;
+        }
+        // SDK: a GetNodePoseState3(Render, frameIndex) answer is the pose for
+        // THAT frame's display time, and Time says which. Same gate and offset
+        // as ovrp_GetPredictedDisplayTime, so the two never disagree.
+        {
+            static int on = -1;
+            if (on < 0) on = kl_env_on("KL_OVRP_PRED_FRAMEIDX", 0);
+            if (t_req_frame >= 0)
+                tm += klovrp_pred_frame_offset(on, t_req_frame,
+                          __atomic_load_n(&g_fring_begin, __ATOMIC_ACQUIRE),
+                          kl_ovrp_display_frequency());
         }
         memcpy((char *)out + 0x50, &tm, sizeof tm);
     }
@@ -8097,6 +8142,27 @@ static uint64_t klovrp_GetPerfMetricsFloat(int metric, float *out) {
 // caller's own wrapper answers 0.0f on a negative result. Distinct from
 // ovrp_GetAppPerfStats (the un-numbered 1.28 form), which is not an out-param
 // call at all — libunity reads the RETURNED pointer there.
+
+// ovrp_GetAppLatencyTimings2(ovrpAppLatencyTimings *out) — OVR_Plugin_Types.h:
+// { float LatencyRender, LatencyTimewarp, LatencyPostPresent, ErrorRender,
+// ErrorTimewarp } in seconds. KL_OVRP_LATENCY=1 (def. 0) answers from what is
+// measured here: LatencyRender = mean BeginFrame->GPU done + one display period
+// (the frame is shown on the next vsync); LatencyTimewarp = one period (our
+// compositor reprojects at present); PostPresent and the errors 0. Off: the
+// old Unsupported answer, which every title running today was seen with.
+static uint64_t klovrp_GetAppLatencyTimings2(float *out) {
+    ovrp_hit("ovrp_GetAppLatencyTimings2");
+    if (!out) return OVRP_FAIL_INVALID_PARAM;
+    memset(out, 0, 5 * sizeof(float));
+    static int on = -1;
+    if (on < 0) on = kl_env_on("KL_OVRP_LATENCY", 0);
+    if (!on || !(g_lat_render_s > 0.0f)) return OVRP_FAIL_UNSUPPORTED;
+    float hz = kl_ovrp_display_frequency();
+    float per = hz > 1.0f ? 1.0f / hz : 1.0f / 72.0f;
+    out[0] = g_lat_render_s + per;
+    out[1] = per;
+    return OVRP_SUCCESS;
+}
 #define KLOVRP_APP_PERF_STATS_BYTES 292
 static uint64_t klovrp_GetAppPerfStats2(void *out) {
     ovrp_hit("ovrp_GetAppPerfStats2");
@@ -8852,6 +8918,7 @@ static const struct { const char *name; void *fn; } g_ovrp_impl[] = {
     {"ovrp_GetAppShouldRecenter2", (void *)klovrp_GetAppShouldRecenter2},
     {"ovrp_GetAppShouldRecenter", (void *)klovrp_GetAppShouldRecenter},
     {"ovrp_GetPredictedDisplayTime", (void *)klovrp_GetPredictedDisplayTime},
+    {"ovrp_GetAppLatencyTimings2", (void *)klovrp_GetAppLatencyTimings2},
     {"ovrp_GetSystemProductName", (void *)klovrp_GetSystemProductName},
     {"ovrp_GetSystemProductName2", (void *)klovrp_GetSystemProductName2},
     {"ovrp_GetSystemDisplayFrequency", (void *)klovrp_GetSystemDisplayFrequency},
@@ -9446,7 +9513,7 @@ static const char *const g_ovrp_result_unsupported[] = {
     "ovrp_GetCurrentInteractionProfileName", "ovrp_GetCurrentDetachedInteractionProfile",
     "ovrp_TriggerVibrationAction",
     // performance telemetry this host cannot measure
-    "ovrp_GetGPUUtilLevel2", "ovrp_GetAppLatencyTimings2", "ovrp_GetPassthroughPreferences",
+    "ovrp_GetGPUUtilLevel2", "ovrp_GetPassthroughPreferences",
     "ovrp_GetLayerOcclusionMesh",
     // mixed-reality capture (no external camera)
     "ovrp_Media_GetCurrentCameraAnchorHandle", "ovrp_Media_GetCameraAnchorName",

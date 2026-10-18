@@ -264,8 +264,12 @@ Vulkan CTS desde la app; el informe de capacidades (vulkaninfo) de un Quest 3 re
      5b. `kl_ovrp.c`: `KL_OVRP_QUEST3_ID` (def. 0): con `KL_QUEST3` activo, ovrpSystemHeadset=11 (Meta_Quest_3) y
      producto «Meta Quest 3» en GetSystemProductName/2, para que OVRPlugin no contradiga a Build.MODEL.
      `VQConformance.prepareOpenXR` exporta `KL_XR_STRICT_LAYERS=1`; `VQLaunch` lo quita para juegos.
-     Pendiente: `ovrp_GetPredictedDisplayTime(frameIndex,…)` ignora frameIndex (real: +períodos por frame futuro);
-     `GetAppLatencyTimings2` → Unsupported.
+     5c. `KL_OVRP_PRED_FRAMEIDX` (def. 0): GetPredictedDisplayTime(frameIndex) y Time (+0x50) de GetNodePoseState3
+     (Render) suman k/hz por frame futuro respecto a `g_fring_begin` (k≤3). Arnés `klepton/runtime/xr/tests/
+     pred_frame_offset_test.c` OK. `KL_OVRP_LATENCY` (def. 0): GetAppLatencyTimings2 implementado (Render = EMA
+     BeginFrame→GPU done + 1 periodo; Timewarp = 1 periodo; resto 0); apagado sigue Unsupported.
+     Sin cambiar (no verificable sin OVR_Plugin_Types.h, GitHub raw bloqueado): flags SpaceWarp (1<<8|1<<12, 1<<9|1<<13),
+     aceleraciones de pose a 0 (velocidades sí), listas bool_yes/result_ok (no mienten sobre passthrough/anclas).
 
 ## Juegos: problemas abiertos (resto)
 - Congelado tras `ShaderWarmupManager.WarmUpShaders` (AC, logs 53–55): `[futex]` en el `[snap]` para diagnosticar.
