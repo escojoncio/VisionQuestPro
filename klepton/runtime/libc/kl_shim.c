@@ -2052,6 +2052,7 @@ static int klb_timer_getoverrun(void *t) { (void)t; return 0; }
 uintptr_t klb_stack_chk_guard = (uintptr_t)0x00000aff0a0000ULL;  // NUL/newline bytes trap overruns
 
 // ---------- table ----------
+void *kl_bionic_extra_lookup(const char *name);     // kl_bionic_extra.c
 typedef struct { const char *name; void *fn; } kl_entry;
 #define E(n, f)   { n, (void *)(f) }
 #define KL_FWD(n) { #n, (void *)(n) },
@@ -2448,6 +2449,7 @@ void kl_shim_set_guest_gl(kl_image *img) { g_guest_gl = img; }
 // media NDK, Oculus Platform), 0 when nothing would serve it.
 int kl_shim_known(const char *name) {
     if (!name || !*name) return 0;
+    if (kl_bionic_extra_lookup(name)) return 1;
     for (size_t i = 0; i < sizeof g_shim / sizeof g_shim[0]; i++)
         if (strcmp(g_shim[i].name, name) == 0) return 1;
     if (kl_ndk_lookup(name)) return 1;
@@ -2471,6 +2473,10 @@ int kl_shim_known(const char *name) {
 
 void *kl_shim_lookup(const char *name) {
     if (kl_shim_override) { void *o = kl_shim_override(name); if (o) return o; }
+    // kl_bionic_extra.c: the bionic names no title had asked for yet, plus the few the
+    // generated table forwarded with the wrong ABI (long double) or semantics (UTF-8).
+    void *extra = kl_bionic_extra_lookup(name);
+    if (extra) return extra;
     for (size_t i = 0; i < sizeof g_shim / sizeof g_shim[0]; i++)
         if (strcmp(g_shim[i].name, name) == 0) return g_shim[i].fn;
     // Tier 4: the NDK surface lives in its own table — it is a different
