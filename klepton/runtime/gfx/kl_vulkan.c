@@ -6066,18 +6066,13 @@ static int klvk_spoof_gpu(void) {
 // are transient on a Quest's tiler and cost it nothing; here they are real
 // memory - AC Nexus's 4x colour and depth pair is 865 MB per eye stage at
 // 3072 px - so the sample count is what an eye size
-// is paid for with. Default 2 for AC Nexus only (package gate); 0 for every
-// other game. An explicit per-game MSAA choice in the app (VPVK_MSAA, applied
+// is paid for with. Default 0 (the truth) for every game. An explicit per-game MSAA choice in the app (VPVK_MSAA, applied
 // inside VPKEngine to the sample count the game asks for) still wins over this,
 // and VPVK_FORCE_1X still forces 1x: this only changes what the guest asks for.
 static uint32_t klvk_sample_mask(void) {
     static int v = -1;
     if (v < 0) {
-        extern int kl_is_ac_nexus(void);
-        extern int kl_ac_nexus_known(void);
-        int r = kl_env_int("KL_VK_MAX_SAMPLES", 0) /* AC back to 4x: transient MSAA is memoryless in VPKEngine */;
-        if (!kl_ac_nexus_known()) return r == 1 ? 0x1u : r == 2 ? 0x3u : r == 4 ? 0x7u : ~0u;
-        v = r;
+        v = kl_env_int("KL_VK_MAX_SAMPLES", 0);
     }
     return v == 1 ? 0x1u : v == 2 ? 0x3u : v == 4 ? 0x7u : ~0u;
 }
