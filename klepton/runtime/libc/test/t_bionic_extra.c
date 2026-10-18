@@ -2,6 +2,7 @@
 //   cc -DKL_EXTRA_TEST -I.. t_bionic_extra.c -lm -o t && ./t
 // It includes the implementation file so the static wrappers are reachable.
 #include "../kl_bionic_extra.c"
+void *kl_bionic_extra3_lookup(const char *name) { (void)name; return 0; }   // the second half lives in kl_bionic_extra3.c
 void *kl_shim_lookup(const char *n) { (void)n; return 0; }
 long klb_sysconf(int n) { return n; }
 int klb_sysprop_get(const char *n, char *v) { (void)n; v[0] = 0; return 0; }
