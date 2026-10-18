@@ -849,6 +849,13 @@ static int klovrp_headset_type(void) {
         int dflt = (tgt && strcmp(tgt, "liminalvr") == 0)
                      ? OVRP_HEADSET_OCULUS_QUEST
                      : OVRP_HEADSET_OCULUS_QUEST_2;
+        // KL_OVRP_QUEST3_ID=1 (default 0): when JNI already presents a Quest 3
+        // (KL_QUEST3, Build.MODEL "Quest 3"), answer OVRPlugin with the same
+        // device - ovrpSystemHeadset Meta_Quest_3 = 11 (OVRPlugin.cs: Quest 8,
+        // Quest_2 9, Quest_Pro 10, Quest_3 11, Quest_3S 12) and product name
+        // "Meta Quest 3" - so the two surfaces stop disagreeing. Gated: titles
+        // that run today were tuned against the Quest 2 answer.
+        if (kl_env_on("KL_OVRP_QUEST3_ID", 0) && kl_env_on("KL_QUEST3", 0)) dflt = 11;
         v = (int)kl_env_int("KL_OVRP_HEADSET", dflt);
     }
     return v;
@@ -1169,9 +1176,12 @@ static uint64_t klovrp_GetPredictedDisplayTime(int node, double *out) {
 // NULL is explicitly tolerated). A static string is therefore both safe and
 // required if we want the name answered at all; "Oculus Quest 2" is what the
 // real plugin returns on the device we are presenting as everywhere else.
+static const char *klovrp_product_name(void) {
+    return klovrp_headset_type() == 11 ? "Meta Quest 3" : "Oculus Quest 2";
+}
 static const char *klovrp_GetSystemProductName(void) {
     ovrp_hit("ovrp_GetSystemProductName");
-    return "Oculus Quest 2";
+    return klovrp_product_name();
 }
 
 // The 2-form of the same answer: ovrpResult + const char** out — real
@@ -1181,7 +1191,7 @@ static const char *klovrp_GetSystemProductName(void) {
 static uint64_t klovrp_GetSystemProductName2(const char **out) {
     ovrp_hit("ovrp_GetSystemProductName2");
     if (!out) return -1001;
-    *out = "Oculus Quest 2";
+    *out = klovrp_product_name();
     return OVRP_SUCCESS;
 }
 

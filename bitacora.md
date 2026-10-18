@@ -260,8 +260,12 @@ Vulkan CTS desde la app; el informe de capacidades (vulkaninfo) de un Quest 3 re
   5a. (paso 2, rama paso-a1) `kl_openxr.c` xrEndFrame: validación por capa según spec 1.1 tras `KL_XR_STRICT_LAYERS`
      (def. 0): space inválido/swapchain inválido → HANDLE_INVALID; projection viewCount≠2 o view.type malo o
      imageArrayIndex≥arraySize → VALIDATION_FAILURE; swapchain sin imagen liberada → LAYER_INVALID; imageRect fuera
-     → SWAPCHAIN_RECT_INVALID (-25); cuaternión no unitario (±0,01) → POSE_INVALID (-39). Solo compilado en Linux;
-     falta exportar `KL_XR_STRICT_LAYERS=1` en `VQConformance.prepareOpenXR()` (Swift, fuera de xr/) y pasar el CTS.
+     → SWAPCHAIN_RECT_INVALID (-25); cuaternión no unitario (±0,01) → POSE_INVALID (-39). Solo compilado en Linux; falta pasar el CTS.
+     5b. `kl_ovrp.c`: `KL_OVRP_QUEST3_ID` (def. 0): con `KL_QUEST3` activo, ovrpSystemHeadset=11 (Meta_Quest_3) y
+     producto «Meta Quest 3» en GetSystemProductName/2, para que OVRPlugin no contradiga a Build.MODEL.
+     `VQConformance.prepareOpenXR` exporta `KL_XR_STRICT_LAYERS=1`; `VQLaunch` lo quita para juegos.
+     Pendiente: `ovrp_GetPredictedDisplayTime(frameIndex,…)` ignora frameIndex (real: +períodos por frame futuro);
+     `GetAppLatencyTimings2` → Unsupported.
 
 ## Juegos: problemas abiertos (resto)
 - Congelado tras `ShaderWarmupManager.WarmUpShaders` (AC, logs 53–55): `[futex]` en el `[snap]` para diagnosticar.
