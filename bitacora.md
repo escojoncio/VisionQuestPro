@@ -3,13 +3,17 @@
 Historial completo: `git log -p bitacora.md` (compactada el 2026-10-18; detalle de cada paso en los commits
 «Integrar paso-aN» y en las ramas `paso-aN` de GitHub).
 
-## EMPEZAR AQUÍ — 2026-10-18: pasos 1-7 implementados e integrados — build lanzada (resultado pendiente)
-`integ` fusionada en `main` en los dos repos (VPKEngine `main` = e6c3f3b; aquí merge 12090b2 `[build]`, run
-39150059344 de `visionos`). Primer paso del siguiente chat: estado de esa build (`gh run list -R
-escojoncio/VisionQuestPro -L 2`; log en rama `ci-logs`, `visionos.txt`) y corregir errores de compilación.
-Nada de hoy se ha compilado para visionOS: Swift, `.m/.mm`, MSL, `.S` y el C con cabeceras de Darwin solo están
-revisados a mano (VPKEngine 203/203 tests en Linux; arneses C de Klepton en Linux OK). Esperar errores de compilación
-en la primera build: leer el log de CI (rama `ci-logs`) y corregir antes de cualquier prueba.
+## EMPEZAR AQUÍ — 2026-10-18: pasos 1-7 compilados — BUILD SUCCEEDED, IPA publicada (sin probar en el visor)
+- Run 39150059344 (merge 12090b2) falló solo en `kl_bionic_extra.c`: `lgamma_r`/`lgammaf_r` no declarados (math.h de
+  Darwin los esconde tras `_REENTRANT`; libSystem los exporta). Arreglo 210c12b: prototipos explícitos tras los includes.
+- 210c12b también: recetas `build/xros|xrsim/libklepton.a` del `klepton/Makefile` compilan todos los `.c` y fallan al
+  final (`rc=0 … || rc=1`) antes del `ar`; paso del runtime en `visionos.yml` no corta el job (`|| echo ::error::`) para
+  que `xcodebuild` saque también sus errores en la misma pasada. Sin `libklepton.a` el enlace falla → no hay release.
+- Run 39150906473 (210c12b): runtime + VPVulkan (con `taa_native_metal.mm`, gles) + app → BUILD SUCCEEDED; release
+  `visionos` actualizada. Avisos revisados, ninguno es bug: `kl_ovrp.c:2798` indentación (el `n++` va fuera del if a
+  propósito), `strchrnul` visionOS 2.4+ (target 26), `-Wcomma` en `vq_harvest.c`, sin usar en `gpu/gles/glsl`.
+- Siguiente: «Orden de pruebas en el visor» desde el punto 1 con la IPA de 210c12b; logs a `QUEST/Registros`.
+VPKEngine `main` = e6c3f3b.
 
 ### Qué cambia por DEFECTO (sin tocar ajustes)
 - 100 % sin conexión para todos los juegos: `KL_NET_OFFLINE` def. 1 (kl_shim.c getaddrinfo/connect/sendto/sendmsg,
