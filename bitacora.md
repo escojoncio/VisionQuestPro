@@ -3,7 +3,7 @@
 Historial completo: `git log -p bitacora.md` (compactada el 2026-10-18; detalle de cada paso en los commits
 «Integrar paso-aN» y en las ramas `paso-aN` de GitHub).
 
-## EMPEZAR AQUÍ — 2026-10-18 (noche): primera prueba en el visor (AoT + AC) → 5 frentes; build lanzada
+## EMPEZAR AQUÍ — 2026-10-18 (noche): primera prueba en el visor (AoT + AC) → 5 frentes; BUILD SUCCEEDED 3e7a30c (run 39156514064, VPKEngine c920e54), sin probar
 Logs: `…-fin-Attack_on_Titan…` y `…-fin-Assassins_Creed_Nexus_VR` (19:55-20:03). Hallazgos y cambios:
 1. **Audio AC roto** (514 «Voice Starvation», `[aaudio] burst 256`): `klaa_guest_wwise` (kl_aaudio.c) miraba
    `access(<g_native_lib_dir>/libAkSoundEngine.so)`, pero en la app `tree/lib` nunca tiene `.so` (VQPrepare extrae a
