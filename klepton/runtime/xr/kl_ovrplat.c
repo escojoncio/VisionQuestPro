@@ -744,17 +744,11 @@ static uint64_t klplat_User_GetAccessToken(void) {
     // AC Nexus (2026-10-15 21:25): with a token, UbiServices logs in to Ubisoft with it and,
     // offline, retries DNS with back-off for ~50 s before the game moves on. An ERROR
     // completion (what the platform answers with no network/user) sends it straight to its
-    // offline path. KL_PLAT_TOKEN_ERROR=1/0 forces it for any game; default AC only.
+    // offline path. KL_PLAT_TOKEN_ERROR=1 selects it; default off, the same for every game.
     {
-        extern int kl_is_ac_nexus(void);
-        extern int kl_ac_nexus_known(void);
         static int err = -1;
-        int e = err;
-        if (e < 0) {
-            e = kl_env_on("KL_PLAT_TOKEN_ERROR", kl_is_ac_nexus());
-            if (kl_ac_nexus_known() || getenv("KL_PLAT_TOKEN_ERROR")) err = e;   // latch once known
-        }
-        if (e) {
+        if (err < 0) err = kl_env_on("KL_PLAT_TOKEN_ERROR", 0);
+        if (err) {
             pthread_mutex_lock(&g_msg_mu);
             int full = g_msg_tail - g_msg_head >= KLPLAT_MSGQ;
             uint64_t id = full ? 0 : g_next_request++;
