@@ -238,9 +238,6 @@ final class KleptonCompositor {
     /// Always-pass, no write — for coplanar draws after the first. See where
     /// `depthState` is built for why the two cannot be one.
     private var depthPassState: MTLDepthStencilState?
-    /// The guest's quad layers in the order it submitted them: no test, and
-    /// depth still written. See `overlaysInSubmitOrder`.
-    private var overlayOrderState: MTLDepthStencilState?
     private var sampler: MTLSamplerState!
     /// Views this GPU can draw in one amplified pass. 2 everywhere real; 1
     /// forces the old per-view passes, and forces foveation off with them
@@ -963,11 +960,6 @@ final class KleptonCompositor {
             dsdAlways.depthCompareFunction = .always
             dsdAlways.isDepthWriteEnabled = false
             depthPassState = device.makeDepthStencilState(descriptor: dsdAlways)
-
-            let dsdOrder = MTLDepthStencilDescriptor()
-            dsdOrder.depthCompareFunction = .always
-            dsdOrder.isDepthWriteEnabled = true
-            overlayOrderState = device.makeDepthStencilState(descriptor: dsdOrder)
 
             // The overlay pass — the guest's non-eye layers, which are the whole
             // of an Unreal title's UI. See encodeOverlays.
@@ -3199,15 +3191,6 @@ final class KleptonCompositor {
             // The equirect branch above may have swapped the depth state for
             // its behind-everything compare; restore the quad's before drawing.
             if writeDepth, let depthState { enc.setDepthStencilState(depthState) }
-            // ...or, where asked for, the state that lets each quad land over
-            // the ones before it whatever their distances.
-            // Depth WRITES only when the overlays are the frame (writeDepth): over a
-            // live eye picture a write would stamp the panel's near depth over the world
-            // (see encodeOverlays' doc), so there it is compare-always, no write.
-            if Self.overlaysInSubmitOrder {
-                if writeDepth, let overlayOrderState { enc.setDepthStencilState(overlayOrderState) }
-                else if let depthPassState { enc.setDepthStencilState(depthPassState) }
-            }
             enc.setRenderPipelineState(pipe)
             enc.setFragmentTexture(texture, index: 0)
             enc.setFragmentSamplerState(sampler, index: 0)
@@ -3278,20 +3261,6 @@ final class KleptonCompositor {
     /// V flips and sRGB decode differ by how the guest authored the panorama;
     /// both are one device run to settle, so they are env-switchable.
     private static let skipHeadLockedOverlays = klEnvOn("KL_OVERLAY_SKIP_HEADLOCKED", default: false)
-    /// KL_OVERLAY_SUBMIT_ORDER: quad layers are composited in the order the
-    /// guest submitted them, which is what a Quest's compositor does, instead of
-    /// being depth-tested against each other. With `.greater` and writes on, a
-    /// quad stamps its distance over its whole rectangle, transparent parts
-    /// included, and a quad submitted after it that lies farther away is cut off
-    /// along the nearer one's edge - where that edge falls moving with the head
-    /// (Alien: Rogue Incursion's labels, AC Nexus's panels).
-    /// Default on for AC Nexus only (package gate); read once,
-    /// when the compositor first draws, after the game has been configured.
-    private static let overlaysInSubmitOrder: Bool = {
-        let on = klEnvOn("KL_OVERLAY_SUBMIT_ORDER", default: kl_is_ac_nexus() != 0)
-        if on { NSLog("[cp] KL_OVERLAY_SUBMIT_ORDER on: quad layers composited in submit order") }
-        return on
-    }()
     private static let drawEquirectOverlays = klEnvOn("KL_OVERLAY_EQ", default: true)
     private static let eqFlipY = klEnvOn("KL_EQ_FLIP", default: false)
     private static let eqSrgbDecode = klEnvOn("KL_EQ_SRGB", default: false)

@@ -146,24 +146,18 @@ static int g_input_streams;     // INPUT streams sharing the one capture device
 static unsigned long g_short_writes;
 static int g_input_refusals;    // input opens declined because the mic was off
 
-// 1 when the guest mixes through Audiokinetic Wwise: AC Nexus by package, or any
-// Unity guest that ships Wwise's integration library (libAkSoundEngine.so) beside
+// 1 when the guest mixes through Audiokinetic Wwise: any Unity guest that ships Wwise's integration library (libAkSoundEngine.so) beside
 // its own. Unreal titles link Wwise statically and cannot be told apart from
 // here; KL_AAUDIO_BURST=1024 serves them by hand.
 static int klaa_guest_wwise(void) {
     static int v = -1;
     if (v >= 0) return v;
-    extern int kl_is_ac_nexus(void);
-    extern int kl_ac_nexus_known(void);
     extern const char *g_native_lib_dir;
-    int r = kl_is_ac_nexus();
-    if (!r && g_native_lib_dir && *g_native_lib_dir) {
-        char p[1200];
-        snprintf(p, sizeof p, "%s/libAkSoundEngine.so", g_native_lib_dir);
-        r = access(p, F_OK) == 0;
-    }
-    if (kl_ac_nexus_known()) v = r;
-    return r;
+    if (!g_native_lib_dir || !*g_native_lib_dir) return 0;   // not configured yet: ask again later
+    char p[1200];
+    snprintf(p, sizeof p, "%s/libAkSoundEngine.so", g_native_lib_dir);
+    v = access(p, F_OK) == 0;
+    return v;
 }
 
 static int klaa_burst_frames(void) {

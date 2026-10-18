@@ -73,6 +73,24 @@ pasadas completas del Vulkan/OpenXR/GLES CTS en el visor → arreglar fallos →
   informe `gpu.err what=hang_report` + líneas `gpu.hang` (pipelines por command buffer en vuelo), `e5d9dfd` arreglos de
   revisión. Build lanzada sobre ese VPKEngine; resultado pendiente.
 
+### 2026-10-18 — paso 7: limpieza de muletas de AC (rama paso-a6, sin build)
+- Eliminado el gate `kl_is_ac_nexus()`/`kl_ac_nexus_known()`/`KL_AC_NEXUS_PATCHES` (kl_jni_services.c, kl_jni.h,
+  visionos/Sources/kl_app.h). Ya no hay ningún default por paquete de AC.
+- Quitadas por completo: `KL_NEXUS_FRAME_BUDGET` (kl_mprobe.c/.h, llamada en kl_driver.c), `KL_GUEST_FRESH_POSE`
+  (kl_app.c, más `published_ns`/`guest_now_ns` huérfanos), 2 etapas de AC (`kl_ovrp_stage_count`: default 3 para todos,
+  `KL_OVRP_STAGES` sigue), ojo 3840 solo-AC (kl_ovrp.c; tope 3072/4096 genérico, `KL_OVRP_EYE_MAX` sigue),
+  `KL_OVERLAY_SUBMIT_ORDER` + `overlayOrderState` (KleptonCompositor.swift).
+- Generalizados: `KL_OVERLAY_TEXL` default 1 para todos; `KL_VK_MAX_SAMPLES` default 0 sin latch; `KL_PLAT_TOKEN_ERROR`
+  interruptor genérico default 0 (AC tardará ~50 s en reintentos DNS de UbiServices; si molesta, decidir default
+  genérico); burst Wwise solo por presencia de `libAkSoundEngine.so`.
+- Se quedan (emulación de clase/plataforma): JNI `com/nexusvr/loadingscreen/LoadingScreen`, skybox de vídeo de carga.
+- Dudosos, documentados y sin tocar: `klplat_user_default` (kl_ovrplat.c) da usuario offline a paquetes `com.ubisoft.*`
+  y a targets zix/intotheradius/redmatter2/vampire/twd2 — candidato a usuario offline genérico para todos (un Quest sin
+  red sí responde usuario); tablas por `kl_driver_target_name()` heredadas de Klepton (kl_vulkan/kl_libc/kl_dl/kl_egl…):
+  nunca casan en VisionQuestPro (target = carpeta), revisar una a una.
+- Riesgo a vigilar en AC: memoria con 3 etapas (OOM 8,1 GB en su día), parpadeo de quads sin orden de submit,
+  ritmo sin pose fresca. Solo compilado `-fsyntax-only` en Linux lo que no usa mach.
+
 ### 2026-10-18 — parches de AC retirados, carátulas — build lanzada
 - `kl_is_ac_nexus()` (kl_jni_services.c) devuelve 0 salvo `KL_AC_NEXUS_PATCHES=1`: todos los parches solo-AC apagados
   (2 etapas, token error, SpaceWarp spin, pose fresca, overlay texl/orden, burst AC, MSAA/ojo). Riesgo: con 3 etapas AC
