@@ -474,3 +474,10 @@ Vulkan CTS desde la app; el informe de capacidades (vulkaninfo) de un Quest 3 re
   falta, `vq_aot_run` (`app/Native/vq_config.c/h` → `vpvk_aot_build`), sello `aot.v<N>.<fp>.r<recetas>`: se repite
   si cambia el traductor o hay recetas nuevas (variantes vistas en partida). Log `Shaders AOT: …`.
 - En partida mirar `gpu.aot device`, `gpu.pso.aot archived= hot= hot_ms_*`, `gpu.pso.hot`. Swift sin compilar.
+## 2026-10-18 — resolución y anisotrópico por juego (rama paso-a10)
+- `VQLaunch.swift`: `VQGameRes` (`vq.resMode/resBase/resScale.<aaKey>`; por defecto «usar la global») y `VQGameAniso`
+  (`vq.aniso.<aaKey>`; ausente = global). `applyToEnvironment` aplica por juego `KL_OVRP_EYE_BASE/SCALE`, `c.render_scale`,
+  `VPVK_ANISO` y `VPVK_FORCE_ANISO`; logs «Gráficos: resolución…» y «anisotrópico por juego…». kl_ovrp.c NO tocado.
+- `VQLauncher.swift` `VQGameSettingsView`: secciones Resolución (muestra ≈ px por ojo; «Vision Pro» depende del visor) y Filtrado
+  anisotrópico (Global/Del juego/2x…16x). `VQConformance.neutralGraphics`: `VPVK_FORCE_ANISO=0`.
+- Requiere VPKEngine con `VPVK_FORCE_ANISO` (rama paso-a10 de VPKEngine). Swift sin compilar (no hay Mac), sin validar en visor.

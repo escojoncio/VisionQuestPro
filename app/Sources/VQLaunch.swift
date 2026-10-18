@@ -311,9 +311,14 @@ final class VQSettings: ObservableObject {
         setenv("KL_PASSTHROUGH", passthrough, 1)
         VQLog.log("Passthrough: \(passthrough)")
         VQLog.log("Gráficos: postura \(posture)")
-        setenv("KL_OVRP_EYE_SCALE", String(format: "%.2f", renderScale), 1)
-        setenv("KL_OVRP_EYE_BASE", resolutionBase, 1)
-        VQLog.log("Gráficos: resolución base \(resolutionBase)")
+        // Per game (VQGameRes) when the game fixes its own, else the global ones.
+        let gameKey = game?.aaKey ?? ""
+        let res = VQGameRes.load(key: gameKey)
+        let effScale = res.useGlobal ? renderScale : res.scale
+        let effBase = res.useGlobal ? resolutionBase : res.base
+        setenv("KL_OVRP_EYE_SCALE", String(format: "%.2f", effScale), 1)
+        setenv("KL_OVRP_EYE_BASE", effBase, 1)
+        VQLog.log("Gráficos: resolución base \(effBase), escala \(Int(effScale * 100)) % (\(res.useGlobal ? "global" : "del juego"))")
         // Quest 3 identity for every game, in every place a title can check it: Android Build
         // (MODEL/DEVICE eureka), OVRPlugin headset type, OpenXR system name and the GPU.
         if quest3Profile {
@@ -354,8 +359,12 @@ final class VQSettings: ObservableObject {
         c.vpktaa_sharpness = Float(vpktaaSharpness)
         c.taa_native = vpktaaNative ? 1 : 0
         setenv("VPVK_TAA_NATIVE", vpktaaNative ? "1" : "0", 1)  // read by VPVulkan even before the forward
-        c.anisotropy = Int32(anisoLevel)
-        setenv("VPVK_ANISO", String(anisoLevel), 1)  // read by VPVulkan even if the dlsym forward misses
+        // Per game (VQGameAniso): -1 = the global level; 0 = the game's own; 2/4/8/16 forced.
+        let effAniso = VQGameAniso.load(key: gameKey) ?? anisoLevel
+        c.anisotropy = Int32(effAniso)
+        setenv("VPVK_ANISO", String(effAniso), 1)  // read by VPVulkan even if the dlsym forward misses
+        setenv("VPVK_FORCE_ANISO", String(effAniso), 1)  // VPVulkan: wins over VPVK_ANISO, 0 = the game's own
+        VQLog.log("Gráficos: anisotrópico por juego x\(effAniso) (\(VQGameAniso.load(key: gameKey) == nil ? "global" : "del juego"))")
         // Per-pass GPU timing in VPKEngine (gpu.passtime lines, one rendering frame every 90).
         if perfDiag { setenv("VP_PASS_TIMING", "90", 1) } else { unsetenv("VP_PASS_TIMING") }
         if fsDiag { setenv("KL_TRACE_FS", "1", 1) } else { unsetenv("KL_TRACE_FS") }
@@ -365,7 +374,7 @@ final class VQSettings: ObservableObject {
         c.force_single_sample = aa.mode == .vpktaa ? 1 : 0
         setenv("KL_FPS_HUD", showFps ? "1" : "0", 1)
         setenv("VPVK_FORCE_1X", c.force_single_sample != 0 ? "1" : "0", 1)
-        c.render_scale = Float(renderScale)
+        c.render_scale = Float(effScale)
         c.asw_disabled = aswDisabled ? 1 : 0
         c.quest3_profile = quest3Profile ? 1 : 0
         _ = vq_gfx_config_apply(&c)
@@ -386,7 +395,7 @@ final class VQSettings: ObservableObject {
         setenv("VPVK_REPORT_GEOM", "1", 1)
         unsetenv("VPVK_TAA_JITTER")  // set to 0 by the conformance runs only (VQConformance.neutralGraphics)
         let detText = detected.map { "\($0)x" } ?? "no"
-        VQLog.log("Gráficos: foveado Quest siempre apagado; foveado propio \(foveation), AA: modo \(aa.mode.rawValue), MSAA override \(msaaOverride), detectado \(detText) (juego \(aaKey.isEmpty ? "?" : aaKey)\(aa.stored ? "" : ", por defecto")), VPKTAA permitido \(vpktaa) nativo \(vpktaaNative) \(Int(vpktaaPercent)) % nitidez \(vpktaaSharpness), forzar 1x \(c.force_single_sample != 0), anisotrópico x\(anisoLevel), diagnóstico de rendimiento \(perfDiag), diagnóstico de ficheros \(fsDiag), escala \(renderScale), ASW apagado \(aswDisabled), perfil Quest 3 \(quest3Profile), FPS en pantalla \(showFps)")
+        VQLog.log("Gráficos: foveado Quest siempre apagado; foveado propio \(foveation), AA: modo \(aa.mode.rawValue), MSAA override \(msaaOverride), detectado \(detText) (juego \(aaKey.isEmpty ? "?" : aaKey)\(aa.stored ? "" : ", por defecto")), VPKTAA permitido \(vpktaa) nativo \(vpktaaNative) \(Int(vpktaaPercent)) % nitidez \(vpktaaSharpness), forzar 1x \(c.force_single_sample != 0), anisotrópico x\(anisoLevel), diagnóstico de rendimiento \(perfDiag), diagnóstico de ficheros \(fsDiag), escala \(effScale), ASW apagado \(aswDisabled), perfil Quest 3 \(quest3Profile), FPS en pantalla \(showFps)")
         VQLog.log("Ajustes: sin red \(offline), log del juego \(guestLog), vigilante \(Int(watchdogSeconds)) s")
     }
 }
@@ -434,6 +443,71 @@ struct VQGameAA: Equatable {
         guard !key.isEmpty, let n = UserDefaults.standard.object(forKey: "vq.aaDetected." + key) as? Int,
               n >= 1 else { return nil }
         return n
+    }
+}
+
+/// Resolution chosen per game: when `useGlobal` is false, `base` ("original"|"compositor"|"native")
+/// and `scale` (0.5...1.5) replace the global ones (KL_OVRP_EYE_BASE / KL_OVRP_EYE_SCALE).
+/// Saved by game key: vq.resMode.<key> ("game"; absent = global), vq.resBase.<key>, vq.resScale.<key>.
+struct VQGameRes: Equatable {
+    var useGlobal = true
+    var base = "original"
+    var scale = 1.0
+
+    static func load(key: String) -> VQGameRes {
+        let d = UserDefaults.standard
+        var r = VQGameRes()
+        guard !key.isEmpty, d.string(forKey: "vq.resMode." + key) == "game" else { return r }
+        r.useGlobal = false
+        if let b = d.string(forKey: "vq.resBase." + key), ["original", "compositor", "native"].contains(b) { r.base = b }
+        if let s = d.object(forKey: "vq.resScale." + key) as? Double, s >= 0.5, s <= 1.5 { r.scale = s }
+        return r
+    }
+
+    func save(key: String) {
+        guard !key.isEmpty else { return }
+        let d = UserDefaults.standard
+        if useGlobal { d.removeObject(forKey: "vq.resMode." + key) } else { d.set("game", forKey: "vq.resMode." + key) }
+        d.set(base, forKey: "vq.resBase." + key)
+        d.set(scale, forKey: "vq.resScale." + key)
+    }
+
+    /// Per-eye pixels as kl_ovrp_set_eye_texture_size computes them for "original"/"native"
+    /// (same area, scale and cap; aspect of the Quest 3 eye). nil for "compositor": it follows
+    /// the visor's own request, known only when the game runs.
+    static func approxEye(base: String, scale: Double) -> (w: Int, h: Int)? {
+        let area: Double
+        let cap: Double
+        switch base {
+        case "original": area = 2064.0 * 2208.0; cap = 3072
+        case "native": area = 3660.0 * 3200.0; cap = 4096
+        default: return nil
+        }
+        let aspect = 2064.0 / 2208.0
+        let h0 = (area / aspect).squareRoot().rounded()
+        var h = (h0 * scale).rounded()
+        var w = ((h0 * aspect).rounded() * scale).rounded()
+        if w > cap || h > cap {
+            let k = cap / max(w, h)
+            w = (w * k).rounded(); h = (h * k).rounded()
+        }
+        return (Int(w), Int(h))
+    }
+}
+
+/// Anisotropic filtering per game: nil = follow the global level; 0 = the game's own;
+/// 2/4/8/16 forced on its material samplers. Saved as vq.aniso.<key>.
+enum VQGameAniso {
+    static func load(key: String) -> Int? {
+        guard !key.isEmpty, let n = UserDefaults.standard.object(forKey: "vq.aniso." + key) as? Int,
+              [0, 2, 4, 8, 16].contains(n) else { return nil }
+        return n
+    }
+
+    static func save(_ level: Int?, key: String) {
+        guard !key.isEmpty else { return }
+        if let level { UserDefaults.standard.set(level, forKey: "vq.aniso." + key) }
+        else { UserDefaults.standard.removeObject(forKey: "vq.aniso." + key) }
     }
 }
 
