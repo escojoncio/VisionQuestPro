@@ -146,6 +146,7 @@ uint32_t kl_gles_layer_texture(int is_eye, int eye, int stage, int w, int h, uin
     memset(&mai, 0, sizeof mai);
     mai.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
     mai.allocationSize = mr.size;
+    mai.memoryTypeIndex = (mr.memoryTypeBits & 1u) || !mr.memoryTypeBits ? 0u : (uint32_t)__builtin_ctz(mr.memoryTypeBits);
     VkDeviceMemory mem = VK_NULL_HANDLE;
     if (alloc((VkDevice)dev, &mai, NULL, &mem) != VK_SUCCESS) return 0;
     bind((VkDevice)dev, img, mem, 0);
