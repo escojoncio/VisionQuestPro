@@ -100,6 +100,9 @@ final class VQSettings: ObservableObject {
     // is per game (VQGameAA), automatic by default.
     @Published var vpktaaPercent: Double { didSet { save() } }  // 0...100
     @Published var vpktaaSharpness: Double { didSet { save() } } // 0...1
+    /// «VPKTAA nativo»: VPKEngine's own TAA pass (engine jitter, one dispatch for both eyes,
+    /// RCAS) instead of Klepton's VPKTAACore. Off by default; VPVulkan only.
+    @Published var vpktaaNative: Bool { didSet { save() } }
     /// 16x anisotropic filtering on the game's mipmapped linear samplers (VPVulkan).
     /// Forced anisotropic filtering level for material samplers: 0 (off), 2, 4, 8 or 16.
     @Published var anisoLevel: Int { didSet { save() } }
@@ -147,6 +150,7 @@ final class VQSettings: ObservableObject {
         fovHeight = d.object(forKey: "vq.fovHeight") as? Double ?? 0
         vpktaaPercent = d.object(forKey: "vq.vpktaaPercent") as? Double ?? 80
         vpktaaSharpness = d.object(forKey: "vq.vpktaaSharp3") as? Double ?? 1.0  // 3: reconstruction sharpening (PT default 1.0)
+        vpktaaNative = d.object(forKey: "vq.vpktaaNative") as? Bool ?? false
         // Older builds stored a bool (vq.aniso16); off there stays off.
         anisoLevel = d.object(forKey: "vq.anisoLevel") as? Int
             ?? ((d.object(forKey: "vq.aniso16") as? Bool) == false ? 0 : 16)
@@ -202,6 +206,7 @@ final class VQSettings: ObservableObject {
         d.set(fovHeight, forKey: "vq.fovHeight")
         d.set(vpktaaPercent, forKey: "vq.vpktaaPercent")
         d.set(vpktaaSharpness, forKey: "vq.vpktaaSharp3")
+        d.set(vpktaaNative, forKey: "vq.vpktaaNative")
         d.set(anisoLevel, forKey: "vq.anisoLevel")
         d.set(perfDiag, forKey: "vq.perfDiag")
         d.set(fsDiag, forKey: "vq.fsDiag")
@@ -329,6 +334,8 @@ final class VQSettings: ObservableObject {
         c.msaa_override = Int32(msaaOverride)
         c.vpktaa_percent = Float(vpktaaPercent)
         c.vpktaa_sharpness = Float(vpktaaSharpness)
+        c.taa_native = vpktaaNative ? 1 : 0
+        setenv("VPVK_TAA_NATIVE", vpktaaNative ? "1" : "0", 1)  // read by VPVulkan even before the forward
         c.anisotropy = Int32(anisoLevel)
         setenv("VPVK_ANISO", String(anisoLevel), 1)  // read by VPVulkan even if the dlsym forward misses
         // Per-pass GPU timing in VPKEngine (gpu.passtime lines, one rendering frame every 90).
@@ -360,7 +367,7 @@ final class VQSettings: ObservableObject {
         setenv("VPVK_REPORT_GEOM", "1", 1)
         unsetenv("VPVK_TAA_JITTER")  // set to 0 by the conformance runs only (VQConformance.neutralGraphics)
         let detText = detected.map { "\($0)x" } ?? "no"
-        VQLog.log("Gráficos: foveado Quest siempre apagado; foveado propio \(foveation), AA: modo \(aa.mode.rawValue), MSAA override \(msaaOverride), detectado \(detText) (juego \(aaKey.isEmpty ? "?" : aaKey)\(aa.stored ? "" : ", por defecto")), VPKTAA permitido \(vpktaa) \(Int(vpktaaPercent)) % nitidez \(vpktaaSharpness), forzar 1x \(c.force_single_sample != 0), anisotrópico x\(anisoLevel), diagnóstico de rendimiento \(perfDiag), diagnóstico de ficheros \(fsDiag), escala \(renderScale), ASW apagado \(aswDisabled), perfil Quest 3 \(quest3Profile), FPS en pantalla \(showFps)")
+        VQLog.log("Gráficos: foveado Quest siempre apagado; foveado propio \(foveation), AA: modo \(aa.mode.rawValue), MSAA override \(msaaOverride), detectado \(detText) (juego \(aaKey.isEmpty ? "?" : aaKey)\(aa.stored ? "" : ", por defecto")), VPKTAA permitido \(vpktaa) nativo \(vpktaaNative) \(Int(vpktaaPercent)) % nitidez \(vpktaaSharpness), forzar 1x \(c.force_single_sample != 0), anisotrópico x\(anisoLevel), diagnóstico de rendimiento \(perfDiag), diagnóstico de ficheros \(fsDiag), escala \(renderScale), ASW apagado \(aswDisabled), perfil Quest 3 \(quest3Profile), FPS en pantalla \(showFps)")
         VQLog.log("Ajustes: sin red \(offline), log del juego \(guestLog), vigilante \(Int(watchdogSeconds)) s")
     }
 }

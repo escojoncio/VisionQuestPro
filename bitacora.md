@@ -2,6 +2,24 @@
 
 Historial completo: `git log -p bitacora.md` (compactada el 2026-10-15; lo cerrado queda en una línea con referencia).
 
+## 2026-10-18 — VPKTAA nativo (VPKEngine paso-a8) + profundidad de ojo para PTW (sin probar en el visor)
+- Ajuste «VPKTAA nativo» (`VQLaunch.swift` `vpktaaNative`, clave `vq.vpktaaNative`, def. off; toggle en
+  `VQLauncher.swift` `VQVPKTAATuning`) → `vq_gfx_config.taa_native` (`vq_config.{h,c}`, dlsym
+  `vpvk_config_set_taa_native`) + env `VPVK_TAA_NATIVE`. Conformidad: `VPVK_TAA_NATIVE=0` (`VQConformance.neutralGraphics`).
+- `kl_vulkan.{h,c}`: `kl_vulkan_taa_native_on/encode` (dlsym débil `vpvk_taa_native_enabled/encode`), espejo
+  `kl_vulkan_taa_native_frame`. `KleptonTAA.swift` `inlineResolve`: con nativo encendido el callback de
+  `kl_vulkan_native_submit` llama `kl_vulkan_taa_native_encode` (`nativeFrame`: pose, tangentes sin jitter,
+  crop, profundidad viva incl. MSAA, MV AppSW) en vez de `VPKTAACore.encode`; mismo anillo/publicación
+  (`InlineOut.both` = vista unorm de las 2 capas). El jitter lo elige VPKEngine (Halton propio); el de
+  `klvk_taa_next_jitter` solo da enabled/tamaño.
+- Profundidad de ojo desacoplada: `klvk_taa_depth_on()` = (`KL_VPKTAA`=1 o `KL_CP_PTW`=1) y `KL_VPKTAA_DEPTH`≠0;
+  API `kl_vulkan_eye_depth_get` sin cambios. `klvk_taa_wants_ms_depth` también con PTW o nativo.
+  Profundidad MSAA: `klvk_ed_ms_resolve` → `vpvk_depth_resolve_encode` (muestra más cercana, depth32Float del
+  motor, clave etapa*2+ojo) en cola de VPKEngine; se archiva como copia (samples 1, D32_SFLOAT). Solo sin inline
+  o con PTW, y nunca con nativo (lee las muestras). `KL_DEPTH_MS_RESOLVE=0` lo apaga.
+- Pendiente: probar en visor (log `vk.taa native gpu_ms`, objetivo < 1 ms/ojo), PTW + VPKTAA nativo a la vez con
+  MSAA (PTW recibe entonces la profundidad MS sin resolver), compilar Swift (sin Mac).
+
 ## SIGUIENTE PASO OBLIGATORIO — emulación perfecta de Quest 3 (antes de cualquier otra tarea)
 Objetivo: que ningún juego note diferencia con un Quest 3. Hacerlo en este orden:
 1. **GPU idéntica a la Adreno 740 del Quest 3.** VPKEngine debe declarar exactamente lo que declara la Adreno

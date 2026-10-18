@@ -461,6 +461,7 @@ enum VQConformance {
         setenv("VPVK_MSAA", "0", 1)
         setenv("KL_VPKTAA", "0", 1)
         setenv("KL_AA_MODE", "off", 1)
+        setenv("VPVK_TAA_NATIVE", "0", 1)
         var c = vq_gfx_config()
         c.foveation_mode = 0
         c.vpktaa_enabled = 0
