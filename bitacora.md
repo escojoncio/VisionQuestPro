@@ -481,3 +481,9 @@ Vulkan CTS desde la app; el informe de capacidades (vulkaninfo) de un Quest 3 re
 - `VQLauncher.swift` `VQGameSettingsView`: secciones Resolución (muestra ≈ px por ojo; «Vision Pro» depende del visor) y Filtrado
   anisotrópico (Global/Del juego/2x…16x). `VQConformance.neutralGraphics`: `VPVK_FORCE_ANISO=0`.
 - Requiere VPKEngine con `VPVK_FORCE_ANISO` (rama paso-a10 de VPKEngine). Swift sin compilar (no hay Mac), sin validar en visor.
+## 2026-10-18 · GLES con VPKEngine (experimental), rama paso-a5
+- `klepton/runtime/gfx/kl_gles.c/h`: con `KL_GLES_VPK=1` los gl*/egl* los sirve vpgles (dentro de VPVulkan, dlsym sobre `KL_MVK_DYLIB`). Sin la puerta nada cambia.
+- `kl_egl.c`: `kl_egl_sym`/`kl_egl_lookup` consultan primero vpgles. `kl_ovrp.c`: multiview/Array también con vpgles; capas de ojo = VkImage del dispositivo vpgles envuelto como textura GL (`vpgles_wrap_image`) y publicado con `kl_glfb_note_eye_mtl_texture` (Array: 2 slices; DoubleWide: ambos ojos); `klovrp_end_frame_impl` llama `kl_gles_frame_end` (flush+wait).
+- App: ajuste «OpenGL ES con VPKEngine (experimental)» (`vq.glesVPK`, apagado). Solo con él los juegos solo GLES dejan de marcarse incompatibles; `KL_GLES_VPK` solo si además VPKEngine está activo y VPVulkan presente.
+- `conformance/gles/caselists.py`: listas dEQP-GLES2/3/31 (perfil rápida/completa). No conectado aún a `conformance.yml` (falta compilar los módulos gles2/3/31 y el runner EGL).
+- Sin build: nada de esto se ha compilado para visionOS. Requiere que la CI de VPVulkan use la rama con gpu/gles.

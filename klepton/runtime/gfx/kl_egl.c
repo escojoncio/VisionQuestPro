@@ -36,6 +36,7 @@
 #include "kl_mediandk.h"   // what an AHardwareBuffer is, for the image path
 #include "kl_present.h"
 #include "kl_openxr.h"   // XR_KHR_android_surface_swapchain: eglSwapBuffers presents it
+#include "kl_gles.h"     // KL_GLES_VPK=1: VPKEngine's own GLES/EGL answers instead
 
 // ---- the subset of EGL/egl.h we actually answer for ----
 #define EGL_FALSE                 0
@@ -1794,6 +1795,10 @@ static int32_t klegl_GetError(void) {
 // The gateway. Never fails, never aborts — see the header comment.
 void *kl_egl_sym(const char *name) {
     if (!name) return NULL;
+    if (kl_gles_enabled()) {             // gated (kl_gles.h); NULL falls through to the old gateway
+        void *vpk = kl_gles_sym(name);
+        if (vpk) return vpk;
+    }
     void *own = kl_egl_lookup(name);              // eglXxx resolved through here too
     if (own) return own;
     // With KL_GLFB=1 the host's real GL answers everything except the capability
@@ -1947,6 +1952,10 @@ static const struct { const char *name; void *fn; } g_egl[] = {
 };
 
 void *kl_egl_lookup(const char *name) {
+    if (kl_gles_enabled() && name && !strncmp(name, "egl", 3)) {
+        void *vpk = kl_gles_sym(name);
+        if (vpk) return vpk;
+    }
     for (size_t i = 0; i < sizeof g_egl / sizeof g_egl[0]; i++)
         if (strcmp(g_egl[i].name, name) == 0) return g_egl[i].fn;
     return NULL;
