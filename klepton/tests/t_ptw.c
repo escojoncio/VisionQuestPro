@@ -60,6 +60,51 @@ int main(void) {
     NEAR(sizeof(kl_ptw_uniforms), 192, 0, "uniform size");
     NEAR(__builtin_offsetof(kl_ptw_uniforms, grid_n), 96, 0, "gridN offset");
 
+    // 6. ASW extrapolation: known MV -> expected displacement.
+    {
+        float sc[2] = {0.5f, 0.5f}, mvv[2] = {0.04f, -0.02f}, dc[2];
+        // NDC delta (0.04, -0.02) -> uv (0.02, -0.01); half a guest frame -> (0.01, -0.005).
+        NEAR(kl_asw_displace(dc, mvv, sc, 0.5f, 0, 1.0f), 1, 0, "mv valid");
+        NEAR(dc[0], 0.01, 1e-7, "asw dx"); NEAR(dc[1], -0.005, 1e-7, "asw dy");
+        // top-left-origin MV texture (Vulkan): y flips into grid space (cy UP).
+        kl_asw_displace(dc, mvv, sc, 0.5f, 1, 1.0f);
+        NEAR(dc[0], 0.01, 1e-7, "asw dx flip"); NEAR(dc[1], 0.005, 1e-7, "asw dy flip");
+        // Metric check: a vertex at depth z moves by dc.x * (l + r) * z sideways.
+        float c0x = 0.5f, z = 3.0f, p0[3], p1[3];
+        kl_ptw_point(p0, c0x, 0.5f, z, tan4);
+        kl_ptw_point(p1, c0x + dc[0], 0.5f + dc[1], z, tan4);
+        NEAR(p1[0] - p0[0], 0.01 * (tan4[0] + tan4[1]) * z, 1e-6, "asw metres x");
+        NEAR(p1[1] - p0[1], 0.005 * (tan4[2] + tan4[3]) * z, 1e-6, "asw metres y");
+        NEAR(p1[2], p0[2], 0, "asw keeps depth");
+        // frac 0 = identity; cap; invalid vectors are ignored.
+        kl_asw_displace(dc, mvv, sc, 0.0f, 0, 1.0f);
+        NEAR(dc[0], 0, 0, "frac 0 dx"); NEAR(dc[1], 0, 0, "frac 0 dy");
+        kl_asw_displace(dc, mvv, sc, 100.0f, 0, 0.05f);
+        NEAR(dc[0], 0.05, 1e-7, "cap +"); NEAR(dc[1], -0.05, 1e-7, "cap -");
+        float bad[2] = {NAN, 0.0f}, big[2] = {5.0f, 0.0f};
+        NEAR(kl_asw_displace(dc, bad, sc, 1.0f, 0, 1.0f), 0, 0, "nan rejected");
+        NEAR(kl_asw_displace(dc, big, sc, 1.0f, 0, 1.0f), 0, 0, "|mv|>4 rejected");
+        NEAR(dc[0], 0, 0, "rejected dc = 0");
+        // sign of the scale (VPKTAA's mvSign = -1) reverses the motion.
+        float neg[2] = {-0.5f, -0.5f};
+        kl_asw_displace(dc, mvv, neg, 1.0f, 0, 1.0f);
+        NEAR(dc[0], -0.02, 1e-7, "negative scale");
+        // Fraction: on time = 0; one interval late = 1; cap; bad input = 0.
+        NEAR(kl_asw_fraction(12.0f, 12.0f, 11.1f, 1.5f), 0, 0, "on time");
+        NEAR(kl_asw_fraction(8.0f, 12.0f, 11.1f, 1.5f), 0, 0, "early = 0");
+        NEAR(kl_asw_fraction(23.1f, 12.0f, 11.1f, 1.5f), 1, 1e-5, "one frame late");
+        NEAR(kl_asw_fraction(60.0f, 12.0f, 11.1f, 1.5f), 1.5, 0, "capped");
+        NEAR(kl_asw_fraction(20.0f, 12.0f, 0.0f, 1.5f), 0, 0, "no interval");
+        // Uniform fill.
+        kl_ptw_uniforms u; kl_ptw_fill(&u, I, 0.1f, 0, 1, 200, 64, 64, 8, 0, 1);
+        NEAR(u.asw[3], 0, 0, "asw off by default");
+        kl_ptw_fill_asw(&u, 0.5f, 0.5f, 0.7f, 32, 32, 1, 0.1f);
+        NEAR(u.asw[3], 1, 0, "asw on"); NEAR(u.mv_size[3], 1, 0, "mv slice");
+        kl_ptw_fill_asw(&u, 0.5f, 0.5f, 0.0f, 32, 32, 1, 0.1f);
+        NEAR(u.asw[3], 0, 0, "asw off at frac 0");
+        NEAR(__builtin_offsetof(kl_ptw_uniforms, asw), 112, 0, "asw offset");
+    }
+
     printf(fails ? "t_ptw: %d FAILED\n" : "t_ptw: ok\n", fails);
     return fails != 0;
 }

@@ -304,6 +304,8 @@ final class VQSettings: ObservableObject {
         }
         // ASW: Klepton never hands out SpaceWarp textures (ovrp_GetLayerTextureSpaceWarp
         // -> unsupported), so every frame is real; the setting is passed on for VPVulkan.
+        // The ASW setting also reaches the compositor's extrapolation (KL_CP_ASW, behind its own gate).
+        setenv("KL_CP_ASW_OFF", aswDisabled ? "1" : "0", 1)
         var c = vq_gfx_config()
         c.foveation_mode = Int32(foveation.rawValue)
         c.sharp_zone = Float(sharpZone)

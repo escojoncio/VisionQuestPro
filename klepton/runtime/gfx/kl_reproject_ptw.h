@@ -39,7 +39,11 @@ typedef struct {
     uint32_t depth_slice;    // array layer of this eye in its depth texture
     uint32_t dilate;         // 1 = nearest-of-neighbourhood depth
     uint32_t on;             // 0 = this view has no usable depth (vertex collapses)
-    float    pad[20];
+    // ASW (object extrapolation, KL_CP_ASW): MV scale x/y (motion-vector value -> eye-picture
+    // uv, signed as VPKTAA's), fraction of a guest frame to extrapolate, 1 = MVs bound.
+    float    asw[4];
+    float    mv_size[4];     // MV texture w, h, per-axis cap (picture fraction), array slice
+    float    pad[12];
 } kl_ptw_uniforms;
 
 // Metres in front of the eye for a device depth value d (Vulkan clip z in [0,1]).
@@ -65,6 +69,32 @@ void kl_ptw_fill(kl_ptw_uniforms *u, const float model_view[16],
                  float near_z, float far_z, int reversed, float far_cap,
                  int tex_w, int tex_h, uint32_t grid_n, uint32_t depth_slice,
                  int dilate);
+
+// ---------------------------------------------------------------------------
+// ASW 2.0 object extrapolation (Oculus Application SpaceWarp). The guest's
+// motion vectors (SpaceWarp layer, 0x300 / ovrp_GetLayerTextureSpaceWarp) say
+// how far each surface moved, in picture uv, over ONE guest frame. When the
+// frame on screen is older than the guest's cadence says it should be, each
+// PTW vertex is displaced along its MV by `frac` of that motion before the
+// head-pose reprojection, so moving objects keep moving instead of
+// freezing with the (correctly reprojected) world. Camera motion is NOT in the
+// MVs (AppSW excludes it); the PTW delta already carries it.
+
+// How many guest frames the picture is overdue: (age - lead) / interval, clamped
+// to [0, max_frac]. `lead` is the age a FRESH frame has at first use (render
+// latency), so a frame shown on time extrapolates by 0. Zero on bad input.
+float kl_asw_fraction(float age_ms, float lead_ms, float interval_ms, float max_frac);
+
+// Picture-space displacement of a vertex for motion vector mv (as stored) in
+// grid-parameter space (cy UP): mv * scale * frac, y flipped when the MV texture
+// origin is top-left, each axis capped at +-max_c. Returns 0 and dc = 0 for a
+// NaN / infinite / |mv| > 4 vector (VPKTAA's validity rule), else 1.
+int kl_asw_displace(float dc[2], const float mv[2], const float scale[2],
+                    float frac, int flip_y, float max_c);
+
+// Turn extrapolation on for one view's uniforms (after kl_ptw_fill).
+void kl_ptw_fill_asw(kl_ptw_uniforms *u, float scale_x, float scale_y, float frac,
+                     int mv_w, int mv_h, uint32_t mv_slice, float max_c);
 
 // MSL to APPEND to kl_reproject_msl(); vertex function kl_ptw_v.
 const char *kl_reproject_ptw_msl(void);

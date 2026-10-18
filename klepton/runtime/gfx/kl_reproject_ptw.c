@@ -101,6 +101,34 @@ void kl_ptw_fill(kl_ptw_uniforms *u, const float mv[16],
     u->on = (near_z > 0 && tex_w > 0 && tex_h > 0) ? 1u : 0u;
 }
 
+float kl_asw_fraction(float age, float lead, float interval, float mx) {
+    if (!(interval > 0.0f) || !(age >= 0.0f) || !(lead >= 0.0f) || !(mx > 0.0f)) return 0.0f;
+    float f = (age - lead) / interval;
+    if (!(f > 0.0f)) return 0.0f;      // also NaN
+    return f > mx ? mx : f;
+}
+
+int kl_asw_displace(float dc[2], const float mv[2], const float scale[2],
+                    float frac, int flip_y, float max_c) {
+    dc[0] = dc[1] = 0.0f;
+    if (!isfinite(mv[0]) || !isfinite(mv[1]) || fabsf(mv[0]) > 4.0f || fabsf(mv[1]) > 4.0f)
+        return 0;
+    float x = mv[0] * scale[0] * frac;
+    float y = mv[1] * scale[1] * frac * (flip_y ? -1.0f : 1.0f);
+    if (x > max_c) x = max_c; else if (x < -max_c) x = -max_c;
+    if (y > max_c) y = max_c; else if (y < -max_c) y = -max_c;
+    dc[0] = x; dc[1] = y;
+    return 1;
+}
+
+void kl_ptw_fill_asw(kl_ptw_uniforms *u, float sx, float sy, float frac,
+                     int mv_w, int mv_h, uint32_t slice, float max_c) {
+    u->asw[0] = sx; u->asw[1] = sy; u->asw[2] = frac;
+    u->asw[3] = (frac > 0.0f && mv_w > 0 && mv_h > 0) ? 1.0f : 0.0f;
+    u->mv_size[0] = (float)mv_w; u->mv_size[1] = (float)mv_h;
+    u->mv_size[2] = max_c; u->mv_size[3] = (float)slice;
+}
+
 // The PTW vertex stage. APPENDED to kl_reproject_msl() (it reuses KLReproj,
 // VOut, kl_offscreen and the fragment kl_reproject_f), so the picture is
 // sampled, decoded, faded and keyed exactly as in the rotation-only pass.
@@ -115,7 +143,9 @@ static const char kl_msl_ptw[] =
 "    uint     depthSlice;\n"
 "    uint     dilate;\n"
 "    uint     on;\n"
-"    float    pad[20];\n"
+"    float4   asw;        // mv scale x/y, frame fraction, 1 = MV bound\n"
+"    float4   mvSize;     // mv w, h, per-axis cap, array slice\n"
+"    float    pad[12];\n"
 "};\n"
 "\n"
 "static float kl_ptw_lin(float d, float4 p)\n"
@@ -129,16 +159,19 @@ static const char kl_msl_ptw[] =
 // Nearest surface of a 3x3 texel neighbourhood (dilate) or the texel itself.
 // Nearest, not average: averaging across a silhouette invents a surface
 // halfway between the two that neither eye ever saw.
-"static float kl_ptw_depth(depth2d_array<float> dt, float2 uv, constant KLPtw &k)\n"
+"static float kl_ptw_depth(depth2d_array<float> dt, float2 uv, constant KLPtw &k, thread int2 &best)\n"
 "{\n"
 // read(), not sample(): a vertex function has no derivatives for implicit LOD.
 "    int2 hi = int2(k.texSize.xy) - 1;\n"
 "    int2 t0 = clamp(int2(uv * k.texSize.xy), int2(0), hi);\n"
 "    float z = k.depthP.w;\n"
+"    best = int2(0);\n"
 "    int r = k.dilate != 0u ? 1 : 0;\n"
 "    for (int j = -r; j <= r; j++)\n"
-"        for (int i = -r; i <= r; i++)\n"
-"            z = min(z, kl_ptw_lin(dt.read(uint2(clamp(t0 + int2(i, j), int2(0), hi)), k.depthSlice), k.depthP));\n"
+"        for (int i = -r; i <= r; i++) {\n"
+"            float zi = kl_ptw_lin(dt.read(uint2(clamp(t0 + int2(i, j), int2(0), hi)), k.depthSlice), k.depthP);\n"
+"            if (zi < z) { z = zi; best = int2(i, j); }\n"
+"        }\n"
 "    return z;\n"
 "}\n"
 "\n"
@@ -158,13 +191,22 @@ static const char kl_msl_ptw[] =
 "    return mix(mix(a, b, f.x), mix(d, e, f.x), f.y);\n"
 "}\n"
 "\n"
+// Same validity rule as kl_asw_displace; as_type so fast-math cannot drop the NaN test.
+"static bool kl_asw_bad(float2 v)\n"
+"{\n"
+"    uint2 e = as_type<uint2>(v) & uint2(0x7f800000u);\n"
+"    return any(e == uint2(0x7f800000u)) || any(abs(v) > 4.0);\n"
+"}\n"
+"\n"
 "vertex VOut kl_ptw_v(uint vid [[vertex_id]],\n"
 "                     ushort amp [[amplification_id]],\n"
 "                     constant KLReproj *ua [[buffer(0)]],\n"
 "                     constant float2 *grid [[buffer(1)]],\n"
 "                     constant KLPtw *pa [[buffer(2)]],\n"
 "                     depth2d_array<float> d0 [[texture(0)]],\n"
-"                     depth2d_array<float> d1 [[texture(1)]])\n"
+"                     depth2d_array<float> d1 [[texture(1)]],\n"
+"                     texture2d_array<float> m0 [[texture(2)]],\n"
+"                     texture2d_array<float> m1 [[texture(3)]])\n"
 "{\n"
 "    constant KLReproj &u = ua[amp];\n"
 "    constant KLPtw &k = pa[amp];\n"
@@ -176,9 +218,26 @@ static const char kl_msl_ptw[] =
 "    float2 c = float2(g) / float(n);\n"
 "    float2 uv = kl_ptw_uv(grid, u.gridEye, c);\n"
 "    if (u.flipY != 0u) uv.y = 1.0 - uv.y;\n"
-"    float z = amp == 0 ? kl_ptw_depth(d0, uv, k) : kl_ptw_depth(d1, uv, k);\n"
-"    float x = mix(-u.tangents.x, u.tangents.y, c.x) * z;\n"
-"    float y = mix(-u.tangents.w, u.tangents.z, c.y) * z;\n"
+"    int2 bo;\n"
+"    float z = amp == 0 ? kl_ptw_depth(d0, uv, k, bo) : kl_ptw_depth(d1, uv, k, bo);\n"
+// ASW: the MV at the nearest-depth texel of the neighbourhood (the surface that
+// owns this vertex), read in the MV's own picture-rect uv, moved by frac of one
+// guest frame. The vertex keeps its colour uv (the texel) and its depth.
+"    float2 cm = c;\n"
+"    if (k.asw.w > 0.5) {\n"
+"        float2 muv = float2(c.x, u.flipY != 0u ? 1.0 - c.y : c.y) + float2(bo) * k.texSize.zw;\n"
+"        int2 mhi = int2(k.mvSize.xy) - 1;\n"
+"        uint2 mt = uint2(clamp(int2(muv * k.mvSize.xy), int2(0), mhi));\n"
+"        uint msl = uint(k.mvSize.w);\n"
+"        float2 mv = amp == 0 ? m0.read(mt, msl).xy : m1.read(mt, msl).xy;\n"
+"        if (!kl_asw_bad(mv)) {\n"
+"            float2 dc = mv * k.asw.xy * k.asw.z;\n"
+"            if (u.flipY != 0u) dc.y = -dc.y;\n"
+"            cm = c + clamp(dc, float2(-k.mvSize.z), float2(k.mvSize.z));\n"
+"        }\n"
+"    }\n"
+"    float x = mix(-u.tangents.x, u.tangents.y, cm.x) * z;\n"
+"    float y = mix(-u.tangents.w, u.tangents.z, cm.y) * z;\n"
 "    VOut o;\n"
 "    o.slice = u.slice;\n"
 "    o.srgb = u.srgbDecode;\n"

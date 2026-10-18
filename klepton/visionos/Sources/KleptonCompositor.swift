@@ -295,6 +295,33 @@ final class KleptonCompositor {
     private var ptwGpuMs = [0.0, 0.0], ptwGpuN = [0, 0]
     private var ptwLastReport = Date()
     private var ptwDrewThisCmd = false
+    // Paso 4b — ASW 2.0 (object extrapolation by the guest's SpaceWarp motion vectors) on top of
+    // PTW. KL_CP_ASW=1 (default 0) AND KL_CP_PTW=1; the user setting «ASW desactivado» reaches
+    // here as KL_CP_ASW_OFF=1 (app/VQLaunch.swift) and wins. Each PTW vertex moves along the MV
+    // (read at its nearest-depth texel) by `fraction` of one guest frame, fraction = how overdue
+    // the picture on screen is: (age - lead) / interval, lead = EMA of a fresh frame's age at
+    // first use, interval = EMA of the guest's submit gap. KL_CP_ASW_MAX (1.5 frames),
+    // KL_CP_ASW_CAP (0.08 of the picture per axis), KL_CP_ASW_SIGN (+1 / -1, KL_VPKTAA_MV_SIGN's
+    // meaning; the auto vote lives in KleptonTAA and is NOT shared), KL_CP_ASW_YFLIP,
+    // KL_CP_ASW_SCALE (0.5 = NDC delta -> uv, as VPKTAA).
+    private let aswRequested = klEnvOn("KL_CP_ASW", default: false)
+    private let aswUserOff = klEnvOn("KL_CP_ASW_OFF", default: false)
+    private var aswWanted: Bool { aswRequested && ptwWanted && !aswUserOff }
+    private let aswMax = max(klEnvFloat("KL_CP_ASW_MAX", 1.5), 0.1)
+    private let aswCap = max(klEnvFloat("KL_CP_ASW_CAP", 0.08), 0.001)
+    private let aswScale: SIMD2<Float> = {
+        let m = klEnvFloat("KL_CP_ASW_SCALE", 0.5)
+        let sg: Float = klEnvFloat("KL_CP_ASW_SIGN", 1) < 0 ? -1 : 1
+        return SIMD2<Float>(m * sg, m * sg * (klEnvOn("KL_CP_ASW_YFLIP", default: false) ? -1 : 1))
+    }()
+    private var aswSerial: UInt64 = 0, aswSubmitNs: UInt64 = 0
+    private var aswIntervalMs: Float = 0, aswLeadMs: Float = 0
+    private var aswViews: [ObjectIdentifier: MTLTexture] = [:]
+    private var aswDummy: MTLTexture?
+    private var aswPasses = 0, aswFracSum: Float = 0
+    private var aswWhy = ""
+    private typealias PTWPass = (u: [kl_ptw_uniforms], d0: MTLTexture, d1: MTLTexture,
+                                 m0: MTLTexture, m1: MTLTexture)
     /// Red, green, blue — one second each, off the wall clock. Deliberately
     /// full-intensity primaries: whatever tone mapping or colour management sits
     /// between the drawable and the display, these stay obviously themselves.
@@ -900,6 +927,11 @@ final class KleptonCompositor {
                     ptwPipeline = try device.makeRenderPipelineState(descriptor: pd)
                     NSLog("[cp] PTW (KL_CP_PTW=1): positional timewarp with per-pixel depth, grid "
                           + "\(ptwGrid)x\(ptwGrid)/eye, far cap \(ptwFar) m, dilate \(ptwDilate)")
+                    if aswRequested {
+                        NSLog("[cp] ASW (KL_CP_ASW=1): "
+                              + (aswUserOff ? "OFF by the user setting (KL_CP_ASW_OFF=1), every frame real"
+                                            : "object extrapolation with SpaceWarp motion vectors, max \(aswMax) frames, cap \(aswCap)"))
+                    }
                 } catch {
                     NSLog("[cp] PTW pipeline failed, rotation-only stays: \(error)")
                 }
@@ -2816,6 +2848,8 @@ final class KleptonCompositor {
                 }
                 enc.setVertexTexture(ptw.d0, index: 0)
                 enc.setVertexTexture(ptw.d1, index: 1)
+                enc.setVertexTexture(ptw.m0, index: 2)
+                enc.setVertexTexture(ptw.m1, index: 3)
                 enc.drawPrimitives(type: .triangle, vertexStart: 0,
                                    vertexCount: 6 * Int(ptwGrid) * Int(ptwGrid))
                 ptwDrewThisCmd = true
@@ -4120,9 +4154,9 @@ final class KleptonCompositor {
     private func ptwInputs(viewIndices: [Int], drawable: LayerRenderer.Drawable,
                            uniforms: [kl_reproject_uniforms], rendered: kl_ovrp_render_pose,
                            haveRendered: Bool, originFromHead: simd_float4x4)
-        -> (u: [kl_ptw_uniforms], d0: MTLTexture, d1: MTLTexture)? {
+        -> PTWPass? {
         guard ptwWanted, ptwPipeline != nil else { return nil }
-        func refuse(_ why: String) -> (u: [kl_ptw_uniforms], d0: MTLTexture, d1: MTLTexture)? {
+        func refuse(_ why: String) -> PTWPass? {
             ptwFallbacks += 1
             if why != ptwWhy { ptwWhy = why; NSLog("[cp] PTW off this frame: \(why)") }
             return nil
@@ -4130,6 +4164,9 @@ final class KleptonCompositor {
         guard haveRendered, rendered.serial != 0 else { return refuse("no frame record") }
         var out: [kl_ptw_uniforms] = []
         var tex: [MTLTexture?] = []
+        var mvTex: [MTLTexture?] = []
+        let aswFrac: Float = aswWanted ? aswFraction(rendered) : 0
+        var aswWhyNow = aswWanted ? "" : "off"
         let nearSubmit = rendered.depth_near > 0
         let near = nearSubmit ? rendered.depth_near : max(kl_ovrp_frustum_near(), 0.001)
         let far = nearSubmit ? max(rendered.depth_far, 0) : 0
@@ -4138,7 +4175,7 @@ final class KleptonCompositor {
             var info = kl_vulkan_eye_depth()
             guard kl_vulkan_eye_depth_get(Int32(rendered.stage), Int32(eye), rendered.serial, &info) != 0,
                   let p = info.mtl else {
-                if uniforms[n].visible == 0 { out.append(kl_ptw_uniforms()); tex.append(nil); continue }
+                if uniforms[n].visible == 0 { out.append(kl_ptw_uniforms()); tex.append(nil); mvTex.append(nil); continue }
                 return refuse("no eye depth for serial \(rendered.serial) eye \(eye) "
                               + "(needs KL_VPKTAA=1, Vulkan guest)")
             }
@@ -4178,14 +4215,95 @@ final class KleptonCompositor {
             var u = kl_ptw_uniforms()
             kl_ptw_fill(&u, mv, near, far, rev ? 1 : 0, ptwFar, Int32(v.width), Int32(v.height),
                         ptwGrid, UInt32(max(info.slice, 0)), ptwDilate ? 1 : 0)
+            // ASW: this view's motion vectors, when the guest wrote them for this very frame.
+            var mvT: MTLTexture? = nil
+            if aswWanted {
+                if aswFrac <= 0 { aswWhyNow = "on time (fraction 0)" }
+                else if let (m, sl) = aswMotion(eye, rendered) {
+                    mvT = m
+                    kl_ptw_fill_asw(&u, aswScale.x, aswScale.y, aswFrac, Int32(m.width), Int32(m.height),
+                                    UInt32(sl), aswCap)
+                } else { aswWhyNow = aswMotionWhy }
+            }
             out.append(u)
             tex.append(v)
+            mvTex.append(mvT)
         }
         guard let any = tex.compactMap({ $0 }).first else { return refuse("no visible view") }
         let d0 = tex[0] ?? any
         if ptwWhy != "" { ptwWhy = ""; NSLog("[cp] PTW on") }
         ptwFrames += 1
-        return (out, d0, (tex.count > 1 ? tex[1] : nil) ?? d0)
+        // Vertex texture slots 2/3 are always bound (Metal wants the type to match): a 1x1
+        // dummy stands in for a view without motion vectors; its uniforms say asw.w == 0.
+        let dummy = aswDummyTexture()
+        let anyMV = mvTex.compactMap({ $0 }).first
+        if aswWanted {
+            if anyMV != nil { aswPasses += 1; aswFracSum += aswFrac; aswWhyNow = "" }
+            if aswWhyNow != aswWhy { aswWhy = aswWhyNow
+                NSLog(aswWhyNow.isEmpty ? "[cp] ASW extrapolating (fraction \(aswFrac))"
+                                        : "[cp] ASW idle: \(aswWhyNow)") }
+        }
+        let m0 = mvTex[0] ?? anyMV ?? dummy
+        let m1 = (mvTex.count > 1 ? mvTex[1] : nil) ?? mvTex[0] ?? anyMV ?? dummy
+        return (out, d0, (tex.count > 1 ? tex[1] : nil) ?? d0, m0, m1)
+    }
+
+    private var aswMotionWhy = ""
+
+    private func aswDummyTexture() -> MTLTexture {
+        if let d = aswDummy { return d }
+        let td = MTLTextureDescriptor()
+        td.textureType = .type2DArray; td.pixelFormat = .rgba16Float
+        td.width = 1; td.height = 1; td.arrayLength = 1; td.usage = .shaderRead
+        td.storageMode = .shared
+        let t = device.makeTexture(descriptor: td)!
+        aswDummy = t
+        return t
+    }
+
+    /// Fraction of a guest frame the picture in `r` is overdue (see aswRequested). Tracks the
+    /// guest cadence and a fresh frame's first-use age when `r` is a serial not seen before.
+    private func aswFraction(_ r: kl_ovrp_render_pose) -> Float {
+        guard r.submit_ns != 0 else { return 0 }
+        var ts = timespec()
+        clock_gettime(CLOCK_MONOTONIC, &ts)
+        let now = UInt64(ts.tv_sec) * 1_000_000_000 + UInt64(ts.tv_nsec)
+        guard now > r.submit_ns else { return 0 }
+        let age = Float(now - r.submit_ns) / 1_000_000
+        if r.serial != aswSerial {
+            if aswSerial != 0, r.serial > aswSerial, aswSubmitNs != 0, r.submit_ns > aswSubmitNs {
+                let gap = Float(r.submit_ns - aswSubmitNs) / 1_000_000 / Float(r.serial - aswSerial)
+                if gap > 2, gap < 100 { aswIntervalMs = aswIntervalMs == 0 ? gap : aswIntervalMs * 0.9 + gap * 0.1 }
+            }
+            aswSerial = r.serial; aswSubmitNs = r.submit_ns
+            // A fresh frame's age at first use; clamped to one interval so a late first sighting
+            // does not teach "late is normal".
+            let a = aswIntervalMs > 0 ? min(age, aswIntervalMs) : age
+            aswLeadMs = aswLeadMs == 0 ? a : aswLeadMs * 0.9 + a * 0.1
+        }
+        return kl_asw_fraction(age, aswLeadMs, aswIntervalMs, aswMax)
+    }
+
+    /// The motion-vector texture (as a 2D-array view), its slice and why-not, for `eye` of the
+    /// frame in `r`. Same gating as KleptonTAA.motionInput: storage exists and the guest wrote it.
+    private func aswMotion(_ eye: Int, _ r: kl_ovrp_render_pose) -> (MTLTexture, Int)? {
+        guard (r.asw & Int32(KL_OVRP_ASW_STORAGE)) != 0 else { aswMotionWhy = "guest has no SpaceWarp storage"; return nil }
+        guard (r.asw & Int32(KL_OVRP_ASW_MV)) != 0 else { aswMotionWhy = "guest wrote no motion vectors this frame"; return nil }
+        var w: Int32 = 0, h: Int32 = 0, sl: Int32 = 0
+        guard let p = kl_vulkan_spacewarp_mtl(Int32(eye), Int32(r.stage), Int32(KLVK_ASW_MOTION), &w, &h, &sl)
+        else { aswMotionWhy = "no motion-vector texture"; return nil }
+        let t = Unmanaged<MTLTexture>.fromOpaque(p).takeUnretainedValue() as MTLTexture
+        guard t.sampleCount == 1, t.usage.contains(.shaderRead),
+              ([.rgba16Float, .rg16Float, .rgba32Float, .rg32Float] as [MTLPixelFormat]).contains(t.pixelFormat)
+        else { aswMotionWhy = "motion-vector format \(t.pixelFormat.rawValue) not readable"; return nil }
+        if t.textureType == .type2DArray { return (t, Int(max(sl, 0))) }
+        guard t.textureType == .type2D else { aswMotionWhy = "motion-vector texture type"; return nil }
+        if let c = aswViews[ObjectIdentifier(t)] { return (c, 0) }
+        guard let c = t.makeTextureView(pixelFormat: t.pixelFormat, textureType: .type2DArray,
+                                        levels: 0..<1, slices: 0..<1) else { aswMotionWhy = "motion-vector view"; return nil }
+        if aswViews.count > 32 { aswViews.removeAll() }
+        aswViews[ObjectIdentifier(t)] = c
+        return (c, 0)
     }
 
     /// GPU ms per composite command buffer, PTW vs rotation-only, every 5 s while KL_CP_PTW=1.
@@ -4209,6 +4327,12 @@ final class KleptonCompositor {
                      n[1] > 0 ? m[1] / Double(n[1]) : 0, n[1],
                      n[0] > 0 ? m[0] / Double(n[0]) : 0, n[0], ptwFrames, ptwFallbacks))
         ptwFrames = 0; ptwFallbacks = 0
+        if aswWanted {
+            NSLog(String(format: "[cp] ASW: %d extrapolated passes in 5 s, mean fraction %.2f; guest interval %.1f ms, "
+                         + "fresh-frame lead %.1f ms", aswPasses, aswPasses > 0 ? aswFracSum / Float(aswPasses) : 0,
+                         aswIntervalMs, aswLeadMs))
+            aswPasses = 0; aswFracSum = 0
+        }
     }
 
     private func unwarpGrid(_ source: MTLTexture?,
