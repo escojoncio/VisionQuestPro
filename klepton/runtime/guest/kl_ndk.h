@@ -3,8 +3,10 @@
 // ANativeWindow_lock/unlockAndPost and the AAssetManager_*/AAsset_* subset —
 // Unity never imported those (its assets arrive over JNI), which is why they
 // were absent from the original measured surface rather than refused.
-// Still absent: AConfiguration_* and the whole ANativeActivity lifecycle —
-// neither target has an ANativeActivity_onCreate anywhere in the chain.
+// AConfiguration_*, AChoreographer, AThermal, APerformanceHint, AStorageManager,
+// ASharedMemory and the input accessors live in kl_android.c, behind this lookup.
+// Still absent: the ANativeActivity lifecycle — neither target has an
+// ANativeActivity_onCreate anywhere in the chain.
 #ifndef KL_NDK_H
 #define KL_NDK_H
 #include <stdint.h>
@@ -58,6 +60,11 @@ void kl_ndk_prepare_looper(void);
 // the JNI boundary — and the two must agree, or a guest that checks through
 // Java and then acts through ALooper gets contradictory answers.
 int kl_ndk_thread_has_looper(void);
+
+// The calling thread's looper (NULL if none) and a wake for one, for objects
+// that deliver to a looper from another thread (AChoreographer).
+void *kl_ndk_looper_current(void);
+void  kl_ndk_looper_wake(void *looper);
 
 // ...and pump it, which is what Looper.loop() does on Android's main thread
 // between callbacks. Returns what ALooper_pollOnce returns. A prepared looper

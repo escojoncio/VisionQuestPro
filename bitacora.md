@@ -186,6 +186,30 @@ Vulkan CTS desde la app; el informe de capacidades (vulkaninfo) de un Quest 3 re
   - Fork, no portado: `klovrp_enq_age` (ruta EndFrame legada), usuarios offline por app id de otras tiendas,
     `KL_OVERLAY_FLIP_X/Y` (los paneles de AC podrían salir girados 180°; comprobar).
 
+## 2026-10-18 (agente 14): Android completo B (libandroid, libmediandk, AAudio/OpenSL, JNI de clases Android) — SIN PROBAR EN DISPOSITIVO
+- Solo comprobado con `clang -fsyntax-only` y arneses Linux con stubs de CoreVideo/VideoToolbox/CommonCrypto (no hay build Darwin).
+- `media/kl_mediandk.c`: AMediaFormat tipado (64 claves; Int64/Float/Double/Size/Buffer/Rect, copy, toString, +71 AMEDIAFORMAT_KEY_*),
+  errores AMEDIA_*, DataSource por URI (esquemas remotos -> ERROR_IO), Extractor completo, Codec (async, nombre, formatos,
+  parámetros, salida a surface; codificación y DRM no soportados a propósito), AImageReader/AImage (planos solo YUV_420_888 sobre NV12),
+  AHardwareBuffer (allocate/lock/lockPlanes/describe/unlock/getId), ATrace.
+- `media/kl_aaudio.c`: requestPause/Flush, release, getters de usage/contentType/capturePolicy/privacy/spatialized/hardware*,
+  convertStreamStateToText, getTimestamp validado.
+- `media/kl_opensl.c`: todos los SL_IID_*, MuteSolo, EffectSend, OutputMix, EngineCapabilities, Query* del motor;
+  Create* rechaza con FEATURE_UNSUPPORTED una interfaz requerida no servida. Efectos/3D/MIDI no soportados.
+- `guest/kl_android.c` (+`.h`, nuevo; `kl_ndk_lookup` cae a `kl_android_lookup`): AConfiguration de Quest 3, AChoreographer sobre el looper
+  (hilo de pulso a kl_ovrp_display_frequency), AThermal real (`media/kl_thermal.m`: NSProcessInfo.thermalState), APerformanceHint,
+  AStorageManager/AObb (montaje -> ERROR_COULD_NOT_MOUNT), ASharedMemory, AInput*/AKeyEvent/AMotionEvent, ANativeActivity.
+  `kl_ndk.c`: ANativeWindow (transform, dataspace, frame rate), ASensor accessors. Makefile: kl_android.c, kl_thermal.m, kl_jni_sysinfo.c.
+- JNI: nuevo `jni/kl_jni_sysinfo.c` (tabla `klj_bind_sysinfo`): SystemClock, Process (myPid/myUid/is64Bit...), PowerManager
+  (isInteractive, isPowerSaveMode, getCurrentThermalStatus real vía `kl_android_thermal_status`, newWakeLock/WakeLock con contador),
+  BatteryManager.getLongProperty, Build.getSerial, Debug, Locale (display names, ISO3, toString). `kl_jni.c`: campos Build
+  (BOARD, HOST, SERIAL, CPU_ABI, SOC_*), Build.VERSION (SDK, SECURITY_PATCH, PREVIEW_SDK_INT), VERSION_CODES, constantes de PowerManager/
+  BatteryManager/Process. Con `KL_QUEST3=1` (o target batman): SDK_INT=32 (`klj_field_ival`, también `kl_jni_build_int`), RELEASE=12,
+  SDK="32", fingerprint ":12/". Por defecto sigue siendo Quest 2 / SDK 29 (decisión previa; ver comentarios de Build en `kl_jni.c`).
+  ANDROID_ID ya era fijo sintético (`kl_jni_net.c`).
+- Pendiente: sensores del Quest (lista ASensor vacía), AObb montaje real, AImage otros formatos, `ovrp` aún dice Quest 2 si no hay KL_QUEST3,
+  sysinfo sin probar con un juego (Unity/Unreal); comprobar que gen_xcodeproj/project.yml de visionos lista los ficheros nuevos.
+
 ## 2026-10-15 (15): una sola pose por frame para TODAS las lecturas; registros al acabar el juego — SIN PROBAR
 - Resultado de (14) (Registros 9/10, builds e56af9c/c29ae8e): PEOR al girar («los ojos ni se sincronizan»). El log lo
   mide: `frame record -> last Update(Render)` worst 2–7°, mean 0,7–1,2° girando, 22° en tirones = lo que el registro se
