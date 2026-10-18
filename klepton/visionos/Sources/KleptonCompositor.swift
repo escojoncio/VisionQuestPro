@@ -537,6 +537,21 @@ final class KleptonCompositor {
     // Consecutive liveness reports whose mean gap disagrees with the latched
     // display period by more than 10%. See cadenceSummary().
     private var cadenceDisagreed = 0
+    // Gaps of the current cadence window, for its median. Cleared with the window.
+    private var cadenceGaps: [Double] = []
+    // Half-rate recovery (see cadenceSummary). visionOS can drop us to 2.0 periods after a burst of
+    // late frames and not give the rate back; the only lever is minimumFrameRepeatCount, and we
+    // only ever lower it to 0 (we never ask for a slower rate). KL_CP_HALFRATE_RECOVER=0 disables it.
+    private let halfRateRecover = klEnvOn("KL_CP_HALFRATE_RECOVER", default: true)
+    private var lastRepeatCount: Int32?
+    private var halfRateWindows = 0          // consecutive windows at ~2.0 periods with 0 late frames
+    private var halfRateActive = false       // inside an episode
+    private var halfRateSince = Date()
+    private var halfRateLastTry: Date?
+    private var halfRateLoggedHeld = false
+    private var halfRateEpisodes = 0
+    private var halfRatePresents = 0         // presents seen at half rate, whole session
+    private var halfRateSeconds = 0.0        // wall time of those presents
     private let noFence = klEnvOn("KL_CP_NOFENCE", default: false)
     // The last device anchor the tracker actually answered with, and how often
     // it has had to stand in. See displayOriginFromDevice for why holding it is
@@ -1500,6 +1515,8 @@ final class KleptonCompositor {
 
     private func renderLoop() {
         layerRenderer.waitUntilRunning()
+        lastRepeatCount = layerRenderer.minimumFrameRepeatCount
+        NSLog("[cp] minimumFrameRepeatCount \(lastRepeatCount ?? -1) at start")
         if probe == 9 {
             // The system default device, exactly as Apple's template uses —
             // not ANGLE's. Nothing here samples a guest texture, so there is no
@@ -1613,6 +1630,10 @@ final class KleptonCompositor {
         }
         NSLog("[cp] render loop ended after \(presented) presented frames, "
               + "\(iterations) iterations, state=\(String(describing: layerRenderer.state))")
+        if halfRateEpisodes > 0 {
+            NSLog(String(format: "[cp] half rate this session: %d episode(s), %d presents over %.1f s "
+                         + "at ~2.0 periods", halfRateEpisodes, halfRatePresents, halfRateSeconds))
+        }
         // Ends the guest's loop and joins it, so its report — which is the
         // lifecycle report, and belongs to the guest's end of the run rather than
         // to this one — has been written before this returns.
@@ -3940,6 +3961,7 @@ final class KleptonCompositor {
         guard seconds > 0 else { return }
         cadenceN += 1
         cadenceSum += seconds
+        cadenceGaps.append(seconds)
         cadenceMax = max(cadenceMax, seconds)
         cadenceMin = min(cadenceMin, seconds)
         if gap >= 1.5 { cadenceRepeats += 1 }
@@ -3954,9 +3976,19 @@ final class KleptonCompositor {
         guard cadenceN > 0 else { return "cadence n/a (no presents yet)" }
         let meanS = cadenceSum / Double(cadenceN)
         let periods = displayPeriod > 0 ? meanS / displayPeriod : 0
+        // Median gap in periods, only for windows that are being held (mean >= 1.5 periods):
+        // mean and median apart tell a steady 2.0 from a mix of 1.0 and long gaps.
+        var medianText = ""
+        if displayPeriod > 0, periods >= 1.5, !cadenceGaps.isEmpty {
+            let s = cadenceGaps.sorted()
+            let mid = s.count / 2
+            let med = s.count % 2 == 1 ? s[mid] : (s[mid - 1] + s[mid]) / 2
+            medianText = String(format: " (median %.2f)", med / displayPeriod)
+        }
         let out = String(format: "cadence %.2f ms mean / %.2f max", meanS * 1000,
                          cadenceMax * 1000)
             + (displayPeriod > 0 ? String(format: " = %.2f periods", periods) : "")
+            + medianText
             + ", \(cadenceRepeats)/\(cadenceN) held >=1.5, "
             + "\(missedDeadline) past deadline"
             // Only when it has happened: a permanently-zero clause on the one
@@ -4014,6 +4046,53 @@ final class KleptonCompositor {
         } else {
             cadenceDisagreed = 0
         }
+        // The system may change minimumFrameRepeatCount on its own; say so when it does.
+        let repeatNow = layerRenderer.minimumFrameRepeatCount
+        if let before = lastRepeatCount, before != repeatNow {
+            NSLog("[cp] minimumFrameRepeatCount changed \(before) -> \(repeatNow) (by the system)")
+        }
+        lastRepeatCount = repeatNow
+        // Half-rate recovery. Six windows (~3 s) in a row at 1.8-2.2 periods with no frame past
+        // its deadline means WE are on time and the system is the one holding every frame twice.
+        // The one thing we can undo is a repeat count above 0; we never set anything else.
+        if halfRateRecover, displayPeriod > 0, cadenceN >= 10 {
+            if periods >= 1.8 && periods <= 2.2 && missedDeadline == 0 {
+                halfRateWindows += 1
+            } else {
+                halfRateWindows = 0
+            }
+            if halfRateActive && periods >= 1.5 {
+                halfRatePresents += cadenceN
+                halfRateSeconds += cadenceSum
+            }
+            if halfRateWindows >= 6 {
+                let now = Date()
+                if !halfRateActive {
+                    halfRateActive = true
+                    halfRateSince = now
+                    halfRateLoggedHeld = false
+                    halfRateEpisodes += 1
+                }
+                if halfRateLastTry == nil || now.timeIntervalSince(halfRateLastTry!) >= 10 {
+                    halfRateLastTry = now
+                    if repeatNow != 0 {
+                        NSLog("[cp] HALF RATE: system cadence 2.0 periods with 0 late frames; "
+                              + "minimumFrameRepeatCount \(repeatNow) -> 0")
+                        layerRenderer.minimumFrameRepeatCount = 0
+                        lastRepeatCount = layerRenderer.minimumFrameRepeatCount
+                    } else if !halfRateLoggedHeld {
+                        halfRateLoggedHeld = true
+                        NSLog("[cp] HALF RATE held by the system (minimumFrameRepeatCount already 0; "
+                              + "nothing to re-assert)")
+                    }
+                }
+            } else if halfRateActive && periods < 1.15 {
+                NSLog(String(format: "[cp] HALF RATE over after %.1f s", Date().timeIntervalSince(halfRateSince)))
+                halfRateActive = false
+                halfRateLastTry = nil
+            }
+        }
+        cadenceGaps.removeAll(keepingCapacity: true)
         cadenceN = 0; cadenceSum = 0; cadenceMax = 0; cadenceMin = .infinity; cadenceShort = 0
         cadenceRepeats = 0; missedDeadline = 0
         anchorWalkedBack = 0; anchorHeld = 0; anchorUnknown = 0
