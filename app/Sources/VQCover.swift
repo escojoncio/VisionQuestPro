@@ -1,8 +1,8 @@
 // VisionQuestPro: a cover picture for each game card, like the Quest library.
 //
 // The games never go online; only the app fetches the store picture, once, when the setting allows.
-// Order: an image the user put in the game's folder (a file named cover/banner/poster wins, else
-// the largest image), then the store cover cached as QUEST/Cache/<game>/cover-store.<ext>
+// Order: an image the user put in the game's folder (only a file named cover/banner/poster/caratula
+// counts), then the store cover cached as QUEST/Cache/<game>/cover-store.<ext>
 // (downloaded once by VQCoverStore), then the APK's assets/vr_splash.png when it is ~16:9
 // (cover-splash.<ext>), then the art inside the APK (a banner first, else the launcher icon at
 // its highest density; cover-apk.<ext>). No picture: the card draws a gradient with the game's name.
@@ -21,21 +21,75 @@ enum VQCover {
 
     /// The picture to show for `game`, or nil. Extracts from the APK on first use (cheap: one small entry).
     static func url(for game: VQGame, storeCovers: Bool) -> URL? {
-        if let own = folderImage(game.folder) { return own }
-        guard let cache = VQFolder.shared.cache(for: game.id) else { return nil }
-        if let stored = cached("cover-store", in: cache) { return stored }
+        if let own = folderImage(game.folder) {
+            logOnce(game.id, "Carátula de \(game.name): fuente folderImage (\(own.lastPathComponent))")
+            return own
+        }
+        guard let cache = VQFolder.shared.cache(for: game.id) else {
+            logOnce(game.id, "Carátula de \(game.name): sin carpeta de caché (cache nil); no hay carátula")
+            return nil
+        }
+        if let stored = cached("cover-store", in: cache) {
+            logOnce(game.id, "Carátula de \(game.name): fuente cover-store (\(stored.lastPathComponent))")
+            return stored
+        }
         if storeCovers { VQCoverStore.fetchIfNeeded(game, cache: cache) }
-        if let splash = cached("cover-splash", in: cache) { return splash }
+        else { logOnce(game.id, "Carátula de tienda: \(game.name): omitida, ajuste de carátulas de tienda apagado") }
+        if let splash = cached("cover-splash", in: cache) {
+            logOnce(game.id, "Carátula de \(game.name): fuente cover-splash (\(splash.lastPathComponent))")
+            return splash
+        }
         let fm = FileManager.default
         let splashNone = cache.appendingPathComponent("cover-splash.none")
         if !fm.fileExists(atPath: splashNone.path) {
             let (splash, definitive) = extractSplash(game.apk, into: cache)
-            if let splash { return splash }
+            if let splash {
+                logOnce(game.id, "Carátula de \(game.name): fuente cover-splash (\(splash.lastPathComponent))")
+                return splash
+            }
             // Only a clean "no usable splash" is remembered; transient failures are retried next time.
             if definitive { fm.createFile(atPath: splashNone.path, contents: nil) }
         }
-        if let apkArt = cached("cover-apk", in: cache) { return apkArt }
-        return extractFromAPK(game.apk, into: cache)
+        if let apkArt = cached("cover-apk", in: cache) {
+            logOnce(game.id, "Carátula de \(game.name): fuente cover-apk/icono (\(apkArt.lastPathComponent))")
+            return apkArt
+        }
+        let art = extractFromAPK(game.apk, into: cache)
+        logOnce(game.id, "Carátula de \(game.name): " + (art.map { "fuente cover-apk/icono (\($0.lastPathComponent), recién extraído)" } ?? "sin carátula (ni icono en el APK)"))
+        return art
+    }
+
+    private static let logLock = NSLock()
+    private static var logged: Set<String> = []
+
+    /// Logs `message` once per game and session (the card asks for the cover several times).
+    static func logOnce(_ id: String, _ message: String) {
+        logLock.lock()
+        let first = logged.insert("\(id)|\(message)").inserted
+        logLock.unlock()
+        if first { VQLog.log(message) }
+    }
+
+    static func dimensions(_ data: Data) -> (w: Int, h: Int)? {
+        guard let src = CGImageSourceCreateWithData(data as CFData, nil),
+              let p = CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [CFString: Any],
+              let w = p[kCGImagePropertyPixelWidth] as? Int, let h = p[kCGImagePropertyPixelHeight] as? Int else { return nil }
+        return (w, h)
+    }
+
+    /// JPEG (quality 0.85) scaled to at most `maxWidth` px wide, or nil when it cannot be done.
+    static func downscaledJPEG(_ data: Data, maxWidth: Int) -> Data? {
+        guard let src = CGImageSourceCreateWithData(data as CFData, nil) else { return nil }
+        let opts: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceThumbnailMaxPixelSize: maxWidth,   // landscape: the width is the longest side
+        ]
+        guard let img = CGImageSourceCreateThumbnailAtIndex(src, 0, opts as CFDictionary) else { return nil }
+        let out = NSMutableData()
+        guard let dst = CGImageDestinationCreateWithData(out, "public.jpeg" as CFString, 1, nil) else { return nil }
+        CGImageDestinationAddImage(dst, img, [kCGImageDestinationLossyCompressionQuality: 0.85] as CFDictionary)
+        return CGImageDestinationFinalize(dst) ? out as Data : nil
     }
 
     private static func cached(_ stem: String, in cache: URL) -> URL? {
@@ -79,16 +133,10 @@ enum VQCover {
     private static func folderImage(_ folder: URL) -> URL? {
         let items = (try? FileManager.default.contentsOfDirectory(at: folder, includingPropertiesForKeys: [.fileSizeKey])) ?? []
         let images = items.filter { imageExts.contains($0.pathExtension.lowercased()) }
-        let named = images.first { n in
+        return images.first { n in
             let s = n.deletingPathExtension().lastPathComponent.lowercased()
-            return s.contains("cover") || s.contains("banner") || s.contains("poster")
+            return ["cover", "banner", "poster", "caratula"].contains { s.contains($0) }
         }
-        if let named { return named }
-        return images.max { fileSize($0) < fileSize($1) }
-    }
-
-    private static func fileSize(_ u: URL) -> Int {
-        (try? u.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
     }
 
     // APK art: res/<dir>/<name>.<raster>. Banners (wide, made for TV/launchers) beat icons; among
@@ -134,24 +182,45 @@ enum VQCover {
 /// (relative to the same host) and `display_long_description_unprocessed`, a markdown text whose
 /// images look like `![{"height":720,"type":"image","width":1280}](https://scontent-….oculuscdn.com/…png?…)`).
 /// Candidates, in order: `imageLink`, then those 1280x720 store images; the first that really decodes as
-/// ~16:9 is kept. Result file: cover-store.<ext>; marker cover-store.none = "<unix time> <absent|net>"
-/// (absent: the store does not know the package, never retried; net: retry after 7 days).
+/// ~16:9 is kept. Result file: cover-store.<ext>; marker cover-store.none = "<unix time> <absent|net> v2"
+/// (absent: the store does not know the package, retry after 3 days; net: retry after 7 days; a marker
+/// without the current version tag was written by older code and counts as missing).
 enum VQCoverStore {
     private static let host = "https://oculusdb.rui2015.me"
     private static let retryAfter: TimeInterval = 7 * 24 * 3600
+    private static let retryAbsentAfter: TimeInterval = 3 * 24 * 3600
+    private static let markerVersion = "v2"
+    private static let maxBytes = 16 << 20
+    private static let maxWidth = 1920
     private static let lock = NSLock()
     private static var running: Set<String> = []
 
     static func fetchIfNeeded(_ game: VQGame, cache: URL) {
         let package = game.package.trimmingCharacters(in: .whitespaces)
-        guard package.contains("."), package != VQConformance.openXRPackage else { return }
+        guard package.contains("."), package != VQConformance.openXRPackage else {
+            VQCover.logOnce(game.id, "Carátula de tienda: \(game.name): omitida, paquete inválido (\"\(package)\")")
+            return
+        }
         let marker = cache.appendingPathComponent("cover-store.none")
         if let text = try? String(contentsOf: marker, encoding: .utf8) {
             let parts = text.split(separator: " ")
-            if parts.count >= 2, parts[1] == "absent" { return }
-            if let t = parts.first.flatMap({ TimeInterval($0) }), Date().timeIntervalSince1970 - t < retryAfter { return }
+            if parts.count >= 3, parts[2] == markerVersion, let t = TimeInterval(parts[0]) {
+                let age = Date().timeIntervalSince1970 - t
+                let limit = parts[1] == "absent" ? retryAbsentAfter : retryAfter
+                if age < limit {
+                    VQCover.logOnce(game.id, "Carátula de tienda: \(package): omitida, marcador \(parts[1]) de hace \(Int(age / 3600)) h (reintento a las \(Int(limit / 3600)) h)")
+                    return
+                }
+                VQCover.logOnce(game.id, "Carátula de tienda: \(package): marcador \(parts[1]) caducado (\(Int(age / 3600)) h); se reintenta")
+            } else {
+                VQCover.logOnce(game.id, "Carátula de tienda: \(package): marcador de una versión anterior ignorado")
+            }
         }
-        guard setRunning(game.id, true) else { return }
+        guard setRunning(game.id, true) else {
+            VQCover.logOnce(game.id, "Carátula de tienda: \(package): omitida, ya hay una descarga en curso")
+            return
+        }
+        VQLog.log("Carátula de tienda: \(package): inicio de la descarga")
         Task.detached(priority: .utility) {
             await run(id: game.id, package: package, cache: cache, marker: marker)
             _ = setRunning(game.id, false)
@@ -170,7 +239,7 @@ enum VQCoverStore {
         cfg.timeoutIntervalForResource = 40
         let session = URLSession(configuration: cfg)
         func mark(_ why: String) {
-            try? "\(Int(Date().timeIntervalSince1970)) \(why)".write(to: marker, atomically: true, encoding: .utf8)
+            try? "\(Int(Date().timeIntervalSince1970)) \(why) \(markerVersion)".write(to: marker, atomically: true, encoding: .utf8)
         }
         do {
             guard let encoded = package.addingPathComponentEncoded,
@@ -190,17 +259,39 @@ enum VQCoverStore {
                 mark("absent"); return
             }
             var netFailure = false
-            for candidate in candidates(app) {
-                let data: Data
+            let list2 = candidates(app)
+            VQLog.log("Carátula de tienda: \(package): \(list2.count) candidato(s)")
+            for candidate in list2 {
+                let short = shortURL(candidate)
+                var data: Data
                 do {
-                    let (d, r) = try await session.data(from: candidate)
-                    guard (r as? HTTPURLResponse)?.statusCode == 200 else { netFailure = true; continue }
+                    let (d, r) = try await session.data(from: candidate)   // follows redirects
+                    let http = r as? HTTPURLResponse
+                    let type = http?.value(forHTTPHeaderField: "Content-Type") ?? "?"
+                    let size = VQCover.dimensions(d).map { "\($0.w)x\($0.h)" } ?? "sin dimensiones"
+                    func verdict(_ why: String) { VQLog.log("Carátula de tienda: candidato \(short): HTTP \(http?.statusCode ?? -1), \(d.count) bytes, \(size), \(type): descartado, \(why)") }
+                    guard http?.statusCode == 200 else { netFailure = true; verdict("código HTTP"); continue }
+                    let t = type.lowercased()
+                    if t.contains("html") || t.contains("json") || t.hasPrefix("text/") { verdict("Content-Type no es imagen"); continue }
+                    guard d.count <= maxBytes else { verdict("más de 16 MB"); continue }
+                    guard fileExtension(d) != nil else { verdict("formato no reconocido"); continue }
+                    guard VQCover.isLandscape(d) else { verdict("no es ~16:9"); continue }
                     data = d
-                } catch { netFailure = true; continue }
-                guard data.count <= 8 << 20, let ext = fileExtension(data), VQCover.isLandscape(data) else { continue }
+                } catch {
+                    VQLog.log("Carátula de tienda: candidato \(short): error de red: \(error.localizedDescription)")
+                    netFailure = true; continue
+                }
+                var ext = fileExtension(data) ?? "jpg"
+                if let w = VQCover.dimensions(data)?.w, w > maxWidth || data.count > 8 << 20,
+                   let small = VQCover.downscaledJPEG(data, maxWidth: maxWidth) {
+                    VQLog.log("Carátula de tienda: \(package): recomprimida \(data.count / 1024) KB -> \(small.count / 1024) KB (JPEG 0.85, máx. \(maxWidth) px)")
+                    data = small; ext = "jpg"
+                }
+                // A stale file of another extension would shadow the new one in `cached`.
+                for e in ["png", "jpg", "jpeg", "webp"] { try? FileManager.default.removeItem(at: cache.appendingPathComponent("cover-store.\(e)")) }
                 try data.write(to: cache.appendingPathComponent("cover-store.\(ext)"), options: .atomic)
                 try? FileManager.default.removeItem(at: marker)
-                VQLog.log("Carátula de tienda: \(package): guardada (\(data.count / 1024) KB)")
+                VQLog.log("Carátula de tienda: \(package): guardada (\(data.count / 1024) KB, \(ext))")
                 await MainActor.run { NotificationCenter.default.post(name: .vqCoverUpdated, object: id) }
                 return
             }
@@ -233,6 +324,12 @@ enum VQCoverStore {
             wide.append((w, u))
         }
         return out + wide.sorted { $0.w > $1.w }.map(\.u)
+    }
+
+    /// host + path (no query), at most 70 characters.
+    private static func shortURL(_ u: URL) -> String {
+        let s = (u.host ?? "") + u.path
+        return s.count > 70 ? String(s.prefix(70)) + "…" : s
     }
 
     private static func fileExtension(_ d: Data) -> String? {

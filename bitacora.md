@@ -219,3 +219,8 @@ VPKEngine `main` = e6c3f3b.
   `VQGameAniso`), `VQLauncher`, `VQConformance*`, `VQApiScan`, `VQCover`; `app/Native/vq_apk.c`, `vq_config.c`, `vq_scan.c`.
 - CI `visionos.yml`: solo `[build]` o manual; release `visionos` (`VisionQuestPro.ipa`); log de CI en rama `ci-logs`
   (`visionos.txt`; `gh run view --log-failed` da 403 desde aquí).
+
+## Fix crash general + carátulas
+- VPKEngine: fix de capturas colgadas en completion handlers Metal (crash de TRIANGLE y probablemente SIGBUS de AC). Auditado runtime C de 650083e (eye hold, kl_wait, ledger, rings, fb_map): sin escrituras fuera de rango.
+- `app/Sources/VQCover.swift`: imagen de carpeta solo si el nombre contiene cover/banner/poster/caratula; marcadores `<unix> <absent|net> v2` (reintento 3/7 días, antiguos ignorados); log por candidato; rechazo html/json/text; máx 16 MB; downscale >1920 px u >8 MB a JPEG 0.85; borra caché de otra extensión.
+- Pendiente: si AC sigue cayendo probar VPVK_MAX_DRAWS_PER_CB=0, VPVK_ZERO_NEW_IMAGES=0, KL_SNAP_GAME_STALL_S=0. Pausa con la corona en la siguiente build.
