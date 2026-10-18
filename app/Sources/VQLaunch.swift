@@ -139,6 +139,9 @@ final class VQSettings: ObservableObject {
     @Published var precompileShaders: Bool { didSet { save() } }
     /// Keep the shader/pipeline cache in QUEST/Cache (survives reinstalls) instead of the app's Caches.
     @Published var shaderCacheInQuest: Bool { didSet { save() } }
+    /// AOT shaders (VPKEngine VPVK_AOT): the whole game's shaders/pipelines are built into the Metal
+    /// binary archive before playing; unseen variants compile in the background without holding frames.
+    @Published var aotShaders: Bool { didSet { save() } }
     /// Conformance runs (Vulkan CTS): minutes per session and the memory limit between batches.
     @Published var conformanceMinutes: Double { didSet { save() } }
     @Published var conformanceMemoryMB: Int { didSet { save() } }
@@ -182,6 +185,7 @@ final class VQSettings: ObservableObject {
         gameLanguage = d.string(forKey: "vq.gameLang") ?? "auto"
         precompileShaders = d.object(forKey: "vq.precompile") as? Bool ?? true
         shaderCacheInQuest = d.object(forKey: "vq.psoInQuest") as? Bool ?? false
+        aotShaders = d.object(forKey: "vq.aot") as? Bool ?? false
         conformanceMinutes = d.object(forKey: "vq.ctsMinutes") as? Double ?? 15
         conformanceMemoryMB = d.object(forKey: "vq.ctsMemMB") as? Int ?? 3000
     }
@@ -229,6 +233,7 @@ final class VQSettings: ObservableObject {
         d.set(gameLanguage, forKey: "vq.gameLang")
         d.set(precompileShaders, forKey: "vq.precompile")
         d.set(shaderCacheInQuest, forKey: "vq.psoInQuest")
+        d.set(aotShaders, forKey: "vq.aot")
         d.set(conformanceMinutes, forKey: "vq.ctsMinutes")
         d.set(conformanceMemoryMB, forKey: "vq.ctsMemMB")
     }
@@ -363,6 +368,7 @@ final class VQSettings: ObservableObject {
         // Also through the environment: the call above reaches VPVulkan only once it is loaded,
         // and its first vkCreateDevice may come before the app can repeat it.
         setenv("VPVK_PREWARM", precompileShaders ? "1" : "0", 1)
+        if aotShaders { setenv("VPVK_AOT", "1", 1) } else { unsetenv("VPVK_AOT") }
         // Games keep going after a single hung or faulting GPU frame (conformance runs set it to 1).
         unsetenv("VPVK_DEVICE_LOST_STRICT")
         unsetenv("VPVK_EXTRA_EXTENSIONS")  // the conformance runs set it again (VQConformance)
@@ -575,6 +581,10 @@ final class VQPrewarm: ObservableObject {
             VQLog.log("Shaders: precompilación desactivada en ajustes")
             return
         }
+        if VQSettings.shared.aotShaders {
+            aot(gameFolder: gameFolder, cache: cache)
+            return
+        }
         firstRun(gameFolder: gameFolder, cache: cache)
         let count = vq_prewarm_count()  // 0 as well when VPVulkan is not the driver
         guard count > 0 else {
@@ -589,6 +599,54 @@ final class VQPrewarm: ObservableObject {
         let ms = Int(Date().timeIntervalSince(start) * 1000)
         DispatchQueue.main.async { shared.active = false }
         VQLog.log("Shaders: precompilados \(n) pipelines en \(ms) ms")
+    }
+
+    /// AOT (setting "Shaders AOT", VPVK_AOT=1): harvest the game's SPIR-V once, then translate it
+    /// all and compile every known pipeline (recipes of earlier runs + compute variants) into the
+    /// game's MTLBinaryArchive. Repeats only when the translator or the number of recipes changes
+    /// (a run that met new variants adds recipes, so the next launch archives them too).
+    static func aot(gameFolder: URL, cache: URL) {
+        let fm = FileManager.default
+        var tag = "v\(firstRunVersion)"
+        if let sym = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "vpmsl_translator_fingerprint") {
+            typealias FP = @convention(c) () -> UnsafePointer<CChar>?
+            if let c = unsafeBitCast(sym, to: FP.self)() { tag += "." + String(String(cString: c).prefix(16)) }
+        }
+        guard dlsym(UnsafeMutableRawPointer(bitPattern: -2), "vpvk_aot_build") != nil else {
+            VQLog.log("Shaders AOT: VPVulkan sin vpvk_aot_build")
+            return
+        }
+        try? fm.createDirectory(at: cache, withIntermediateDirectories: true)
+        let recipes = vq_prewarm_count()
+        let stamp = cache.appendingPathComponent("aot.\(tag).r\(recipes)")
+        if fm.fileExists(atPath: stamp.path) {
+            VQLog.log("Shaders AOT: archivo al día (\(recipes) recetas), se carga al crear el dispositivo")
+            return
+        }
+        let spirv = cache.appendingPathComponent("spirv", isDirectory: true)
+        DispatchQueue.main.async { shared.done = 0; shared.total = 0; shared.compiling = true; shared.active = true }
+        if !fm.fileExists(atPath: spirv.path) {
+            var stats = VqHarvestStats()
+            var err = [CChar](repeating: 0, count: 256)
+            let rc = vq_harvest_spirv(gameFolder.path, spirv.path, &stats, { done, total, _ in
+                DispatchQueue.main.async { VQPrewarm.shared.done = done; VQPrewarm.shared.total = total }
+            }, nil, { line, _ in
+                if let line = line { VQLog.log(String(cString: line)) }
+            }, &err, err.count)
+            if rc != 0 { VQLog.log("Shaders AOT: harvest falló: \(String(cString: err))") }
+        }
+        let start = Date()
+        let n = vq_aot_run(fm.fileExists(atPath: spirv.path) ? spirv.path : nil, { done, total, _ in
+            DispatchQueue.main.async { VQPrewarm.shared.done = done; VQPrewarm.shared.total = total }
+        }, nil)
+        VQLog.log("Shaders AOT: \(n) librerías+pipelines en \(Int(Date().timeIntervalSince(start) * 1000)) ms")
+        if n > 0 {
+            if let old = try? fm.contentsOfDirectory(atPath: cache.path) {
+                for f in old where f.hasPrefix("aot.v") { try? fm.removeItem(at: cache.appendingPathComponent(f)) }
+            }
+            fm.createFile(atPath: stamp.path, contents: Data())
+        }
+        DispatchQueue.main.async { shared.compiling = false; shared.active = false }
     }
 
     /// First play of a game (or new translator version): every SPIR-V module in the game's data is

@@ -36,3 +36,6 @@ uint32_t vq_prewarm_run(vq_prewarm_progress progress, void *user);
 // First-run precompile: translates + compiles every <dir>/*.spv (vq_harvest_spirv output) with
 // VPVulkan's vpvk_precompile_spirv. Returns the libraries compiled (0 without VPVulkan).
 uint32_t vq_precompile_run(const char *dir, vq_prewarm_progress progress, void *user);
+// AOT build (VPVulkan vpvk_aot_build, needs env VPVK_AOT=1): every <spirv_dir>/*.spv + every stored
+// recipe compiled and serialized into the game's Metal binary archive. 0 without VPVulkan / gate off.
+uint32_t vq_aot_run(const char *spirv_dir, vq_prewarm_progress progress, void *user);

@@ -295,3 +295,10 @@ Vulkan CTS desde la app; el informe de capacidades (vulkaninfo) de un Quest 3 re
   `VP_PIPELINE_CACHE_DIR` = `QUEST/Cache/<juego>/Pipelines` (recetas, msl_index, .metalar sobreviven a reinstalar).
   Log `Shaders: caché de pipelines en …`. Toggle en `VQLauncher.swift`. Sin probar en visor.
 - VPKEngine a6c0f02: `gpu.shader.lib` ya cuenta aciertos de recetas (`recipe_hit=`).
+
+## 2026-10-18 — Ajuste «Shaders AOT» (experimental, apagado por defecto)
+- `VQSettings.aotShaders` (`vq.aot`) → `VPVK_AOT=1` en `applyToEnvironment`. Toggle en `VQLauncher.swift`.
+- `VQPrewarm.aot()` (`VQLaunch.swift`): con el ajuste sustituye a firstRun+prewarm: harvest a `<caché>/spirv` si
+  falta, `vq_aot_run` (`app/Native/vq_config.c/h` → `vpvk_aot_build`), sello `aot.v<N>.<fp>.r<recetas>`: se repite
+  si cambia el traductor o hay recetas nuevas (variantes vistas en partida). Log `Shaders AOT: …`.
+- En partida mirar `gpu.aot device`, `gpu.pso.aot archived= hot= hot_ms_*`, `gpu.pso.hot`. Swift sin compilar.

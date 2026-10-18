@@ -87,3 +87,13 @@ uint32_t vq_precompile_run(const char *dir, vq_prewarm_progress progress, void *
     }
     return f(dir, progress, user);
 }
+
+uint32_t vq_aot_run(const char *spirv_dir, vq_prewarm_progress progress, void *user) {
+    typedef uint32_t (*run_fn)(const char *, vq_prewarm_progress, void *);
+    run_fn f = (run_fn)dlsym(RTLD_DEFAULT, "vpvk_aot_build");
+    if (!f) {
+        fprintf(stderr, "vq.aot skipped: VPVulkan without vpvk_aot_build\n");
+        return 0;
+    }
+    return f(spirv_dir, progress, user);
+}
