@@ -3003,7 +3003,7 @@ void *kl_vulkan_mtl_for_handle(unsigned long long h) {
 
     // Resolve on EVERY call (not just the first), so every frame samples fresh UI.
     //
-    // Default OFF for AC Nexus (package gate), on for every other game. This
+    // Default on (KL_OVERLAY_TEXL=0 turns it off). This
     // detour exists because the layer's own swapchain image used to be empty -
     // and it was empty because ovrp_GetLayerTexturePtr handed Unity the raw
     // VkImage instead of a VkImage* cell (now fixed: klovrp_texcell). With that
@@ -3015,11 +3015,8 @@ void *kl_vulkan_mtl_for_handle(unsigned long long h) {
     // something else). Other games keep the detour until measured the same way.
     static int texl = -1;
     if (texl < 0) {
-        extern int kl_is_ac_nexus(void);
-        extern int kl_ac_nexus_known(void);
-        int r = kl_env_on("KL_OVERLAY_TEXL", !kl_is_ac_nexus());
-        if (kl_ac_nexus_known()) texl = r;
-        if (!r) return NULL;
+        texl = kl_env_on("KL_OVERLAY_TEXL", 1);
+        if (!texl) return NULL;
     } else if (!texl) return NULL;
     // Only a live, tracked, non-eye image. A wild or already-destroyed handle here
     // is exactly the stale-MVKImage crash that destroy-tracking now prevents:
