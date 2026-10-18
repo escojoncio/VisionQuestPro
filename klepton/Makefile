@@ -40,7 +40,7 @@ RUNTIME_JNI := runtime/kl_jni.c \
            runtime/jni/kl_jni_looper.c runtime/jni/kl_jni_display.c \
            runtime/jni/kl_jni_bridge.c runtime/jni/kl_jni_window.c \
            runtime/jni/kl_jni_net.c runtime/jni/kl_jni_softinput.c \
-           runtime/jni/kl_jni_services.c runtime/jni/kl_jni_io.c \
+           runtime/jni/kl_jni_services.c runtime/jni/kl_jni_io.c runtime/jni/kl_jni_sysinfo.c \
            runtime/jni/kl_jni_prefs.c runtime/jni/kl_jni_sdl.c \
            runtime/jni/kl_jni_ue4.c runtime/jni/kl_jni_electra.c runtime/jni/kl_jni_fmod.c runtime/jni/kl_jni_jkxr.c \
            runtime/jni/kl_jni_hostvideo.c

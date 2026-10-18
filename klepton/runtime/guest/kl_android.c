@@ -477,7 +477,7 @@ extern int kl_host_thermal_state(void) __attribute__((weak));
 enum { ATHERMAL_STATUS_ERROR = -1, ATHERMAL_STATUS_NONE = 0, ATHERMAL_STATUS_LIGHT = 1,
        ATHERMAL_STATUS_MODERATE = 2, ATHERMAL_STATUS_SEVERE = 3, ATHERMAL_STATUS_CRITICAL = 4 };
 
-static int kla_thermal_status(void) {
+int kl_android_thermal_status(void) {
     if (!kl_host_thermal_state) return ATHERMAL_STATUS_NONE;
     switch (kl_host_thermal_state()) {          // NSProcessInfoThermalState
     case 0:  return ATHERMAL_STATUS_NONE;       // nominal
@@ -498,7 +498,7 @@ static pthread_mutex_t g_thermal_lock = PTHREAD_MUTEX_INITIALIZER;
 static void *kla_AThermal_acquireManager(void) { return &g_thermal_mgr; }
 static void  kla_AThermal_releaseManager(void *m) { (void)m; }
 static int   kla_AThermal_getCurrentThermalStatus(void *m) {
-    return m ? kla_thermal_status() : ATHERMAL_STATUS_ERROR;
+    return m ? kl_android_thermal_status() : ATHERMAL_STATUS_ERROR;
 }
 
 // Listeners are called when the status changes, and once on registration with
@@ -509,7 +509,7 @@ static void *kla_thermal_main(void *arg) {
     int last = -2;
     for (;;) {
         usleep(500000);
-        int st = kla_thermal_status();
+        int st = kl_android_thermal_status();
         pthread_mutex_lock(&g_thermal_lock);
         int n = g_thermal_n;
         kla_thermal_cb fn[8]; void *d[8];

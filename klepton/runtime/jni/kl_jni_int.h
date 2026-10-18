@@ -196,6 +196,7 @@ extern const klj_binding klj_bind_hostvideo[];
 extern const klj_binding klj_bind_fmod[];
 extern const klj_binding klj_bind_jkxr[];
 extern const klj_binding klj_bind_services[];
+extern const klj_binding klj_bind_sysinfo[];
 extern const klj_binding *const klj_binding_tables[];
 
 

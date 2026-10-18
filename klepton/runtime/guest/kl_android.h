@@ -13,4 +13,8 @@ void *kl_android_lookup(const char *name);
 // calls this before and after waiting; it runs whatever frame callbacks the
 // calling thread has due and returns how many ran (0 when none).
 int kl_android_choreo_dispatch(void);
+
+// PowerManager.getCurrentThermalStatus() and AThermal_getCurrentThermalStatus
+// answer from the same place: THERMAL_STATUS_* (0 none .. 6 shutdown).
+int kl_android_thermal_status(void);
 #endif
