@@ -849,14 +849,14 @@ static int klovrp_headset_type(void) {
         int dflt = (tgt && strcmp(tgt, "liminalvr") == 0)
                      ? OVRP_HEADSET_OCULUS_QUEST
                      : OVRP_HEADSET_OCULUS_QUEST_2;
-        // KL_OVRP_QUEST3_ID=1 (default 0): when JNI already presents a Quest 3
+        // KL_OVRP_QUEST3_ID (default 1; 0 restores the old Quest 2 answer): when JNI already presents a Quest 3
         // (KL_QUEST3, Build.MODEL "Quest 3"), answer OVRPlugin with the same
         // device - ovrpSystemHeadset Meta_Quest_3 = 11 (OVRPlugin.cs: Quest 8,
         // Quest_2 9, Quest_Pro 10, Quest_3 11, Quest_3S 12 - order verified against
         // Meta v71 OVRManager docs + Unity SystemHeadset values) and product name
-        // "Meta Quest 3" - so the two surfaces stop disagreeing. Gated: titles
-        // that run today were tuned against the Quest 2 answer.
-        if (kl_env_on("KL_OVRP_QUEST3_ID", 0) && kl_env_on("KL_QUEST3", 0)) dflt = 11;
+        // "Meta Quest 3" - so the two surfaces stop disagreeing. Titles
+        // that only behave with the Quest 2 answer can set KL_OVRP_QUEST3_ID=0.
+        if (kl_env_on("KL_OVRP_QUEST3_ID", 1) && kl_env_on("KL_QUEST3", 0)) dflt = 11;
         v = (int)kl_env_int("KL_OVRP_HEADSET", dflt);
     }
     return v;

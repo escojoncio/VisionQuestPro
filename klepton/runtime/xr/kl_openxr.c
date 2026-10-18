@@ -1823,7 +1823,7 @@ static XrResult klxr_GetSystemProperties(void *instance, XrSystemId system_id,
     // regression.
     props->vendorId = (uint32_t)kl_env_int("KL_XR_VENDOR_ID", 0x2833);
     snprintf(props->systemName, sizeof props->systemName, "%s",
-             kl_env_str("KL_XR_SYSTEM_NAME", "Oculus Quest2"));
+             kl_env_str("KL_XR_SYSTEM_NAME", kl_env_on("KL_QUEST3", 0) ? "Meta Quest 3" : "Oculus Quest2"));
     // The maxima are a ceiling on what a swapchain may ask for, not a
     // recommendation — so they are generous, and the recommendation lives in
     // the view configuration below where the guest will actually read it.
