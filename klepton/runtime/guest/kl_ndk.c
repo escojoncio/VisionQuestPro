@@ -4,8 +4,7 @@
 //   ALooper       — real implementation over poll() and a self-pipe. Unity waits
 //                   on this, so a stub that returns immediately would spin.
 //   ANativeWindow — a synthetic window carrying geometry. No pixels until EGL binds one.
-//   ASensor       — an empty sensor list, which is a legitimate Android device
-//                   configuration and the honest answer here (see below).
+//   ASensor       — one real sensor (head gyroscope); none invented (see below).
 #include <errno.h>
 #include <fcntl.h>
 #include <poll.h>
@@ -24,6 +23,7 @@
 // For kl_jni_locale_parts — AConfiguration and java.util.Locale are two doors
 // onto one fact and must not answer differently.
 #include "kl_jni.h"
+#include "kl_ovrp.h"
 #include "kl_openxr.h"   // the XR surface-swapchain seam, for ANativeWindow_fromSurface
 
 // ================================================================== ALooper
@@ -610,14 +610,15 @@ static void kl_AAssetDir_close(kl_assetdir *ad) {
 }
 
 // =================================================================== ASensor
-// The sensor list is empty, and that is the correct answer rather than a
-// shortcut. Vision Pro exposes no Android-shaped accelerometer/gyro to the
-// guest, and this title does not want one: head and controller poses arrive
-// through ovrp_*, not through Input.acceleration. An empty list is a
-// configuration real Android devices ship, so Unity already handles it —
-// whereas a fabricated sensor would feed the engine invented motion data.
-//
-// The accessors are still real, so adding an entry later is a one-line change.
+// One sensor, because it is the only one with a real source: the gyroscope.
+// kl_ovrp_head_motion gives the head's angular velocity in tracking space
+// (derived from successive poses, and it says when it has no basis); it is
+// rotated into the head frame to match Android's device axes. Not listed,
+// deliberately: the accelerometer (the runtime has no acceleration, and a
+// differentiated pose is noise), the magnetometer and the proximity sensor
+// (no source at all). A fabricated reading would feed the engine invented
+// motion, whereas a shorter list is a configuration Android devices ship.
+#define KL_ASENSOR_TYPE_GYROSCOPE 4
 typedef struct kl_sensor {
     const char *name, *vendor;
     int         type, min_delay_us;
@@ -626,18 +627,58 @@ typedef struct kl_sensor {
     int         fifo_max, fifo_reserved, reporting_mode, wake_up, handle;
 } kl_sensor;
 
-static const kl_sensor  *g_sensors[]  = { NULL };   // C forbids a zero-length array
-static const unsigned    g_nsensors   = 0;
+static const kl_sensor kl_sensor_gyro = {
+    "Quest Head Gyroscope", "VisionQuestPro", KL_ASENSOR_TYPE_GYROSCOPE, 5000,
+    0.001f, "android.sensor.gyroscope", 0, 0, 0 /* continuous */, 0, 1 };
+static const kl_sensor  *g_sensors[]  = { &kl_sensor_gyro };
+static const unsigned    g_nsensors   = 1;
+
+// Bionic's ASensorEvent: 104 bytes; the gyroscope vector is data[0..2], rad/s.
+typedef struct kl_sensor_event {
+    int32_t version, sensor, type, reserved0;
+    int64_t timestamp;
+    float   data[16];
+    uint32_t flags;
+    int32_t reserved1[3];
+} kl_sensor_event;
 
 typedef struct kl_sensor_queue {
     kl_looper   *looper;
     int          ident;
     kl_looper_cb cb;
     void        *data;
-    int          pipe_r, pipe_w;   // never written: we have no sensors to report
+    int          pipe_r, pipe_w;   // one byte per due sample, written by the ticker
+    pthread_t    ticker;
+    volatile int on, period_us, quit, started;
 } kl_sensor_queue;
 
 static char g_sensor_manager;      // opaque, non-NULL handle
+
+// Head-frame angular velocity: world rate rotated by the conjugate of the head
+// orientation. Returns 0 when the runtime has no measurement.
+static int kl_gyro_sample(float w[3]) {
+    float lin[3], ang[3], px, py, pz, qx, qy, qz, qw;
+    if (!kl_ovrp_head_motion(lin, ang)) return 0;
+    kl_ovrp_get_guest_head_pose(&px, &py, &pz, &qx, &qy, &qz, &qw);
+    // v' = q^-1 v q  via t = 2 * cross(-q.xyz, v); v' = v + qw*t + cross(-q.xyz, t)
+    float ux = -qx, uy = -qy, uz = -qz;
+    float tx = 2 * (uy * ang[2] - uz * ang[1]);
+    float ty = 2 * (uz * ang[0] - ux * ang[2]);
+    float tz = 2 * (ux * ang[1] - uy * ang[0]);
+    w[0] = ang[0] + qw * tx + (uy * tz - uz * ty);
+    w[1] = ang[1] + qw * ty + (uz * tx - ux * tz);
+    w[2] = ang[2] + qw * tz + (ux * ty - uy * tx);
+    return 1;
+}
+
+static void *kl_sensor_ticker(void *arg) {
+    kl_sensor_queue *q = arg;
+    while (!q->quit) {
+        usleep(q->period_us > 0 ? (useconds_t)q->period_us : 20000);
+        if (q->on && !q->quit) { char c = 1; (void)!write(q->pipe_w, &c, 1); }
+    }
+    return NULL;
+}
 
 static void *kl_ASensorManager_getInstance(void) { return &g_sensor_manager; }
 static void *kl_ASensorManager_getInstanceForPackage(const char *pkg) { (void)pkg; return &g_sensor_manager; }
@@ -663,10 +704,10 @@ static void *kl_ASensorManager_createEventQueue(void *mgr, kl_looper *looper, in
     int p[2];
     if (pipe(p) != 0) { free(q); return NULL; }
     fcntl(p[0], F_SETFL, fcntl(p[0], F_GETFL, 0) | O_NONBLOCK);
+    fcntl(p[1], F_SETFL, fcntl(p[1], F_GETFL, 0) | O_NONBLOCK);
     q->looper = looper; q->ident = ident; q->cb = cb; q->data = data;
     q->pipe_r = p[0]; q->pipe_w = p[1];
-    // Register with the looper even though nothing will ever be readable, so
-    // the caller's poll ident bookkeeping matches what it would see on Android.
+    q->period_us = 20000;
     if (looper) kl_ALooper_addFd(looper, q->pipe_r, ident, ALOOPER_EVENT_INPUT, cb, data);
     return q;
 }
@@ -674,23 +715,62 @@ static void *kl_ASensorManager_createEventQueue(void *mgr, kl_looper *looper, in
 static int kl_ASensorManager_destroyEventQueue(void *mgr, kl_sensor_queue *q) {
     (void)mgr;
     if (!q) return -EINVAL;
+    if (q->started) { q->quit = 1; pthread_join(q->ticker, NULL); }
     if (q->looper) kl_ALooper_removeFd(q->looper, q->pipe_r);
     close(q->pipe_r); close(q->pipe_w);
     free(q);
     return 0;
 }
 
-// Unreachable while the sensor list is empty — the guest cannot obtain a valid
-// ASensor* to pass. They return the same -EINVAL bionic would.
-static int kl_ASensorEventQueue_enableSensor(void *q, const void *s)  { (void)q; (void)s; return -EINVAL; }
-static int kl_ASensorEventQueue_disableSensor(void *q, const void *s) { (void)q; (void)s; return -EINVAL; }
-static int kl_ASensorEventQueue_setEventRate(void *q, const void *s, int32_t us) { (void)q; (void)s; (void)us; return -EINVAL; }
-static int kl_ASensorEventQueue_hasEvents(void *q) { (void)q; return 0; }
-
-// ssize_t: 0 means "no events pending", which is not an error.
-static ssize_t kl_ASensorEventQueue_getEvents(void *q, void *events, size_t count) {
-    (void)q; (void)events; (void)count;
+static int kl_ASensorEventQueue_enableSensor(void *qp, const void *s) {
+    kl_sensor_queue *q = qp;
+    if (!q || s != &kl_sensor_gyro) return -EINVAL;
+    if (!q->started) {
+        if (pthread_create(&q->ticker, NULL, kl_sensor_ticker, q) != 0) return -EAGAIN;
+        q->started = 1;
+    }
+    q->on = 1;
     return 0;
+}
+static int kl_ASensorEventQueue_disableSensor(void *qp, const void *s) {
+    kl_sensor_queue *q = qp;
+    if (!q || s != &kl_sensor_gyro) return -EINVAL;
+    q->on = 0;
+    return 0;
+}
+static int kl_ASensorEventQueue_setEventRate(void *qp, const void *s, int32_t us) {
+    kl_sensor_queue *q = qp;
+    if (!q || s != &kl_sensor_gyro) return -EINVAL;
+    q->period_us = us < kl_sensor_gyro.min_delay_us ? kl_sensor_gyro.min_delay_us : us;
+    return 0;
+}
+static int kl_ASensorEventQueue_hasEvents(void *qp) {
+    kl_sensor_queue *q = qp;
+    if (!q) return -EINVAL;
+    struct pollfd pf = { q->pipe_r, POLLIN, 0 };
+    return poll(&pf, 1, 0) > 0 && (pf.revents & POLLIN) ? 1 : 0;
+}
+
+// ssize_t: 0 means "no events pending", which is not an error. At most one
+// event per call: the pipe is drained and the sample taken now, and a tick with
+// no measurement behind it produces nothing rather than a zero.
+static ssize_t kl_ASensorEventQueue_getEvents(void *qp, void *events, size_t count) {
+    kl_sensor_queue *q = qp;
+    if (!q || !events) return -EINVAL;
+    char buf[64];
+    ssize_t n = read(q->pipe_r, buf, sizeof buf);
+    if (n <= 0 || !q->on || count < 1) return 0;
+    float w[3];
+    if (!kl_gyro_sample(w)) return 0;
+    struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
+    kl_sensor_event *e = events;
+    memset(e, 0, sizeof *e);
+    e->version = (int32_t)sizeof *e; e->sensor = kl_sensor_gyro.handle;
+    e->type = KL_ASENSOR_TYPE_GYROSCOPE;
+    e->timestamp = (int64_t)ts.tv_sec * 1000000000LL + ts.tv_nsec;
+    e->data[0] = w[0]; e->data[1] = w[1]; e->data[2] = w[2];
+    e->data[3] = 3;   // status byte of sensor_vec_t: ACCURACY_HIGH
+    return 1;
 }
 
 // Everything an ASensor can be asked, for a list that is empty today: when a
