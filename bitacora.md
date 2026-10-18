@@ -289,3 +289,11 @@ Vulkan CTS desde la app; el informe de capacidades (vulkaninfo) de un Quest 3 re
   `VQConformance*`; `app/Native/vq_apk.c` (ZIP + AXML), `vq_config.c` (reenvío `vpvk_config_set_*`).
 - CI `visionos.yml`: solo `[build]` o manual; release `visionos` (`VisionQuestPro.ipa`, bundle `com.kdt.livecontainer`);
   log de CI en rama `ci-logs` (`visionos.txt`; `gh run view --log-failed` da 403 desde aquí).
+
+## Paso 3A (agente 13): libc/libm/pthread/bionic + escáner
+- Escáner: `kl_shim_known` (klepton/runtime/libc/kl_shim.c) ya no marca por prefijo AMedia*/AImage*/AHardwareBuffer*/AAudio*; consulta `kl_aaudio_lookup` / `kl_mediandk_lookup` y la tabla nueva `kl_bionic_extra_lookup`.
+- Nuevos: `libc/kl_bionic_extra.c` (tabla g_extra, ~504 símbolos: libm/long double binario128 vía `kl_ld128.h`, clasificación FP, strings/ctype/locale, multibyte UTF-8, nl_langinfo, android_get_device_api_level=32, fdsan, liblog, _chk, pwd/grp AID, spawn attrs...), `libc/kl_bionic_extra2.c` (solo Darwin: xattr, rlimit, memoria, splice/copy_file_range, ids/sched, ptrace, printf ancho, err.h, clock_nanosleep, temporizadores POSIX con hilo, stdio extra, mallinfo/mallopt).
+- Modificados: kl_pthread.c (timed locks, rwlock attr, spin, barrier, sem_clockwait, gettid/getname), kl_libc.c (propiedades Quest 3 eureka/kalama API 32 y Quest 2; `__system_property_*` extra; set/add/update denegados), kl_va_thunks.S + kl_va_handlers.c (scanf/wprintf/err...), Makefile (RUNTIME_SHIP).
+- Test host: `libc/test/t_bionic_extra.c` (`clang -DKL_EXTRA_TEST -I.. ... -lm`) -> "all ok".
+- NO verificado en Darwin (no se compiló nada): kl_bionic_extra2.c, adiciones de kl_pthread.c, ensamblado de los thunks, posibles choques de símbolos klb_timer_* con los static de kl_shim.c.
+- Pendiente: ~300 nombres aún sin servir (ver lista de escáner: regex/regcomp, hsearch/tsearch, res_*, iconv, getopt_long, mkstemps/mkostemp, timerfd, signalfd, tcgetattr extra, utmp, getmntent, pselect/ppoll64, preadv/pwritev, pthread_cancel...), inotify ENOSYS, posix_spawn ENOSYS, getcpuclockid solo propio hilo.

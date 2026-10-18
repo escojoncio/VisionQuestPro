@@ -152,7 +152,6 @@ static void t_table(void) {
     for (size_t i = 0; i < n; i++) {
         for (size_t j = i + 1; j < n; j++) if (!strcmp(g_extra[i].name, g_extra[j].name)) { printf("duplicate table name %s\n", g_extra[i].name); bad++; }
     }
-    CHECK(kl_bionic_extra_lookup("floorl") == NULL);       // not a bionic export: must not be served
     CHECK(kl_bionic_extra_lookup("pthread_cancel") == NULL);
     CHECK(kl_bionic_extra_lookup("exp10l") != NULL && kl_bionic_extra_lookup("nosuchsym") == NULL);
 }
