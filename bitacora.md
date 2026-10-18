@@ -163,6 +163,57 @@ Vulkan CTS desde la app; el informe de capacidades (vulkaninfo) de un Quest 3 re
   Falta vulkaninfo real de un Quest 3 para cerrar valores [B]/[C].
 - Volver a MSAA 4x en AC (`KL_VK_MAX_SAMPLES`) ahora que la MSAA transitoria no gasta RAM.
 
+## 2026-10-18: paso 4b (agente 9) — ASW 2.0: extrapolación de objetos con MV de SpaceWarp sobre PTW (sin build)
+- `klepton/runtime/gfx/kl_reproject_ptw.{c,h}`: `kl_ptw_uniforms` (sigue 192 B) estrena `asw[4]` (escala MV x/y con signo,
+  fracción de frame, 1 = MV ligados; offset 112) y `mv_size[4]` (w, h, tope por eje, slice; offset 128). Funciones C
+  `kl_asw_fraction` ((edad−lead)/intervalo, 0..max), `kl_asw_displace` (mv*escala*fracción, y invertida si origen arriba-izq,
+  tope; NaN/inf/|mv|>4 → 0) y `kl_ptw_fill_asw`. MSL `kl_ptw_v`: texturas de vértice 2/3 = MV por ojo
+  (`texture2d_array`), MV leído en el texel de menor profundidad de la vecindad 3x3 (el que da el z del vértice) y el vértice
+  se desplaza en espacio de rejilla (`cm = c + dc`), mismo z y mismo uv de color; estiramiento de malla = relleno de desoclusión.
+- `KleptonCompositor.swift`: puerta `KL_CP_ASW=1` (def. 0, exige `KL_CP_PTW=1`); `KL_CP_ASW_OFF=1` (lo pone
+  `app/Sources/VQLaunch.swift` desde «ASW desactivado», def. true) la anula. Fracción: `aswFraction` = (edad de `submit_ns` −
+  lead)/intervalo; lead = EMA de la edad de un frame fresco al primer uso (acotada a 1 intervalo), intervalo = EMA del hueco
+  de `submit_ns` por serial → frame a tiempo = 0, retenido ≈ 1, tope `KL_CP_ASW_MAX` (1.5). MV: `aswMotion` (mismo filtro que
+  `KleptonTAA.motionInput`: flags STORAGE/MV, `kl_vulkan_spacewarp_mtl`, vista 2D-array). Textura 1x1 ficticia en slots 2/3
+  cuando una vista no tiene MV. Otras: `KL_CP_ASW_CAP` (0.08 del cuadro/eje), `KL_CP_ASW_SCALE` (0.5), `KL_CP_ASW_SIGN`,
+  `KL_CP_ASW_YFLIP`. Log `[cp] ASW …` cada 5 s y motivo de inactividad al cambiar.
+- Validado en Linux: `make ptw` (t_ptw.c amplía: MV conocido → desplazamiento en uv y en metros, flip Y, tope, rechazo
+  NaN/|mv|>4, signo, fracción, offsets de uniformes). MSL y Swift revisados a mano, SIN compilar.
+- Capas de proyección (Steam Link, `encodeProjLayers`): NO reciben PTW: son texturas GL de `kl_glfb`, sin profundidad ni MV
+  (la profundidad de ojo es solo de kl_vulkan); comparten pipeline de rotación pura y siguen igual. Ruta GL: sin cambios
+  (GLES nuevo en otro agente); ningún título GLES usa AppSW.
+- Sin validar: signo/escala reales de los MV de AC/BONELAB (VPKTAA los vota en `KleptonTAA`, aquí es fijo por env: si el
+  objeto va al revés, `KL_CP_ASW_SIGN=-1`); la fracción asume que `submit_ns` marca el inicio del frame del juego;
+  el desplazamiento del texel de dilatación se aplica en uv de profundidad (≈ uv de recorte); sin medir coste GPU.
+- Pendiente: compartir el signo votado de VPKTAA con ASW; probar en visor `KL_CP_PTW=1 KL_VPKTAA=1 KL_CP_ASW=1`.
+
+## 2026-10-18: paso 4 (compositor) — PTW con profundidad por píxel + ritmo fijo de panel (sin build)
+- `runtime/gfx/kl_reproject_ptw.{c,h}` (nuevo, en Makefile RUNTIME_SHIP): reproyección posicional tipo
+  Oculus PTW/ASW 2.0. Malla densa (KL_CP_PTW_GRID, def. 96x96/ojo) sobre la imagen; cada vértice se lleva
+  a la distancia que da la profundidad del juego (`kl_vulkan_eye_depth_get` con el serial del registro de
+  frame, monomuestra) y se mira desde el ojo ACTUAL con el delta rígido completo (rotación + traslación,
+  offset de ojo incluido). Desoclusión: malla continua (estira el fondo) + dilatación al más cercano 3x3
+  (`KL_CP_PTW_DILATE`, def. 1) para que el estirado caiga en el fondo. Lejos/infinito → `KL_CP_PTW_FAR`
+  (def. 200 m). El pase escribe la profundidad real al depth del drawable → CompositorServices recibe
+  geometría por píxel (análogo XR_KHR_composition_layer_depth). Fragment = `kl_reproject_f` (mismo sRGB,
+  fade, chroma); vértice `kl_ptw_v` (MSL concatenado a `kl_reproject_msl()`), buffer(2) `kl_ptw_uniforms`
+  (192 B), texturas de vértice 0/1 = profundidad por ojo.
+- Puerta `KL_CP_PTW=1` (def. 0). Necesita `KL_VPKTAA=1` (la profundidad del ojo solo se rastrea con él) y
+  guest Vulkan. Sin profundidad válida cae por frame al quad de solo giro (log `[cp] PTW off this frame: …`).
+  Tras el dibujo PTW, overlays sin estado propio usan compare-always (la profundidad ya no es 500 m).
+- Medición: `[cp] PTW gpu: composite X ms mean with PTW (n), Y ms rotation-only (m); P passes / F fallbacks`
+  cada 5 s (gpuEnd−gpuStart del command buffer del compositor).
+- Ritmo: tras el latch de `primeDisplay`, la frecuencia se encaja SIEMPRE en una frecuencia real de panel
+  (`panelHz` 120/100/96/90, ±6 %, por defecto; `KL_CP_PANEL_SNAP=0` lo quita) o se fuerza con
+  `KL_CP_PANEL_HZ=100`. Justificación: el panel solo funciona a esas frecuencias; antes una medida 1–6 %
+  fuera (frames retenidos/ruido) quedaba como frecuencia permanente del juego (deriva). 60 Hz no se toca.
+- Validado en Linux: `make ptw` (tests/t_ptw.c: linealización rev/std finita/infinita, model-view
+  identidad, paralaje −dx/z, tangentes, layout 192 B). MSL y Swift revisados a mano, SIN compilar (no hay Mac).
+- Pendiente: probar en visor con KL_CP_PTW=1 KL_VPKTAA=1 (AC/BONELAB); profundidad MSAA no soportada
+  (cae a giro); PTW no aplica a capas de proyección por capa (Steam Link) ni ruta GL; vectores de
+  movimiento SpaceWarp (ASW extrapolación de objetos) no usados aún; interfaz con agente 1: nada nuevo de
+  kl_ovrp (usa depth_near/far, stage, serial existentes).
+
 ## 2026-10-15 (18): crash AMediaDataSource, panel 50→100 Hz, vertex SSBO (rosa), token offline — build 18
 - Resultado de (17) (build 505b8dc, AC 21:24–21:32, primera vez que el juego arranca): 0 `Scheduler::dispatch` (reloj
   OK); `[nexus] SpaceWarp spin 18.89 ms -> 0`; memoria 3,9 GB; rosa sigue (cover quad + menús); fin por
