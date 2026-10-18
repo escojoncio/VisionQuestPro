@@ -744,10 +744,11 @@ static uint64_t klplat_User_GetAccessToken(void) {
     // AC Nexus (2026-10-15 21:25): with a token, UbiServices logs in to Ubisoft with it and,
     // offline, retries DNS with back-off for ~50 s before the game moves on. An ERROR
     // completion (what the platform answers with no network/user) sends it straight to its
-    // offline path. KL_PLAT_TOKEN_ERROR=1 selects it; default off, the same for every game.
+    // offline path. Default ON for every game (a Quest without network cannot mint a token);
+    // KL_PLAT_TOKEN_ERROR=0 hands out the synthetic offline token instead.
     {
         static int err = -1;
-        if (err < 0) err = kl_env_on("KL_PLAT_TOKEN_ERROR", 0);
+        if (err < 0) err = kl_env_on("KL_PLAT_TOKEN_ERROR", 1);
         if (err) {
             pthread_mutex_lock(&g_msg_mu);
             int full = g_msg_tail - g_msg_head >= KLPLAT_MSGQ;
@@ -802,25 +803,10 @@ static uint64_t klplat_Achievements_GetAllDefinitions(void) {
 // optional; the knob still overrides in either direction. Beat Saber and the
 // rest keep the default-0 offline path (they tolerate no user).
 static int klplat_user_default(void) {
-    // Titles that ABORT when ovr_GetLoggedInUserID / GetLoggedInUser returns 0 —
-    // they put up "Unable to get a valid UserID ... check you have an Entitlement"
-    // and then FMessageDialog->abort on the game thread. A synthetic offline user
-    // is strictly better for these: there is no Oculus service to sign in to, and
-    // the alternative is a hard exit before the menu. Unity titles that read 0 as
-    // "offline, carry on" are NOT in this list and keep the 0.
-    static const char *on[] = { "zix", "intotheradius", "redmatter2", "vampire", "twd2" };
-    const char *t = kl_driver_target_name();
-    if (t) for (unsigned i = 0; i < sizeof on / sizeof on[0]; i++)
-        if (strcmp(t, on[i]) == 0) return 1;
-    // VisionQuestPro names the target after the game FOLDER, so the list above
-    // never matches there: key on the package too. Ubisoft titles run their
-    // online init (UbiServices, ProfilePolicy UsePlatform) as a chain that
-    // needs the platform user: AC Nexus log 45 passes the entitlement check,
-    // gets 0 here, prints "An unknown error occurred. Request failed." and
-    // stays on the Background-Looping loading video for good.
-    const char *pkg = kl_jni_guest_package();
-    if (pkg && strncasecmp(pkg, "com.ubisoft.", 12) == 0) return 1;
-    return 0;
+    // Every title gets the synthetic offline user: a Quest without network still
+    // has its signed-in account cached, so ovr_GetLoggedInUserID is never 0 on the
+    // real device. No per-game list. KL_PLAT_USER=0 restores the old "no user" answer.
+    return 1;
 }
 static uint64_t klplat_User_GetLoggedInUser(void) {
     plat_hit("ovr_User_GetLoggedInUser");

@@ -1050,7 +1050,7 @@ static klj_val klj_WifiManager_getConnectionInfo(void *env, void *self,
 // other guest needs (Steam Link streams over it).
 static int kl_net_offline(void) {
     static int v = -1;
-    if (v < 0) v = kl_env_on("KL_NET_OFFLINE", 0);
+    if (v < 0) v = kl_env_on("KL_NET_OFFLINE", 1);
     return v;
 }
 

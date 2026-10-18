@@ -452,7 +452,7 @@ static int kl_net_trace(void) {
 // its offline path instead of paying TCP timeouts to unreachable endpoints.
 static int kl_net_offline(void) {
     static int off = -1;
-    if (off < 0) off = kl_env_on("KL_NET_OFFLINE", 0);
+    if (off < 0) off = kl_env_on("KL_NET_OFFLINE", 1);
     return off;
 }
 // KL_TRACE_NET_HEX=<n>: the first n bytes of every payload, alongside the
@@ -478,7 +478,9 @@ static void kl_hexdump(const char *tag, const void *buf, ssize_t n) {
 static void kl_sa_to_guest(struct sockaddr *sa, socklen_t *len);
 static int kl_getaddrinfo(const char *node, const char *serv,
                           const void *hints, void *res) {
-    if (kl_net_offline()) {
+    // Offline (default for every game): only loopback names resolve.
+    if (kl_net_offline() && !(node && (!strcmp(node, "localhost") ||
+            !strncmp(node, "127.", 4) || !strcmp(node, "::1")))) {
         if (kl_net_trace())
             fprintf(stderr, "  [net] getaddrinfo(\"%s\") -> EAI_NONAME (offline)\n",
                     node ? node : "(null)");
@@ -802,8 +804,18 @@ static int klb_JNI_GetCreatedJavaVMs(void **vmBuf, int bufLen, int *nVMs) {
     return 0;   // JNI_OK
 }
 
+static int kl_net_loopback(const struct sockaddr *sa) {
+    // Guest sockaddrs are Linux-shaped (u16 family first): AF_UNIX 1, AF_INET 2, AF_INET6 10.
+    if (!sa) return 0;
+    uint16_t fam; memcpy(&fam, sa, 2);
+    if (fam == 1) return 1;
+    if (fam == 2) return ((const uint8_t *)sa)[4] == 127;
+    if (fam == 10) { static const uint8_t lo[16] = {[15] = 1};
+                     return !memcmp((const uint8_t *)sa + 8, lo, 16); }
+    return 0;
+}
 static int kl_connect(int fd, const struct sockaddr *sa, socklen_t len) {
-    if (kl_net_offline()) {
+    if (kl_net_offline() && !kl_net_loopback(sa)) {
         if (kl_net_trace()) fprintf(stderr, "  [net] connect() -> ENETUNREACH (offline)\n");
         errno = ENETUNREACH;
         return -1;
