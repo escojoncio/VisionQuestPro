@@ -177,7 +177,7 @@ enum VQGames {
             game.problems.append(VQL("Motor nativo: no se encuentra su librería de entrada \(game.entryLib).so.",
                                      "Native engine: its entry library \(game.entryLib).so is missing."))
         }
-        if !vulkan && !VQSettings.shared.glesVPK {
+        if !vulkan && !(VQSettings.shared.glesVPK && VQSettings.shared.useVPKEngine && VQSettings.vpvulkanPath != nil) {
             game.problems.append(VQL("Solo OpenGL ES: activa «OpenGL ES con VPKEngine (experimental)» en Ajustes para probarlo.",
                                      "OpenGL ES only: turn on \"OpenGL ES with VPKEngine (experimental)\" in Settings to try it."))
         }

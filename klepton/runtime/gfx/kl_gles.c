@@ -17,6 +17,7 @@
 #include "kl_env.h"
 #include "kl_gles.h"
 #include "kl_glfb.h"
+#include "kl_vulkan.h"
 
 #if defined(__has_include)
 #if __has_include(<vulkan/vulkan.h>)
@@ -80,7 +81,8 @@ void *kl_gles_sym(const char *name) {
 }
 
 void kl_gles_frame_end(void) {
-    if (kl_gles_enabled()) g_flush(1);
+    // Vulkan titles never touch vpgles: no extra instance/device for them.
+    if (!kl_vulkan_guest_active() && kl_gles_enabled()) g_flush(1);
 }
 
 #ifdef KL_GLES_HAVE_VK
