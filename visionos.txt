@@ -1,4 +1,4 @@
-# visionos - 113590d29463b74e3228a2930f362f0a08d577e3 - 2026-10-18T23:47:51Z
+# visionos - 16e24b46f9f8156c56866694756234a3327880a2 - 2026-10-19T00:06:14Z
 
 ## vpvulkan.log:      110 lines
 ### errors
@@ -28,8 +28,8 @@ ninja: Entering directory `build/vpvulkan-build'
 [4/52] Building CXX object shader/ir/CMakeFiles/vpir.dir/src/parse.cpp.o
 [5/52] Building CXX object core/CMakeFiles/vpgpu_core.dir/src/resources.cpp.o
 [6/52] Building CXX object shader/ir/CMakeFiles/vpir.dir/src/verify.cpp.o
-[7/52] Building CXX object shader/ir/CMakeFiles/vpir.dir/src/fbfetch.cpp.o
-[8/52] Building CXX object shader/ir/CMakeFiles/vpir.dir/src/optimize.cpp.o
+[7/52] Building CXX object shader/ir/CMakeFiles/vpir.dir/src/optimize.cpp.o
+[8/52] Building CXX object shader/ir/CMakeFiles/vpir.dir/src/fbfetch.cpp.o
 [9/52] Building CXX object core/CMakeFiles/vpgpu_core.dir/src/commands.cpp.o
 [10/52] Building CXX object core/CMakeFiles/vpgpu_core.dir/src/diagnostics.cpp.o
 [11/52] Building CXX object core/CMakeFiles/vpgpu_core.dir/src/pipeline_cache.cpp.o
@@ -37,15 +37,15 @@ ninja: Entering directory `build/vpvulkan-build'
 [13/52] Building CXX object core/CMakeFiles/vpgpu_core.dir/src/device.cpp.o
 [14/52] Building CXX object core/CMakeFiles/vpgpu_core.dir/src/null_backend.cpp.o
 [15/52] Building CXX object gles/CMakeFiles/vpglsl.dir/glsl/types.cpp.o
-[16/52] Building CXX object gles/CMakeFiles/vpglsl.dir/glsl/builtins.cpp.o
-/Users/runner/work/VisionQuestPro/VisionQuestPro/vpkengine/gpu/gles/glsl/builtins.cpp:25:6: warning: unused function 'scalarOf' [-Wunused-function]
-   25 | bool scalarOf(const T& t, Base b) { return plain(t) && t.base == b && t.vec == 1; }
-      |      ^~~~~~~~
-1 warning generated.
-[17/52] Building CXX object gles/CMakeFiles/vpglsl.dir/glsl/pp.cpp.o
+[16/52] Building CXX object gles/CMakeFiles/vpglsl.dir/glsl/pp.cpp.o
 /Users/runner/work/VisionQuestPro/VisionQuestPro/vpkengine/gpu/gles/glsl/pp.cpp:596:11: warning: private field 'stage_' is not used [-Wunused-private-field]
   596 |     Stage stage_;
       |           ^
+1 warning generated.
+[17/52] Building CXX object gles/CMakeFiles/vpglsl.dir/glsl/builtins.cpp.o
+/Users/runner/work/VisionQuestPro/VisionQuestPro/vpkengine/gpu/gles/glsl/builtins.cpp:25:6: warning: unused function 'scalarOf' [-Wunused-function]
+   25 | bool scalarOf(const T& t, Base b) { return plain(t) && t.base == b && t.vec == 1; }
+      |      ^~~~~~~~
 1 warning generated.
 [18/52] Building CXX object gles/CMakeFiles/vpglsl.dir/glsl/link.cpp.o
 /Users/runner/work/VisionQuestPro/VisionQuestPro/vpkengine/gpu/gles/glsl/link.cpp:50:33: warning: unused parameter 'sh' [-Wunused-parameter]
@@ -53,7 +53,12 @@ ninja: Entering directory `build/vpvulkan-build'
       |                                 ^
 1 warning generated.
 [19/52] Linking CXX static library shader/ir/libvpir.a
-[20/52] Building CXX object gles/CMakeFiles/vpglsl.dir/glsl/parser.cpp.o
+[20/52] Building CXX object gles/CMakeFiles/vpglsl.dir/glsl/emit.cpp.o
+/Users/runner/work/VisionQuestPro/VisionQuestPro/vpkengine/gpu/gles/glsl/emit.cpp:235:14: warning: private field 'fragDataVar_' is not used [-Wunused-private-field]
+  235 |     uint32_t fragDataVar_ = 0;
+      |              ^
+1 warning generated.
+[21/52] Building CXX object gles/CMakeFiles/vpglsl.dir/glsl/parser.cpp.o
 /Users/runner/work/VisionQuestPro/VisionQuestPro/vpkengine/gpu/gles/glsl/parser.cpp:226:73: warning: '&&' within '||' [-Wlogical-op-parentheses]
   226 |         if (!es3() && (it->second.base == Base::Uint || it->second.cols && it->second.cols != it->second.vec ||
       |                                                      ~~ ~~~~~~~~~~~~~~~~^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -62,12 +67,7 @@ ninja: Entering directory `build/vpvulkan-build'
       |                                                                         ^
       |                                                         (                                                   )
 1 warning generated.
-[21/52] Linking CXX static library core/libvpgpu_core.a
-[22/52] Building CXX object gles/CMakeFiles/vpglsl.dir/glsl/emit.cpp.o
-/Users/runner/work/VisionQuestPro/VisionQuestPro/vpkengine/gpu/gles/glsl/emit.cpp:235:14: warning: private field 'fragDataVar_' is not used [-Wunused-private-field]
-  235 |     uint32_t fragDataVar_ = 0;
-      |              ^
-1 warning generated.
+[22/52] Linking CXX static library core/libvpgpu_core.a
 [23/52] Linking CXX static library gles/libvpglsl.a
 [24/52] Building CXX object gles/CMakeFiles/vpgles.dir/src/vk.cpp.o
 [25/52] Building CXX object shader/spirv/CMakeFiles/vpspirv.dir/src/parse.cpp.o
@@ -108,11 +108,11 @@ ninja: Entering directory `build/vpvulkan-build'
  platform VISIONOS
     minos 26.0
 exported vk* symbols: 222
-total 5016
-drwxr-xr-x  4 runner  staff      128 Oct 18 23:46 .
-drwxr-xr-x  4 runner  staff      128 Oct 18 23:46 ..
--rw-r--r--  1 runner  staff      663 Oct 18 23:46 Info.plist
--rwxr-xr-x  1 runner  staff  2561256 Oct 18 23:46 VPVulkan
+total 5024
+drwxr-xr-x  4 runner  staff      128 Oct 19 00:04 .
+drwxr-xr-x  4 runner  staff      128 Oct 19 00:04 ..
+-rw-r--r--  1 runner  staff      663 Oct 19 00:04 Info.plist
+-rwxr-xr-x  1 runner  staff  2564712 Oct 19 00:04 VPVulkan
 
 ## runtime.log:       32 lines
 ### errors
@@ -150,10 +150,9 @@ runtime/gfx/kl_glfb.c:5897:25: warning: variable 'said' set but not used [-Wunus
       |                         ^
 1 warning generated.
 
-## app.log:      749 lines
+## app.log:      750 lines
 ### errors
 ### end
-    cd /Users/runner/work/VisionQuestPro/VisionQuestPro
     
     Using response file: /Users/runner/work/VisionQuestPro/VisionQuestPro/build/dd/Build/Intermediates.noindex/VisionQuestPro.build/Release-xros/VisionQuestPro.build/Objects-normal/arm64/7187679823f38a2a940e0043cdf9d637-common-args.resp
     
@@ -246,28 +245,29 @@ Ld /Users/runner/work/VisionQuestPro/VisionQuestPro/build/dd/Build/Products/Rele
     cd /Users/runner/work/VisionQuestPro/VisionQuestPro
     /Applications/Xcode_26.6.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/clang -Xlinker -reproducible -target arm64-apple-xros26.0 -isysroot /Applications/Xcode_26.6.app/Contents/Developer/Platforms/XROS.platform/Developer/SDKs/XROS26.5.sdk -Os -L/Users/runner/work/VisionQuestPro/VisionQuestPro/build/dd/Build/Intermediates.noindex/EagerLinkingTBDs/Release-xros -L/Users/runner/work/VisionQuestPro/VisionQuestPro/build/dd/Build/Products/Release-xros -L/Users/runner/work/VisionQuestPro/VisionQuestPro/klepton/build/xros -F/Users/runner/work/VisionQuestPro/VisionQuestPro/build/dd/Build/Intermediates.noindex/EagerLinkingTBDs/Release-xros -F/Users/runner/work/VisionQuestPro/VisionQuestPro/build/dd/Build/Products/Release-xros -Fbuild -Fklepton/vendor-moltenvk/out/xros -filelist /Users/runner/work/VisionQuestPro/VisionQuestPro/build/dd/Build/Intermediates.noindex/VisionQuestPro.build/Release-xros/VisionQuestPro.build/Objects-normal/arm64/VisionQuestPro.LinkFileList -Xlinker -rpath -Xlinker @executable_path/Frameworks -Xlinker -dead_strip -Xlinker -object_path_lto -Xlinker /Users/runner/work/VisionQuestPro/VisionQuestPro/build/dd/Build/Intermediates.noindex/VisionQuestPro.build/Release-xros/VisionQuestPro.build/Objects-normal/arm64/VisionQuestPro_lto.o -Xlinker -dependency_info -Xlinker /Users/runner/work/VisionQuestPro/VisionQuestPro/build/dd/Build/Intermediates.noindex/VisionQuestPro.build/Release-xros/VisionQuestPro.build/Objects-normal/arm64/VisionQuestPro_dependency_info.dat -fobjc-link-runtime -L/Applications/Xcode_26.6.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/xros -L/usr/lib/swift -Xlinker -add_ast_path -Xlinker /Users/runner/work/VisionQuestPro/VisionQuestPro/build/dd/Build/Intermediates.noindex/VisionQuestPro.build/Release-xros/VisionQuestPro.build/Objects-normal/arm64/VisionQuestPro.swiftmodule @/Users/runner/work/VisionQuestPro/VisionQuestPro/build/dd/Build/Intermediates.noindex/VisionQuestPro.build/Release-xros/VisionQuestPro.build/Objects-normal/arm64/VisionQuestPro-linker-args.resp -lklepton -framework Metal -lz -framework AudioToolbox -framework VideoToolbox -framework CoreMedia -framework CoreVideo -framework IOSurface -framework AVFoundation -framework Security -framework CoreFoundation -framework Foundation -o /Users/runner/work/VisionQuestPro/VisionQuestPro/build/dd/Build/Products/Release-xros/VisionQuestPro.app/VisionQuestPro
 
-Copy /Users/runner/work/VisionQuestPro/VisionQuestPro/build/dd/Build/Products/Release-xros/VisionQuestPro.app/Frameworks/VPVulkan.framework /Users/runner/work/VisionQuestPro/VisionQuestPro/build/VPVulkan.framework (in target 'VisionQuestPro' from project 'VisionQuestPro')
-    cd /Users/runner/work/VisionQuestPro/VisionQuestPro
-    builtin-copy -exclude .DS_Store -exclude CVS -exclude .svn -exclude .git -exclude .hg -exclude Headers -exclude PrivateHeaders -exclude Modules -exclude \*.tbd -bitcode-strip all -bitcode-strip-tool /Applications/Xcode_26.6.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/bitcode_strip -resolve-src-symlinks -remove-static-executable /Users/runner/work/VisionQuestPro/VisionQuestPro/build/VPVulkan.framework /Users/runner/work/VisionQuestPro/VisionQuestPro/build/dd/Build/Products/Release-xros/VisionQuestPro.app/Frameworks
-/Applications/Xcode_26.6.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/bitcode_strip /Users/runner/work/VisionQuestPro/VisionQuestPro/build/VPVulkan.framework/VPVulkan -r -o /Users/runner/work/VisionQuestPro/VisionQuestPro/build/dd/Build/Products/Release-xros/VisionQuestPro.app/Frameworks/VPVulkan.framework/VPVulkan
 Copy /Users/runner/work/VisionQuestPro/VisionQuestPro/build/dd/Build/Products/Release-xros/VisionQuestPro.app/Frameworks/MoltenVK.framework /Users/runner/work/VisionQuestPro/VisionQuestPro/klepton/vendor-moltenvk/out/xros/MoltenVK.framework (in target 'VisionQuestPro' from project 'VisionQuestPro')
     cd /Users/runner/work/VisionQuestPro/VisionQuestPro
     builtin-copy -exclude .DS_Store -exclude CVS -exclude .svn -exclude .git -exclude .hg -exclude Headers -exclude PrivateHeaders -exclude Modules -exclude \*.tbd -bitcode-strip all -bitcode-strip-tool /Applications/Xcode_26.6.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/bitcode_strip -resolve-src-symlinks -remove-static-executable /Users/runner/work/VisionQuestPro/VisionQuestPro/klepton/vendor-moltenvk/out/xros/MoltenVK.framework /Users/runner/work/VisionQuestPro/VisionQuestPro/build/dd/Build/Products/Release-xros/VisionQuestPro.app/Frameworks
 /Applications/Xcode_26.6.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/bitcode_strip /Users/runner/work/VisionQuestPro/VisionQuestPro/klepton/vendor-moltenvk/out/xros/MoltenVK.framework/MoltenVK -r -o /Users/runner/work/VisionQuestPro/VisionQuestPro/build/dd/Build/Products/Release-xros/VisionQuestPro.app/Frameworks/MoltenVK.framework/MoltenVK
+Copy /Users/runner/work/VisionQuestPro/VisionQuestPro/build/dd/Build/Products/Release-xros/VisionQuestPro.app/Frameworks/VPVulkan.framework /Users/runner/work/VisionQuestPro/VisionQuestPro/build/VPVulkan.framework (in target 'VisionQuestPro' from project 'VisionQuestPro')
+    cd /Users/runner/work/VisionQuestPro/VisionQuestPro
+    builtin-copy -exclude .DS_Store -exclude CVS -exclude .svn -exclude .git -exclude .hg -exclude Headers -exclude PrivateHeaders -exclude Modules -exclude \*.tbd -bitcode-strip all -bitcode-strip-tool /Applications/Xcode_26.6.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/bitcode_strip -resolve-src-symlinks -remove-static-executable /Users/runner/work/VisionQuestPro/VisionQuestPro/build/VPVulkan.framework /Users/runner/work/VisionQuestPro/VisionQuestPro/build/dd/Build/Products/Release-xros/VisionQuestPro.app/Frameworks
+/Applications/Xcode_26.6.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/bitcode_strip /Users/runner/work/VisionQuestPro/VisionQuestPro/build/VPVulkan.framework/VPVulkan -r -o /Users/runner/work/VisionQuestPro/VisionQuestPro/build/dd/Build/Products/Release-xros/VisionQuestPro.app/Frameworks/VPVulkan.framework/VPVulkan
+
 ProcessInfoPlistFile /Users/runner/work/VisionQuestPro/VisionQuestPro/build/dd/Build/Products/Release-xros/VisionQuestPro.app/Info.plist /Users/runner/work/VisionQuestPro/VisionQuestPro/klepton/visionos/Info.plist (in target 'VisionQuestPro' from project 'VisionQuestPro')
     cd /Users/runner/work/VisionQuestPro/VisionQuestPro
     builtin-infoPlistUtility /Users/runner/work/VisionQuestPro/VisionQuestPro/klepton/visionos/Info.plist -producttype com.apple.product-type.application -genpkginfo /Users/runner/work/VisionQuestPro/VisionQuestPro/build/dd/Build/Products/Release-xros/VisionQuestPro.app/PkgInfo -expandbuildsettings -format binary -platform xros -scanforprivacyfile /Users/runner/work/VisionQuestPro/VisionQuestPro/build/dd/Build/Products/Release-xros/VisionQuestPro.app/Frameworks/MoltenVK.framework -scanforprivacyfile /Users/runner/work/VisionQuestPro/VisionQuestPro/build/dd/Build/Products/Release-xros/VisionQuestPro.app/Frameworks/VPVulkan.framework -o /Users/runner/work/VisionQuestPro/VisionQuestPro/build/dd/Build/Products/Release-xros/VisionQuestPro.app/Info.plist
 
 CopySwiftLibs /Users/runner/work/VisionQuestPro/VisionQuestPro/build/dd/Build/Products/Release-xros/VisionQuestPro.app (in target 'VisionQuestPro' from project 'VisionQuestPro')
     cd /Users/runner/work/VisionQuestPro/VisionQuestPro
-    builtin-swiftStdLibTool --copy --verbose --scan-executable /Users/runner/work/VisionQuestPro/VisionQuestPro/build/dd/Build/Products/Release-xros/VisionQuestPro.app/VisionQuestPro --scan-folder /Users/runner/work/VisionQuestPro/VisionQuestPro/build/dd/Build/Products/Release-xros/VisionQuestPro.app/Frameworks --scan-folder /Users/runner/work/VisionQuestPro/VisionQuestPro/build/dd/Build/Products/Release-xros/VisionQuestPro.app/PlugIns --scan-folder /Users/runner/work/VisionQuestPro/VisionQuestPro/build/dd/Build/Products/Release-xros/VisionQuestPro.app/SystemExtensions --scan-folder /Users/runner/work/VisionQuestPro/VisionQuestPro/build/dd/Build/Products/Release-xros/VisionQuestPro.app/Extensions --platform xros --toolchain /var/run/com.apple.security.cryptexd/mnt/com.apple.MobileAsset.MetalToolchain-v17.6.109.0.c7nCRj/Metal.xctoolchain --toolchain /Applications/Xcode_26.6.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain --destination /Users/runner/work/VisionQuestPro/VisionQuestPro/build/dd/Build/Products/Release-xros/VisionQuestPro.app/Frameworks --strip-bitcode --strip-bitcode-tool /Applications/Xcode_26.6.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/bitcode_strip --emit-dependency-info /Users/runner/work/VisionQuestPro/VisionQuestPro/build/dd/Build/Intermediates.noindex/VisionQuestPro.build/Release-xros/VisionQuestPro.build/SwiftStdLibToolInputDependencies.dep --filter-for-swift-os
+    builtin-swiftStdLibTool --copy --verbose --scan-executable /Users/runner/work/VisionQuestPro/VisionQuestPro/build/dd/Build/Products/Release-xros/VisionQuestPro.app/VisionQuestPro --scan-folder /Users/runner/work/VisionQuestPro/VisionQuestPro/build/dd/Build/Products/Release-xros/VisionQuestPro.app/Frameworks --scan-folder /Users/runner/work/VisionQuestPro/VisionQuestPro/build/dd/Build/Products/Release-xros/VisionQuestPro.app/PlugIns --scan-folder /Users/runner/work/VisionQuestPro/VisionQuestPro/build/dd/Build/Products/Release-xros/VisionQuestPro.app/SystemExtensions --scan-folder /Users/runner/work/VisionQuestPro/VisionQuestPro/build/dd/Build/Products/Release-xros/VisionQuestPro.app/Extensions --platform xros --toolchain /var/run/com.apple.security.cryptexd/mnt/com.apple.MobileAsset.MetalToolchain-v17.6.109.0.5TZpH2/Metal.xctoolchain --toolchain /Applications/Xcode_26.6.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain --destination /Users/runner/work/VisionQuestPro/VisionQuestPro/build/dd/Build/Products/Release-xros/VisionQuestPro.app/Frameworks --strip-bitcode --strip-bitcode-tool /Applications/Xcode_26.6.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/bitcode_strip --emit-dependency-info /Users/runner/work/VisionQuestPro/VisionQuestPro/build/dd/Build/Intermediates.noindex/VisionQuestPro.build/Release-xros/VisionQuestPro.build/SwiftStdLibToolInputDependencies.dep --filter-for-swift-os
 Ignoring --strip-bitcode because --sign was not passed
 
 ExtractAppIntentsMetadata (in target 'VisionQuestPro' from project 'VisionQuestPro')
     cd /Users/runner/work/VisionQuestPro/VisionQuestPro
-    /Applications/Xcode_26.6.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/appintentsmetadataprocessor --toolchain-dir /var/run/com.apple.security.cryptexd/mnt/com.apple.MobileAsset.MetalToolchain-v17.6.109.0.c7nCRj/Metal.xctoolchain --module-name VisionQuestPro --sdk-root /Applications/Xcode_26.6.app/Contents/Developer/Platforms/XROS.platform/Developer/SDKs/XROS26.5.sdk --xcode-version 17F113 --platform-family xrOS --deployment-target 26.0 --bundle-identifier com.kdt.livecontainer --output /Users/runner/work/VisionQuestPro/VisionQuestPro/build/dd/Build/Products/Release-xros/VisionQuestPro.app --target-triple arm64-apple-xros26.0 --binary-file /Users/runner/work/VisionQuestPro/VisionQuestPro/build/dd/Build/Products/Release-xros/VisionQuestPro.app/VisionQuestPro --dependency-file /Users/runner/work/VisionQuestPro/VisionQuestPro/build/dd/Build/Intermediates.noindex/VisionQuestPro.build/Release-xros/VisionQuestPro.build/Objects-normal/arm64/VisionQuestPro_dependency_info.dat --stringsdata-file /Users/runner/work/VisionQuestPro/VisionQuestPro/build/dd/Build/Intermediates.noindex/VisionQuestPro.build/Release-xros/VisionQuestPro.build/Objects-normal/arm64/ExtractedAppShortcutsMetadata.stringsdata --source-file-list /Users/runner/work/VisionQuestPro/VisionQuestPro/build/dd/Build/Intermediates.noindex/VisionQuestPro.build/Release-xros/VisionQuestPro.build/Objects-normal/arm64/VisionQuestPro.SwiftFileList --metadata-file-list /Users/runner/work/VisionQuestPro/VisionQuestPro/build/dd/Build/Intermediates.noindex/VisionQuestPro.build/Release-xros/VisionQuestPro.build/VisionQuestPro.DependencyMetadataFileList --static-metadata-file-list /Users/runner/work/VisionQuestPro/VisionQuestPro/build/dd/Build/Intermediates.noindex/VisionQuestPro.build/Release-xros/VisionQuestPro.build/VisionQuestPro.DependencyStaticMetadataFileList --swift-const-vals-list /Users/runner/work/VisionQuestPro/VisionQuestPro/build/dd/Build/Intermediates.noindex/VisionQuestPro.build/Release-xros/VisionQuestPro.build/Objects-normal/arm64/VisionQuestPro.SwiftConstValuesFileList --compile-time-extraction --deployment-aware-processing --validate-assistant-intents --no-app-shortcuts-localization
-2026-10-18 23:47:49.451 appintentsmetadataprocessor[4634:16818] Starting appintentsmetadataprocessor export
-2026-10-18 23:47:49.463 appintentsmetadataprocessor[4634:16818] warning: Metadata extraction skipped. No AppIntents.framework dependency found.
+    /Applications/Xcode_26.6.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/appintentsmetadataprocessor --toolchain-dir /var/run/com.apple.security.cryptexd/mnt/com.apple.MobileAsset.MetalToolchain-v17.6.109.0.5TZpH2/Metal.xctoolchain --module-name VisionQuestPro --sdk-root /Applications/Xcode_26.6.app/Contents/Developer/Platforms/XROS.platform/Developer/SDKs/XROS26.5.sdk --xcode-version 17F113 --platform-family xrOS --deployment-target 26.0 --bundle-identifier com.kdt.livecontainer --output /Users/runner/work/VisionQuestPro/VisionQuestPro/build/dd/Build/Products/Release-xros/VisionQuestPro.app --target-triple arm64-apple-xros26.0 --binary-file /Users/runner/work/VisionQuestPro/VisionQuestPro/build/dd/Build/Products/Release-xros/VisionQuestPro.app/VisionQuestPro --dependency-file /Users/runner/work/VisionQuestPro/VisionQuestPro/build/dd/Build/Intermediates.noindex/VisionQuestPro.build/Release-xros/VisionQuestPro.build/Objects-normal/arm64/VisionQuestPro_dependency_info.dat --stringsdata-file /Users/runner/work/VisionQuestPro/VisionQuestPro/build/dd/Build/Intermediates.noindex/VisionQuestPro.build/Release-xros/VisionQuestPro.build/Objects-normal/arm64/ExtractedAppShortcutsMetadata.stringsdata --source-file-list /Users/runner/work/VisionQuestPro/VisionQuestPro/build/dd/Build/Intermediates.noindex/VisionQuestPro.build/Release-xros/VisionQuestPro.build/Objects-normal/arm64/VisionQuestPro.SwiftFileList --metadata-file-list /Users/runner/work/VisionQuestPro/VisionQuestPro/build/dd/Build/Intermediates.noindex/VisionQuestPro.build/Release-xros/VisionQuestPro.build/VisionQuestPro.DependencyMetadataFileList --static-metadata-file-list /Users/runner/work/VisionQuestPro/VisionQuestPro/build/dd/Build/Intermediates.noindex/VisionQuestPro.build/Release-xros/VisionQuestPro.build/VisionQuestPro.DependencyStaticMetadataFileList --swift-const-vals-list /Users/runner/work/VisionQuestPro/VisionQuestPro/build/dd/Build/Intermediates.noindex/VisionQuestPro.build/Release-xros/VisionQuestPro.build/Objects-normal/arm64/VisionQuestPro.SwiftConstValuesFileList --compile-time-extraction --deployment-aware-processing --validate-assistant-intents --no-app-shortcuts-localization
+2026-10-19 00:06:12.844 appintentsmetadataprocessor[8884:28486] Starting appintentsmetadataprocessor export
+2026-10-19 00:06:12.853 appintentsmetadataprocessor[8884:28486] warning: Metadata extraction skipped. No AppIntents.framework dependency found.
 
 GenerateDSYMFile /Users/runner/work/VisionQuestPro/VisionQuestPro/build/dd/Build/Products/Release-xros/VisionQuestPro.app.dSYM /Users/runner/work/VisionQuestPro/VisionQuestPro/build/dd/Build/Products/Release-xros/VisionQuestPro.app/VisionQuestPro (in target 'VisionQuestPro' from project 'VisionQuestPro')
     cd /Users/runner/work/VisionQuestPro/VisionQuestPro
@@ -288,18 +288,18 @@ Touch /Users/runner/work/VisionQuestPro/VisionQuestPro/build/dd/Build/Products/R
 ** BUILD SUCCEEDED **
 
 build/dd/Build/Products/Release-xros/VisionQuestPro.app:
-total 20592
-drwxr-xr-x  7 runner  staff       224 Oct 18 23:47 .
-drwxr-xr-x@ 5 runner  staff       160 Oct 18 23:47 ..
-drwxr-xr-x  4 runner  staff       128 Oct 18 23:47 Frameworks
--rw-r--r--  1 runner  staff      2094 Oct 18 23:47 Info.plist
--rw-r--r--  1 runner  staff         8 Oct 18 23:47 PkgInfo
--rwxr-xr-x  1 runner  staff  10534880 Oct 18 23:47 VisionQuestPro
-drwxr-xr-x  8 runner  staff       256 Oct 18 23:46 VPKEngineCertificates
+total 20600
+drwxr-xr-x  7 runner  staff       224 Oct 19 00:06 .
+drwxr-xr-x@ 5 runner  staff       160 Oct 19 00:06 ..
+drwxr-xr-x  4 runner  staff       128 Oct 19 00:06 Frameworks
+-rw-r--r--  1 runner  staff      2094 Oct 19 00:06 Info.plist
+-rw-r--r--  1 runner  staff         8 Oct 19 00:06 PkgInfo
+-rwxr-xr-x  1 runner  staff  10535056 Oct 19 00:06 VisionQuestPro
+drwxr-xr-x  8 runner  staff       256 Oct 19 00:05 VPKEngineCertificates
 
 build/dd/Build/Products/Release-xros/VisionQuestPro.app/Frameworks:
 total 0
-drwxr-xr-x  4 runner  staff  128 Oct 18 23:47 .
-drwxr-xr-x  7 runner  staff  224 Oct 18 23:47 ..
-drwxr-xr-x  4 runner  staff  128 Oct 18 23:47 MoltenVK.framework
-drwxr-xr-x  4 runner  staff  128 Oct 18 23:47 VPVulkan.framework
+drwxr-xr-x  4 runner  staff  128 Oct 19 00:06 .
+drwxr-xr-x  7 runner  staff  224 Oct 19 00:06 ..
+drwxr-xr-x  4 runner  staff  128 Oct 19 00:06 MoltenVK.framework
+drwxr-xr-x  4 runner  staff  128 Oct 19 00:06 VPVulkan.framework
