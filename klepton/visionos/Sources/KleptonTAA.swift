@@ -23,7 +23,7 @@
 //     KL_VPKTAA_MV_SCALE (0.5: NDC delta -> uv) with the sign KL_VPKTAA_MV_SIGN (1 | -1; default
 //     +x+y), KL_VPKTAA_MV_YFLIP=1 flips y;
 //   * diagnostics: [taa] inputs per eye + stats every 30 s (gpu ms, composites shown).
-// Settings from the app as environment (KL_VPKTAA=1, KL_VPKTAA_PCT, KL_VPKTAA_SHARP — the pass
+// Settings from the app as environment (KL_VPKTAA=1, KL_VPKTAA_PCT, KL_RCAS (RCAS intensity) — the pass
 // itself reads percent/sharpness from vpvk_config_set_vpktaa; KL_AA_MODE, VQ_GAME_KEY: the
 // automatic AA gate lives in kl_vulkan, the detection is stored here).
 // Threads: the inline resolve state is under `coreLock` (guest thread); outputs/publication under
@@ -34,6 +34,15 @@ import Foundation
 
 final class KleptonTAA {
     static let enabled: Bool = getenv("KL_VPKTAA").map { String(cString: $0) == "1" } ?? false
+    /// RCAS (VPKEngine's sharpening pass, «Nitidez (RCAS)» in the app): intensity 0...1 from KL_RCAS,
+    /// always on in every game and AA mode; 0 = no pass at all. Frames VPKTAA does not resolve (game
+    /// MSAA, msaa/off modes, gate closed) go through the same hook as RCAS-only frames.
+    static let rcasIntensity: Float = {
+        guard let v = getenv("KL_RCAS"), let f = Float(String(cString: v)) else { return 0 }
+        return min(max(f, 0), 1)
+    }()
+    /// The hook is needed for VPKTAA and/or RCAS.
+    static let passEnabled: Bool = enabled || rcasIntensity > 0
     private static func envS(_ k: String) -> String? {
         guard let v = getenv(k) else { return nil }
         return String(cString: v)
@@ -43,7 +52,6 @@ final class KleptonTAA {
         return f
     }
     private let percent = min(max(KleptonTAA.envF("KL_VPKTAA_PCT", 80), 0), 100)
-    private let sharp = min(max(KleptonTAA.envF("KL_VPKTAA_SHARP", 1.0), 0), 1)
     // Near plane for the depth linearisation when the submit carries none: KL_VPKTAA_NEAR if
     // set, else the zNear ovrp_GetNodeFrustum2 serves the guest (0.1 m).
     private let nearForced: Float? = KleptonTAA.envS("KL_VPKTAA_NEAR").flatMap { Float($0) }.map { max($0, 0.001) }
@@ -73,7 +81,7 @@ final class KleptonTAA {
     private var saidCropOff = [false, false]
 
     init?(device: MTLDevice) {
-        guard KleptonTAA.enabled else { return nil }
+        guard KleptonTAA.passEnabled else { return nil }
         self.device = device
         if KleptonTAA.envS("KL_VPKTAA_MV_SIGN") == "-1" { mvSign = SIMD2<Float>(-1, -1) }
         if KleptonTAA.envS("KL_VPKTAA_MV_YFLIP") == "1" { mvSign.y = -mvSign.y }
@@ -288,7 +296,7 @@ final class KleptonTAA {
             }, me)
             NSLog("%@", "[taa-inline] mode: resolve at the guest's frame end on VPKEngine's queue, no CPU "
                   + "wait (output shown when its command buffer completes, max 2 in flight), jitter "
-                  + "applied by VPKEngine (viewport), pct=\(Int(percent)) sharp=\(sharp)")
+                  + "applied by VPKEngine (viewport), pct=\(Int(percent)) rcas=\(String(format: "%.2f", KleptonTAA.rcasIntensity))")
         }
         if inlineLatched { return true }
         if kl_vulkan_taa_inline_frames() > 0 {
@@ -465,6 +473,8 @@ final class KleptonTAA {
     private func inlineResolve(stage: Int, vkSerial: UInt64) -> String? {
         // Jitter VPKEngine applied to this frame. Read every frame, first: the read resets
         // VPKEngine's counters, so they always cover exactly one guest frame.
+        // VPKTAA frame, or RCAS alone (no jitter, no resolve, no depth/motion): decided by kl_vulkan at this frame end.
+        let taaFrame = KleptonTAA.enabled && kl_vulkan_hook_is_taa() != 0
         var jx: Float = 0, jy: Float = 0
         var tw: Int32 = 0, th: Int32 = 0
         var nj: UInt32 = 0, nsk: UInt32 = 0, nmx: UInt32 = 0
@@ -534,8 +544,12 @@ final class KleptonTAA {
         var inputs: [VPKTAAEyeInput] = []
         var dDesc = ["none", "none"], mDesc = ["none", "none"]
         for e in 0..<2 {
-            let (d, dd, _) = depthInput(e, r, stage: stage, tag: 0, allowMS: true)
-            let (m, md) = motionInput(e, r)
+            var d: VPKTAADepthInput? = nil, m: VPKTAAMotionInput? = nil
+            var dd = "rcas-only", md = "rcas-only"
+            if taaFrame {   // RCAS alone needs neither depth nor motion
+                (d, dd, _) = depthInput(e, r, stage: stage, tag: 0, allowMS: true)
+                (m, md) = motionInput(e, r)
+            }
             dDesc[e] = dd; mDesc[e] = md
             // flipY: a Vulkan eye image has its origin at the top left (kl_glfb notes the same).
             guard let inp = makeInput(eye: e, color: srcs[e].0, slice: srcs[e].1, flipY: kl_vulkan_eye_color_top_left(Int32(stage), Int32(e)) != 0,
@@ -547,13 +561,24 @@ final class KleptonTAA {
         let committedAt = Date()
         // VPKTAA nativo: VPKEngine's own pass (its jitter, both eyes in one dispatch, RCAS, UI mask).
         // The only resolver: without it the frame goes out unresolved.
-        guard kl_vulkan_taa_native_on() != 0 else { return "VPKTAA nativo off" }
+        guard (taaFrame ? kl_vulkan_taa_native_on() : kl_vulkan_rcas_on()) != 0 else {
+            return taaFrame ? "VPKTAA nativo off" : "RCAS off"
+        }
         inBottomUp = kl_vulkan_taa_eye_bottom_up() != 0
         var nf = nativeFrame(inputs, output: out.both)
-        if !inNativeSaid {
+        nf.rcas_only = taaFrame ? 0 : 1
+        let route = kl_vulkan_guest_active() != 0 ? "Vulkan" : "vpgles"
+        let maskS = kl_vulkan_taa_ui_mask_on() != 0 ? "sí" : "no"
+        if taaFrame && !inNativeSaid {
             inNativeSaid = true
-            NSLog("%@", "VPKTAA nativo activo (máscara UI: \(kl_vulkan_taa_ui_mask_on() != 0 ? "sí" : "no")) "
-                  + "— ruta \(kl_vulkan_guest_active() != 0 ? "Vulkan" : "vpgles"), ojo \(w)x\(h), \(Int(percent)) %, nitidez \(sharp)")
+            NSLog("%@", "VPKTAA nativo activo (máscara UI: \(maskS)) "
+                  + "— ruta \(route), ojo \(w)x\(h), \(Int(percent)) %")
+        }
+        if taaFrame != inRcasTaa || !inRcasSaid {
+            inRcasSaid = true
+            inRcasTaa = taaFrame
+            NSLog("%@", "RCAS activo (nitidez \(String(format: "%.2f", KleptonTAA.rcasIntensity)), máscara UI \(maskS), "
+                  + "ruta \(route) + gancho de fin de frame ovrp/OpenXR, \(taaFrame ? "tras VPKTAA" : "sin VPKTAA: solo RCAS"), ojo \(w)x\(h))")
         }
         let box = InlineEncode { [self] cmd in
             // First: whatever is encoded, the command buffer now owns slot and semaphore.
@@ -585,6 +610,7 @@ final class KleptonTAA {
     }
 
     private var inNativeSaid = false
+    private var inRcasSaid = false, inRcasTaa = true
     private var inNativeEye = SIMD2<Int>(0, 0)
 
     /// VPKTAA nativo: the frame description VPKEngine's pass takes, from the inputs
@@ -667,7 +693,7 @@ final class KleptonTAA {
         inLastInputsKey = key
         inLastInputsLog = now
         NSLog("%@", "[taa] inputs (inline) \(w)x\(h) jitter=\(applied ? "applied" : "none") "
-              + "pct=\(Int(percent)) sharp=\(sharp) | eye0 depth=\(depth[0]) mv=\(motion[0]) "
+              + "pct=\(Int(percent)) rcas=\(String(format: "%.2f", KleptonTAA.rcasIntensity)) | eye0 depth=\(depth[0]) mv=\(motion[0]) "
               + "| eye1 depth=\(depth[1]) mv=\(motion[1])")
     }
 

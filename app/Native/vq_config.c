@@ -24,6 +24,8 @@ int vq_gfx_config_forward(void) {
     // Newer VPKEngine only (also read from VPVK_MSAA by the driver): weak, may be absent.
     void (*set_msaa)(int) = (void (*)(int))dlsym(RTLD_DEFAULT, "vpvk_config_set_msaa_override");
     void (*set_native)(int) = (void (*)(int))dlsym(RTLD_DEFAULT, "vpvk_config_set_taa_native");
+    // RCAS (sharpening pass): newer VPKEngine only, weak (also read from VPVK_RCAS by the driver).
+    void (*set_rcas)(float) = (void (*)(float))dlsym(RTLD_DEFAULT, "vpvk_config_set_rcas");
     // Own foveation (rate map per eye): the mode chosen in the app turns it on; Off keeps the frame as before.
     void (*set_fov_apply)(int) = (void (*)(int))dlsym(RTLD_DEFAULT, "vpvk_config_set_foveation_apply");
     if (!set_fov || !set_taa) {
@@ -41,6 +43,9 @@ int vq_gfx_config_forward(void) {
     if (set_aniso) set_aniso(g_cfg.anisotropy);
     if (set_1x) set_1x(g_cfg.force_single_sample);
     if (set_native) set_native(g_cfg.taa_native);
+    if (set_rcas) set_rcas(g_cfg.rcas);
+    else if (g_cfg.rcas > 0)
+        fprintf(stderr, "vq.rcas intensity %.2f: vpvk_config_set_rcas not in this VPVulkan (env VPVK_RCAS only)\n", g_cfg.rcas);
     if (set_msaa) set_msaa(g_cfg.msaa_override);
     else if (g_cfg.msaa_override)
         fprintf(stderr, "vq.aa msaa override %d: vpvk_config_set_msaa_override not in this VPVulkan (env VPVK_MSAA only)\n",
@@ -56,9 +61,9 @@ int vq_gfx_config_apply(const vq_gfx_config *c) {
     static const char *const names[] = { "off", "m2", "m5", "custom" };
     int m = (c->foveation_mode >= 0 && c->foveation_mode <= 3) ? c->foveation_mode : 0;
     fprintf(stderr, "vq.fov settings quest_foveation=off(always) own=%s sharp=%.2f periphery=%.2f height=%.2f "
-            "vpktaa=%d native=%d %.0f%% sharp=%.2f scale=%.2f asw_off=%d quest3=%d aniso=%d force1x=%d msaa=%d\n",
+            "vpktaa=%d native=%d %.0f%% rcas=%.2f scale=%.2f asw_off=%d quest3=%d aniso=%d force1x=%d msaa=%d\n",
             names[m], c->sharp_zone, c->periphery, c->height, c->vpktaa_enabled, c->taa_native, c->vpktaa_percent,
-            c->vpktaa_sharpness, c->render_scale, c->asw_disabled, c->quest3_profile, c->anisotropy,
+            c->rcas, c->render_scale, c->asw_disabled, c->quest3_profile, c->anisotropy,
             c->force_single_sample, c->msaa_override);
     return vq_gfx_config_forward();
 }

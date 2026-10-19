@@ -465,6 +465,8 @@ enum VQConformance {
         setenv("KL_VPKTAA", "0", 1)
         setenv("KL_AA_MODE", "off", 1)
         setenv("VPVK_TAA_NATIVE", "0", 1)
+        setenv("KL_RCAS", "0", 1)   // the driver tests see the game's picture untouched
+        setenv("VPVK_RCAS", "0", 1)
         var c = vq_gfx_config()
         c.foveation_mode = 0
         c.vpktaa_enabled = 0
@@ -474,6 +476,7 @@ enum VQConformance {
         c.anisotropy = 0
         c.force_single_sample = 0
         c.msaa_override = 0
+        c.rcas = 0
         _ = vq_gfx_config_apply(&c)
         VQLog.log("Conformidad: gráficos neutros (sin anisotrópico forzado, sin VPKTAA, MSAA del test, sin foveado)")
     }

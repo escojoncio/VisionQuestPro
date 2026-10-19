@@ -117,6 +117,8 @@ int   kl_vulkan_native_submit(void (*fn)(void *, void *), void *u) { (void)fn; (
 void *kl_vulkan_native_device(void) { return NULL; }
 size_t kl_vulkan_mem_stats(char *out, size_t cap) { (void)out; (void)cap; return 0; }
 int   kl_vulkan_taa_native_on(void) { return 0; }
+int   kl_vulkan_rcas_on(void) { return 0; }
+int   kl_vulkan_hook_is_taa(void) { return 1; }
 int   kl_vulkan_taa_ui_mask_on(void) { return 0; }
 int   kl_vulkan_taa_native_encode(const void *f, void *cb) { (void)f; (void)cb; return 0; }
 void *kl_vulkan_eye_color_mtl(int s, int e, int *sl, int *w, int *h) {
@@ -3658,6 +3660,7 @@ typedef struct {
     uint32_t width, height;
     float    jx, jy;
     uint64_t tag;
+    int      still;   // 1: eye passes + UI mask, no offset (RCAS without TAA)
 } klvk_vpvk_taa_jitter;
 typedef struct {
     uint64_t tag;
@@ -3681,6 +3684,7 @@ static struct {
     int   (*taa_native_enabled)(void);
     int   (*taa_native_encode)(const void *frame, void *mtl_cmdbuf);
     int   (*taa_ui_mask_enabled)(void);
+    float (*rcas_intensity)(void);     // weak: VPKEngine with RCAS (vpvk_rcas_intensity)
     void *(*depth_resolve_encode)(void *mtl_cmdbuf, void *depth_ms, int reversed_z, int mode, int key);
     // weak: VPKEngine with the zero-init queries (vpvk/config.h "vpvk_image_zero_pending")
     int   (*image_zero_pending)(void *mtl);
@@ -3710,6 +3714,7 @@ static void klvk_vpvk_resolve(void) {
         g_vpvk.taa_native_enabled = (int (*)(void))dlsym(lib, "vpvk_taa_native_enabled");
         g_vpvk.taa_native_encode = (int (*)(const void *, void *))dlsym(lib, "vpvk_taa_native_encode");
         g_vpvk.taa_ui_mask_enabled = (int (*)(void))dlsym(lib, "vpvk_taa_ui_mask_enabled");
+        g_vpvk.rcas_intensity = (float (*)(void))dlsym(lib, "vpvk_rcas_intensity");
         g_vpvk.depth_resolve_encode =
             (void *(*)(void *, void *, int, int, int))dlsym(lib, "vpvk_depth_resolve_encode");
         g_vpvk.image_zero_pending = (int (*)(void *))dlsym(lib, "vpvk_image_zero_pending");
@@ -3744,10 +3749,11 @@ int kl_vulkan_taa_inline(void) {
     if (!kl_vulkan_guest_active() && !kl_gles_vpk_up()) return 0;
     klvk_vpvk_resolve();
     const char *why = NULL;
-    if (!kl_env_on("KL_VPKTAA", 0)) v = 0;      // VPKTAA off: nothing to say
+    // The hook runs for VPKTAA (KL_VPKTAA=1) and/or for RCAS (KL_RCAS > 0, always on in the app).
+    if (!kl_env_on("KL_VPKTAA", 0) && !kl_vulkan_rcas_on()) v = 0;      // neither: nothing to say
     else if (!kl_env_on("KL_VPKTAA_INLINE", 1)) why = "KL_VPKTAA_INLINE=0 — no VPKTAA (the native pass is the only one)", v = 0;
     else if (!g_vpvk.native_submit) why = "the Vulkan driver has no vpvk_native_submit (MoltenVK?) — no VPKTAA", v = 0;
-    else if (!kl_vulkan_taa_native_on()) why = "VPKEngine without the native VPKTAA (vpvk_taa_native_*) — no VPKTAA (there is no other one)", v = 0;
+    else if (!kl_vulkan_taa_native_on() && !kl_vulkan_rcas_on()) why = "VPKEngine without the native VPKTAA / RCAS (vpvk_taa_native_*) — no VPKTAA, no RCAS (there is no other one)", v = 0;
     else v = 1;
     int expect = -1;
     if (__atomic_compare_exchange_n(&g_taa_inline, &expect, v, 0,
@@ -3869,6 +3875,22 @@ int kl_vulkan_taa_native_on(void) {
     if (g_vpvk.taa_native_enabled && g_vpvk.taa_native_encode) return g_vpvk.taa_native_enabled() != 0;
     return 0;   // driver without the native pass (MoltenVK, older VPKEngine)
 }
+
+// RCAS (the sharpening pass, VPKEngine taa_native.h): KL_RCAS = intensity 0..1 from the app (0 = off, no pass,
+// no hook, no cost) and a driver whose native pass knows RCAS-only frames (vpvk_rcas_intensity).
+int kl_vulkan_rcas_on(void) {
+    static int env = -2;
+    if (env == -2) {
+        const char *e = getenv("KL_RCAS");
+        env = e && *e ? (kl_env_float("KL_RCAS", 0.0f) > 0.0f ? 1 : 0) : 0;
+    }
+    if (!env) return 0;
+    klvk_vpvk_resolve();
+    return g_vpvk.rcas_intensity && g_vpvk.taa_native_encode && g_vpvk.rcas_intensity() > 0.0f;
+}
+// Set by the frame end just before it runs the hook (same thread): 1 = VPKTAA frame, 0 = RCAS only.
+static __thread int t_hook_taa = 1;
+int kl_vulkan_hook_is_taa(void) { return t_hook_taa; }
 
 int kl_vulkan_taa_ui_mask_on(void) {
     klvk_vpvk_resolve();
@@ -4249,7 +4271,7 @@ static float klvk_halton(unsigned i, unsigned b) {
 // (kl_vulkan_taa_applied reports 0 draws), so a dropped frame costs nothing.
 // Set as soon as the hook has committed (VPKEngine applies it to submits
 // translated from then on: the next frame's), no GPU wait needed.
-static void klvk_taa_next_jitter(unsigned eye_w, unsigned eye_h, int resolving, int hook_on, int gate) {
+static void klvk_taa_next_jitter(unsigned eye_w, unsigned eye_h, int resolving, int hook_on, int gate, int still) {
     if (!g_vpvk.set_jitter) {
         static int said;
         if (!said++) VKI("[taa-inline] vpvk_taa_set_jitter missing — frames are rendered without jitter\n");
@@ -4267,8 +4289,9 @@ static void klvk_taa_next_jitter(unsigned eye_w, unsigned eye_h, int resolving, 
     unsigned long long n = __atomic_load_n(&g_frame_issued, __ATOMIC_ACQUIRE) + 1;
     j.tag = n;
     j.width = eye_w; j.height = eye_h;
-    j.enabled = want && resolving && j.width && j.height;
-    if (j.enabled) {
+    j.still = still;   // RCAS-only frame: eye passes + UI mask identified, but no sub-pixel offset
+    j.enabled = (still || want) && resolving && j.width && j.height;
+    if (j.enabled && !still) {
         unsigned k = (unsigned)(n % 8u) + 1u;
         j.jx = klvk_halton(k, 2) - 0.5f;
         j.jy = klvk_halton(k, 3) - 0.5f;
@@ -4374,7 +4397,7 @@ void kl_vulkan_frame_done(int stage) {
     // goes out unresolved instead. A committed resolve is NOT waited for: the
     // hook's owner advances the serial when it completes on the GPU.
     int taa_inline = kl_vulkan_taa_inline();
-    int hook_on = 0, committed = 0, gate = 0, hook_called = 0, mine = 0;
+    int hook_on = 0, committed = 0, gate = 0, hook_called = 0, mine = 0, rcas_frame = 0;
     unsigned long long rec_serial = 0;
     if (taa_inline) {
         int rec_stage = g_taa_rec_stage;
@@ -4388,12 +4411,16 @@ void kl_vulkan_frame_done(int stage) {
         hook_on = fn != NULL;
         mine = rec_serial && rec_stage == stage;
         if (mine) __atomic_add_fetch(&g_taa_inline_frames, 1, __ATOMIC_RELEASE);
-        gate = kl_vulkan_aa_gate();
-        if (fn && mine && gate) {
+        // VPKTAA runs while its gate is open; otherwise (game MSAA, msaa/off mode, detection pending,
+        // KL_VPKTAA=0) the same hook sharpens the frame with RCAS alone (KL_RCAS > 0, no resolve).
+        gate = kl_env_on("KL_VPKTAA", 0) && kl_vulkan_aa_gate();
+        rcas_frame = !gate && kl_vulkan_rcas_on();
+        if (fn && mine && (gate || rcas_frame)) {
             // The depth record carries the frame-record serial before the hook
             // reads it (kl_ovrp tags it again after this returns, same value).
             kl_vulkan_eye_depth_tag(stage, rec_serial);
             hook_called = 1;
+            t_hook_taa = gate;
             committed = fn(stage, issued, user) != 0;
         } else if (fn && !mine) {
             static unsigned said;
@@ -4469,7 +4496,7 @@ void kl_vulkan_frame_done(int stage) {
     if (taa_inline) {
         unsigned ew, eh;
         klvk_eye_wh(stage, &ew, &eh);
-        klvk_taa_next_jitter(ew, eh, committed, hook_on, gate);
+        klvk_taa_next_jitter(ew, eh, committed, hook_on, gate, rcas_frame);
     }
 }
 
@@ -4485,10 +4512,12 @@ int kl_vulkan_taa_gles_frame_end(int stage, unsigned long long rec_serial) {
     pthread_mutex_unlock(&g_taa_hook_mu);
     int mine = rec_serial && stage >= 0 && stage < KLVK_EYE_STAGES;
     if (mine) __atomic_add_fetch(&g_taa_inline_frames, 1, __ATOMIC_RELEASE);
-    int gate = kl_vulkan_aa_gate();
+    int gate = kl_env_on("KL_VPKTAA", 0) && kl_vulkan_aa_gate();   // else: RCAS alone (see kl_vulkan_frame_done)
+    int rcas_frame = !gate && kl_vulkan_rcas_on();
     int committed = 0, hook_called = 0;
-    if (fn && mine && gate) {
+    if (fn && mine && (gate || rcas_frame)) {
         hook_called = 1;
+        t_hook_taa = gate;
         committed = fn(stage, 0, user) != 0;
     } else if (fn && !mine) {
         static unsigned said;
@@ -4507,7 +4536,7 @@ int kl_vulkan_taa_gles_frame_end(int stage, unsigned long long rec_serial) {
     if (!committed && mine) __atomic_store_n(&g_taa_raw_record, rec_serial, __ATOMIC_RELEASE);
     unsigned ew, eh;
     klvk_eye_wh(stage, &ew, &eh);
-    klvk_taa_next_jitter(ew, eh, committed, fn != NULL, gate);
+    klvk_taa_next_jitter(ew, eh, committed, fn != NULL, gate, rcas_frame);
     return committed;
 }
 

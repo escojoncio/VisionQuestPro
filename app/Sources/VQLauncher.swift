@@ -277,6 +277,7 @@ struct VQSettingsView: View {
                              "Antialiasing: chosen per game (the “Game settings” button on its card). Automatic by default: VPKTAA for games without MSAA, the game's own MSAA for those that use it. Here, VPKTAA's fine tuning for all of them."))
                         .font(.caption)
                     VQVPKTAATuning(settings: settings)
+                    VQRCASSlider(value: $settings.vpktaaSharpness)
                     Toggle(VQL("Descargar carátulas de la tienda de Meta", "Download covers from the Meta store"), isOn: $settings.storeCovers)
                     Text(VQL("Solo descarga la imagen de la ficha de cada juego, una vez y sin cuenta. Los juegos siguen sin conexión.",
                              "It only downloads the picture of each game's listing, once and without an account. Games stay offline."))
@@ -488,10 +489,21 @@ struct VQVPKTAATuning: View {
         Text(VQL("Cuánto se mezcla cada frame con los anteriores. Más: bordes más limpios y menos parpadeo; también más estela al girar rápido o en objetos que se mueven. Recomendado 60–80 %.",
                  "How much each frame is blended with the previous ones. Higher: cleaner edges and less shimmer, but more trailing on fast turns and moving objects. Recommended 60–80 %."))
             .font(.caption)
-        Stepper(VQL("Nitidez VPKTAA: \(Int(settings.vpktaaSharpness * 100)) %", "VPKTAA sharpness: \(Int(settings.vpktaaSharpness * 100)) %"),
-                value: $settings.vpktaaSharpness, in: 0...1, step: 0.1)
-        Text(VQL("Enfoque aplicado después del suavizado, para recuperar el detalle que el TAA difumina. Demasiado alto: halos y bordes que parpadean. Recomendado 20–30 %; 0 % lo desactiva.",
-                 "Sharpening applied after the smoothing, to recover the detail TAA blurs. Too high: halos and flickering edges. Recommended 20–30 %; 0 % turns it off."))
+    }
+}
+
+/// «Nitidez (RCAS)»: the intensity of the sharpening pass (RCAS, as in FSR), 0–100 %. Applied in every game and
+/// AA mode (VPKTAA, game MSAA, no AA), only to the 3D: menus and text are left untouched. 0 % = off, no cost.
+struct VQRCASSlider: View {
+    @Binding var value: Double
+
+    var body: some View {
+        VStack(alignment: .leading) {
+            Text(VQL("Nitidez (RCAS): \(Int((value * 100).rounded())) %", "Sharpness (RCAS): \(Int((value * 100).rounded())) %"))
+            Slider(value: $value, in: 0...1, step: 0.05)
+        }
+        Text(VQL("Afilado robusto por contraste (el de FSR) tras el antialiasing, sin halos. Solo el 3D: menús y textos no se tocan. 100 % = el máximo; 0 % lo desactiva y no cuesta nada.",
+                 "Contrast-adaptive sharpening (FSR's) after antialiasing, without halos. 3D only: menus and text are left alone. 100 % = maximum; 0 % turns it off at no cost."))
             .font(.caption)
     }
 }
@@ -506,12 +518,15 @@ struct VQGameSettingsView: View {
     @State private var res: VQGameRes
     /// -1 = global level (nothing saved for this game), else 0/2/4/8/16.
     @State private var aniso: Int
+    /// nil = the global «Nitidez (RCAS)»; else this game's own 0...1.
+    @State private var rcas: Double?
 
     init(game: VQGame) {
         self.game = game
         _aa = State(initialValue: VQGameAA.load(key: game.aaKey))
         _res = State(initialValue: VQGameRes.load(key: game.aaKey))
         _aniso = State(initialValue: VQGameAniso.load(key: game.aaKey) ?? -1)
+        _rcas = State(initialValue: VQGameRCAS.load(key: game.aaKey))
     }
 
     /// The game's own eye-pass sample count seen on an earlier run (nil: not yet).
@@ -539,6 +554,15 @@ struct VQGameSettingsView: View {
                     Text(modeHelp).font(.caption)
                     if showsMSAALevel { msaaLevel }
                     if showsVPKTAATuning { VQVPKTAATuning(settings: settings) }
+                }
+                Section(VQL("Nitidez (RCAS)", "Sharpness (RCAS)")) {
+                    Toggle(VQL("Usar la global", "Use the global one"), isOn: Binding(
+                        get: { rcas == nil },
+                        set: { rcas = $0 ? nil : settings.vpktaaSharpness }))
+                    VQRCASSlider(value: Binding(
+                        get: { rcas ?? settings.vpktaaSharpness },
+                        set: { rcas = $0 }))
+                        .disabled(rcas == nil)
                 }
                 Section(VQL("Resolución", "Resolution")) {
                     Toggle(VQL("Usar la global", "Use the global one"), isOn: $res.useGlobal)
@@ -579,6 +603,10 @@ struct VQGameSettingsView: View {
             .onChange(of: res) { _, new in
                 new.save(key: game.aaKey)
                 VQLog.log("Ajustes del juego \(game.aaKey): resolución \(new.useGlobal ? "global" : "\(new.base) \(Int(new.scale * 100)) %")")
+            }
+            .onChange(of: rcas) { _, new in
+                VQGameRCAS.save(new, key: game.aaKey)
+                VQLog.log("Ajustes del juego \(game.aaKey): Nitidez (RCAS) \(new.map { "\(Int($0 * 100)) %" } ?? "global")")
             }
             .onChange(of: aniso) { _, new in
                 VQGameAniso.save(new < 0 ? nil : new, key: game.aaKey)

@@ -361,8 +361,15 @@ typedef struct {
     int      reversed_z;
     float    near_z, far_z;
     int      reset;
+    int      rcas_only;   // 1: no TAA this frame — RCAS alone on `color` (appended field, as in VPKEngine)
 } kl_vulkan_taa_native_frame;
 int  kl_vulkan_taa_native_on(void);
+// RCAS (the sharpening pass, always on in the app; KL_RCAS = intensity 0..1, 0 = off): 1 when KL_RCAS > 0 and the
+// driver's native pass does RCAS-only frames. Then the inline hook also runs for frames where VPKTAA does not
+// (game MSAA, msaa/off AA modes, gate closed) with an unjittered, unresolved frame: RCAS on the game's colour.
+int  kl_vulkan_rcas_on(void);
+// Inside the hook (guest thread): 1 = this frame is a VPKTAA resolve (+RCAS), 0 = RCAS only.
+int  kl_vulkan_hook_is_taa(void);
 // 1 when the native pass also uses the reactive UI mask (R8: UI/2D stays sharp, only the 3D is
 // smoothed); 0 without it or on an older VPKEngine.
 int  kl_vulkan_taa_ui_mask_on(void);

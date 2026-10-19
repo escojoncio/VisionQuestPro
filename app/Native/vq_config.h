@@ -19,6 +19,7 @@ typedef struct vq_gfx_config {
     int32_t force_single_sample; // 1 = render the game's MSAA targets at 1x (VPKTAA does the AA)
     int32_t msaa_override;    // 0 = the game's own sample count; 2/4/8 where the game asked for MSAA
     int32_t taa_native;       // 1 = «VPKTAA nativo»: VPKEngine's own pass (also env VPVK_TAA_NATIVE)
+    float rcas;               // 0..1: «Nitidez (RCAS)», always on in every AA mode (0 = off). Appended field.
 } vq_gfx_config;
 
 // Stores the config and pushes it to VPVulkan if loaded (returns 1 if forwarded).

@@ -3,6 +3,13 @@
 Historial completo: `git log -p bitacora.md` (compactada el 2026-10-18; detalle de cada paso en los commits
 «Integrar paso-aN» y en las ramas `paso-aN` de GitHub).
 
+## 2026-10-19 (noche, 2) — «Nitidez (RCAS)» siempre activa en todos los modos de AA (sin compilar Swift/.mm/.c, sin probar en visor)
+- El RCAS ya estaba dentro del VPKTAA nativo; ahora es un pase independiente (VPKEngine) que corre con VPKTAA, con MSAA del juego y sin AA, en Vulkan y vpgles (ovrp y OpenXR), por el mismo gancho de fin de frame. Intensidad 0–100 %; 0 = sin pase.
+- `app/Sources/VQLaunch.swift`: `vpktaaSharpness` pasa a ser la «Nitidez (RCAS)» global (default 1.0 = lo de antes); `VQGameRCAS` (`vq.rcas.<key>`, nil = global); `KL_RCAS` + `VPVK_RCAS` + `c.rcas`; `KL_VPKTAA_SHARP` retirada. `VQLauncher.swift`: `VQRCASSlider` (global en Ajustes, por juego en «Ajustes del juego»); quitado el stepper «Nitidez VPKTAA». `Native/vq_config.h/.c`: campo `rcas` (al final) → `vpvk_config_set_rcas`. `VQConformance.swift`: RCAS 0.
+- `klepton/runtime/gfx/kl_vulkan.c/.h`: `kl_vulkan_rcas_on`, `kl_vulkan_hook_is_taa`; el gancho corre también si la puerta de VPKTAA está cerrada (frame «solo RCAS», `vpvk_taa_jitter.still`); `kl_vulkan_taa_native_frame.rcas_only` (al final). `KleptonTAA.swift`: `passEnabled`, frames RCAS-only sin profundidad/movimiento; log «RCAS activo (nitidez X, máscara UI sí/no, ruta …)».
+- Riesgos: ruta ANGLE/MoltenVK sin RCAS; con `KL_RCAS>0` el modo inline queda activo en todo juego Vulkan/vpgles (frame-end sin async); con MSAA del juego no hay máscara UI. Requiere el VPVulkan nuevo (campos añadidos al final de dos structs).
+- Pendiente: compilar en CI; en visor, ver `RCAS activo`, `vk.rcas active`, coste GPU (`vk.taa native gpu_ms`) en un juego MSAA.
+
 ## 2026-10-19 (noche) — Háptica global en los mandos Sense (sin compilar Swift, sin probar en visor)
 Causas (logs AC, AoT, Demeo, SuperHOT, Hellsplit): (1) Hellsplit/UE4 llama `ovrp_SetControllerHapticsAmplitudeEnvelope` ×1259 y estaba en `k_refused` (-1004); `SetControllerHaptics2` y `SetControllerLocalizedVibration` eran no-op aceptados; (2) en AC/AoT el primer `CHHapticEngine` de cada mano moría con `systemError` (-1, XPC `gamecontrollerd.haptics` 4097) ~10 ms tras `start()`, no se creaba el player avanzado y la mano quedaba en eventos discretos TODA la sesión; (3) `stoppedHandler` borraba el motor por índice de mano (el stop del motor sustituido, razón 5, borraba al nuevo); (4) ganancia fija 0.25 sobre amplitudes ya pequeñas (AC: picos 0.00-0.03 llegaban al actuador); (5) Demeo (OpenXR): 0 llamadas a `xrApplyHapticFeedback` en la sesión; SuperHOT: `SetControllerVibration` casi siempre amplitud 0 y `SetControllerHaptics` nunca llamado.
 Cambios:

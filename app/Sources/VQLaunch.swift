@@ -112,7 +112,9 @@ final class VQSettings: ObservableObject {
     // The old global AA switches (vq.vpktaa4, vq.gameMSAA) are no longer read: antialiasing
     // is per game (VQGameAA), automatic by default.
     @Published var vpktaaPercent: Double { didSet { save() } }  // 0...100
-    @Published var vpktaaSharpness: Double { didSet { save() } } // 0...1
+    /// Global «Nitidez (RCAS)» (0...1, 0 = off): the intensity of the sharpening pass, on in every AA mode.
+    /// Per game it can be overridden (VQGameRCAS). Default 1.0 = what VPKTAA's old sharpening did.
+    @Published var vpktaaSharpness: Double { didSet { save() } }
     /// 16x anisotropic filtering on the game's mipmapped linear samplers (VPVulkan).
     /// Forced anisotropic filtering level for material samplers: 0 (off), 2, 4, 8 or 16.
     @Published var anisoLevel: Int { didSet { save() } }
@@ -385,7 +387,12 @@ final class VQSettings: ObservableObject {
         c.vpktaa_enabled = vpktaa ? 1 : 0
         c.msaa_override = Int32(msaaOverride)
         c.vpktaa_percent = Float(vpktaaPercent)
-        c.vpktaa_sharpness = Float(vpktaaSharpness)
+        // RCAS (VPKEngine's sharpening pass): always on, any AA mode; per game, else the global one; 0 = off.
+        let effRcas = VQGameRCAS.load(key: gameKey) ?? vpktaaSharpness
+        c.vpktaa_sharpness = Float(effRcas)
+        c.rcas = Float(effRcas)
+        setenv("KL_RCAS", String(format: "%.2f", effRcas), 1)   // Klepton's frame-end hook
+        setenv("VPVK_RCAS", String(format: "%.2f", effRcas), 1)  // VPVulkan, even before the forward
         // The only VPKTAA is VPKEngine's native pass (on whenever VPKTAA is allowed for this game).
         c.taa_native = vpktaa ? 1 : 0
         setenv("VPVK_TAA_NATIVE", vpktaa ? "1" : "0", 1)  // read by VPVulkan even before the forward
@@ -412,7 +419,7 @@ final class VQSettings: ObservableObject {
         // percent and sharpness reach it through vq_gfx_config_apply (vpvk_config_set_vpktaa).
         setenv("KL_VPKTAA", vpktaa ? "1" : "0", 1)
         setenv("KL_VPKTAA_PCT", String(format: "%.0f", vpktaaPercent), 1)
-        setenv("KL_VPKTAA_SHARP", String(format: "%.2f", vpktaaSharpness), 1)
+        unsetenv("KL_VPKTAA_SHARP")  // replaced by KL_RCAS
         vq_prewarm_set_enabled(precompileShaders ? 1 : 0)
         // Also through the environment: the call above reaches VPVulkan only once it is loaded,
         // and its first vkCreateDevice may come before the app can repeat it.
@@ -427,7 +434,7 @@ final class VQSettings: ObservableObject {
         setenv("VPVK_REPORT_GEOM", "1", 1)
         unsetenv("VPVK_TAA_JITTER")  // set to 0 by the conformance runs only (VQConformance.neutralGraphics)
         let detText = detected.map { "\($0)x" } ?? "no"
-        VQLog.log("Gráficos: foveado Quest siempre apagado; foveado propio \(foveation), AA: modo \(aa.mode.rawValue), MSAA override \(msaaOverride), detectado \(detText) (juego \(aaKey.isEmpty ? "?" : aaKey)\(aa.stored ? "" : ", por defecto")), VPKTAA nativo permitido \(vpktaa) \(Int(vpktaaPercent)) % nitidez \(vpktaaSharpness), forzar 1x \(c.force_single_sample != 0), anisotrópico x\(anisoLevel), diagnóstico de rendimiento \(perfDiag), diagnóstico de ficheros \(fsDiag), escala \(effScale), ASW apagado \(aswDisabled), perfil Quest 3 \(quest3Profile), perfil Vulkan completo \(vkFullProfile), FPS en pantalla \(showFps)")
+        VQLog.log("Gráficos: foveado Quest siempre apagado; foveado propio \(foveation), AA: modo \(aa.mode.rawValue), MSAA override \(msaaOverride), detectado \(detText) (juego \(aaKey.isEmpty ? "?" : aaKey)\(aa.stored ? "" : ", por defecto")), VPKTAA nativo permitido \(vpktaa) \(Int(vpktaaPercent)) %, Nitidez (RCAS) \(Int(effRcas * 100)) % (\(VQGameRCAS.load(key: gameKey) == nil ? "global" : "del juego")), forzar 1x \(c.force_single_sample != 0), anisotrópico x\(anisoLevel), diagnóstico de rendimiento \(perfDiag), diagnóstico de ficheros \(fsDiag), escala \(effScale), ASW apagado \(aswDisabled), perfil Quest 3 \(quest3Profile), perfil Vulkan completo \(vkFullProfile), FPS en pantalla \(showFps)")
         // Effective antialiasing and why (one line, so a log alone explains what the eye pass will be).
         let aaEffective: String
         let aaWhy: String
@@ -563,6 +570,21 @@ enum VQGameAniso {
         guard !key.isEmpty else { return }
         if let level { UserDefaults.standard.set(level, forKey: "vq.aniso." + key) }
         else { UserDefaults.standard.removeObject(forKey: "vq.aniso." + key) }
+    }
+}
+
+/// «Nitidez (RCAS)» per game: nil = follow the global value (VQSettings.vpktaaSharpness); else 0...1
+/// (0 = off). Saved as vq.rcas.<key>.
+enum VQGameRCAS {
+    static func load(key: String) -> Double? {
+        guard !key.isEmpty, let v = UserDefaults.standard.object(forKey: "vq.rcas." + key) as? Double else { return nil }
+        return min(max(v, 0), 1)
+    }
+
+    static func save(_ value: Double?, key: String) {
+        guard !key.isEmpty else { return }
+        if let value { UserDefaults.standard.set(min(max(value, 0), 1), forKey: "vq.rcas." + key) }
+        else { UserDefaults.standard.removeObject(forKey: "vq.rcas." + key) }
     }
 }
 

@@ -90,6 +90,7 @@ antialiasing VPKTAA (escojoncio/PTVisionPro).
 - VPKTAA en lugar del AA del juego (porcentaje, nitidez).
 - Perfil Quest 3 cuando el juego lo tenga.
 - ASW desactivable: todos los frames reales, sin extrapolar.
+- Nitidez (RCAS): afilado de FSR (RCAS), siempre activo en todos los modos de AA, 0–100 % (global y por juego; 0 = apagado), solo sobre el 3D.
 - Foveado: zona nítida, periferia, presets M2 / M5 / personalizado (como PTVisionPro; M5 solo
   seleccionable en un Vision Pro M5).
 
