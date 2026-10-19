@@ -26,6 +26,19 @@
 #include "kl_il2cpp.h"
 #include "kl_x18.h"
 
+// Which kind of thread died. kl_thread_init() seeds the bionic canary in TSD slot 5 on every
+// thread that runs guest code (game, guest pthreads, Java threads, audio/reader callbacks);
+// a libdispatch / workqueue thread never gets it, and there guest x18 is 0 and IL2CPP does
+// not know the thread — a fault there is us calling the guest from the wrong place.
+static const char *kl_fault_thread_kind(void) {
+    if (pthread_main_np()) return " (main)";
+    uint64_t tp;
+    __asm__ volatile("mrs %0, tpidrro_el0" : "=r"(tp));
+    if (!((const uint64_t *)tp)[5])
+        return " (HOST thread: libdispatch/workqueue/system, no guest TLS - not a guest thread)";
+    return " (a guest thread)";
+}
+
 // ---- where a crash report goes so that it SURVIVES ------------------------
 //
 // The report used to go to fd 2 alone, and on device it was not there to read:
@@ -221,7 +234,7 @@ static void report_fault(int sig, siginfo_t *si, void *uctx) {
                       "\n[klepton] fault: signal %d at %p, pc %s+0x%zx (%p), thread %llu%s\n",
                       sig, si ? si->si_addr : NULL, img ? img : "<host>", off, pc,
                       (unsigned long long)tid,
-                      pthread_main_np() ? " (main)" : " (a guest worker thread)");
+                      kl_fault_thread_kind());
     if (n > 0) { klf_emit(buf, (size_t)n); }
 
     // WHAT KIND OF PAGE the address is, for a memory fault.

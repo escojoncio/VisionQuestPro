@@ -425,6 +425,9 @@ unsigned kl_jni_drain_ui_tasks(void) {
     // the other; the count stays the UI tasks' so the drivers' "drained N
     // posted tasks" keeps meaning what it did.
     klj_drain_soft_input();
+    // SurfaceTexture.onFrameAvailable: Android posts it to the creating thread's looper (the main
+    // looper for Unity), i.e. it runs on THIS thread, never on the decoder's.
+    klhv_drain();
     return n;
 }
 

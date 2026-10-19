@@ -255,7 +255,7 @@ double kl_sdl2_pump(double seconds, const volatile int *quit) {
     struct timespec iv = { 0, 100 * 1000 * 1000 };
     for (unsigned t = 0; (quit ? !*quit : 1) && (seconds < 0 || elapsed < seconds); t++) {
         nanosleep(&iv, NULL);
-        if ((t + 1) % 10 == 0) kl_jni_drain_ui_tasks();
+        if ((t + 1) % 10 == 0) { kl_jni_drain_ui_tasks(); kl_mem_pressure_deliver(); }   // decided by the timer, delivered here (game/UI thread)
         struct timespec now; clock_gettime(CLOCK_MONOTONIC, &now);
         elapsed = (double)(now.tv_sec - t0.tv_sec) + (double)(now.tv_nsec - t0.tv_nsec) / 1e9;
     }

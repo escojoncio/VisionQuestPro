@@ -25,6 +25,16 @@
 // and draw a visionOS watchdog kill. Log once; the answer never changes.
 #define KLJ_LOG_ONCE(...) do { static int _kl_logged; if (!_kl_logged) { _kl_logged = 1; KLJ_LOG(__VA_ARGS__); } } while (0)
 
+// Kernel thread id for log lines (the same number Process.setThreadPriority(tid) and the
+// [media] codec lines print), so a JNI call can be matched to the thread that made it.
+static inline uint64_t klj_tid(void) {
+#ifdef __APPLE__
+    uint64_t t = 0; pthread_threadid_np(NULL, &t); return t;
+#else
+    return (uint64_t)(uintptr_t)pthread_self();
+#endif
+}
+
 #define KLJ_MAX_CLASSES 512
 #define KLJ_MAX_NATIVES 1024
 #define KLJ_MAX_WANTED  1024
@@ -222,6 +232,8 @@ extern const klj_binding *const klj_binding_tables[];
 //
 // Macros rather than a struct because g_fields is a static initialiser and a
 // const object is not a constant expression in C.
+#define KLJ_ANDROID_ID "4b6c6570746f6e01"      /* "Klepton\1" as hex */
+
 #define KLJ_DISPLAY_W        1832
 #define KLJ_DISPLAY_H        1920
 #define KLJ_DISPLAY_DPI      320
@@ -298,6 +310,8 @@ extern klj_ui_task  g_ui_tasks[KLJ_MAX_UI_TASKS];
 extern unsigned     g_ui_task_n;
 
 klj_val      klj_singleton(const char *cls, void **slot);
+klj_val      klj_Context_getAssets(void *env, void *self, const klj_val *a, int n);   // the one AssetManager (kl_jni_services.c)
+int          klj_is_quest3(void);     // the presented identity is a Quest 3 (kl_jni.c: KL_QUEST3 / the batman target)
 void        *klj_new_list(void **items, int count);
 klj_webdoc  *klj_webdoc_of(void *self);
 klj_handler *klj_as_handler(void *obj);
@@ -325,6 +339,9 @@ klj_val klj_Display_getPresentationDeadlineNanos(void *env, void *self, const kl
 klj_val klj_Display_getRefreshRate(void *env, void *self, const klj_val *a, int n);
 klj_val klj_UnityPlayer_loadLibrary(void *env, void *self, const klj_val *a, int n);
 unsigned klj_drain_soft_input(void);
+// kl_jni_hostvideo.c: deliver the SurfaceTexture.onFrameAvailable callbacks announced since the last
+// drain, on the calling (game / UI) thread. Called from kl_jni_drain_ui_tasks.
+void klhv_drain(void);
 void *klj_box_int(int32_t v);
 void klj_deliver_message(void *message);
 void klj_guest_version(long *code, const char **name);

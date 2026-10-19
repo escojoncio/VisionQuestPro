@@ -1610,7 +1610,37 @@ static uint64_t klplat_JNI_OnLoad(void *vm, void *reserved) {
     return 0x00010006;                 // JNI_VERSION_1_6
 }
 
+// ovrKeyValuePair_make*: pure value constructors from OVR_KeyValuePair.h (analytics /
+// matchmaking-query pairs). They touch no service, so they are served for real: the pair is
+// built exactly as the SDK builds it. The 40-byte struct comes back through x8 (AAPCS64
+// indirect result), which is what a by-value C return compiles to.
+typedef struct {
+    const char *key_;
+    int         valueType_;          // ovrKeyValuePairType: 0 string, 1 int, 2 double
+    const char *stringValue_;
+    int         intValue_;
+    double      doubleValue_;
+} klplat_kvp;
+static klplat_kvp klplat_kvp_makeString(const char *key, const char *value) {
+    klplat_kvp r = { key, 0, value, 0, 0.0 };
+    plat_hit("ovrKeyValuePair_makeString");
+    return r;
+}
+static klplat_kvp klplat_kvp_makeInt(const char *key, int value) {
+    klplat_kvp r = { key, 1, NULL, value, 0.0 };
+    plat_hit("ovrKeyValuePair_makeInt");
+    return r;
+}
+static klplat_kvp klplat_kvp_makeDouble(const char *key, double value) {
+    klplat_kvp r = { key, 2, NULL, 0, value };
+    plat_hit("ovrKeyValuePair_makeDouble");
+    return r;
+}
+
 static const struct { const char *name; void *fn; } g_plat_impl[] = {
+    {"ovrKeyValuePair_makeString", (void *)klplat_kvp_makeString},
+    {"ovrKeyValuePair_makeInt",    (void *)klplat_kvp_makeInt},
+    {"ovrKeyValuePair_makeDouble", (void *)klplat_kvp_makeDouble},
     {"JNI_OnLoad",                (void *)klplat_JNI_OnLoad},
     {"ovr_IsPlatformInitialized", (void *)klplat_IsPlatformInitialized},
     {"ovr_GetLoggedInUserID",     (void *)klplat_GetLoggedInUserID},
@@ -1731,6 +1761,13 @@ void *kl_ovrplat_dlopen(const char *soname) {
 
 int kl_ovrplat_is_handle(const void *h) { return h == (const void *)g_plat_handle; }
 
+// True for every name kl_ovrplat_sym answers by family: `ovr_*`, `ovrID*` and the SDK's
+// by-value helpers `ovrKeyValuePair_*` (which, unlike the rest, have no `ovr_` prefix).
+int kl_ovrplat_owns(const char *name) {
+    return name && (!strncmp(name, "ovr_", 4) || !strncmp(name, "ovrID", 5) ||
+                    !strncmp(name, "ovrKeyValuePair_", 16));
+}
+
 void *kl_ovrplat_sym(const char *name) {
     if (!name) return NULL;
     int s = plat_slot(name);                    // resolved, whatever happens next
@@ -1765,6 +1802,23 @@ void *kl_ovrplat_sym(const char *name) {
     if (plat_is_absent_ok(name) || plat_is_init(name))
         return kl_named_stub(name, (void *)klplat_init_fails);
     return kl_named_stub(name, (void *)klplat_called);
+}
+
+// Static coverage for the launcher's scanner (kl_shim_known): pure, no slot, no stub, no log.
+// 2 when kl_ovrplat_sym answers the name with a specific behaviour (own handler, a named family
+// rule, an offline request completion, or the DRM refusal), 0 when it would only get the generic
+// neutral "unimplemented" stub (klplat_called) -- which resolves at load and answers 0/"".
+int kl_ovrplat_known(const char *name) {
+    if (!name) return 0;
+    if (plat_is_drm(name)) return 2;
+    for (size_t i = 0; i < sizeof g_plat_impl / sizeof g_plat_impl[0]; i++)
+        if (strcmp(g_plat_impl[i].name, name) == 0) return 2;
+    if (plat_is_unity_hook(name) || plat_is_drop(name) || plat_is_options_create(name) ||
+        plat_is_launch_details(name) || plat_is_launch_field(name) || plat_is_empty_array(name) ||
+        plat_is_options_sink(name) || plat_is_init_async(name) || plat_is_request(name) ||
+        plat_is_absent_ok(name) || plat_is_init(name))
+        return 2;
+    return plat_msg_type_of(name) ? 2 : 0;
 }
 
 void kl_ovrplat_report(FILE *f) {

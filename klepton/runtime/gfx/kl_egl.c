@@ -13,8 +13,8 @@
 //   * eglGetProcAddress is a LOOKUP. It never fails and never aborts; the guest
 //     resolves plenty it never calls, and refusing there would only tell us
 //     which symbol Unity's loader happened to reach first.
-//   * calling the returned pointer is an ASSERTION. It aborts by name.
-//     KL_PERMISSIVE=1 downgrades that to a zero return so one run collects the
+//   * calling the returned pointer of an absent function is NOT fatal (ANGLE rule: never abort for a
+//     missing function): it logs the name once, counts it and returns 0, so one run collects the
 //     whole GL surface instead of one function per run — which is the entire
 //     point of this file right now, since nothing can be sized until we know
 //     what Unity actually calls.
@@ -195,7 +195,7 @@ static int klegl_sticky_ctx(void) {
 
 // ---------- the GL gateway ----------
 #define KL_GL_MAX 512
-static struct { const char *name; unsigned calls; int resolved; } g_gl[KL_GL_MAX];
+static struct { const char *name; unsigned calls; int resolved; int absent; } g_gl[KL_GL_MAX];
 static unsigned g_ngl;
 
 static int gl_slot(const char *name) {
@@ -205,40 +205,52 @@ static int gl_slot(const char *name) {
     g_gl[g_ngl].name = strdup(name);
     g_gl[g_ngl].calls = 0;
     g_gl[g_ngl].resolved = 0;
+    g_gl[g_ngl].absent = 0;
     return (int)g_ngl++;
 }
 
-static int g_permissive = -1;
-static int permissive(void) {
-    if (g_permissive < 0) g_permissive = kl_env_on("KL_PERMISSIVE", 0);
-    return g_permissive;
+// Standard (ANGLE): a GL name nobody implements is never fatal. The guest gets a stub that returns 0,
+// the first call is logged by name, every call is counted, and the list of absent functions that were
+// actually called is written at the end of the session (kl_egl_report_absent, also atexit).
+static unsigned g_absent_loose;            // calls that could not be slotted (table full)
+static int g_absent_hook;                  // atexit registered
+char kl_gl_last_unimpl[64];                // last absent GL name called (kept for the crash report)
+
+void kl_egl_report_absent(FILE *f) {
+    unsigned n = 0;
+    for (unsigned i = 0; i < g_ngl; i++)
+        if (__atomic_load_n(&g_gl[i].absent, __ATOMIC_RELAXED)) n++;
+    if (!n && !g_absent_loose) return;
+    fprintf(f, "\n[egl] GL functions called that no backend implements (stub returned 0): %u\n", n);
+    for (unsigned i = 0; i < g_ngl; i++)
+        if (__atomic_load_n(&g_gl[i].absent, __ATOMIC_RELAXED))
+            fprintf(f, "    %-40s x%u\n", g_gl[i].name, __atomic_load_n(&g_gl[i].calls, __ATOMIC_RELAXED));
+    if (g_absent_loose) fprintf(f, "    (+%u calls to names beyond the %d-entry table)\n", g_absent_loose, KL_GL_MAX);
 }
 
-// Reached through a per-name trampoline, so x0 is the function's own name. The
-// return value becomes the GL call's return value: the stub tail-calls here, so
-// returning 0 is exactly "the GL function returned 0".
-// The last GL name that hit the unimplemented-abort. The pre-abort fprintf below
-// races the device-console capture and is often lost, so this is stamped and
-// re-emitted from kl_egl_report(), which rides the fault handler's report that
-// DOES survive to the log — the reliable way to learn the culprit's name.
-char kl_gl_last_unimpl[64];
+static void klgl_absent_atexit(void) {
+    kl_egl_report_absent(stderr);
+    kl_gles_report_unresolved(stderr);
+}
+
+// Reached through a per-name trampoline, so x0 is the function's own name. The return value becomes
+// the GL call's return value: the stub tail-calls here, so returning 0 is exactly "the GL function
+// returned 0".
 static uint64_t klgl_called(const char *name) {
     int s = gl_slot(name);
-    if (s >= 0) g_gl[s].calls++;
-    if (permissive()) {
-        if (s >= 0 && g_gl[s].calls == 1)
-            fprintf(stderr, "  [egl] GL call (permissive, returning 0): %s\n", name);
+    if (s < 0) {
+        if (__atomic_add_fetch(&g_absent_loose, 1, __ATOMIC_RELAXED) == 1)
+            fprintf(stderr, "  [egl] absent GL call (table full, not slotted): %s\n", name ? name : "?");
         return 0;
     }
-    snprintf(kl_gl_last_unimpl, sizeof kl_gl_last_unimpl, "%s", name ? name : "?");
-    fprintf(stderr, "\n[klepton] fatal: guest called unimplemented GL entry point "
-                    "'%s'\n", name);
-    fflush(stderr);   // abort() below does not flush a fully-buffered stderr (log
-                      // is a file, not a tty): without this the one line that names
-                      // the culprit never reaches the captured log.
-    kl_egl_report(stderr);
-    kl_fatal_prepare();
-    abort();
+    const unsigned n = __atomic_add_fetch(&g_gl[s].calls, 1, __ATOMIC_RELAXED);
+    if (n == 1) {
+        __atomic_store_n(&g_gl[s].absent, 1, __ATOMIC_RELAXED);
+        snprintf(kl_gl_last_unimpl, sizeof kl_gl_last_unimpl, "%s", name ? name : "?");
+        fprintf(stderr, "  [egl] absent GL function called, returning 0: %s\n", name ? name : "?");
+        if (!__atomic_exchange_n(&g_absent_hook, 1, __ATOMIC_RELAXED)) atexit(klgl_absent_atexit);
+    }
+    return 0;
 }
 
 // The other half of the gateway: the calls a null driver can honestly do nothing
@@ -1884,9 +1896,8 @@ unsigned long kl_egl_frames(void) { return g_frames; }
 void kl_egl_report(FILE *f) {
     // Outside the idempotency guard so it prints on whichever report call reaches
     // the log: the name of the GL entry point that aborted, when one did.
-    if (kl_gl_last_unimpl[0])
-        fprintf(f, "\n[klepton] the abort was an unimplemented GL entry point: '%s'\n",
-                kl_gl_last_unimpl);
+    kl_egl_report_absent(f);
+    kl_gles_report_unresolved(f);
     // Idempotent: this is reachable both from a caller that knows it is dying
     // and from kl_fatal_prepare(), which every fatal path goes through. Printing
     // the graphics surface twice is noise; printing it never is how the first

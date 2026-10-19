@@ -13,6 +13,7 @@ void *kl_opensl_dlopen(const char *soname);   // NULL if not libOpenSLES.so
 int   kl_opensl_claims(const char *soname);   // the same test, without opening
 int   kl_opensl_is_handle(const void *h);
 void *kl_opensl_sym(const char *name);
+int   kl_opensl_known(const char *name);      // static coverage: 1 when the table serves it (no stub made)
 
 // What FMOD looked up and what it called. The work list, same as kl_egl_report.
 void kl_opensl_report(FILE *f);

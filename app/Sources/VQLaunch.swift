@@ -350,6 +350,25 @@ final class VQSettings: ObservableObject {
         setenv("KL_OVRP_EYE_SCALE", String(format: "%.2f", effScale), 1)
         setenv("KL_OVRP_EYE_BASE", effBase, 1)
         VQLog.log("Gráficos: resolución base \(effBase), escala \(Int(effScale * 100)) % (\(res.useGlobal ? "global" : "del juego"))")
+        // Final eye size from the last run with these settings, pushed BEFORE the guest boots so its
+        // first eye layer is built at it (the compositor's first drawable arrives after the guest has
+        // started). The compositor pushes the display's request later; the same result changes nothing.
+        // The push goes through kl_ovrp's base/scale/cap, so those are neutralised for this one call.
+        do {
+            let env = { (k: String) -> String in getenv(k).map { String(cString: $0) } ?? "-" }
+            let sig = [env("KL_OVRP_EYE_BASE"), env("KL_OVRP_EYE_SCALE"), env("KL_OVRP_EYE_MAX")].joined(separator: "|")
+            if let saved = UserDefaults.standard.string(forKey: "vq.eyeSizeFinal"),
+               saved.hasPrefix(sig + "="),
+               case let dims = saved.dropFirst(sig.count + 1).split(separator: "x"), dims.count == 2,
+               let w = Int32(dims[0]), let h = Int32(dims[1]), w > 0, h > 0 {
+                let keys = ["KL_OVRP_EYE_BASE", "KL_OVRP_EYE_SCALE", "KL_OVRP_EYE_MAX"]
+                let old = keys.map { getenv($0).map { String(cString: $0) } }
+                setenv("KL_OVRP_EYE_BASE", "compositor", 1); setenv("KL_OVRP_EYE_SCALE", "1.0", 1); setenv("KL_OVRP_EYE_MAX", "0", 1)
+                kl_ovrp_set_eye_texture_size(w, h)
+                for (k, v) in zip(keys, old) { if let v { setenv(k, v, 1) } else { unsetenv(k) } }
+                VQLog.log("Gráficos: tamaño de ojo \(w)x\(h) empujado antes de arrancar el juego")
+            }
+        }
         // Quest 3 identity for every game, in every place a title can check it: Android Build
         // (MODEL/DEVICE eureka), OVRPlugin headset type, OpenXR system name and the GPU.
         if quest3Profile {

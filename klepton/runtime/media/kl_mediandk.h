@@ -65,6 +65,12 @@ void  kl_media_surface_set_size(void *reader, int w, int h);
 int   kl_media_surface_take_rgba(void *reader, uint8_t **rgba, int *w, int *h, int64_t *pts_us);
 void  kl_media_surface_abandon(void *reader);
 
+// Video-creation trace window: opens at AMediaCodec_createDecoderByType("video/*"), closes when the
+// codec is configured with a surface (or deleted). While open, kl_jni.c logs EVERY JNI call that has
+// no emulation (and every FindClass) with its thread id, so a stalled surface creation names the call
+// the engine is stuck on. Capped (KLM_VTRACE_MAX lines) so a stall cannot flood the log.
+int kl_media_video_trace(void);
+
 void kl_mediandk_report(FILE *f);
 
 #endif

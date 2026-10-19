@@ -299,6 +299,9 @@ unsigned long long kl_vulkan_taa_inline_frames(void);
 // outputs shows that frame's live picture instead while it is newer than the
 // newest published output (gaps: loading, AA gate closed, refused resolves).
 unsigned long long kl_vulkan_taa_raw_record(void);
+// 1 once the GPU device was lost (VK_ERROR_DEVICE_LOST, queue wait -4, VPKEngine's lost flag):
+// sticky. The guest no longer renders, so the compositor must show black, never an eye image.
+int kl_vulkan_gpu_lost(void);
 
 // A GLES guest on vpgles (KL_GLES_VPK=1, kl_gles.h) has no kl_vulkan_frame_done but runs through the same
 // VPKEngine queue and the same native pass. Its frame end is reported here by whoever ends the guest's frame
@@ -374,6 +377,11 @@ int  kl_vulkan_hook_is_taa(void);
 // smoothed); 0 without it or on an older VPKEngine.
 int  kl_vulkan_taa_ui_mask_on(void);
 int  kl_vulkan_taa_native_encode(const void *frame, void *mtl_cmdbuf);
+// VPKEngine's R8 UI mask (1 = menus / HUD / text, 0 = 3D) of the newest eye passes for `eye`, for the compositor's
+// fused RCAS: id<MTLTexture> RETAINED for the caller (release it: Unmanaged.takeRetainedValue / CFRelease), or NULL
+// (no UI drawn, mask off, no VPKEngine device, ANGLE guest). *w x *h = its size (the eye texture's own); *slice =
+// the array layer to read (a 2-layer multiview mask: = eye; a 1-layer mask is a plain 2D texture: 0). Any thread.
+void *kl_vulkan_ui_mask_texture(int eye, int *w, int *h, int *slice);
 // The guest's LIVE eye colour for (stage, eye) — the image it rendered, never
 // the VPKTAA output published over it. id<MTLTexture> (borrowed); *slice is
 // the array layer holding `eye` (Array/multiview layout), 0 under Stereo.

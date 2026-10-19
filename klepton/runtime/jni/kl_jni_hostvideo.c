@@ -11,6 +11,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <pthread.h>
+#include "klepton.h"
 #include "kl_jni.h"
 #include "kl_jni_int.h"
 #include "kl_hostvideo.h"
@@ -90,8 +92,8 @@ static klj_val klhv_stereo(void *e, void *s, const klj_val *a, int n) { (void)e;
 //
 // The codec decodes into the AImageReader behind kl_jni_surface_window() (a
 // host-side reader, kl_mediandk.c); each published frame fires onFrameAvailable
-// on the reader's dispatch thread (Android uses the handler's thread; Unity's
-// listener only flags/notifies natively, so the thread does not matter), and
+// on the game thread (klhv_drain, from kl_jni_drain_ui_tasks: the reader's dispatch
+// thread is host-made, so it only enqueues), and
 // updateTexImage converts the newest frame to RGBA8 and uploads it to the
 // guest's GL texture through vpgles (kl_gles_sym), as GL_TEXTURE_EXTERNAL_OES.
 #define STEX_CLASS "android/graphics/SurfaceTexture"
@@ -108,6 +110,11 @@ typedef struct {
     int      params_set, released;
     int64_t  ts_ns;
     void    *reader, *self, *listener;
+    // onFrameAvailable hand-off, all guarded by g_dl_mu: frames announced and not yet
+    // delivered, whether t sits in the delivery queue, and whether the delivery thread is
+    // inside the listener right now (release() waits for that to end).
+    unsigned pending;
+    int      queued, delivering;
 } klhv_stex;
 
 typedef struct { klhv_stex *t; } klhv_ssurf;
@@ -118,17 +125,78 @@ static klhv_stex *klhv_stex_of(void *o) {
     return (ko && ko->cls && strcmp(ko->cls, STEX_CLASS) == 0) ? ko->data : NULL;
 }
 
-static void klhv_on_frame(void *ctx) {
-    klhv_stex *t = ctx;
-    if (!t || t->released) return;
+// onFrameAvailable delivery. The reader's dispatch thread (kl_mediandk.c reader_dispatch) is made
+// by the host with pthread_create + kl_thread_init: it is not a guest thread, and the listener is a
+// JNIBridge proxy, i.e. managed Unity code (the same class of call as nativeLowMemory, which crashed
+// IL2CPP when made from a host-made thread). So that thread only ENQUEUES (under g_dl_mu), and the
+// game thread delivers from klhv_drain(), called by kl_jni_drain_ui_tasks. That is Android's
+// contract: a SurfaceTexture posts onFrameAvailable to the Looper of the thread that created it,
+// or to the main looper when that thread has none (Unity's native VideoDecoderLooper has none, so
+// for Unity it is the UI thread = the thread draining here). Frames coalesce: the listener only
+// flags "a frame is waiting" and updateTexImage takes the newest, so a backlog is capped.
+#define KLHV_DL_MAX 32
+#define KLHV_PENDING_MAX 4
+static pthread_mutex_t g_dl_mu = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t  g_dl_idle = PTHREAD_COND_INITIALIZER;
+static klhv_stex *g_dl_q[KLHV_DL_MAX];
+static unsigned   g_dl_head, g_dl_n;
+static pthread_t  g_dl_drainer;      // the thread inside klhv_drain (valid while g_dl_draining)
+static int        g_dl_draining;
+
+static void klhv_deliver_one(klhv_stex *t) {
+    pthread_mutex_lock(&g_lock);
     void *l = t->listener;
-    KLJ_LOG_ONCE("SurfaceTexture: first decoded frame published (onFrameAvailable %s)", l ? "delivered" : "has no listener");
+    pthread_mutex_unlock(&g_lock);
+    KLJ_LOG_ONCE("SurfaceTexture: first decoded frame published (onFrameAvailable %s, thread %llu)",
+                 l ? "delivered" : "has no listener", (unsigned long long)klj_tid());
     if (!l) return;
     klj_PushLocalFrame(NULL, 0);
     void *args = klj_new_array('L', "java/lang/Object", 1);
     ((void **)klj_arr(args)->data)[0] = t->self;
     klj_proxy_invoke(l, STEX_LISTENER, "onFrameAvailable", "(Landroid/graphics/SurfaceTexture;)V", args);
     klj_PopLocalFrame(NULL, NULL);
+}
+
+// The game thread's half (kl_jni_drain_ui_tasks): deliver every announced frame.
+void klhv_drain(void) {
+    pthread_mutex_lock(&g_dl_mu);
+    if (!g_dl_n || g_dl_draining) { pthread_mutex_unlock(&g_dl_mu); return; }
+    g_dl_draining = 1;
+    g_dl_drainer = pthread_self();
+    while (g_dl_n) {
+        klhv_stex *t = g_dl_q[g_dl_head];
+        g_dl_head = (g_dl_head + 1) % KLHV_DL_MAX;
+        g_dl_n--;
+        t->queued = 0;
+        unsigned n = t->pending;
+        t->pending = 0;
+        if (t->released) n = 0;
+        else t->delivering = 1;
+        pthread_mutex_unlock(&g_dl_mu);       // the listener is guest code: never under the lock
+        for (unsigned i = 0; i < n; i++) {
+            if (t->released) break;
+            klhv_deliver_one(t);
+        }
+        pthread_mutex_lock(&g_dl_mu);
+        t->delivering = 0;
+        pthread_cond_broadcast(&g_dl_idle);
+    }
+    g_dl_draining = 0;
+    pthread_mutex_unlock(&g_dl_mu);
+}
+
+// Runs on the reader's dispatch thread: host-only work, no guest code.
+static void klhv_on_frame(void *ctx) {
+    klhv_stex *t = ctx;
+    if (!t || t->released) return;
+    pthread_mutex_lock(&g_dl_mu);
+    if (t->pending < KLHV_PENDING_MAX) t->pending++;
+    if (!t->queued && g_dl_n < KLHV_DL_MAX) {
+        g_dl_q[(g_dl_head + g_dl_n) % KLHV_DL_MAX] = t;
+        g_dl_n++;
+        t->queued = 1;
+    }
+    pthread_mutex_unlock(&g_dl_mu);
 }
 
 static klj_val klhv_stex_init(void *env, void *clazz, const klj_val *a, int n) {
@@ -147,7 +215,7 @@ static klj_val klhv_stex_init(void *env, void *clazz, const klj_val *a, int n) {
     if (ko) ko->pinned++;     // the guest and the reader thread hold it for life, until release()
     pthread_mutex_unlock(&g_lock);
     if (t->reader) kl_media_surface_set_cb(t->reader, klhv_on_frame, t);
-    fprintf(stderr, "  [video] SurfaceTexture %p tex=%d reader=%p\n", o, tex, t->reader);
+    fprintf(stderr, "  [video] tid=%llu SurfaceTexture %p tex=%d reader=%p\n", (unsigned long long)klj_tid(), o, tex, t->reader);
     return (klj_val){.l = o};
 }
 // SurfaceTexture(boolean singleBufferMode): detached, texture comes with attachToGLContext.
@@ -278,7 +346,14 @@ static klj_val klhv_stex_release(void *e, void *self, const klj_val *a, int n) {
     klhv_stex *t = klhv_stex_of(self);
     if (t && !t->released) {
         t->released = 1;
-        kl_media_surface_abandon(t->reader);   // joins the callback thread: no more calls through the listener
+        kl_media_surface_abandon(t->reader);   // joins the reader thread: nothing new is enqueued
+        // ...and the delivery thread must be out of the listener before it is unpinned. Not when
+        // release() is itself called from the listener (that thread would wait for itself).
+        pthread_mutex_lock(&g_dl_mu);
+        t->pending = 0;
+        while (t->delivering && !(g_dl_draining && pthread_equal(pthread_self(), g_dl_drainer)))
+            pthread_cond_wait(&g_dl_idle, &g_dl_mu);
+        pthread_mutex_unlock(&g_dl_mu);
         pthread_mutex_lock(&g_lock);
         klj_object *ko = klj_as_object(self), *lk = klj_as_object(t->listener);
         if (ko && ko->pinned) ko->pinned--;
@@ -341,7 +416,7 @@ void *kl_jni_surface_window(void *surface) {
     klhv_stex *t = ((klhv_ssurf *)ko->data)->t;
     if (!t || t->released) return NULL;
     void *w = kl_media_surface_window(t->reader);
-    fprintf(stderr, "  [video] ANativeWindow_fromSurface(%p) -> SurfaceTexture %p reader window %p\n", surface, t->self, w);
+    fprintf(stderr, "  [video] tid=%llu ANativeWindow_fromSurface(%p) -> SurfaceTexture %p reader window %p\n", (unsigned long long)klj_tid(), surface, t->self, w);
     return w;
 }
 

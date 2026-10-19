@@ -1402,8 +1402,24 @@ typedef struct {
 
 static klm_codec *g_codec;
 
+// Video-creation trace window (kl_media_video_trace).
+#define KLM_VTRACE_MAX 400
+static volatile int g_vtrace_open;
+static int          g_vtrace_lines;
+int kl_media_video_trace(void) {
+    if (!g_vtrace_open) return 0;
+    return __atomic_add_fetch(&g_vtrace_lines, 1, __ATOMIC_RELAXED) <= KLM_VTRACE_MAX;
+}
+static uint64_t klm_tid(void) { uint64_t t = 0; pthread_threadid_np(NULL, &t); return t; }
+
 
 static void *klm_AMediaCodec_createDecoderByType(const char *mime) {
+    fprintf(stderr, "  [media] tid=%llu AMediaCodec_createDecoderByType(\"%s\") enter\n",
+            (unsigned long long)klm_tid(), mime ? mime : "(null)");
+    if (mime && strncmp(mime, "video/", 6) == 0) {
+        __atomic_store_n(&g_vtrace_lines, 0, __ATOMIC_RELAXED);
+        g_vtrace_open = 1;
+    }
     klm_codec *c = calloc(1, sizeof *c);
     if (!c) return NULL;
     c->magic = KLM_CODEC_MAGIC;
@@ -1421,7 +1437,8 @@ static void *klm_AMediaCodec_createDecoderByType(const char *mime) {
         free(c);
         return NULL;
     }
-    fprintf(stderr, "  [media] AMediaCodec_createDecoderByType(\"%s\")\n", mime);
+    fprintf(stderr, "  [media] tid=%llu AMediaCodec_createDecoderByType(\"%s\") exit -> %p\n",
+            (unsigned long long)klm_tid(), mime, (void *)c);
     g_codec = c;
     g_ever_created = 1;
     return c;
@@ -1430,6 +1447,8 @@ static void *klm_AMediaCodec_createDecoderByType(const char *mime) {
 static int klm_AMediaCodec_configure(void *codec, const void *format,
                                      void *window, void *crypto, uint32_t flags) {
     klm_codec *c = codec;
+    fprintf(stderr, "  [media] tid=%llu AMediaCodec_configure enter: codec=%p window=%p flags=0x%x\n",
+            (unsigned long long)klm_tid(), codec, window, flags);
     if (!c || c->magic != KLM_CODEC_MAGIC) return AMEDIA_ERROR_INVALID_PARAMETER;
     if (crypto) {
         // A decrypting configure is DRM, and this project does not do that
@@ -1459,6 +1478,8 @@ static int klm_AMediaCodec_configure(void *codec, const void *format,
     if (window && !r)
         fprintf(stderr, "  [media]   ...that window is not an AImageReader's; "
                         "rendered frames will have nowhere to go\n");
+    fprintf(stderr, "  [media] tid=%llu AMediaCodec_configure exit: OK\n", (unsigned long long)klm_tid());
+    g_vtrace_open = 0;
     return AMEDIA_OK;
 }
 
@@ -1503,6 +1524,7 @@ static void klm_codec_async_stop(klm_codec *c);
 static int klm_AMediaCodec_delete(void *codec) {
     klm_codec *c = codec;
     if (!c || c->magic != KLM_CODEC_MAGIC) return AMEDIA_ERROR_INVALID_PARAMETER;
+    g_vtrace_open = 0;
     klm_codec_async_stop(c);
     pthread_mutex_lock(&c->lock);
     klm_codec_drop_outputs(c);
@@ -2219,8 +2241,10 @@ static int klm_AMediaCodec_setParameters(void *codec, const void *params) {
 }
 static int klm_AMediaCodec_getName(void *codec, char **out) {
     klm_codec *c = codec;
+    fprintf(stderr, "  [media] tid=%llu AMediaCodec_getName enter: codec=%p\n", (unsigned long long)klm_tid(), codec);
     if (!c || c->magic != KLM_CODEC_MAGIC || !out) return AMEDIA_ERROR_INVALID_PARAMETER;
     *out = strdup(strstr(c->mime, "hevc") ? "c2.qti.hevc.decoder" : "c2.qti.avc.decoder");
+    fprintf(stderr, "  [media] tid=%llu AMediaCodec_getName exit: \"%s\"\n", (unsigned long long)klm_tid(), *out ? *out : "(null)");
     return *out ? AMEDIA_OK : AMEDIA_ERROR_UNKNOWN;
 }
 static void klm_AMediaCodec_releaseName(void *codec, char *name) { (void)codec; free(name); }

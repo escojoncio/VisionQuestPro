@@ -36,6 +36,7 @@
 #include "kl_avdec.h"
 #include "kl_egl.h"
 #include "kl_ndk.h"
+#include "kl_mediandk.h"   // kl_media_video_trace: log unemulated JNI while a video codec is being created
 #include "kl_jni_slots.h"
 #include "kl_jni_int.h"
 #include "kl_va.h"
@@ -346,6 +347,9 @@ const char *kl_jni_native_sig(const char *cls, const char *name) {
 // The class is looked up rather than assumed: nativeLowMemory is registered
 // through RegisterNatives like the other 45, and which class declares it is the
 // natives table's answer to give. Returns 1 if the guest was told.
+// GAME THREAD ONLY, between frames: this runs managed code, and on a host thread
+// (libdispatch) x18 is 0 and IL2CPP has not registered it. Callers go through
+// kl_mem_pressure_deliver (kl_driver_frame), never from the timer / OS source.
 int kl_jni_low_memory(void) {
     const klj_native *n = NULL;
     pthread_mutex_lock(&g_lock);
@@ -416,6 +420,7 @@ static void *klj_GetVersion(void *env) { (void)env; return (void *)(uintptr_t)KL
 
 static void *klj_FindClass(void *env, const char *name) {
     (void)env;
+    if (kl_media_video_trace()) KLJ_LOG("[vtrace tid=%llu] FindClass %s", (unsigned long long)klj_tid(), name);
     pthread_mutex_lock(&g_lock);
     void *c = klj_intern_class_locked(name)->as_object;
     pthread_mutex_unlock(&g_lock);
@@ -1299,8 +1304,16 @@ static klj_val klj_call_common(void *env, void *self, void *mid, char want,
         return b->fn(env, self, argv, argc);
     }
 
-    if (klj_game_void_noop(w, have))
+    if (klj_game_void_noop(w, have)) {
+        if (kl_media_video_trace())
+            KLJ_LOG("[vtrace tid=%llu] NO-OP game Java void %s.%s%s (self=%p)",
+                    (unsigned long long)klj_tid(), w->cls, w->name, w->sig, self);
         return zero;
+    }
+    if (kl_media_video_trace())
+        KLJ_LOG("[vtrace tid=%llu] call to a class with no emulation: %s.%s%s (self=%p) -> %s",
+                (unsigned long long)klj_tid(), w->cls, w->name, w->sig, self,
+                g_permissive ? "SIMULATED 0/false/null" : "NOT IMPLEMENTED");
 
     // Permissive (the default since 2026-10-13, KL_PERMISSIVE=0 / KL_JNI_STRICT=1
     // restore the abort): simulate the method — 0 / false / null — and name it
@@ -1651,6 +1664,8 @@ static int klj_quest3(void) {
     return (t && strcmp(t, "batman") == 0) || kl_env_on("KL_QUEST3", 0);
 }
 
+int klj_is_quest3(void) { return klj_quest3(); }
+
 // The Quest 3 ships Android 12L (SDK 32): SDK_INT follows the identity, so the
 // JNI field, UE4's copy and ro.build.version.sdk keep describing one device.
 static int klj_field_ival(const klj_field *f) {
@@ -1958,6 +1973,7 @@ static const klj_field g_fields[] = {
     KLJ_FSTR("android/os/Environment", "MEDIA_MOUNTED", "mounted"),
     KLJ_FFN("android/net/Uri", "EMPTY", "Landroid/net/Uri;", klj_Uri_EMPTY),
     KLJ_FINT("android/content/res/Configuration", "colorMode", 0),
+    KLJ_FINT("android/content/res/Configuration", "fontWeightAdjustment", 0),   // API 31+: no bold-text adjustment
     KLJ_FINT("android/content/res/Configuration", "densityDpi",   320),
     KLJ_FFLT("android/content/res/Configuration", "fontScale",    1.0),
     KLJ_FINT("android/content/res/Configuration", "orientation",  2),   // ORIENTATION_LANDSCAPE
@@ -2234,6 +2250,24 @@ static const klj_field g_fields[] = {
     KLJ_FINT("android/media/MediaRouter", "ROUTE_TYPE_USER",       8388608),
 
     KLJ_FSTR("android/provider/Settings$Secure", "ANDROID_ID", "android_id"),
+    // The key-name constants of Settings.Global/System: names only; the values behind them are
+    // the table in kl_jni_net.c (klj_setting_value), shared by all three namespaces.
+    KLJ_FSTR("android/provider/Settings$Global", "DEVICE_NAME",                  "device_name"),
+    KLJ_FSTR("android/provider/Settings$Global", "AIRPLANE_MODE_ON",             "airplane_mode_on"),
+    KLJ_FSTR("android/provider/Settings$Global", "ADB_ENABLED",                  "adb_enabled"),
+    KLJ_FSTR("android/provider/Settings$Global", "DEVELOPMENT_SETTINGS_ENABLED", "development_settings_enabled"),
+    KLJ_FSTR("android/provider/Settings$Global", "AUTO_TIME",                    "auto_time"),
+    KLJ_FSTR("android/provider/Settings$Global", "AUTO_TIME_ZONE",               "auto_time_zone"),
+    KLJ_FSTR("android/provider/Settings$Global", "STAY_ON_WHILE_PLUGGED_IN",     "stay_on_while_plugged_in"),
+    KLJ_FSTR("android/provider/Settings$Global", "ALWAYS_FINISH_ACTIVITIES",     "always_finish_activities"),
+    KLJ_FSTR("android/provider/Settings$Global", "WIFI_ON",                      "wifi_on"),
+    KLJ_FSTR("android/provider/Settings$Global", "BLUETOOTH_ON",                 "bluetooth_on"),
+    KLJ_FSTR("android/provider/Settings$Global", "WINDOW_ANIMATION_SCALE",       "window_animation_scale"),
+    KLJ_FSTR("android/provider/Settings$Global", "TRANSITION_ANIMATION_SCALE",   "transition_animation_scale"),
+    KLJ_FSTR("android/provider/Settings$Global", "ANIMATOR_DURATION_SCALE",      "animator_duration_scale"),
+    KLJ_FSTR("android/provider/Settings$System", "FONT_SCALE",                   "font_scale"),
+    KLJ_FSTR("android/provider/Settings$System", "SCREEN_OFF_TIMEOUT",           "screen_off_timeout"),
+    KLJ_FSTR("android/provider/Settings$System", "ACCELEROMETER_ROTATION",       "accelerometer_rotation"),
 
     KLJ_FINT("android/content/pm/PackageManager", "GET_ACTIVITIES",     0x0001),
     KLJ_FINT("android/content/pm/PackageManager", "GET_INTENT_FILTERS", 0x0020),
@@ -2272,6 +2306,11 @@ static const klj_field g_fields[] = {
     // dispatch is per (class, name, signature) rather than per object — which is
     // exactly right here, because there is one display and every DisplayMetrics
     // the guest fills from it describes that same screen.
+    // The window bounds WindowMetrics.getBounds() hands out (kl_jni_window.c): the presented display.
+    KLJ_FINT("android/graphics/Rect", "left",   0),
+    KLJ_FINT("android/graphics/Rect", "top",    0),
+    KLJ_FINT("android/graphics/Rect", "right",  KLJ_DISPLAY_W),
+    KLJ_FINT("android/graphics/Rect", "bottom", KLJ_DISPLAY_H),
     KLJ_FINT("android/util/DisplayMetrics", "widthPixels",    KLJ_DISPLAY_W),
     KLJ_FINT("android/util/DisplayMetrics", "heightPixels",   KLJ_DISPLAY_H),
     KLJ_FINT("android/util/DisplayMetrics", "densityDpi",     KLJ_DISPLAY_DPI),

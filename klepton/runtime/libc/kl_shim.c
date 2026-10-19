@@ -2482,12 +2482,29 @@ int kl_shim_known(const char *name) {
     for (size_t i = 0; i < sizeof g_shim / sizeof g_shim[0]; i++)
         if (strcmp(g_shim[i].name, name) == 0) return 1;
     if (kl_ndk_lookup(name)) return 1;
+    // Family by family, asking the REAL table wherever one can answer without side effects (no
+    // stub made, no driver started). A prefix rule answered 2 for any gl*/egl*/vk*/xr*/SL_*/ovr_*
+    // and so reported imports as served that kl_shim_lookup says no to (get_crc_table was not
+    // one of them, but ovrKeyValuePair_makeString was: no tier claimed its prefix).
+    //   xr*      kl_openxr_status: 2 implemented; 0 refused (UNSUPPORTED) and -1 absent are gaps.
+    //   SL_*     kl_opensl_known: the symbol table (the sym door manufactures stubs for the rest).
+    //   ovr*     kl_ovrplat_known: own handler / family rule / offline completion vs. the generic
+    //            neutral stub.
+    //   egl*     kl_egl_lookup's table; skipped while KL_GLES_VPK is on (that lookup would bring up
+    //            vpgles inside the launcher), where the family answer stays.
+    // Still by family: gl* (kl_egl_sym manufactures a named stub for any gl name and has no pure
+    // query) and vk* (kl_vulkan_lookup initialises MoltenVK). They can only say "served by the
+    // gateway", not "implemented".
+    if (name[0] == 'x' && name[1] == 'r' && name[2] >= 'A' && name[2] <= 'Z')
+        return kl_openxr_status(name) == 2 ? 2 : 0;
+    if (!strncmp(name, "SL_IID_", 7) || !strcmp(name, "slCreateEngine"))
+        return kl_opensl_known(name) ? 2 : 0;
+    if (kl_ovrplat_owns(name))
+        return kl_ovrplat_known(name) ? 2 : 0;
+    if (name[0] == 'e' && name[1] == 'g' && name[2] == 'l' && name[3] >= 'A' && name[3] <= 'Z')
+        return kl_env_on("KL_GLES_VPK", 0) || kl_egl_lookup(name) ? 2 : 0;
     if ((name[0] == 'g' && name[1] == 'l' && name[2] >= 'A' && name[2] <= 'Z') ||
-        (name[0] == 'e' && name[1] == 'g' && name[2] == 'l' && name[3] >= 'A' && name[3] <= 'Z') ||
-        (name[0] == 'v' && name[1] == 'k' && name[2] >= 'A' && name[2] <= 'Z') ||
-        (name[0] == 'x' && name[1] == 'r' && name[2] >= 'A' && name[2] <= 'Z') ||
-        !strncmp(name, "SL_IID_", 7) || !strcmp(name, "slCreateEngine") ||
-        !strncmp(name, "ovr_", 4) || !strncmp(name, "ovrID", 5))
+        (name[0] == 'v' && name[1] == 'k' && name[2] >= 'A' && name[2] <= 'Z'))
         return 2;
     // AAudio / media NDK: the REAL tables answer, not the prefix. A prefix rule reported
     // every AMedia*/AImage*/AHardwareBuffer_*/AAudio* import as served although most are not
@@ -2648,7 +2665,7 @@ void *kl_shim_lookup(const char *name) {
     // `ovrp_` is OVRPlugin's prefix and a different library (kl_ovrp), so the
     // fourth character is checked: `ovr_` and `ovrID` are the platform's, and
     // `ovrp_` must not be claimed here.
-    if (!strncmp(name, "ovr_", 4) || !strncmp(name, "ovrID", 5))
+    if (kl_ovrplat_owns(name))          // ovr_*, ovrID*, ovrKeyValuePair_* (a by-value helper with no ovr_ prefix)
         return kl_ovrplat_sym(name);
     return NULL;
 }

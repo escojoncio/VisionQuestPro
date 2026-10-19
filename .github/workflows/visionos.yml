@@ -2,6 +2,10 @@
 # (VPVulkan.framework, the default) and MoltenVK v1.4.2 (selectable in the app), VPKEngine's
 # signature code. Unsigned IPA, published as the release "visionos" (VisionQuestPro.ipa).
 #
+# Gate: before the IPA is built, the macOS runner runs VPKEngine's gpu/ tests (host), a visionOS-SDK
+# build of gpu/metal2, Klepton's host tests with ASan/UBSan and a -fsyntax-only pass over the whole
+# runtime (tools/ci/). If any fails, the IPA is not published. Everything goes to the log (ci-logs).
+#
 # Only when asked for: by hand (Actions > visionos > Run workflow) or a push whose commit message
 # has [build] in it. Klepton's runtime and MoltenVK are cached while their sources do not change.
 name: visionos
@@ -64,6 +68,19 @@ jobs:
           bash tools/mvk_retarget.sh
           rm -rf vendor-moltenvk/dist vendor-moltenvk/*.tar
 
+      - name: Syntax of the whole runtime (visionOS SDK, -fsyntax-only)
+        run: |
+          mkdir -p build
+          # Never fails the step: the gate below does, after the app has reported its own errors too.
+          set -o pipefail
+          bash tools/ci/syntax-xros.sh 2>&1 | tee syntax.log || echo syntax >> build/ci-failed
+
+      - name: Tests (VPKEngine gpu, metal2 for visionOS, Klepton with ASan/UBSan)
+        run: |
+          mkdir -p build
+          set -o pipefail
+          bash tools/ci/host-tests.sh vpkengine build/host-tests 2>&1 | tee tests.log || echo tests >> build/ci-failed
+
       - uses: actions/cache@v4
         id: rt
         with:
@@ -107,9 +124,17 @@ jobs:
           (cd build/ipa && zip -qry ../VisionQuestPro.ipa Payload)
           ls -la build/VisionQuestPro.ipa
 
+      - name: Gate (no tests or syntax errors, or no IPA)
+        run: |
+          if [ -f build/ci-failed ]; then
+            echo "::error::failed: $(tr '\n' ' ' < build/ci-failed)(see tests.log / syntax.log)"
+            exit 1
+          fi
+          echo "tests and syntax: OK"
+
       - name: Publish the logs (branch ci-logs, visionos.txt)
         if: always()
-        run: bash scripts/ci-publish-log.sh visionos vpvulkan.log runtime.log app.log
+        run: bash scripts/ci-publish-log.sh visionos syntax.log tests.log vpvulkan.log runtime.log app.log
 
       - name: Publish the app as a release
         if: success() && github.ref == 'refs/heads/main'

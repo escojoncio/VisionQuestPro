@@ -31,6 +31,7 @@
 #include "kl_env.h"
 #include "kl_driver.h"   // kl_driver_target_name() — per-target GPU identity spoof
 #include "klepton.h"       // kl_addr_image() — call-site logging (klvk_who)
+#include "kl_jni.h"      // kl_jni_request_quit — a lost GPU ends the run with a message
 #include "kl_fault.h"     // kl_fault_try_recover — a lost device ends the running test (exe door)
 
 // Matched on with a prefix test rather than equality: the guest asks by plain
@@ -111,6 +112,7 @@ void  kl_vulkan_set_taa_hook(kl_vulkan_taa_hook_fn fn, void *u) { (void)fn; (voi
 void  kl_vulkan_taa_frame_complete(unsigned long long s) { (void)s; }
 unsigned long long kl_vulkan_taa_inline_frames(void) { return 0; }
 unsigned long long kl_vulkan_taa_raw_record(void) { return 0; }
+int   kl_vulkan_gpu_lost(void) { return 0; }
 int   kl_vulkan_aa_detected(int *dm) { if (dm) *dm = -1; return -1; }
 int   kl_vulkan_aa_gate(void) { return 0; }
 int   kl_vulkan_native_submit(void (*fn)(void *, void *), void *u) { (void)fn; (void)u; return 0; }
@@ -121,6 +123,9 @@ int   kl_vulkan_rcas_on(void) { return 0; }
 int   kl_vulkan_hook_is_taa(void) { return 1; }
 int   kl_vulkan_taa_ui_mask_on(void) { return 0; }
 int   kl_vulkan_taa_native_encode(const void *f, void *cb) { (void)f; (void)cb; return 0; }
+void *kl_vulkan_ui_mask_texture(int eye, int *w, int *h, int *slice) {
+    (void)eye; if (w) *w = 0; if (h) *h = 0; if (slice) *slice = 0; return NULL;
+}
 void *kl_vulkan_eye_color_mtl(int s, int e, int *sl, int *w, int *h) {
     (void)s; (void)e; if (sl) *sl = 0; if (w) *w = 0; if (h) *h = 0; return NULL;
 }
@@ -1446,11 +1451,13 @@ static void eye_publish_mtl(int stage, int eye, int layers) {
 // the release CLAIMS the hold with an exchange, so two racing releasers publish once.
 static uint64_t g_eye_hold_at[KLVK_EYE_STAGES][2]; // 0 = not held, else klvk_now_s() in ns at hold (never 0)
 static double klvk_now_s(void);
+static void klvk_retire_schedule(void);
 static void klvk_eye_hold_release(int stage, int eye, const char *why) {
     if (__atomic_exchange_n(&g_eye_hold_at[stage][eye], 0, __ATOMIC_ACQ_REL) == 0) return;
     int layers = (int)g_eye[stage][eye].layers;
     if (g_eye[stage][eye].img) eye_publish_mtl(stage, eye, layers ? layers : 1);
     VKI("[vk] eye stage %d: new image published (%s)\n", stage, why);
+    klvk_retire_schedule();   // the replaced image of this stage is due now: do not wait for a frame end
 }
 // The guest wrote `img`: if it is a held eye image, publish it now.
 static void klvk_eye_hold_written(VkImage img) {
@@ -1896,7 +1903,7 @@ static VkImage klvk_image_alloc(klvk_device *d, VkFormat fmt,
 static void klvk_retire_image(klvk_device *d, VkImage img, VkDeviceMemory mem, const char *what,
                               uint32_t w, uint32_t h, uint32_t layers);
 static int klvk_retire_image_ex(klvk_device *d, VkImage img, VkDeviceMemory mem, const char *what,
-                                uint32_t w, uint32_t h, uint32_t layers, int quick);
+                                uint32_t w, uint32_t h, uint32_t layers, int quick, int hold);
 static void klvk_retire_forget(klvk_device *d, VkImage img);
 static void klvk_retire_pump(klvk_device *d);
 static void klvk_retire_schedule(void);   // a delayed pump (destroyed OpenXR images)
@@ -2001,11 +2008,16 @@ unsigned long long kl_vulkan_layer_image(int layer_key, int stage, int eye,
             layer_key, stage, eye ? "eye 1" : "eye 0",
             slot->w, slot->h, slot->layers, w, h, layers,
             retire ? "retired (freed in a few seconds)" : "kept, not freed");
-        if (retire) klvk_retire_image(d, slot->img, slot->mem, "eye image", slot->w, slot->h, slot->layers);
+        // Hold first, retire second: the retire pump frees the old eye image as soon as the
+        // hold of ITS stage is released (the replacement published), so the hold must exist
+        // before the entry can be seen.
         if (is_eye) {
             __atomic_store_n(&g_eye_hold_at[stage][eye], (uint64_t)(klvk_now_s() * 1e9) + 1, __ATOMIC_RELEASE);
             VKI("[vk] eye stage %d: new image held back until the guest's first write\n", stage);
         }
+        if (retire)
+            (void)klvk_retire_image_ex(d, slot->img, slot->mem, "eye image", slot->w, slot->h,
+                                       slot->layers, 0, is_eye ? stage * 2 + eye : -1);
         slot->img = VK_NULL_HANDLE;
         slot->mem = VK_NULL_HANDLE;
     }
@@ -3295,7 +3307,7 @@ void kl_vulkan_xr_image_free(unsigned long long image) {
     pthread_mutex_unlock(&g_xr_img_mu);
     if (!found) return;   // not ours (or the table was full when it was made)
     klvk_retire_pump(d);   // make room first
-    if (!klvk_retire_image_ex(d, img, mem, "xr swapchain image", w, h, layers, 1)) {
+    if (!klvk_retire_image_ex(d, img, mem, "xr swapchain image", w, h, layers, 1, -1)) {
         // Retire queue full (a burst of destroyed swapchains): destroyed now rather than leaked.
         klvk_retire_forget(d, img);
         if (d->DestroyImage) d->DestroyImage(d->dev, img, NULL);
@@ -3691,6 +3703,17 @@ static struct {
     int   (*image_zero_clear)(void *mtl);
     // weak: VPKEngine with vpvk_mem_stats (vpvk/config.h)
     size_t (*mem_stats)(char *out, size_t cap);
+    // weak: VPKEngine with the GPU backlog gauges (vpvk/config.h)
+    unsigned (*gpu_backlog_ms)(void);
+    unsigned (*gpu_last_splits)(void);
+    int   (*gpu_lost)(void);
+    // weak: VPKEngine memory trim under pressure (any thread): drops what it can rebuild
+    // (PSO / MTLLibrary not used recently, idle staging, inactive rings), returns bytes freed
+    // and a short "what=MiB ..." summary in `out`. level 1 = warning, 2 = critical.
+    size_t (*trim_memory)(int level, char *out, size_t cap);
+    // weak: VPKEngine's UI mask of the newest eye passes for hosts that composite the eye themselves
+    // (vpvk/config.h vpvk_ui_mask_texture): id<MTLTexture> +1 retained, or NULL.
+    void *(*ui_mask_texture)(int eye, int *w, int *h, int *slice);
 } g_vpvk;
 static pthread_mutex_t g_vpvk_mu = PTHREAD_MUTEX_INITIALIZER;
 
@@ -3720,9 +3743,59 @@ static void klvk_vpvk_resolve(void) {
         g_vpvk.image_zero_pending = (int (*)(void *))dlsym(lib, "vpvk_image_zero_pending");
         g_vpvk.image_zero_clear   = (int (*)(void *))dlsym(lib, "vpvk_image_zero_clear");
         g_vpvk.mem_stats = (size_t (*)(char *, size_t))dlsym(lib, "vpvk_mem_stats");
+        g_vpvk.gpu_backlog_ms  = (unsigned (*)(void))dlsym(lib, "vpvk_gpu_backlog_ms");
+        g_vpvk.gpu_last_splits = (unsigned (*)(void))dlsym(lib, "vpvk_gpu_last_frame_chunks");
+        g_vpvk.gpu_lost        = (int (*)(void))dlsym(lib, "vpvk_gpu_lost");
+        g_vpvk.trim_memory     = (size_t (*)(int, char *, size_t))dlsym(lib, "vpvk_trim_memory");
+        g_vpvk.ui_mask_texture = (void *(*)(int, int *, int *, int *))dlsym(lib, "vpvk_ui_mask_texture");
         __atomic_store_n(&g_vpvk.resolved, 1, __ATOMIC_RELEASE);
     }
     pthread_mutex_unlock(&g_vpvk_mu);
+}
+
+// ---- GPU lost / congested (VPKEngine) ----
+// Lost: sticky. Once the device is gone the guest renders nothing, yet its eye images still exist:
+// no frame end may file a "complete" record after it, and the compositor shows black
+// (kl_vulkan_gpu_lost) while the run is ended with a message. The exe test door (KL_GUEST_KIND=exe)
+// recreates the device per case and handles loss in klvk_lost, so it never latches.
+static int g_gpu_lost;
+int kl_vulkan_gpu_lost(void) { return __atomic_load_n(&g_gpu_lost, __ATOMIC_ACQUIRE); }
+static void klvk_gpu_mark_lost(const char *why) {
+    const char *kind = getenv("KL_GUEST_KIND");
+    if (kind && !strcmp(kind, "exe")) return;
+    if (__atomic_exchange_n(&g_gpu_lost, 1, __ATOMIC_ACQ_REL)) return;
+    VKI("[gpu] DEVICE LOST (%s) — the compositor shows black from now on and the run is ended\n", why);
+    kl_jni_request_quit("La GPU se ha reiniciado: el juego se ha cerrado. Vuelve a abrirlo.");
+}
+// Polls VPKEngine's lost flag; 1 = lost (latched).
+static int klvk_gpu_poll_lost(void) {
+    if (kl_vulkan_gpu_lost()) return 1;
+    klvk_vpvk_resolve();
+    if (g_vpvk.gpu_lost && g_vpvk.gpu_lost()) klvk_gpu_mark_lost("VPKEngine reports the device lost");
+    return kl_vulkan_gpu_lost();
+}
+// 1 while the GPU is behind: the optional native pass (RCAS / VPKTAA) orders itself after EVERY frame
+// in flight and holds a queue slot waiting for them, so over a slow frame (AC's ShaderWarmupManager:
+// ~14 slow command buffers) it piles up, the driver times out and the device is lost. The frame then
+// goes out through the plain unresolved path. Once per episode in the log.
+// Thresholds: KL_HOOK_BACKLOG_MS (default 30) = age of the oldest frame in flight; the newest frame
+// cut by the hang split (>2 cuts) counts too. KL_HOOK_BACKLOG_MS=0 turns the gate off.
+static int klvk_gpu_congested(void) {
+    klvk_vpvk_resolve();
+    static int limit = -1;
+    if (limit < 0) limit = kl_env_int("KL_HOOK_BACKLOG_MS", 30);
+    if (limit <= 0 || !g_vpvk.gpu_backlog_ms) return 0;
+    unsigned ms = g_vpvk.gpu_backlog_ms();
+    unsigned splits = g_vpvk.gpu_last_splits ? g_vpvk.gpu_last_splits() : 0;
+    int busy = ms > (unsigned)limit || splits > 2;
+    static int was;
+    if (busy != was) {
+        was = busy;
+        if (busy) VKI("[taa-inline] GPU congested (oldest frame in flight %u ms, %u hang-split cuts in the last frame): "
+                      "no native pass until it drains — frames go out unresolved\n", ms, splits);
+        else VKI("[taa-inline] GPU drained — the native pass resumes\n");
+    }
+    return busy;
 }
 
 // A game texture the compositor is about to sample may still hold recycled Metal memory: VPKEngine
@@ -3885,6 +3958,10 @@ int kl_vulkan_rcas_on(void) {
         env = e && *e ? (kl_env_float("KL_RCAS", 0.0f) > 0.0f ? 1 : 0) : 0;
     }
     if (!env) return 0;
+    // RCAS is fused into the compositor's composite pass (kl_reproject.c, KleptonCompositor.swift):
+    // no hook, no output ring, no native command buffers for RCAS-only frames. The native pass keeps
+    // its own RCAS for VPKTAA frames. KL_RCAS_COMPOSITOR=0 brings the separate pass back.
+    if (kl_env_on("KL_RCAS_COMPOSITOR", 1)) return 0;
     klvk_vpvk_resolve();
     return g_vpvk.rcas_intensity && g_vpvk.taa_native_encode && g_vpvk.rcas_intensity() > 0.0f;
 }
@@ -3895,6 +3972,14 @@ int kl_vulkan_hook_is_taa(void) { return t_hook_taa; }
 int kl_vulkan_taa_ui_mask_on(void) {
     klvk_vpvk_resolve();
     return g_vpvk.taa_ui_mask_enabled ? g_vpvk.taa_ui_mask_enabled() != 0 : 0;
+}
+
+void *kl_vulkan_ui_mask_texture(int eye, int *w, int *h, int *slice) {
+    if (w) *w = 0;
+    if (h) *h = 0;
+    if (slice) *slice = 0;
+    klvk_vpvk_resolve();
+    return g_vpvk.ui_mask_texture ? g_vpvk.ui_mask_texture(eye, w, h, slice) : NULL;
 }
 
 int kl_vulkan_taa_native_encode(const void *frame, void *mtl_cmdbuf) {
@@ -4059,7 +4144,8 @@ unsigned long long kl_vulkan_taa_raw_record(void) {
 // ---------------------------------------------------------------------------
 #define KLVK_RETIRE_MAX 256
 static struct { VkImage img; VkDeviceMemory mem; double at; unsigned long long frame; const char *what;
-                uint32_t w, h, layers; int quick; }
+                uint32_t w, h, layers; int quick;
+                int hold; }   // replaced eye image: stage*2+eye whose publication frees it, else -1
     g_retire[KLVK_RETIRE_MAX];
 static unsigned g_retire_n;
 static pthread_mutex_t g_retire_mu = PTHREAD_MUTEX_INITIALIZER;
@@ -4089,13 +4175,14 @@ static void klvk_retire_touch(VkImage img, const char *how) {
 }
 
 static int klvk_retire_image_ex(klvk_device *d, VkImage img, VkDeviceMemory mem, const char *what,
-                                uint32_t w, uint32_t h, uint32_t layers, int quick) {
+                                uint32_t w, uint32_t h, uint32_t layers, int quick, int hold) {
     (void)d;
     int queued = 0;
     if (!img) return 1;
     pthread_mutex_lock(&g_retire_mu);
     if (g_retire_n < KLVK_RETIRE_MAX) {
         g_retire[g_retire_n].quick = quick;
+        g_retire[g_retire_n].hold = hold;
         g_retire[g_retire_n].img = img;
         g_retire[g_retire_n].mem = mem;
         g_retire[g_retire_n].at = klvk_now_s();
@@ -4118,7 +4205,7 @@ static int klvk_retire_image_ex(klvk_device *d, VkImage img, VkDeviceMemory mem,
 
 static void klvk_retire_image(klvk_device *d, VkImage img, VkDeviceMemory mem, const char *what,
                               uint32_t w, uint32_t h, uint32_t layers) {
-    (void)klvk_retire_image_ex(d, img, mem, what, w, h, layers, 0);
+    (void)klvk_retire_image_ex(d, img, mem, what, w, h, layers, 0, -1);
 }
 
 // Every cache keyed by the VkImage handle forgets it before the handle can be
@@ -4161,12 +4248,17 @@ static void klvk_retire_forget(klvk_device *d, VkImage img) {
     pthread_mutex_unlock(&g_ed_rec_mu);
 }
 
-// force_quick: destroyed OpenXR swapchain images go now, grace or not (memory pressure).
-static void klvk_retire_pump_ex(klvk_device *d, int force_quick);
-static void klvk_retire_pump(klvk_device *d) { klvk_retire_pump_ex(d, 0); }
+// force_quick (memory pressure): destroyed OpenXR swapchain images go now, grace or not, and
+// every other retired image that nothing still needs goes after 3 frame ends / 0.5 s instead
+// of 5 s. A replaced eye image whose replacement is not published yet is never forced: it is
+// still what the compositor shows.
+// Returns the number of images destroyed.
+static double g_trim_until;   // klvk_now_s() until which retired images are freed as under pressure (10 s after a trim)
+static unsigned klvk_retire_pump_ex(klvk_device *d, int force_quick);
+static void klvk_retire_pump(klvk_device *d) { (void)klvk_retire_pump_ex(d, 0); }
 
-static void klvk_retire_pump_ex(klvk_device *d, int force_quick) {
-    if (!d || !d->DestroyImage) return;
+static unsigned klvk_retire_pump_ex(klvk_device *d, int force_quick) {
+    if (!d || !d->DestroyImage) return 0;
     static double after = -1;
     if (after < 0) {
         const char *e = getenv("KL_VK_FREE_AFTER_S");
@@ -4187,9 +4279,23 @@ static void klvk_retire_pump_ex(klvk_device *d, int force_quick) {
         // Replaced images also go after 4x the grace without frame ends: a guest that stops
         // ending frames (OpenXR CTS between sessions) left 253 of them queued until the system
         // was in critical memory pressure (log 62).
-        const int due = g_retire[i].quick ? (force_quick || now - g_retire[i].at >= 0.5)
-                                          : (now - g_retire[i].at >= after && f >= g_retire[i].frame + 8) ||
-                                            now - g_retire[i].at >= after * 4;
+        const double age = now - g_retire[i].at;
+        // Settled = no frame in flight can still name it (frame ends since it was retired or last
+        // used by the guest), or half a second on the wall clock when the guest ends no frames
+        // (a synchronous load). The compositor's own command buffers retain the texture.
+        const int settled = f >= g_retire[i].frame + 3 || age >= 0.5;
+        const int hold = g_retire[i].hold;
+        int due;
+        if (g_retire[i].quick)
+            due = force_quick || age >= 0.5;
+        else if (hold >= 0) {
+            // Replaced eye image: free it as soon as the replacement is published (the guest's
+            // first write), not after a fixed wait. Until then it stays the stage's picture.
+            const int held = __atomic_load_n(&g_eye_hold_at[hold >> 1][hold & 1], __ATOMIC_ACQUIRE) != 0;
+            due = held ? age >= after * 4 : settled;
+        } else
+            due = (force_quick || now < g_trim_until) ? settled
+                              : ((age >= after && f >= g_retire[i].frame + 8) || age >= after * 4);
         if (due) {
             go[n].img = g_retire[i].img; go[n].mem = g_retire[i].mem; go[n].what = g_retire[i].what;
             go[n].w = g_retire[i].w; go[n].h = g_retire[i].h; go[n].layers = g_retire[i].layers; n++;
@@ -4209,6 +4315,7 @@ static void klvk_retire_pump_ex(klvk_device *d, int force_quick) {
             VKI("[mem] freed old %s %p (%ux%u) after %.0f s — ~%llu MiB of replaced images freed so far\n",
                 go[i].what, (void *)go[i].img, w, h, after, g_retired_bytes_est >> 20);
     }
+    return n;
 }
 
 static int g_retire_timer;   // a delayed pump is scheduled
@@ -4234,14 +4341,42 @@ static void klvk_retire_timer_fire(void *ctx) {
 // Memory pressure (kl_mem_pressure_fire, footprint or the OS's own warning): every destroyed
 // OpenXR swapchain image still in its grace period is freed at once.
 void kl_vulkan_trim(const char *why) {
-    if (!kl_vulkan_guest_active()) return;
-    klvk_device *d = g_devs[0];
-    if (!d) return;
-    unsigned before = __atomic_load_n(&g_retire_live, __ATOMIC_ACQUIRE);
-    klvk_retire_pump_ex(d, 1);
-    unsigned after = __atomic_load_n(&g_retire_live, __ATOMIC_ACQUIRE);
-    VKI("[mem] trim (%s): %u retired image(s) freed now, %u still in grace\n",
-        why ? why : "?", before > after ? before - after : 0, after);
+    // Our own retired OpenXR images only exist with a Vulkan guest; the VPKEngine half below also
+    // serves a GLES guest on vpgles (same dylib), so it does not depend on kl_vulkan_guest_active().
+    klvk_device *d = kl_vulkan_guest_active() ? g_devs[0] : NULL;
+    if (d) {
+        // Called from the pressure decider (timer / OS source / frame poll), never through the
+        // guest: in a synchronous load nothing else would run in time.
+        unsigned before = __atomic_load_n(&g_retire_live, __ATOMIC_ACQUIRE);
+        g_trim_until = klvk_now_s() + 10.0;   // images retired during the load go quickly too
+        unsigned freed = klvk_retire_pump_ex(d, 1);
+        unsigned after = __atomic_load_n(&g_retire_live, __ATOMIC_ACQUIRE);
+        static double last_log;   // the decider re-arms while the guest is unregistered: no 10 lines/s
+        if (freed || klvk_now_s() - last_log >= 1.0) {
+            last_log = klvk_now_s();
+            VKI("[mem] trim (%s): %u of %u retired image(s) freed now (~%llu MiB freed over the run), "
+                "%u still waiting\n", why ? why : "?", freed, before, g_retired_bytes_est >> 20, after);
+        }
+    }
+    // VPKEngine side: PSOs / libraries unused for a while, idle staging and arg rings. Rate
+    // limited: the decider can fire per tier plus the OS source within seconds.
+    klvk_vpvk_resolve();
+    if (g_vpvk.trim_memory) {
+        static double last[3];
+        double now = klvk_now_s();
+        const int level = (why && (strstr(why, "critical") || !strcmp(why, "headroom"))) ? 2 : 1;
+        if (now - last[level] >= 1.0) {
+            last[level] = now;
+            char out[256];
+            out[0] = 0;
+            size_t freed_b = g_vpvk.trim_memory(level, out, sizeof out);
+            VKI("[mem] trim (%s): VPKEngine released %zu MiB (%s)\n", why ? why : "?",
+                freed_b >> 20, out[0] ? out : "-");
+        }
+    } else {
+        static int said;
+        if (!said++) VKI("[mem] trim: VPKEngine exports no vpvk_trim_memory — only our own images were trimmed\n");
+    }
 }
 
 
@@ -4359,6 +4494,8 @@ static int klvk_frame_async(uint64_t issued) {
 
 void kl_vulkan_frame_done(int stage) {
     if (!kl_vulkan_guest_active()) return;
+    // Device lost: the frame is not complete and never will be — no record, no serial, no jitter.
+    if (klvk_gpu_poll_lost()) return;
     // This frame's number (the serial it stands for), before the depth is filed.
     unsigned long long issued = __atomic_add_fetch(&g_frame_issued, 1, __ATOMIC_ACQ_REL);
     {
@@ -4415,6 +4552,9 @@ void kl_vulkan_frame_done(int stage) {
         // KL_VPKTAA=0) the same hook sharpens the frame with RCAS alone (KL_RCAS > 0, no resolve).
         gate = kl_env_on("KL_VPKTAA", 0) && kl_vulkan_aa_gate();
         rcas_frame = !gate && kl_vulkan_rcas_on();
+        if (fn && mine && (gate || rcas_frame) && klvk_gpu_congested()) {
+            gate = 0; rcas_frame = 0;   // skipped this frame: plain unresolved path below
+        }
         if (fn && mine && (gate || rcas_frame)) {
             // The depth record carries the frame-record serial before the hook
             // reads it (kl_ovrp tags it again after this returns, same value).
@@ -4482,6 +4622,8 @@ void kl_vulkan_frame_done(int stage) {
                 if (!said++)
                     VKI("waiting for the guest's queue at frame end answered %d — a "
                         "compositor may sample an eye the GPU is still writing\n", (int)r);
+                if (r == VK_ERROR_DEVICE_LOST) klvk_gpu_mark_lost("vkQueueWaitIdle at frame end");
+                if (kl_vulkan_gpu_lost()) return;   // not complete: no raw record, no serial
             }
         }
         // Waited: this frame's live picture is complete (and so is every
@@ -4512,8 +4654,10 @@ int kl_vulkan_taa_gles_frame_end(int stage, unsigned long long rec_serial) {
     pthread_mutex_unlock(&g_taa_hook_mu);
     int mine = rec_serial && stage >= 0 && stage < KLVK_EYE_STAGES;
     if (mine) __atomic_add_fetch(&g_taa_inline_frames, 1, __ATOMIC_RELEASE);
+    if (klvk_gpu_poll_lost()) return 0;   // lost: nothing complete to record
     int gate = kl_env_on("KL_VPKTAA", 0) && kl_vulkan_aa_gate();   // else: RCAS alone (see kl_vulkan_frame_done)
     int rcas_frame = !gate && kl_vulkan_rcas_on();
+    if ((gate || rcas_frame) && klvk_gpu_congested()) { gate = 0; rcas_frame = 0; }
     int committed = 0, hook_called = 0;
     if (fn && mine && (gate || rcas_frame)) {
         hook_called = 1;
@@ -6824,6 +6968,7 @@ static VkResult VKAPI_CALL klvk_GetPhysicalDeviceImageFormatProperties2(
 // fresh VkDevice; kl_exe.c records the case as DeviceLost. Other threads just get the result.
 static VkResult klvk_lost(const char *call, VkResult r) {
     if (r != VK_ERROR_DEVICE_LOST) return r;
+    klvk_gpu_mark_lost(call);
     static atomic_int said;
     if (atomic_fetch_add(&said, 1) < 8)
         fprintf(stderr, "[vk] %s -> VK_ERROR_DEVICE_LOST (the GPU hung or refused work; "

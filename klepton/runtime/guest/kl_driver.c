@@ -664,6 +664,10 @@ int kl_driver_frame(void) {
     // Android's low-memory notification: one task_info call, and the guest drops
     // its caches when the footprint crosses the reported budget.
     kl_mem_pressure_poll();
+    // Deliver what the poll, the 100 ms timer or the OS source decided (they only set a
+    // pending flag: managed code is safe only here, on the game thread between frames).
+    // A game blocked in a synchronous load gets the notice when it next frames.
+    kl_mem_pressure_deliver();
     // KL_PROBE_INPUT: the managed-side probe, self-gated on its env knob and
     // wired here so it runs on DEVICE too (m_boot ticks it around its own
     // pump). Between frames on the thread that just ran one, which is where

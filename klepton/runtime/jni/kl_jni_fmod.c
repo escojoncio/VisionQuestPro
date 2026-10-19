@@ -56,7 +56,11 @@ const klj_binding klj_bind_fmod[] = {
     // is nothing to store here (getContext answers from the activity), so no-ops.
     {FMODCLS, "init",                "(Landroid/content/Context;)V", klf_void},
     {FMODCLS, "init",                "(Ljava/lang/Object;)V",  klf_void},
+    {FMODCLS, "init",                "(Lcom.unity3d.player.UnityPlayerActivity;)V", klf_void},
     {FMODCLS, "close",               "()V",                    klf_void},
+    // FMOD.getAssetManager(): the AssetManager FMOD opens its banks from (file:///android_asset/),
+    // the same one Context.getAssets() hands out -- null here left every asset-bank open failing.
+    {FMODCLS, "getAssetManager",     "()Landroid/content/res/AssetManager;", klj_Context_getAssets},
     {FMODCLS, "getContext",          "()Landroid/content/Context;", klf_getContext},
     {FMODCLS, "getContext",          "()Ljava/lang/Object;",   klf_getContext},
     // Output format + fast-path capabilities the native mixer queries.

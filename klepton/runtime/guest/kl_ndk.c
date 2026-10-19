@@ -4,7 +4,8 @@
 //   ALooper       — real implementation over poll() and a self-pipe. Unity waits
 //                   on this, so a stub that returns immediately would spin.
 //   ANativeWindow — a synthetic window carrying geometry. No pixels until EGL binds one.
-//   ASensor       — one real sensor (head gyroscope); none invented (see below).
+//   ASensor       — accelerometer/gyroscope/gravity/rotation vector derived from the head pose.
+//   AInputQueue   — a real queue (keys/motion pushed by the host; Touch controllers as a gamepad).
 #include <errno.h>
 #include <fcntl.h>
 #include <poll.h>
@@ -25,6 +26,7 @@
 #include "kl_jni.h"
 #include "kl_ovrp.h"
 #include "kl_openxr.h"   // the XR surface-swapchain seam, for ANativeWindow_fromSurface
+#include "kl_mediandk.h"  // kl_mediandk_lookup: the AHardwareBuffer core the JNI-facing half builds on
 
 // ================================================================== ALooper
 enum {
@@ -126,12 +128,15 @@ static void kl_ALooper_release(kl_looper *l) {
     if (l) __atomic_fetch_sub(&l->refs, 1, __ATOMIC_RELAXED);
 }
 
-static void kl_ALooper_wake(kl_looper *l) {
+// 'w' = a real ALooper_wake (pollOnce returns ALOOPER_POLL_WAKE); 'i' = the internal wake of
+// addFd/removeFd, which only makes the poller rebuild its fd set and keep waiting (as on Android,
+// where rebuildEpoll is invisible to the caller).
+static void kl_ALooper_wake_byte(kl_looper *l, char c) {
     if (!l) return;
-    char c = 1;
     ssize_t n = write(l->wake_w, &c, 1);
     (void)n;   // EAGAIN just means a wake is already pending, which is the point
 }
+static void kl_ALooper_wake(kl_looper *l) { kl_ALooper_wake_byte(l, 'w'); }
 
 static int kl_ALooper_addFd(kl_looper *l, int fd, int ident, int events,
                             kl_looper_cb cb, void *data) {
@@ -142,11 +147,19 @@ static int kl_ALooper_addFd(kl_looper *l, int fd, int ident, int events,
             l->fds[i].ident = ident; l->fds[i].events = events;
             l->fds[i].cb = cb; l->fds[i].data = data;
             pthread_mutex_unlock(&l->lock);
+            kl_ALooper_wake_byte(l, 'i');
             return 1;
         }
     if (l->nfds == KL_LOOPER_MAX_FDS) { pthread_mutex_unlock(&l->lock); return -1; }
     l->fds[l->nfds++] = (typeof(l->fds[0])){fd, ident, events, cb, data};
     pthread_mutex_unlock(&l->lock);
+    // Android's Looper::addFd/removeFd wake the looper (rebuildEpoll). Another thread may
+    // register an fd on a looper whose owner is already blocked in poll() with the OLD fd set
+    // (kl_looper_poll snapshots it before poll): without this wake the new fd is not watched
+    // until something else wakes the loop. Unity's VideoDecoderLooper is exactly that: the
+    // thread prepares + blocks in ALooper_pollOnce(-1), and the creating thread then addFd()s
+    // the request pipe, so every surface-mode video request stayed unanswered.
+    kl_ALooper_wake_byte(l, 'i');
     return 1;
 }
 
@@ -157,11 +170,15 @@ static int kl_ALooper_removeFd(kl_looper *l, int fd) {
         if (l->fds[i].fd == fd) {
             l->fds[i] = l->fds[--l->nfds];
             pthread_mutex_unlock(&l->lock);
+            kl_ALooper_wake_byte(l, 'i');   // the poller may hold the removed fd in its snapshot
             return 1;
         }
     pthread_mutex_unlock(&l->lock);
     return 0;
 }
+
+
+static int64_t kl_now_ms(void);
 
 static int kl_looper_poll(int timeoutMillis, int *outFd, int *outEvents, void **outData) {
     kl_looper *l = kl_ALooper_forThread();
@@ -171,6 +188,11 @@ static int kl_looper_poll(int timeoutMillis, int *outFd, int *outEvents, void **
     // the Choreographer's own fd callback would: they are "a callback ran".
     if (kl_android_choreo_dispatch()) return ALOOPER_POLL_CALLBACK;
 
+    // Deadline for the internal-wake retries below: an addFd/removeFd wake must not shorten the wait.
+    const int64_t deadline = timeoutMillis > 0 ? kl_now_ms() + timeoutMillis : 0;
+    int remaining = timeoutMillis;
+
+    for (;;) {
     struct pollfd pfd[KL_LOOPER_MAX_FDS + 1];
     int           ident[KL_LOOPER_MAX_FDS + 1];
     kl_looper_cb  cb[KL_LOOPER_MAX_FDS + 1];
@@ -188,15 +210,27 @@ static int kl_looper_poll(int timeoutMillis, int *outFd, int *outEvents, void **
     }
     pthread_mutex_unlock(&l->lock);
 
-    int r = poll(pfd, (nfds_t)n, timeoutMillis);
+    int r = poll(pfd, (nfds_t)n, remaining);
     if (r < 0)  return errno == EINTR ? ALOOPER_POLL_WAKE : ALOOPER_POLL_ERROR;
     if (r == 0) return ALOOPER_POLL_TIMEOUT;
 
     if (pfd[0].revents & POLLIN) {         // drain the wake pipe
         char buf[64];
-        while (read(l->wake_r, buf, sizeof buf) > 0) { }
+        int real = 0;
+        ssize_t got;
+        while ((got = read(l->wake_r, buf, sizeof buf)) > 0)
+            for (ssize_t k = 0; k < got; k++) if (buf[k] == 'w') real = 1;
         if (kl_android_choreo_dispatch()) return ALOOPER_POLL_CALLBACK;   // the wake was a vsync
-        return ALOOPER_POLL_WAKE;
+        if (real) return ALOOPER_POLL_WAKE;
+        // Only the internal wake of addFd/removeFd: rebuild the fd set and wait out the rest of the
+        // timeout. A zero timeout re-polls once more without blocking (the new set may already be
+        // ready; the wake bytes are drained, so this ends with TIMEOUT when nothing is).
+        if (timeoutMillis > 0) {
+            int64_t left = deadline - kl_now_ms();
+            if (left <= 0) return ALOOPER_POLL_TIMEOUT;
+            remaining = (int)left;
+        }
+        continue;
     }
     for (int i = 1; i < n; i++) {
         if (!pfd[i].revents) continue;
@@ -207,6 +241,7 @@ static int kl_looper_poll(int timeoutMillis, int *outFd, int *outEvents, void **
         return ident[i];
     }
     return ALOOPER_POLL_WAKE;
+    }
 }
 
 static int64_t kl_now_ms(void) {
@@ -618,15 +653,35 @@ static void kl_AAssetDir_close(kl_assetdir *ad) {
 }
 
 // =================================================================== ASensor
-// One sensor, because it is the only one with a real source: the gyroscope.
-// kl_ovrp_head_motion gives the head's angular velocity in tracking space
-// (derived from successive poses, and it says when it has no basis); it is
-// rotated into the head frame to match Android's device axes. Not listed,
-// deliberately: the accelerometer (the runtime has no acceleration, and a
-// differentiated pose is noise), the magnetometer and the proximity sensor
-// (no source at all). A fabricated reading would feed the engine invented
-// motion, whereas a shorter list is a configuration Android devices ship.
-#define KL_ASENSOR_TYPE_GYROSCOPE 4
+// The head's own motion, made into Android's motion sensors. visionOS gives no
+// IMU for the head (CoreMotion has none for it); what the runtime HAS is ARKit's
+// head pose, published through kl_ovrp, and every sensor below is derived from
+// that pose by the physics that relates it to the sensor -- nothing is invented:
+//
+//   gravity / accelerometer  the world's "up" expressed in the head frame, 9.80665 m/s^2.
+//                            An accelerometer at rest reads exactly this; the user's own
+//                            linear acceleration is NOT added (a twice-differentiated pose
+//                            is noise), so a head accelerating reads as a head at rest.
+//   gyroscope                the head's angular velocity in the head frame (rad/s), from
+//                            successive poses (kl_ovrp_head_motion says when it has no basis,
+//                            and then there is simply no event rather than a zero).
+//   rotation vector /        the head orientation as a unit quaternion in Android's
+//   game rotation vector     East-North-Up world: tracking space is Y-up with -Z forward, so
+//                            ENU = (x, -z, y), a +90 degree turn about X applied on the left.
+//                            Heading is relative to the tracking origin's forward (there is no
+//                            magnetometer), which is what the GAME rotation vector means; the
+//                            rotation vector reports it too with heading accuracy -1 (unknown).
+// Not listed: magnetometer, light, proximity, linear acceleration, pressure (no source).
+// The device frame is Android's: +X right, +Y up, +Z out of the display toward the user, which
+// is exactly the head frame of an HMD (X right, Y up, Z backward).
+#include <math.h>
+#define KL_ASENSOR_TYPE_ACCELEROMETER        1
+#define KL_ASENSOR_TYPE_GYROSCOPE            4
+#define KL_ASENSOR_TYPE_GRAVITY              9
+#define KL_ASENSOR_TYPE_ROTATION_VECTOR     11
+#define KL_ASENSOR_TYPE_GAME_ROTATION_VECTOR 15
+#define KL_GRAVITY_EARTH 9.80665f
+
 typedef struct kl_sensor {
     const char *name, *vendor;
     int         type, min_delay_us;
@@ -635,13 +690,89 @@ typedef struct kl_sensor {
     int         fifo_max, fifo_reserved, reporting_mode, wake_up, handle;
 } kl_sensor;
 
-static const kl_sensor kl_sensor_gyro = {
-    "Quest Head Gyroscope", "VisionQuestPro", KL_ASENSOR_TYPE_GYROSCOPE, 5000,
-    0.001f, "android.sensor.gyroscope", 0, 0, 0 /* continuous */, 0, 1 };
-static const kl_sensor  *g_sensors[]  = { &kl_sensor_gyro };
-static const unsigned    g_nsensors   = 1;
+static const kl_sensor g_sensor_tab[] = {
+    {"Head Accelerometer",         "VisionQuestPro", KL_ASENSOR_TYPE_ACCELEROMETER,        5000, 0.0024f,
+     "android.sensor.accelerometer",         0, 0, 0 /* continuous */, 0, 1},
+    {"Head Gyroscope",             "VisionQuestPro", KL_ASENSOR_TYPE_GYROSCOPE,            5000, 0.001f,
+     "android.sensor.gyroscope",             0, 0, 0, 0, 2},
+    {"Head Gravity",               "VisionQuestPro", KL_ASENSOR_TYPE_GRAVITY,              5000, 0.0024f,
+     "android.sensor.gravity",               0, 0, 0, 0, 3},
+    {"Head Rotation Vector",       "VisionQuestPro", KL_ASENSOR_TYPE_ROTATION_VECTOR,      5000, 5.96e-8f,
+     "android.sensor.rotation_vector",       0, 0, 0, 0, 4},
+    {"Head Game Rotation Vector",  "VisionQuestPro", KL_ASENSOR_TYPE_GAME_ROTATION_VECTOR, 5000, 5.96e-8f,
+     "android.sensor.game_rotation_vector",  0, 0, 0, 0, 5},
+};
+#define KL_NSENSORS ((unsigned)(sizeof g_sensor_tab / sizeof g_sensor_tab[0]))
+static const kl_sensor *g_sensors[KL_NSENSORS];     // the NULL-terminated-free list getSensorList hands out
 
-// Bionic's ASensorEvent: 104 bytes; the gyroscope vector is data[0..2], rad/s.
+static int kl_sensor_index(const void *s) {
+    for (unsigned i = 0; i < KL_NSENSORS; i++)
+        if (s == &g_sensor_tab[i]) return (int)i;
+    return -1;
+}
+
+// v rotated by the CONJUGATE of q (world -> head): t = 2 * cross(-q.xyz, v); v' = v + w*t + cross(-q.xyz, t).
+static void kl_q_unrotate(const float q[4], const float v[3], float out[3]) {
+    float ux = -q[0], uy = -q[1], uz = -q[2];
+    float tx = 2 * (uy * v[2] - uz * v[1]);
+    float ty = 2 * (uz * v[0] - ux * v[2]);
+    float tz = 2 * (ux * v[1] - uy * v[0]);
+    out[0] = v[0] + q[3] * tx + (uy * tz - uz * ty);
+    out[1] = v[1] + q[3] * ty + (uz * tx - ux * tz);
+    out[2] = v[2] + q[3] * tz + (ux * ty - uy * tx);
+}
+
+// One consistent sample of everything above, from the pose the FRONTEND last published (the live
+// head, not the per-frame latch: a sensor stream faster than the frame would otherwise repeat one
+// value per frame). 0 when there is no usable orientation.
+int kl_ndk_motion_sample(kl_ndk_motion *m) {
+    if (!m) return 0;
+    float px, py, pz, q[4];
+    kl_ovrp_get_head_pose(&px, &py, &pz, &q[0], &q[1], &q[2], &q[3]);
+    float n = sqrtf(q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3]);
+    if (!(n > 0.5f && n < 1.5f)) return 0;
+    for (int i = 0; i < 4; i++) q[i] /= n;
+
+    const float up[3] = { 0.0f, KL_GRAVITY_EARTH, 0.0f };          // tracking space is Y-up
+    kl_q_unrotate(q, up, m->gravity);
+
+    // ENU = C * tracking, C = +90 degrees about X: q_enu = qC (x) q_head (Hamilton product).
+    const float c = 0.70710678f;                                   // qC = (c, 0, 0, c)
+    float e[4] = {
+        c * q[3] + c * q[0],
+        c * q[1] - c * q[2],
+        c * q[2] + c * q[1],
+        c * q[3] - c * q[0],
+    };
+    if (e[3] < 0) for (int i = 0; i < 4; i++) e[i] = -e[i];        // Android reports w >= 0
+    memcpy(m->quat, e, sizeof e);
+
+    // Tilt for a consumer that wants angles (UE4's `tilt`): SensorManager.getOrientation() of an
+    // upright device sits at pitch -90 degrees -- gimbal lock, where azimuth and roll are noise --
+    // which is what a headset always is, so the angles are taken the way remapCoordinateSystem for
+    // an upright/camera device gives them: azimuth = compass heading of where the head LOOKS
+    // (0 = tracking-origin forward, clockwise), pitch = elevation of the gaze (+ up), roll = head
+    // roll about the gaze (+ when the right ear rises). All well-conditioned for an upright head.
+    float x = e[0], y = e[1], z = e[2], w = e[3];
+    float fwd_e = -2 * (x * z + y * w), fwd_n = -2 * (y * z - x * w), fwd_u = -(1 - 2 * (x * x + y * y));
+    float right_u = 2 * (x * z - y * w), up_u = 2 * (y * z + x * w);
+    float su = fwd_u; if (su > 1) su = 1; if (su < -1) su = -1;
+    m->tilt[0] = atan2f(fwd_e, fwd_n);
+    m->tilt[1] = asinf(su);
+    m->tilt[2] = atan2f(right_u, up_u);
+    (void)w;
+
+    // Head-frame angular velocity: the world rate rotated into the head frame.
+    float lin[3], ang[3];
+    m->rate_valid = kl_ovrp_head_motion(lin, ang);
+    if (m->rate_valid) kl_q_unrotate(q, ang, m->rate);
+    else m->rate[0] = m->rate[1] = m->rate[2] = 0;
+    return 1;
+}
+
+// Bionic's ASensorEvent: 104 bytes. The vector sensors report x,y,z in data[0..2] and the accuracy
+// STATUS as the int8 right after them (sensor_vec_t.status = data[3]'s first byte); the rotation
+// vector is x,y,z,w,heading-accuracy in data[0..4].
 typedef struct kl_sensor_event {
     int32_t version, sensor, type, reserved0;
     int64_t timestamp;
@@ -655,35 +786,32 @@ typedef struct kl_sensor_queue {
     int          ident;
     kl_looper_cb cb;
     void        *data;
-    int          pipe_r, pipe_w;   // one byte per due sample, written by the ticker
+    int          pipe_r, pipe_w;   // one byte per due tick, written by the ticker
     pthread_t    ticker;
-    volatile int on, period_us, quit, started;
+    volatile int on_mask;          // bit i: sensor i enabled on this queue
+    volatile int period_us, quit, started;
+    int          rate_us[KL_NSENSORS];
 } kl_sensor_queue;
 
 static char g_sensor_manager;      // opaque, non-NULL handle
 
-// Head-frame angular velocity: world rate rotated by the conjugate of the head
-// orientation. Returns 0 when the runtime has no measurement.
-static int kl_gyro_sample(float w[3]) {
-    float lin[3], ang[3], px, py, pz, qx, qy, qz, qw;
-    if (!kl_ovrp_head_motion(lin, ang)) return 0;
-    kl_ovrp_get_guest_head_pose(&px, &py, &pz, &qx, &qy, &qz, &qw);
-    // v' = q^-1 v q  via t = 2 * cross(-q.xyz, v); v' = v + qw*t + cross(-q.xyz, t)
-    float ux = -qx, uy = -qy, uz = -qz;
-    float tx = 2 * (uy * ang[2] - uz * ang[1]);
-    float ty = 2 * (uz * ang[0] - ux * ang[2]);
-    float tz = 2 * (ux * ang[1] - uy * ang[0]);
-    w[0] = ang[0] + qw * tx + (uy * tz - uz * ty);
-    w[1] = ang[1] + qw * ty + (uz * tx - ux * tz);
-    w[2] = ang[2] + qw * tz + (ux * ty - uy * tx);
-    return 1;
+// The queue ticks at the fastest rate any enabled sensor asked for.
+static int kl_sensor_period(const kl_sensor_queue *q) {
+    int best = 0;
+    for (unsigned i = 0; i < KL_NSENSORS; i++)
+        if ((q->on_mask >> i) & 1) {
+            int p = q->rate_us[i] > 0 ? q->rate_us[i] : 20000;
+            if (p < g_sensor_tab[i].min_delay_us) p = g_sensor_tab[i].min_delay_us;
+            if (!best || p < best) best = p;
+        }
+    return best ? best : 20000;
 }
 
 static void *kl_sensor_ticker(void *arg) {
     kl_sensor_queue *q = arg;
     while (!q->quit) {
-        usleep(q->period_us > 0 ? (useconds_t)q->period_us : 20000);
-        if (q->on && !q->quit) { char c = 1; (void)!write(q->pipe_w, &c, 1); }
+        usleep((useconds_t)q->period_us);
+        if (q->on_mask && !q->quit) { char c = 1; (void)!write(q->pipe_w, &c, 1); }
     }
     return NULL;
 }
@@ -693,14 +821,15 @@ static void *kl_ASensorManager_getInstanceForPackage(const char *pkg) { (void)pk
 
 static int kl_ASensorManager_getSensorList(void *mgr, const kl_sensor ***list) {
     (void)mgr;
+    for (unsigned i = 0; i < KL_NSENSORS; i++) g_sensors[i] = &g_sensor_tab[i];
     if (list) *list = g_sensors;
-    return (int)g_nsensors;
+    return (int)KL_NSENSORS;
 }
 
 static const kl_sensor *kl_ASensorManager_getDefaultSensor(void *mgr, int type) {
     (void)mgr;
-    for (unsigned i = 0; i < g_nsensors; i++)
-        if (g_sensors[i]->type == type) return g_sensors[i];
+    for (unsigned i = 0; i < KL_NSENSORS; i++)
+        if (g_sensor_tab[i].type == type) return &g_sensor_tab[i];
     return NULL;
 }
 
@@ -730,26 +859,33 @@ static int kl_ASensorManager_destroyEventQueue(void *mgr, kl_sensor_queue *q) {
     return 0;
 }
 
-static int kl_ASensorEventQueue_enableSensor(void *qp, const void *s) {
-    kl_sensor_queue *q = qp;
-    if (!q || s != &kl_sensor_gyro) return -EINVAL;
+static int kl_sensor_enable(kl_sensor_queue *q, const void *s, int32_t period_us) {
+    int i = kl_sensor_index(s);
+    if (!q || i < 0) return -EINVAL;
+    if (period_us > 0) q->rate_us[i] = period_us;
+    q->on_mask |= 1 << i;
+    q->period_us = kl_sensor_period(q);
     if (!q->started) {
-        if (pthread_create(&q->ticker, NULL, kl_sensor_ticker, q) != 0) return -EAGAIN;
+        if (pthread_create(&q->ticker, NULL, kl_sensor_ticker, q) != 0) { q->on_mask &= ~(1 << i); return -EAGAIN; }
         q->started = 1;
     }
-    q->on = 1;
     return 0;
 }
+static int kl_ASensorEventQueue_enableSensor(void *qp, const void *s) { return kl_sensor_enable(qp, s, 0); }
 static int kl_ASensorEventQueue_disableSensor(void *qp, const void *s) {
     kl_sensor_queue *q = qp;
-    if (!q || s != &kl_sensor_gyro) return -EINVAL;
-    q->on = 0;
+    int i = kl_sensor_index(s);
+    if (!q || i < 0) return -EINVAL;
+    q->on_mask &= ~(1 << i);
+    q->period_us = kl_sensor_period(q);
     return 0;
 }
 static int kl_ASensorEventQueue_setEventRate(void *qp, const void *s, int32_t us) {
     kl_sensor_queue *q = qp;
-    if (!q || s != &kl_sensor_gyro) return -EINVAL;
-    q->period_us = us < kl_sensor_gyro.min_delay_us ? kl_sensor_gyro.min_delay_us : us;
+    int i = kl_sensor_index(s);
+    if (!q || i < 0) return -EINVAL;
+    q->rate_us[i] = us;
+    q->period_us = kl_sensor_period(q);
     return 0;
 }
 static int kl_ASensorEventQueue_hasEvents(void *qp) {
@@ -759,46 +895,64 @@ static int kl_ASensorEventQueue_hasEvents(void *qp) {
     return poll(&pf, 1, 0) > 0 && (pf.revents & POLLIN) ? 1 : 0;
 }
 
-// ssize_t: 0 means "no events pending", which is not an error. At most one
-// event per call: the pipe is drained and the sample taken now, and a tick with
-// no measurement behind it produces nothing rather than a zero.
+// ssize_t: 0 means "no events pending", which is not an error. A tick yields one event per enabled
+// sensor (as many as `count` holds, in sensor order); the pipe is drained and the sample taken now,
+// and a tick with no measurement behind it produces nothing rather than a zero.
 static ssize_t kl_ASensorEventQueue_getEvents(void *qp, void *events, size_t count) {
     kl_sensor_queue *q = qp;
     if (!q || !events) return -EINVAL;
     char buf[64];
     ssize_t n = read(q->pipe_r, buf, sizeof buf);
-    if (n <= 0 || !q->on || count < 1) return 0;
-    float w[3];
-    if (!kl_gyro_sample(w)) return 0;
+    if (n <= 0 || !q->on_mask || count < 1) return 0;
+    kl_ndk_motion m;
+    if (!kl_ndk_motion_sample(&m)) return 0;
     struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
-    kl_sensor_event *e = events;
-    memset(e, 0, sizeof *e);
-    e->version = (int32_t)sizeof *e; e->sensor = kl_sensor_gyro.handle;
-    e->type = KL_ASENSOR_TYPE_GYROSCOPE;
-    e->timestamp = (int64_t)ts.tv_sec * 1000000000LL + ts.tv_nsec;
-    e->data[0] = w[0]; e->data[1] = w[1]; e->data[2] = w[2];
-    e->data[3] = 3;   // status byte of sensor_vec_t: ACCURACY_HIGH
-    return 1;
+    int64_t now = (int64_t)ts.tv_sec * 1000000000LL + ts.tv_nsec;
+    kl_sensor_event *out = events;
+    size_t k = 0;
+    for (unsigned i = 0; i < KL_NSENSORS && k < count; i++) {
+        if (!((q->on_mask >> i) & 1)) continue;
+        const kl_sensor *s = &g_sensor_tab[i];
+        kl_sensor_event *e = &out[k];
+        memset(e, 0, sizeof *e);
+        e->version = (int32_t)sizeof *e; e->sensor = s->handle; e->type = s->type;
+        e->timestamp = now;
+        switch (s->type) {
+        case KL_ASENSOR_TYPE_ACCELEROMETER:
+        case KL_ASENSOR_TYPE_GRAVITY:
+            memcpy(e->data, m.gravity, sizeof m.gravity);
+            ((int8_t *)&e->data[3])[0] = 3;               // SENSOR_STATUS_ACCURACY_HIGH
+            break;
+        case KL_ASENSOR_TYPE_GYROSCOPE:
+            if (!m.rate_valid) continue;                   // no basis for a rate: no event, not a zero
+            memcpy(e->data, m.rate, sizeof m.rate);
+            ((int8_t *)&e->data[3])[0] = 3;
+            break;
+        case KL_ASENSOR_TYPE_ROTATION_VECTOR:
+        case KL_ASENSOR_TYPE_GAME_ROTATION_VECTOR:
+            memcpy(e->data, m.quat, sizeof m.quat);
+            e->data[4] = s->type == KL_ASENSOR_TYPE_ROTATION_VECTOR ? -1.0f : 0.0f;   // heading accuracy unknown
+            break;
+        }
+        k++;
+    }
+    return (ssize_t)k;
 }
 
-// Everything an ASensor can be asked, for a list that is empty today: when a
-// Quest sensor table is filled in, these already answer from it. A NULL sensor
-// gets the NDK's own "unknown" values (Android would fault; -1/0 is kinder and
-// can only be reached by a guest that ignored a NULL from getDefaultSensor).
 static const char *kl_ASensor_getStringType(const kl_sensor *s) { return s && s->string_type ? s->string_type : ""; }
 static int kl_ASensor_getFifoMaxEventCount(const kl_sensor *s)      { return s ? s->fifo_max : 0; }
 static int kl_ASensor_getFifoReservedEventCount(const kl_sensor *s) { return s ? s->fifo_reserved : 0; }
 static int kl_ASensor_getReportingMode(const kl_sensor *s)          { return s ? s->reporting_mode : -1; }
 static int kl_ASensor_isWakeUpSensor(const kl_sensor *s)            { return s ? s->wake_up : 0; }
 static int kl_ASensor_getHandle(const kl_sensor *s)                 { return s ? s->handle : -1; }
-// Direct channels (ashmem/hardware-buffer sensor streams) need a sensor that
-// advertises them; none does here.
+// Direct channels (ashmem/hardware-buffer sensor streams) need a sensor that advertises them;
+// none does here.
 static int kl_ASensor_isDirectChannelTypeSupported(const kl_sensor *s, int type) { (void)s; (void)type; return 0; }
 static int kl_ASensor_getHighestDirectReportRateLevel(const kl_sensor *s) { (void)s; return 0; /* ASENSOR_DIRECT_RATE_STOP */ }
 static const kl_sensor *kl_ASensorManager_getDefaultSensorEx(void *mgr, int type, int wakeUp) {
     (void)mgr;
-    for (unsigned i = 0; i < g_nsensors; i++)
-        if (g_sensors[i]->type == type && (!!g_sensors[i]->wake_up == !!wakeUp)) return g_sensors[i];
+    for (unsigned i = 0; i < KL_NSENSORS; i++)
+        if (g_sensor_tab[i].type == type && (!!g_sensor_tab[i].wake_up == !!wakeUp)) return &g_sensor_tab[i];
     return NULL;
 }
 static int kl_ASensorManager_createSharedMemoryDirectChannel(void *mgr, int fd, size_t size) {
@@ -811,11 +965,10 @@ static void kl_ASensorManager_destroyDirectChannel(void *mgr, int channel) { (vo
 static int kl_ASensorManager_configureDirectReport(void *mgr, const kl_sensor *s, int channel, int rate) {
     (void)mgr; (void)s; (void)channel; (void)rate; return -EINVAL;
 }
-// registerSensor needs a sensor to register; with none, the answer is the same
-// -EINVAL enableSensor gives. requestAdditionalInfoEvents on a live queue is
-// accepted (no sensor will ever send one).
+// registerSensor: enable with a sampling period (latency is accepted: there is no FIFO to batch in).
 static int kl_ASensorEventQueue_registerSensor(void *q, const void *s, int32_t period_us, int64_t latency_us) {
-    (void)q; (void)s; (void)period_us; (void)latency_us; return -EINVAL;
+    (void)latency_us;
+    return kl_sensor_enable(q, s, period_us);
 }
 static int kl_ASensorEventQueue_requestAdditionalInfoEvents(void *q, int enable) {
     (void)enable; return q ? 0 : -EINVAL;
@@ -871,25 +1024,340 @@ static void kl_ANativeActivity_showSoftInput(void *act, unsigned flags) {
 }
 
 // ================================================================ AInputQueue
-// native_app_glue (OpenXR CTS, every NativeActivity sample) imports the input
-// queue family and calls it only from onInputQueueCreated — which nothing here
-// ever sends: input reaches a VR guest through OpenXR/OVRPlugin, not through an
-// Android InputQueue. So these are the answers for a queue that never has an
-// event, and they exist so that a guest built against the glue binds by name
-// instead of carrying unresolved imports. getEvent < 0 is "no event"; the event
-// accessors can only be reached with an event this queue never handed out.
-static void    kl_AInputQueue_attachLooper(void *q, void *looper, int ident, void *cb, void *data) {
-    (void)q; (void)looper; (void)ident; (void)cb; (void)data;
+// A real input queue, for a NativeActivity guest (native_app_glue and everything built on it).
+// The host that creates the ANativeActivity hands the guest kl_ndk_input_queue() in
+// onInputQueueCreated; the guest attaches it to its looper and drains it with getEvent/finishEvent.
+// Events arrive two ways: kl_ndk_input_push_key / kl_ndk_input_push_motion (a frontend or the text
+// keyboard), and -- once a looper is attached -- the Touch controllers, presented as the gamepad
+// Android shows a NativeActivity app for them (A/B/X/Y, sticks, triggers, bumpers, start/select).
+// Events are owned by the queue until finishEvent, as on Android.
+enum { KL_AINPUT_EVENT_KEY = 1, KL_AINPUT_EVENT_MOTION = 2 };
+enum { KL_AKEY_ACTION_DOWN = 0, KL_AKEY_ACTION_UP = 1, KL_AMOTION_ACTION_MOVE = 2 };
+enum { KL_AINPUT_SOURCE_GAMEPAD = 0x00000401, KL_AINPUT_SOURCE_JOYSTICK = 0x01000010 };
+enum { KL_AXIS_X = 0, KL_AXIS_Y = 1, KL_AXIS_Z = 11, KL_AXIS_RZ = 14,
+       KL_AXIS_LTRIGGER = 17, KL_AXIS_RTRIGGER = 18, KL_AXIS_MAX = 48 };
+enum { KL_AKEYCODE_BUTTON_A = 96, KL_AKEYCODE_BUTTON_B = 97, KL_AKEYCODE_BUTTON_X = 99,
+       KL_AKEYCODE_BUTTON_Y = 100, KL_AKEYCODE_BUTTON_L1 = 102, KL_AKEYCODE_BUTTON_R1 = 103,
+       KL_AKEYCODE_BUTTON_L2 = 104, KL_AKEYCODE_BUTTON_R2 = 105, KL_AKEYCODE_BUTTON_THUMBL = 106,
+       KL_AKEYCODE_BUTTON_THUMBR = 107, KL_AKEYCODE_BUTTON_START = 108, KL_AKEYCODE_BUTTON_SELECT = 109 };
+
+#define KL_INPUT_MAGIC 0x4b4c4945u      /* 'KLIE' */
+#define KL_INPUT_RING 128
+typedef struct kl_input_event {
+    uint32_t magic;
+    int32_t  type, source, device_id, action, flags, meta, keycode, scancode, repeat, button_state;
+    int64_t  down_time, event_time;
+    float    axes[KL_AXIS_MAX];
+} kl_input_event;
+
+typedef struct kl_input_queue {
+    pthread_mutex_t lock;
+    kl_input_event *ring[KL_INPUT_RING];
+    unsigned        head, count;
+    int             pipe_r, pipe_w;
+    kl_looper      *looper;
+    pthread_t       poller;
+    volatile int    poller_on;
+    int             poller_started;   // thread exists and has not been joined (under g_poller_mu)
+} kl_input_queue;
+static pthread_mutex_t g_poller_mu = PTHREAD_MUTEX_INITIALIZER;
+static kl_input_queue  g_inq;
+static pthread_once_t  g_inq_once = PTHREAD_ONCE_INIT;
+
+static int64_t kl_input_now_ns(void) {
+    struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (int64_t)ts.tv_sec * 1000000000LL + ts.tv_nsec;
 }
-static void    kl_AInputQueue_detachLooper(void *q) { (void)q; }
-static int32_t kl_AInputQueue_getEvent(void *q, void **out) { (void)q; if (out) *out = NULL; return -1; }
+
+static void kl_inq_init(void) {
+    pthread_mutex_init(&g_inq.lock, NULL);
+    int p[2];
+    if (pipe(p) != 0) { g_inq.pipe_r = g_inq.pipe_w = -1; return; }
+    fcntl(p[0], F_SETFL, fcntl(p[0], F_GETFL, 0) | O_NONBLOCK);
+    fcntl(p[1], F_SETFL, fcntl(p[1], F_GETFL, 0) | O_NONBLOCK);
+    g_inq.pipe_r = p[0]; g_inq.pipe_w = p[1];
+}
+
+void *kl_ndk_input_queue(void) { pthread_once(&g_inq_once, kl_inq_init); return &g_inq; }
+
+static void kl_inq_push(kl_input_event *e) {
+    pthread_once(&g_inq_once, kl_inq_init);
+    pthread_mutex_lock(&g_inq.lock);
+    if (g_inq.count == KL_INPUT_RING) {                // a guest that never drains: drop the oldest
+        free(g_inq.ring[g_inq.head]);
+        g_inq.head = (g_inq.head + 1) % KL_INPUT_RING; g_inq.count--;
+        char c; (void)!read(g_inq.pipe_r, &c, 1);
+    }
+    g_inq.ring[(g_inq.head + g_inq.count++) % KL_INPUT_RING] = e;
+    pthread_mutex_unlock(&g_inq.lock);
+    char c = 1; (void)!write(g_inq.pipe_w, &c, 1);
+}
+
+void kl_ndk_input_push_key(int source, int device_id, int action, int keycode, int meta) {
+    kl_input_event *e = calloc(1, sizeof *e);
+    if (!e) return;
+    e->magic = KL_INPUT_MAGIC; e->type = KL_AINPUT_EVENT_KEY;
+    e->source = source; e->device_id = device_id; e->action = action; e->keycode = keycode; e->meta = meta;
+    e->down_time = e->event_time = kl_input_now_ns();
+    kl_inq_push(e);
+}
+
+void kl_ndk_input_push_motion(int source, int device_id, int action, const float *axes, int naxes) {
+    kl_input_event *e = calloc(1, sizeof *e);
+    if (!e) return;
+    e->magic = KL_INPUT_MAGIC; e->type = KL_AINPUT_EVENT_MOTION;
+    e->source = source; e->device_id = device_id; e->action = action;
+    if (axes) memcpy(e->axes, axes, (size_t)(naxes < KL_AXIS_MAX ? naxes : KL_AXIS_MAX) * sizeof(float));
+    e->down_time = e->event_time = kl_input_now_ns();
+    kl_inq_push(e);
+}
+
+// The controllers as a gamepad. Left = X/Y/left stick/L1/L2, right = A/B/right stick/R1/R2; the
+// menu buttons ride the left hand's START/BACK words. Sticks go out as one MOVE event whenever
+// either changes by more than the dead band.
+static const struct { uint32_t bit; int key; } kl_pad_map[2][6] = {
+    { {KL_OVRP_RAW_X, KL_AKEYCODE_BUTTON_X}, {KL_OVRP_RAW_Y, KL_AKEYCODE_BUTTON_Y},
+      {KL_OVRP_RAW_LTHUMBSTICK, KL_AKEYCODE_BUTTON_THUMBL}, {KL_OVRP_RAW_START, KL_AKEYCODE_BUTTON_START},
+      {KL_OVRP_RAW_BACK, KL_AKEYCODE_BUTTON_SELECT}, {0, 0} },
+    { {KL_OVRP_RAW_A, KL_AKEYCODE_BUTTON_A}, {KL_OVRP_RAW_B, KL_AKEYCODE_BUTTON_B},
+      {KL_OVRP_RAW_RTHUMBSTICK, KL_AKEYCODE_BUTTON_THUMBR}, {0, 0}, {0, 0}, {0, 0} },
+};
+
+static void *kl_input_poller(void *arg) {
+    (void)arg;
+    uint32_t prev_btn[2] = {0, 0};
+    int      prev_trig[2][2] = {{0, 0}, {0, 0}};      // [hand][0 index, 1 grip]
+    float    prev_axes[KL_AXIS_MAX] = {0};
+    while (g_inq.poller_on) {
+        usleep(8000);
+        float axes[KL_AXIS_MAX] = {0};
+        for (int hand = 0; hand < 2; hand++) {
+            uint32_t b = 0, t = 0; float it = 0, gt = 0, sx = 0, sy = 0;
+            if (!kl_ovrp_controller_input(hand, &b, &t, &it, &gt, &sx, &sy)) { b = 0; it = gt = sx = sy = 0; }
+            for (int k = 0; k < 6; k++) {
+                uint32_t bit = kl_pad_map[hand][k].bit;
+                if (!bit) continue;
+                if ((b ^ prev_btn[hand]) & bit)
+                    kl_ndk_input_push_key(KL_AINPUT_SOURCE_GAMEPAD, 1, (b & bit) ? KL_AKEY_ACTION_DOWN : KL_AKEY_ACTION_UP,
+                                          kl_pad_map[hand][k].key, 0);
+            }
+            prev_btn[hand] = b;
+            int trig[2] = { it > 0.5f, gt > 0.5f };
+            static const int tkey[2][2] = { {KL_AKEYCODE_BUTTON_L2, KL_AKEYCODE_BUTTON_L1},
+                                            {KL_AKEYCODE_BUTTON_R2, KL_AKEYCODE_BUTTON_R1} };
+            for (int k = 0; k < 2; k++) {
+                if (trig[k] != prev_trig[hand][k])
+                    kl_ndk_input_push_key(KL_AINPUT_SOURCE_GAMEPAD, 1, trig[k] ? KL_AKEY_ACTION_DOWN : KL_AKEY_ACTION_UP,
+                                          tkey[hand][k], 0);
+                prev_trig[hand][k] = trig[k];
+            }
+            if (hand == 0) { axes[KL_AXIS_X] = sx;  axes[KL_AXIS_Y] = -sy; axes[KL_AXIS_LTRIGGER] = it; }
+            else           { axes[KL_AXIS_Z] = sx;  axes[KL_AXIS_RZ] = -sy; axes[KL_AXIS_RTRIGGER] = it; }
+        }
+        int changed = 0;
+        for (int a = 0; a < KL_AXIS_MAX; a++) if (fabsf(axes[a] - prev_axes[a]) > 0.02f) changed = 1;
+        if (changed) {
+            kl_ndk_input_push_motion(KL_AINPUT_SOURCE_GAMEPAD | KL_AINPUT_SOURCE_JOYSTICK, 1, KL_AMOTION_ACTION_MOVE,
+                                     axes, KL_AXIS_MAX);
+            memcpy(prev_axes, axes, sizeof axes);
+        }
+    }
+    return NULL;
+}
+
+static void kl_AInputQueue_attachLooper(void *qp, void *looper, int ident, void *cb, void *data) {
+    kl_input_queue *q = qp;
+    if (q != &g_inq || !looper) return;
+    q->looper = looper;
+    kl_ALooper_addFd(looper, q->pipe_r, ident, ALOOPER_EVENT_INPUT, (kl_looper_cb)cb, data);
+    // One poller at most: detachLooper joins it, so a second attach never overlaps a dying one.
+    pthread_mutex_lock(&g_poller_mu);
+    if (!q->poller_started) {
+        q->poller_on = 1;
+        if (pthread_create(&q->poller, NULL, kl_input_poller, NULL) != 0) q->poller_on = 0;
+        else q->poller_started = 1;
+    }
+    pthread_mutex_unlock(&g_poller_mu);
+}
+static void kl_AInputQueue_detachLooper(void *qp) {
+    kl_input_queue *q = qp;
+    if (q != &g_inq || !q->looper) return;
+    kl_ALooper_removeFd(q->looper, q->pipe_r);
+    q->looper = NULL;
+    pthread_mutex_lock(&g_poller_mu);
+    q->poller_on = 0;
+    if (q->poller_started) { pthread_join(q->poller, NULL); q->poller_started = 0; }   // exits within one 8 ms tick
+    pthread_mutex_unlock(&g_poller_mu);
+}
+static int32_t kl_AInputQueue_hasEvents(void *qp) {
+    kl_input_queue *q = qp;
+    if (q != &g_inq) return -EINVAL;
+    pthread_mutex_lock(&q->lock);
+    int n = q->count > 0;
+    pthread_mutex_unlock(&q->lock);
+    return n;
+}
+// 0 and the event, or a negative value for "no event" (-EAGAIN) / a foreign queue (-EINVAL).
+static int32_t kl_AInputQueue_getEvent(void *qp, void **out) {
+    kl_input_queue *q = qp;
+    if (out) *out = NULL;
+    if (q != &g_inq || !out) return -EINVAL;
+    pthread_mutex_lock(&q->lock);
+    if (!q->count) { pthread_mutex_unlock(&q->lock); return -EAGAIN; }
+    kl_input_event *e = q->ring[q->head];
+    q->head = (q->head + 1) % KL_INPUT_RING; q->count--;
+    pthread_mutex_unlock(&q->lock);
+    char c; (void)!read(q->pipe_r, &c, 1);
+    *out = e;
+    return 0;
+}
+// An IME would get the first look at a key; there is none, so nothing is pre-dispatched.
 static int32_t kl_AInputQueue_preDispatchEvent(void *q, void *ev) { (void)q; (void)ev; return 0; }
-static void    kl_AInputQueue_finishEvent(void *q, void *ev, int handled) { (void)q; (void)ev; (void)handled; }
-static int32_t kl_AInputEvent_getType(const void *ev) { (void)ev; return 0; }
-static int32_t kl_AKeyEvent_getAction(const void *ev) { (void)ev; return 0; }
-static int32_t kl_AKeyEvent_getKeyCode(const void *ev) { (void)ev; return 0; }
-static float   kl_AMotionEvent_getRawX(const void *ev, size_t i) { (void)ev; (void)i; return 0.0f; }
-static float   kl_AMotionEvent_getRawY(const void *ev, size_t i) { (void)ev; (void)i; return 0.0f; }
+static void    kl_AInputQueue_finishEvent(void *q, void *ev, int handled) {
+    (void)q; (void)handled;
+    kl_input_event *e = ev;
+    if (e && e->magic == KL_INPUT_MAGIC) { e->magic = 0; free(e); }
+}
+
+static const kl_input_event *kl_ie(const void *ev) {
+    const kl_input_event *e = ev;
+    return e && e->magic == KL_INPUT_MAGIC ? e : NULL;
+}
+#define KL_IE_GET(rettype, sym, field) \
+    static rettype kl_##sym(const void *ev) { const kl_input_event *e = kl_ie(ev); return e ? (rettype)e->field : 0; }
+KL_IE_GET(int32_t, AInputEvent_getType,       type)
+KL_IE_GET(int32_t, AInputEvent_getDeviceId,   device_id)
+KL_IE_GET(int32_t, AInputEvent_getSource,     source)
+KL_IE_GET(int32_t, AKeyEvent_getAction,       action)
+KL_IE_GET(int32_t, AKeyEvent_getFlags,        flags)
+KL_IE_GET(int32_t, AKeyEvent_getKeyCode,      keycode)
+KL_IE_GET(int32_t, AKeyEvent_getScanCode,     scancode)
+KL_IE_GET(int32_t, AKeyEvent_getMetaState,    meta)
+KL_IE_GET(int32_t, AKeyEvent_getRepeatCount,  repeat)
+KL_IE_GET(int64_t, AKeyEvent_getDownTime,     down_time)
+KL_IE_GET(int64_t, AKeyEvent_getEventTime,    event_time)
+KL_IE_GET(int32_t, AMotionEvent_getAction,    action)
+KL_IE_GET(int32_t, AMotionEvent_getFlags,     flags)
+KL_IE_GET(int32_t, AMotionEvent_getMetaState, meta)
+KL_IE_GET(int32_t, AMotionEvent_getButtonState, button_state)
+KL_IE_GET(int64_t, AMotionEvent_getDownTime,  down_time)
+KL_IE_GET(int64_t, AMotionEvent_getEventTime, event_time)
+static size_t  kl_AMotionEvent_getPointerCount(const void *ev) { return kl_ie(ev) ? 1 : 0; }
+static int32_t kl_AMotionEvent_getPointerId(const void *ev, size_t i) { (void)i; (void)ev; return 0; }
+static int32_t kl_AMotionEvent_getToolType(const void *ev, size_t i) { (void)i; (void)ev; return 0; /* UNKNOWN */ }
+static float   kl_AMotionEvent_getAxisValue(const void *ev, int32_t axis, size_t i) {
+    const kl_input_event *e = kl_ie(ev);
+    return e && i == 0 && axis >= 0 && axis < KL_AXIS_MAX ? e->axes[axis] : 0.0f;
+}
+static float kl_AMotionEvent_getX(const void *ev, size_t i)    { return kl_AMotionEvent_getAxisValue(ev, KL_AXIS_X, i); }
+static float kl_AMotionEvent_getY(const void *ev, size_t i)    { return kl_AMotionEvent_getAxisValue(ev, KL_AXIS_Y, i); }
+static float kl_AMotionEvent_getRawX(const void *ev, size_t i) { return kl_AMotionEvent_getAxisValue(ev, KL_AXIS_X, i); }
+static float kl_AMotionEvent_getRawY(const void *ev, size_t i) { return kl_AMotionEvent_getAxisValue(ev, KL_AXIS_Y, i); }
+static float kl_AMotionEvent_getPressure(const void *ev, size_t i) { return kl_AMotionEvent_getAxisValue(ev, 2, i); }
+
+// ========================================================= AHardwareBuffer (rest)
+// libmediandk (kl_mediandk.c) serves allocate/describe/lock/unlock/acquire/release/getId; what it
+// cannot is the part that needs the JNI object model, and the inter-process pair.
+//
+//   AHardwareBuffer_toHardwareBuffer(env, ahb)   a Java android.hardware.HardwareBuffer wrapping
+//                                                ahb (takes its own reference, as Android does).
+//   AHardwareBuffer_fromHardwareBuffer(env, obj) the ahb behind such an object, NO new reference
+//                                                (documented); NULL for an object we did not make.
+//   AHardwareBuffer_sendHandleToUnixSocket / recvHandleFromUnixSocket
+//                                                the handle crosses a Unix socket between PROCESSES
+//                                                on Android. Here there is one process: the socket
+//                                                carries an opaque ticket, and the receiver gets
+//                                                the same buffer back (with a reference of its own).
+typedef void (*kl_ahb_ref_fn)(void *);
+typedef int  (*kl_ahb_id_fn)(const void *, uint64_t *);
+static kl_ahb_ref_fn kl_ahb_acquire_fn(void) {
+    static kl_ahb_ref_fn f; if (!f) f = (kl_ahb_ref_fn)kl_mediandk_lookup("AHardwareBuffer_acquire"); return f;
+}
+static kl_ahb_ref_fn kl_ahb_release_fn(void) {
+    static kl_ahb_ref_fn f; if (!f) f = (kl_ahb_ref_fn)kl_mediandk_lookup("AHardwareBuffer_release"); return f;
+}
+static kl_ahb_id_fn kl_ahb_id(void) {
+    static kl_ahb_id_fn f; if (!f) f = (kl_ahb_id_fn)kl_mediandk_lookup("AHardwareBuffer_getId"); return f;
+}
+
+#define KL_AHB_JAVA_MAX 64
+static struct { void *obj, *ahb; } g_ahb_java[KL_AHB_JAVA_MAX];
+static pthread_mutex_t g_ahb_mu = PTHREAD_MUTEX_INITIALIZER;
+
+static void *kl_AHardwareBuffer_toHardwareBuffer(void *env, void *ahb) {
+    (void)env;
+    if (!ahb) return NULL;
+    pthread_mutex_lock(&g_ahb_mu);
+    for (int i = 0; i < KL_AHB_JAVA_MAX; i++)                    // one Java object per buffer, as identity-stable as Java's
+        if (g_ahb_java[i].ahb == ahb) { void *o = g_ahb_java[i].obj; pthread_mutex_unlock(&g_ahb_mu); return o; }
+    int slot = -1;
+    for (int i = 0; i < KL_AHB_JAVA_MAX; i++) if (!g_ahb_java[i].obj) { slot = i; break; }
+    if (slot < 0) { pthread_mutex_unlock(&g_ahb_mu); return NULL; }
+    void *obj = kl_jni_new_object("android/hardware/HardwareBuffer");
+    if (!obj) { pthread_mutex_unlock(&g_ahb_mu); return NULL; }
+    kl_jni_pin_object(obj);
+    kl_ahb_ref_fn acq = kl_ahb_acquire_fn();
+    if (acq) acq(ahb);                                           // the Java object's own reference
+    g_ahb_java[slot].obj = obj; g_ahb_java[slot].ahb = ahb;
+    pthread_mutex_unlock(&g_ahb_mu);
+    return obj;
+}
+static void *kl_AHardwareBuffer_fromHardwareBuffer(void *env, void *obj) {
+    (void)env;
+    if (!obj) return NULL;
+    void *r = NULL;
+    pthread_mutex_lock(&g_ahb_mu);
+    for (int i = 0; i < KL_AHB_JAVA_MAX; i++) if (g_ahb_java[i].obj == obj) { r = g_ahb_java[i].ahb; break; }
+    pthread_mutex_unlock(&g_ahb_mu);
+    return r;
+}
+
+// Ticket on the wire: magic + the buffer's id. The sent table keeps a reference until received.
+#define KL_AHB_TICKET 0x4b4c4148u            /* 'KLAH' */
+#define KL_AHB_SENT_MAX 32
+static struct { uint64_t id; void *ahb; } g_ahb_sent[KL_AHB_SENT_MAX];
+
+static int kl_AHardwareBuffer_sendHandleToUnixSocket(const void *ahb, int sockfd) {
+    kl_ahb_id_fn idf = kl_ahb_id();
+    uint64_t id = 0;
+    if (!ahb || sockfd < 0 || !idf || idf(ahb, &id) != 0) return -EINVAL;
+    pthread_mutex_lock(&g_ahb_mu);
+    int slot = -1;
+    for (int i = 0; i < KL_AHB_SENT_MAX; i++) if (!g_ahb_sent[i].ahb) { slot = i; break; }
+    if (slot < 0) { pthread_mutex_unlock(&g_ahb_mu); return -ENOMEM; }
+    kl_ahb_ref_fn acq = kl_ahb_acquire_fn();
+    if (acq) acq((void *)ahb);
+    g_ahb_sent[slot].id = id; g_ahb_sent[slot].ahb = (void *)ahb;
+    pthread_mutex_unlock(&g_ahb_mu);
+    struct { uint32_t magic; uint64_t id; } __attribute__((packed)) t = { KL_AHB_TICKET, id };
+    ssize_t n = write(sockfd, &t, sizeof t);
+    if (n != (ssize_t)sizeof t) {
+        pthread_mutex_lock(&g_ahb_mu);
+        g_ahb_sent[slot].ahb = NULL;
+        pthread_mutex_unlock(&g_ahb_mu);
+        kl_ahb_ref_fn rel = kl_ahb_release_fn();
+        if (rel) rel((void *)ahb);
+        return n < 0 ? -errno : -EIO;
+    }
+    return 0;
+}
+static int kl_AHardwareBuffer_recvHandleFromUnixSocket(int sockfd, void **outBuffer) {
+    if (!outBuffer || sockfd < 0) return -EINVAL;
+    *outBuffer = NULL;
+    struct { uint32_t magic; uint64_t id; } __attribute__((packed)) t;
+    ssize_t n = read(sockfd, &t, sizeof t);
+    if (n < 0) return -errno;
+    if (n != (ssize_t)sizeof t || t.magic != KL_AHB_TICKET) return -EINVAL;
+    pthread_mutex_lock(&g_ahb_mu);
+    for (int i = 0; i < KL_AHB_SENT_MAX; i++)
+        if (g_ahb_sent[i].ahb && g_ahb_sent[i].id == t.id) {
+            *outBuffer = g_ahb_sent[i].ahb;                      // the sender's reference becomes the receiver's
+            g_ahb_sent[i].ahb = NULL;
+            break;
+        }
+    pthread_mutex_unlock(&g_ahb_mu);
+    return *outBuffer ? 0 : -ENOENT;
+}
 
 // ================================================================== dispatch
 static const struct { const char *name; void *fn; } g_ndk[] = {
@@ -974,14 +1442,41 @@ static const struct { const char *name; void *fn; } g_ndk[] = {
 
     N("AInputQueue_attachLooper",      kl_AInputQueue_attachLooper),
     N("AInputQueue_detachLooper",      kl_AInputQueue_detachLooper),
+    N("AInputQueue_hasEvents",         kl_AInputQueue_hasEvents),
     N("AInputQueue_getEvent",          kl_AInputQueue_getEvent),
     N("AInputQueue_preDispatchEvent",  kl_AInputQueue_preDispatchEvent),
     N("AInputQueue_finishEvent",       kl_AInputQueue_finishEvent),
     N("AInputEvent_getType",           kl_AInputEvent_getType),
+    N("AInputEvent_getDeviceId",       kl_AInputEvent_getDeviceId),
+    N("AInputEvent_getSource",         kl_AInputEvent_getSource),
     N("AKeyEvent_getAction",           kl_AKeyEvent_getAction),
+    N("AKeyEvent_getFlags",            kl_AKeyEvent_getFlags),
     N("AKeyEvent_getKeyCode",          kl_AKeyEvent_getKeyCode),
+    N("AKeyEvent_getScanCode",         kl_AKeyEvent_getScanCode),
+    N("AKeyEvent_getMetaState",        kl_AKeyEvent_getMetaState),
+    N("AKeyEvent_getRepeatCount",      kl_AKeyEvent_getRepeatCount),
+    N("AKeyEvent_getDownTime",         kl_AKeyEvent_getDownTime),
+    N("AKeyEvent_getEventTime",        kl_AKeyEvent_getEventTime),
+    N("AMotionEvent_getAction",        kl_AMotionEvent_getAction),
+    N("AMotionEvent_getFlags",         kl_AMotionEvent_getFlags),
+    N("AMotionEvent_getMetaState",     kl_AMotionEvent_getMetaState),
+    N("AMotionEvent_getButtonState",   kl_AMotionEvent_getButtonState),
+    N("AMotionEvent_getDownTime",      kl_AMotionEvent_getDownTime),
+    N("AMotionEvent_getEventTime",     kl_AMotionEvent_getEventTime),
+    N("AMotionEvent_getPointerCount",  kl_AMotionEvent_getPointerCount),
+    N("AMotionEvent_getPointerId",     kl_AMotionEvent_getPointerId),
+    N("AMotionEvent_getToolType",      kl_AMotionEvent_getToolType),
+    N("AMotionEvent_getAxisValue",     kl_AMotionEvent_getAxisValue),
+    N("AMotionEvent_getX",             kl_AMotionEvent_getX),
+    N("AMotionEvent_getY",             kl_AMotionEvent_getY),
     N("AMotionEvent_getRawX",          kl_AMotionEvent_getRawX),
     N("AMotionEvent_getRawY",          kl_AMotionEvent_getRawY),
+    N("AMotionEvent_getPressure",      kl_AMotionEvent_getPressure),
+
+    N("AHardwareBuffer_toHardwareBuffer",         kl_AHardwareBuffer_toHardwareBuffer),
+    N("AHardwareBuffer_fromHardwareBuffer",       kl_AHardwareBuffer_fromHardwareBuffer),
+    N("AHardwareBuffer_sendHandleToUnixSocket",   kl_AHardwareBuffer_sendHandleToUnixSocket),
+    N("AHardwareBuffer_recvHandleFromUnixSocket", kl_AHardwareBuffer_recvHandleFromUnixSocket),
 
     N("ANativeActivity_finish",        kl_ANativeActivity_finish),
     N("ANativeActivity_setWindowFormat", kl_ANativeActivity_setWindowFormat),

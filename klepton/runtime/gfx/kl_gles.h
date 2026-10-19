@@ -13,6 +13,10 @@ int kl_gles_enabled(void);
 // The guest's GL/EGL entry point from vpgles, or NULL (the caller keeps its own answer).
 void *kl_gles_sym(const char *name);
 
+// Every NULL kl_gles_sym returned is logged once as it happens; this prints the full list (the names
+// vpgles lacks) for the end-of-session report.
+void kl_gles_report_unresolved(FILE *out);
+
 // 1 once vpgles is serving the guest; never starts it (kl_gles_enabled does): a Vulkan run asking
 // must not bring up a second instance/device.
 int kl_gles_vpk_up(void);

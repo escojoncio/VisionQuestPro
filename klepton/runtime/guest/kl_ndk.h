@@ -71,4 +71,24 @@ void  kl_ndk_looper_wake(void *looper);
 // nobody polls is a queue with no drain — see the note at the definition.
 int kl_ndk_pump_looper(int timeout_ms);
 
+
+// ---- motion sensors, derived from the head pose (see the ASensor note in kl_ndk.c) ----
+// One consistent sample for a consumer that is not the NDK queue (UE4's activity sensor thunks).
+typedef struct {
+    float gravity[3];     // m/s^2, head frame: world up as an accelerometer at rest reads it
+    float rate[3];        // rad/s, head frame (valid only when rate_valid)
+    float quat[4];        // x y z w, head -> Android's East-North-Up world, w >= 0
+    float tilt[3];        // azimuth, pitch, roll (radians), as SensorManager.getOrientation
+    int   rate_valid;
+} kl_ndk_motion;
+int kl_ndk_motion_sample(kl_ndk_motion *m);      // 0 when no orientation is available
+
+// ---- the guest's AInputQueue (one per process) ----
+// A NativeActivity host passes this to onInputQueueCreated. Events: AKEY_EVENT_ACTION_* /
+// AMOTION_EVENT_ACTION_*, Android keycodes; `axes` is indexed by AMOTION_EVENT_AXIS_* (X=0, Y=1...).
+// Attaching the queue to a looper also starts the Touch-controller -> gamepad bridge.
+void *kl_ndk_input_queue(void);
+void  kl_ndk_input_push_key(int source, int device_id, int action, int keycode, int meta);
+void  kl_ndk_input_push_motion(int source, int device_id, int action, const float *axes, int naxes);
+
 #endif

@@ -1526,6 +1526,11 @@ static uint64_t klovrp_SetSystemDisplayFrequency(float hz) {
 // measures the display it is actually running on — see kl_ovrp.h.
 static int g_eye_w = (int)KL_OVRP_EYE_W;
 static int g_eye_h = (int)KL_OVRP_EYE_H;
+// 1 once a frontend has pushed the real size (kl_ovrp_set_eye_texture_size). An eye layer set
+// up before that is built at the Quest default and rebuilt at the final size: two full
+// swapchains (+195..400 MiB at 3840x2485 while the first is retired). The host should push the
+// final size (VQLaunch.swift computes it) BEFORE the guest starts so this never happens.
+static int g_eye_size_pushed;
 
 void kl_ovrp_set_eye_texture_size(int w, int h) {
     // A degenerate size is a measurement that went wrong, and it would reach
@@ -1533,6 +1538,7 @@ void kl_ovrp_set_eye_texture_size(int w, int h) {
     // wrong resolution renders, a zero one does not.
     if (w <= 0 || h <= 0) return;
     const int req_w = w, req_h = h;
+    g_eye_size_pushed = 1;
 
     // Unity applies its own resolution scale on top of whatever we say
     // (measured 1.2x), and allocates stages x eyes of RGBA16F at the result. A
@@ -7535,6 +7541,14 @@ static uint64_t klovrp_SetupLayer(void *device, const ovrp_layer_desc_eyefov *de
                 desc->texture_size.w, desc->texture_size.h,
                 g_eye_storage_w, g_eye_storage_h);
     int reused = l != NULL;
+    if (is_eye) {
+        static int said;
+        if (!g_eye_size_pushed && said++ < 4)
+            fprintf(stderr, "  [ovrp] SetupLayer: eye layer %dx%d built before the display size was "
+                            "pushed (Quest default %dx%d) — it will be rebuilt at the final size, "
+                            "two swapchains alive for a moment\n",
+                    desc->texture_size.w, desc->texture_size.h, g_eye_w, g_eye_h);
+    }
     for (int i = 0; i < KLOVRP_MAX_LAYERS && !l; i++)
         if (!g_layers[i].id) { l = &g_layers[i]; memset(l, 0, sizeof *l); }
     if (!l) {

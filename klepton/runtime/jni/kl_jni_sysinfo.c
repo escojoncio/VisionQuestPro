@@ -117,6 +117,16 @@ void kl_jni_note_log(int prio, const char *tag, const char *msg) {
 int kl_jni_quit_requested(void) { return atomic_load_explicit(&g_quit_requested, memory_order_acquire); }
 const char *kl_jni_quit_reason(void) { return g_quit_reason; }
 
+// The host ends the run without parking the caller (GPU lost: kl_vulkan). First request wins.
+void kl_jni_request_quit(const char *reason) {
+    pthread_mutex_lock(&g_quit_lock);
+    if (!atomic_load_explicit(&g_quit_requested, memory_order_relaxed)) {
+        snprintf(g_quit_reason, sizeof g_quit_reason, "%s", reason && *reason ? reason : "El juego se cerró");
+        atomic_store_explicit(&g_quit_requested, 1, memory_order_release);
+    }
+    pthread_mutex_unlock(&g_quit_lock);
+}
+
 static void klj_engine_quit(const char *who) {
     pthread_mutex_lock(&g_quit_lock);
     if (!atomic_load_explicit(&g_quit_requested, memory_order_relaxed)) {

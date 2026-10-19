@@ -48,6 +48,10 @@ void *kl_egl_current_context(void);
 // call. This is the work list, in the order the guest wanted it.
 void kl_egl_report(FILE *f);
 
+// The GL functions the guest called that no backend implements (each got a logging stub that
+// returned 0; none aborted). Printed by kl_egl_report, at exit, and callable at session end.
+void kl_egl_report_absent(FILE *f);
+
 // Shader sources the guest handed to glShaderSource. They are the input to the
 // GLSL ES -> SPIR-V -> MSL pipeline needs, and this is the only place they
 // exist in plain text — the APK stores them compressed inside Unity's assets.

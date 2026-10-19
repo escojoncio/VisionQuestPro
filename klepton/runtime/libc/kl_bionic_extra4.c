@@ -27,6 +27,7 @@
 #include <time.h>
 #include <unistd.h>
 #include <wchar.h>
+#include <zlib.h>
 #include <sys/event.h>
 #include <sys/ioctl.h>
 #include <sys/socket.h>
@@ -1141,6 +1142,19 @@ static const kl4_entry g_extra4[] = {
     E4("error", klv_error), E4("error_at_line", klv_error_at_line), E4("wscanf", klv_wscanf),
     E4("fwscanf", klv_fwscanf), E4("swscanf", klv_swscanf),
     E4("vswscanf", klx2_vswscanf), E4("vfwscanf", klx2_vfwscanf), E4("vwscanf", klx2_vwscanf),
+    // zlib: the rest of the surface a statically-linked or Android-system libz exports that the
+    // generated table does not forward (get_crc_table: Hellsplit; zError: Batman). Same ABI on
+    // LP64 Darwin (uLong is 64-bit on both), so plain forwards.
+    E4("get_crc_table", get_crc_table), E4("zError", zError), E4("zlibCompileFlags", zlibCompileFlags),
+    E4("crc32_z", crc32_z), E4("crc32_combine", crc32_combine), E4("adler32_z", adler32_z),
+    E4("adler32_combine", adler32_combine), E4("uncompress2", uncompress2), E4("compress", compress),
+    E4("deflateCopy", deflateCopy), E4("deflateParams", deflateParams), E4("deflateTune", deflateTune),
+    E4("deflatePrime", deflatePrime), E4("deflateSetDictionary", deflateSetDictionary),
+    E4("deflateGetDictionary", deflateGetDictionary), E4("deflateSetHeader", deflateSetHeader),
+    E4("inflateCopy", inflateCopy), E4("inflateSync", inflateSync), E4("inflatePrime", inflatePrime),
+    E4("inflateSetDictionary", inflateSetDictionary), E4("inflateGetDictionary", inflateGetDictionary),
+    E4("inflateGetHeader", inflateGetHeader), E4("inflateMark", inflateMark),
+    E4("inflateSyncPoint", inflateSyncPoint), E4("inflateUndermine", inflateUndermine),
     E4("error_message_count", &kl_error_message_count), E4("error_one_per_line", &kl_error_one_per_line),
     E4("error_print_progname", &kl_error_print_progname),
 };

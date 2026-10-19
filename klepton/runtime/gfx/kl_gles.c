@@ -248,10 +248,55 @@ int kl_gles_vpk_up(void) { return __atomic_load_n(&g_state, __ATOMIC_ACQUIRE) ==
 
 void *kl_gles_vk_handle(void) { return kl_gles_vpk_up() ? g_vk_lib : NULL; }
 
+// Every name vpgles does not resolve is logged (once per name) and remembered: the caller falls back to
+// its own answer (kl_egl.c: legacy impl or a stub that logs and returns 0, never aborts), and the list
+// below is the exact work list of GL/EGL functions vpgles lacks. Written at the end of the session
+// (kl_gles_report_unresolved, called from kl_egl_report) so no NULL goes unrecorded.
+#define GLES_MISS_MAX 1024
+static char *g_miss[GLES_MISS_MAX];
+static _Atomic unsigned g_nmiss;
+static pthread_mutex_t g_miss_mu = PTHREAD_MUTEX_INITIALIZER;
+
+static void gles_miss_atexit(void);
+static void gles_note_unresolved(const char *name) {
+    pthread_mutex_lock(&g_miss_mu);
+    unsigned n = atomic_load(&g_nmiss);
+    for (unsigned i = 0; i < n; i++)
+        if (!strcmp(g_miss[i], name)) { pthread_mutex_unlock(&g_miss_mu); return; }
+    if (n < GLES_MISS_MAX) {
+        g_miss[n] = strdup(name);
+        atomic_store(&g_nmiss, n + 1);
+    }
+    static int hooked;
+    if (!hooked) { hooked = 1; atexit(gles_miss_atexit); }
+    pthread_mutex_unlock(&g_miss_mu);
+    fprintf(stderr, "  [gles] vpgles does not resolve '%s' (NULL: the gateway answers with its own or a logging stub)\n", name);
+}
+
+// Also reached from the fault handler (signal context, via kl_egl_report): never blocks. trylock,
+// so a fault taken while a thread holds g_miss_mu skips the list instead of deadlocking. The list
+// prints once per size (g_miss_reported), so the crash report and the atexit hooks do not repeat it.
+static _Atomic unsigned g_miss_reported;
+void kl_gles_report_unresolved(FILE *out) {
+    if (pthread_mutex_trylock(&g_miss_mu) != 0) return;
+    unsigned n = atomic_load(&g_nmiss);
+    if (n && atomic_exchange(&g_miss_reported, n) != n) {
+        fprintf(out, "\n[gles] names asked of vpgles that it does not resolve: %u\n", n);
+        for (unsigned i = 0; i < n; i++) fprintf(out, "    %s\n", g_miss[i]);
+    }
+    pthread_mutex_unlock(&g_miss_mu);
+}
+
+static void gles_miss_atexit(void) { kl_gles_report_unresolved(stderr); }
+
 void *kl_gles_sym(const char *name) {
     if (!name || !kl_gles_enabled()) return NULL;
     void *p = g_proc(name);
-    return p ? gles_diag_wrap(name, p) : NULL;
+    if (!p) {
+        gles_note_unresolved(name);
+        return NULL;
+    }
+    return gles_diag_wrap(name, p);
 }
 
 void kl_gles_frame_end(void) {

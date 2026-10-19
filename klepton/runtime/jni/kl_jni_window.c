@@ -417,11 +417,26 @@ static klj_val klj_WindowInsets_getDisplayCutout(void *env, void *self, const kl
 static klj_val klj_PackageManager_hasSystemFeature(void *env, void *self, const klj_val *a, int n) {
     (void)env; (void)self;
     const char *f = n > 0 ? klj_str(a[0].l) : "";
-    // Truthfully, for the device we present: a Quest 2 reports low-latency audio
-    // and it is the branch FMOD wants. Anything else is answered no rather than
-    // guessed yes — claiming a feature is a promise, same rule as the EGL and GL
-    // extension strings.
-    int has = strstr(f, "audio.low_latency") != NULL;
+    // Truthfully, for the device we present. A feature is a promise (same rule as the EGL and GL
+    // extension strings), so each "yes" is backed by something that is actually served:
+    //   audio.low_latency / audio.output / microphone   FMOD's branch; CoreAudio in and out
+    //   sensor.accelerometer / sensor.gyroscope         the head-pose sensors (kl_ndk.c ASensor)
+    //   vr.headtracking / vr.high_performance           it is a headset, and ARKit tracks the head
+    //   wifi / bluetooth / bluetooth_le                 a Quest has them; connectivity itself is
+    //                                                   still the offline answer elsewhere
+    // Anything else is answered no rather than guessed yes (no camera feature, no touchscreen, no
+    // telephony, no location: none is served).
+    static const char *const yes[] = {
+        "android.hardware.audio.low_latency", "android.hardware.audio.output",
+        "android.hardware.microphone", "android.hardware.sensor.accelerometer",
+        "android.hardware.sensor.gyroscope", "android.hardware.vr.headtracking",
+        "android.hardware.vr.high_performance", "android.hardware.wifi",
+        "android.hardware.bluetooth", "android.hardware.bluetooth_le",
+    };
+    int has = 0;
+    for (size_t i = 0; i < sizeof yes / sizeof yes[0]; i++)
+        if (!strcmp(f, yes[i])) { has = 1; break; }
+    if (!has && strstr(f, "audio.low_latency")) has = 1;
     KLJ_LOG("PackageManager.hasSystemFeature(\"%s\") -> %s", f, has ? "true" : "false");
     return (klj_val){.j = (uint64_t)has};
 }
@@ -764,7 +779,48 @@ static klj_val klj_Activity_requestPermissions(void *env, void *self, const klj_
     return (klj_val){.j = 0};
 }
 
+// ---------------------------------------------------------- WindowMetrics (API 30+)
+// WindowManager.getMaximumWindowMetrics()/getCurrentWindowMetrics(): Unity 6 sizes its surface from
+// them. One window, one display, so both describe the presented panel: bounds are
+// (0, 0, KLJ_DISPLAY_W, KLJ_DISPLAY_H) -- the same numbers getRealMetrics and DisplayMetrics
+// answer -- and the insets are the zero WindowInsets the decor view already returns.
+static klj_val klj_WindowManager_getWindowMetrics(void *env, void *self, const klj_val *a, int n) {
+    (void)env; (void)self; (void)a; (void)n;
+    static void *metrics;
+    return klj_singleton("android/view/WindowMetrics", &metrics);
+}
+static klj_val klj_WindowMetrics_getBounds(void *env, void *self, const klj_val *a, int n) {
+    (void)env; (void)self; (void)a; (void)n;
+    static void *rect;                         // fields come from g_fields (android/graphics/Rect)
+    return klj_singleton("android/graphics/Rect", &rect);
+}
+static klj_val klj_WindowMetrics_getWindowInsets(void *env, void *self, const klj_val *a, int n) {
+    (void)env; (void)self; (void)a; (void)n;
+    return (klj_val){.l = kl_jni_new_object(KLJ_CLASS_WINDOWINSETS)};
+}
+static klj_val klj_WindowMetrics_getDensity(void *env, void *self, const klj_val *a, int n) {
+    (void)env; (void)self; (void)a; (void)n;
+    return (klj_val){.d = KLJ_DISPLAY_DENSITY};
+}
+static klj_val klj_Rect_width(void *env, void *self, const klj_val *a, int n) {
+    (void)env; (void)self; (void)a; (void)n;
+    return (klj_val){.j = KLJ_DISPLAY_W};
+}
+static klj_val klj_Rect_height(void *env, void *self, const klj_val *a, int n) {
+    (void)env; (void)self; (void)a; (void)n;
+    return (klj_val){.j = KLJ_DISPLAY_H};
+}
+
 const klj_binding klj_bind_window[] = {
+    {"android/view/WindowManager", "getMaximumWindowMetrics", "()Landroid/view/WindowMetrics;",
+     klj_WindowManager_getWindowMetrics},
+    {"android/view/WindowManager", "getCurrentWindowMetrics", "()Landroid/view/WindowMetrics;",
+     klj_WindowManager_getWindowMetrics},
+    {"android/view/WindowMetrics", "getBounds",       "()Landroid/graphics/Rect;", klj_WindowMetrics_getBounds},
+    {"android/view/WindowMetrics", "getWindowInsets", "()Landroid/view/WindowInsets;", klj_WindowMetrics_getWindowInsets},
+    {"android/view/WindowMetrics", "getDensity",      "()F", klj_WindowMetrics_getDensity},
+    {"android/graphics/Rect", "width",  "()I", klj_Rect_width},
+    {"android/graphics/Rect", "height", "()I", klj_Rect_height},
     // Reached by pressing *Start Pairing*: the shell checks a permission before
     // it opens the socket. Bound on SteamLink rather than on Context because a
     // binding is matched on the full (class, name, signature) triple and this is
@@ -834,6 +890,7 @@ const klj_binding klj_bind_window[] = {
     {"android/view/View", "setOnApplyWindowInsetsListener", "(Landroid/view/View$OnApplyWindowInsetsListener;)V", klj_View_setOnApplyWindowInsetsListener},
     {"android/view/WindowInsets", "getDisplayCutout", "()Landroid/view/DisplayCutout;", klj_WindowInsets_getDisplayCutout},
     {"android/content/pm/PackageManager", "hasSystemFeature", "(Ljava/lang/String;)Z", klj_PackageManager_hasSystemFeature},
+    {"android/content/pm/PackageManager", "hasSystemFeature", "(Ljava/lang/String;I)Z", klj_PackageManager_hasSystemFeature},
     {"android/content/Context", "checkCallingOrSelfPermission", "(Ljava/lang/String;)I", klj_Context_checkPermission},
     {"com/google/vr/sdk/samples/permission/PermissionHelper", "checkPermission",
      "(Ljava/lang/String;)Z", klj_PermissionHelper_check},

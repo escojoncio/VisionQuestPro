@@ -322,7 +322,7 @@ static klj_val klj_MediaRouter_getSelectedRoute(void *env, void *self, const klj
 // The value is synthetic and constant: Android's own android_id is a per-device,
 // per-app-signing-key random 64-bit value, so any 16-hex-digit string is a
 // well-formed one. Stable across runs because callers cache it and compare.
-#define KLJ_ANDROID_ID "4b6c6570746f6e01"      /* "Klepton\1" as hex */
+// (KLJ_ANDROID_ID itself lives in kl_jni_int.h: the UE4 activity answers the same id.)
 
 static klj_val klj_Context_getContentResolver(void *env, void *self, const klj_val *a, int n) {
     (void)env; (void)self; (void)a; (void)n;
@@ -331,17 +331,115 @@ static klj_val klj_Context_getContentResolver(void *env, void *self, const klj_v
     return (klj_val){.l = resolver};
 }
 
-static klj_val klj_Settings_Secure_getString(void *env, void *self, const klj_val *a, int n) {
-    (void)env; (void)self;
-    const char *key = n > 1 ? klj_str(a[1].l) : NULL;
-    if (key && strcmp(key, "android_id") == 0)
-        return (klj_val){.l = kl_jni_new_string(KLJ_ANDROID_ID)};
-    // Android returns null for a setting that is not present, and callers are
-    // written for it. Naming it keeps an unexpected key from looking like a value.
-    KLJ_LOG("Settings.Secure.getString(\"%s\") -> null (not a setting we serve)",
-            key ? key : "(null)");
-    return (klj_val){.l = NULL};
+// android.provider.Settings.{Secure,Global,System}: one table behind every accessor, because the
+// three namespaces are one device and a guest reads the same key through whichever it likes
+// (Unity asks Secure for "device_name"/"bluetooth_name", Unity 6 asks Global for DEVICE_NAME).
+// Values are what a Quest answers; a key that is not here is genuinely ABSENT on the device,
+// which Android reports as null / the caller's default / SettingNotFoundException -- and is logged
+// once so a key a guest depends on shows up as a work item rather than a silent null.
+static const char *klj_setting_value(const char *key, const char **owned_name) {
+    static const struct { const char *key, *val; } tab[] = {
+        {"android_id",                   KLJ_ANDROID_ID},
+        {"airplane_mode_on",             "0"},
+        {"adb_enabled",                  "0"},
+        {"development_settings_enabled", "0"},
+        {"auto_time",                    "1"},
+        {"auto_time_zone",               "1"},
+        {"stay_on_while_plugged_in",     "0"},
+        {"always_finish_activities",     "0"},
+        {"wifi_on",                      "1"},
+        {"bluetooth_on",                 "1"},
+        {"window_animation_scale",       "1.0"},
+        {"transition_animation_scale",   "1.0"},
+        {"animator_duration_scale",      "1.0"},
+        {"font_scale",                   "1.0"},
+        {"accelerometer_rotation",       "0"},
+        {"screen_off_timeout",           "1800000"},
+        {"install_non_market_apps",      "0"},
+        {"mock_location",                "0"},
+    };
+    if (!key) return NULL;
+    // The user-visible name of the device: the same identity Build.MODEL carries, so the two
+    // never disagree (Meta's own name for it, as Settings > About shows it).
+    if (!strcmp(key, "device_name") || !strcmp(key, "bluetooth_name")) {
+        *owned_name = klj_is_quest3() ? "Meta Quest 3" : "Meta Quest 2";
+        return *owned_name;
+    }
+    for (size_t i = 0; i < sizeof tab / sizeof tab[0]; i++)
+        if (!strcmp(tab[i].key, key)) return tab[i].val;
+    return NULL;
 }
+
+static const char *klj_setting_lookup(const char *ns, const char *key) {
+    const char *dummy = NULL;
+    const char *v = klj_setting_value(key, &dummy);
+    if (!v) {
+        static const char *seen[32];
+        static unsigned nseen;
+        unsigned i = 0;
+        for (; i < nseen; i++) if (!strcmp(seen[i], key ? key : "")) break;
+        if (i == nseen && nseen < 32) {
+            seen[nseen++] = strdup(key ? key : "");
+            KLJ_LOG("Settings.%s(\"%s\") -> absent (not a setting this device has)", ns, key ? key : "(null)");
+        }
+    }
+    return v;
+}
+
+#define KLJ_SETTINGS_ACCESSORS(NS) \
+static klj_val klj_Settings_##NS##_getString(void *env, void *self, const klj_val *a, int n) { \
+    (void)env; (void)self; \
+    const char *v = klj_setting_lookup(#NS ".getString", n > 1 ? klj_str(a[1].l) : NULL); \
+    return (klj_val){.l = v ? kl_jni_new_string(v) : NULL}; \
+} \
+static klj_val klj_Settings_##NS##_getInt3(void *env, void *self, const klj_val *a, int n) { \
+    (void)env; (void)self; \
+    const char *v = klj_setting_lookup(#NS ".getInt", n > 1 ? klj_str(a[1].l) : NULL); \
+    return (klj_val){.j = (uint64_t)(int64_t)(v ? (int)strtol(v, NULL, 10) : (n > 2 ? (int)a[2].j : 0))}; \
+} \
+static klj_val klj_Settings_##NS##_getInt2(void *env, void *self, const klj_val *a, int n) { \
+    (void)env; (void)self; \
+    const char *k = n > 1 ? klj_str(a[1].l) : NULL; \
+    const char *v = klj_setting_lookup(#NS ".getInt", k); \
+    if (!v) { klj_throw_new("android/provider/Settings$SettingNotFoundException", k ? k : ""); return (klj_val){.j = 0}; } \
+    return (klj_val){.j = (uint64_t)(int64_t)(int)strtol(v, NULL, 10)}; \
+} \
+static klj_val klj_Settings_##NS##_getLong3(void *env, void *self, const klj_val *a, int n) { \
+    (void)env; (void)self; \
+    const char *v = klj_setting_lookup(#NS ".getLong", n > 1 ? klj_str(a[1].l) : NULL); \
+    return (klj_val){.j = (uint64_t)(v ? strtoll(v, NULL, 10) : (n > 2 ? (int64_t)a[2].j : 0))}; \
+} \
+static klj_val klj_Settings_##NS##_getLong2(void *env, void *self, const klj_val *a, int n) { \
+    (void)env; (void)self; \
+    const char *k = n > 1 ? klj_str(a[1].l) : NULL; \
+    const char *v = klj_setting_lookup(#NS ".getLong", k); \
+    if (!v) { klj_throw_new("android/provider/Settings$SettingNotFoundException", k ? k : ""); return (klj_val){.j = 0}; } \
+    return (klj_val){.j = (uint64_t)strtoll(v, NULL, 10)}; \
+} \
+static klj_val klj_Settings_##NS##_getFloat3(void *env, void *self, const klj_val *a, int n) { \
+    (void)env; (void)self; \
+    const char *v = klj_setting_lookup(#NS ".getFloat", n > 1 ? klj_str(a[1].l) : NULL); \
+    return (klj_val){.d = v ? strtod(v, NULL) : (n > 2 ? a[2].d : 0.0)}; \
+} \
+static klj_val klj_Settings_##NS##_getFloat2(void *env, void *self, const klj_val *a, int n) { \
+    (void)env; (void)self; \
+    const char *k = n > 1 ? klj_str(a[1].l) : NULL; \
+    const char *v = klj_setting_lookup(#NS ".getFloat", k); \
+    if (!v) { klj_throw_new("android/provider/Settings$SettingNotFoundException", k ? k : ""); return (klj_val){.d = 0.0}; } \
+    return (klj_val){.d = strtod(v, NULL)}; \
+}
+KLJ_SETTINGS_ACCESSORS(Secure)
+KLJ_SETTINGS_ACCESSORS(Global)
+KLJ_SETTINGS_ACCESSORS(System)
+
+#define KLJ_SETTINGS_ROWS(NS) \
+    {"android/provider/Settings$" #NS, "getString", "(Landroid/content/ContentResolver;Ljava/lang/String;)Ljava/lang/String;", klj_Settings_##NS##_getString}, \
+    {"android/provider/Settings$" #NS, "getInt",    "(Landroid/content/ContentResolver;Ljava/lang/String;I)I", klj_Settings_##NS##_getInt3}, \
+    {"android/provider/Settings$" #NS, "getInt",    "(Landroid/content/ContentResolver;Ljava/lang/String;)I",  klj_Settings_##NS##_getInt2}, \
+    {"android/provider/Settings$" #NS, "getLong",   "(Landroid/content/ContentResolver;Ljava/lang/String;J)J", klj_Settings_##NS##_getLong3}, \
+    {"android/provider/Settings$" #NS, "getLong",   "(Landroid/content/ContentResolver;Ljava/lang/String;)J",  klj_Settings_##NS##_getLong2}, \
+    {"android/provider/Settings$" #NS, "getFloat",  "(Landroid/content/ContentResolver;Ljava/lang/String;F)F", klj_Settings_##NS##_getFloat3}, \
+    {"android/provider/Settings$" #NS, "getFloat",  "(Landroid/content/ContentResolver;Ljava/lang/String;)F",  klj_Settings_##NS##_getFloat2},
 
 // java.lang.Thread (start / currentThread / setName and the rest of the
 // lifecycle) moved to kl_jni_looper.c, beside HandlerThread, so the one struct
@@ -471,7 +569,9 @@ const klj_binding klj_bind_net[] = {
     {"com/unity3d/player/UnityPlayer", "executeMainThreadJobs", "()V", klj_UnityPlayer_executeMainThreadJobs},
     {"com/unity3d/player/UnityPlayer", "applyWindowUIChanges", "(Z)V", klj_void_noop},
     {"android/content/Context", "getContentResolver", "()Landroid/content/ContentResolver;", klj_Context_getContentResolver},
-    {"android/provider/Settings$Secure", "getString", "(Landroid/content/ContentResolver;Ljava/lang/String;)Ljava/lang/String;", klj_Settings_Secure_getString},
+    KLJ_SETTINGS_ROWS(Secure)
+    KLJ_SETTINGS_ROWS(Global)
+    KLJ_SETTINGS_ROWS(System)
     {"android/media/AudioManager", "getDevices", "(I)[Landroid/media/AudioDeviceInfo;", klj_AudioManager_getDevices},
     // getProductName answers a String; a guest that calls toString() on the
     // CharSequence gets the same object back, as Java's String.toString does.

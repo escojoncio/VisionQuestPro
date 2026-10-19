@@ -317,18 +317,60 @@ static klj_val klj_HeadsetReceiver_start(void *env, void *self, const klj_val *a
     return (klj_val){.j = 0};
 }
 
-// `AndroidThunkJava_PushSensorEvents` — the engine draining the activity's
-// accumulated accelerometer / gyro / magnetometer / gravity readings into
-// `nativeHandleSensorEvents([F[F[F[F)`, once per game tick.
+// `AndroidThunkJava_EnableMotion(boolean)` / `AndroidThunkJava_PushSensorEvents()` — the engine
+// turning the activity's motion sensors on, then draining them into
+// `nativeHandleSensorEvents([F tilt, [F rotation_rate, [F gravity, [F acceleration)` once per
+// game tick (three floats each; the engine's own motion input reads them as Tilt, RotationRate,
+// Gravity, Acceleration).
 //
-// A no-op, and it is the guest's OWN no-op arm rather than a refusal: the body
-// is `if (!sensorsRegistered) return;` and then `if (!havePending) return;`,
-// and nothing here registers a sensor. A VR guest's head pose comes from
-// OVRPlugin, not from these — this is the phone-orientation path — so there is
-// no reading to deliver and delivering a fabricated one would be four arrays of
-// invented physics arriving every frame.
+// The readings are the head's, from the same pose-derived sensor model the NDK ASensor queue uses
+// (kl_ndk_motion_sample), so the Java door and the native door cannot disagree:
+//   tilt           azimuth (gaze heading), pitch (gaze elevation), roll (head roll), radians --
+//                  well-conditioned for an upright head (see kl_ndk_motion_sample)
+//   rotation_rate  the gyroscope, head frame (rad/s). While the runtime has no velocity basis
+//                  (first sample after a gap) the whole push is skipped -- the Java's own
+//                  `!havePending` arm -- rather than delivering a zero, which would assert "still"
+//   gravity        world up in the head frame, 9.80665 m/s^2
+//   acceleration   zero: the user's linear acceleration has no source (a differentiated pose is
+//                  noise), so an accelerometer reading is gravity alone, exactly as at rest.
+// Nothing is delivered until the engine enabled motion, and nothing when no orientation exists.
+static int g_ue4_motion_on;
+
+static klj_val klj_GA_enableMotion(void *env, void *self, const klj_val *a, int n) {
+    (void)env; (void)self;
+    g_ue4_motion_on = n > 0 && (a[0].j & 0xff) != 0;
+    KLJ_LOG("AndroidThunkJava_EnableMotion(%s) — head-pose sensors %s", g_ue4_motion_on ? "true" : "false",
+            g_ue4_motion_on ? "delivered through PushSensorEvents" : "off");
+    return (klj_val){.j = 0};
+}
+
+static void *klj_ue4_native(const char *name, const char *sig) {
+    void *fn = kl_jni_native("com/epicgames/ue4/GameActivity", name, sig);
+    if (!fn) fn = kl_jni_native("com/epicgames/unreal/GameActivity", name, sig);
+    return fn;
+}
+
+static void *klj_ue4_float3(const float v[3]) {
+    void *arr = klj_new_array('F', NULL, 3);
+    float *d = klj_arr(arr)->data;
+    d[0] = v[0]; d[1] = v[1]; d[2] = v[2];
+    return arr;
+}
+
 static klj_val klj_GA_pushSensorEvents(void *env, void *self, const klj_val *a, int n) {
-    (void)env; (void)self; (void)a; (void)n;
+    (void)a; (void)n;
+    if (!g_ue4_motion_on) return (klj_val){.j = 0};
+    kl_ndk_motion m;
+    if (!kl_ndk_motion_sample(&m) || !m.rate_valid) return (klj_val){.j = 0};
+    void *fn = klj_ue4_native("nativeHandleSensorEvents", "([F[F[F[F)V");
+    if (!fn) {
+        static int said;
+        if (!said++) KLJ_LOG("PushSensorEvents: no registered nativeHandleSensorEvents — the engine never gets motion");
+        return (klj_val){.j = 0};
+    }
+    const float zero[3] = {0, 0, 0};
+    ((void (*)(void *, void *, void *, void *, void *, void *))fn)(
+        env, self, klj_ue4_float3(m.tilt), klj_ue4_float3(m.rate), klj_ue4_float3(m.gravity), klj_ue4_float3(zero));
     return (klj_val){.j = 0};
 }
 
@@ -372,12 +414,19 @@ static klj_val klj_GA_setDesiredViewSize(void *env, void *self, const klj_val *a
     return (klj_val){.j = 0};
 }
 
-// Display refresh rate. The compositor presents at a fixed rate; report 90 Hz
-// as the one supported mode. Set is accepted (there is nothing to change) so
-// UE4's "pick a rate and apply it" path completes.
+// Display refresh rate: the PANEL's real frequency, as the XR runtime knows it (kl_ovrp_display_frequency:
+// pushed by the compositor, the same number ovrp_GetSystemDisplayFrequency2 and
+// xrGetDisplayRefreshRateFB report), or what the guest itself last asked for and was granted. 72 only
+// when no frontend has published a rate yet -- the presented Quest display's own default.
+static int klj_ue4_refresh_hz(void) {
+    float hz = kl_ovrp_guest_display_frequency();
+    if (hz <= 0.0f) hz = kl_ovrp_display_frequency();
+    if (hz <= 0.0f) hz = KLJ_DISPLAY_REFRESH;
+    return (int)(hz + 0.5f);
+}
 static klj_val klj_GA_getNativeDisplayRefreshRate(void *env, void *self, const klj_val *a, int n) {
     (void)env; (void)self; (void)a; (void)n;
-    return (klj_val){.j = 90};
+    return (klj_val){.j = (uint64_t)klj_ue4_refresh_hz()};
 }
 
 // AndroidThunkJava_GetDeviceOrientation()I feeds FAndroidMisc::GetDeviceOrientation,
@@ -390,29 +439,200 @@ static klj_val klj_GA_getDeviceOrientation(void *env, void *self, const klj_val 
     (void)env; (void)self; (void)a; (void)n;
     return (klj_val){.j = 3};   // EDeviceScreenOrientation::LandscapeLeft
 }
+// SetNativeDisplayRefreshRate(I)Z: a rate the runtime offers is granted (and is then what the getter
+// above, ovrp and OpenXR all report back); one it does not offer is refused, as the Java's
+// Display.Mode search does when no mode matches.
 static klj_val klj_GA_setNativeDisplayRefreshRate(void *env, void *self, const klj_val *a, int n) {
-    (void)env; (void)self; (void)a; (void)n;
-    return (klj_val){.j = 1};   // jboolean true — accepted
+    (void)env; (void)self;
+    int hz = n > 0 ? (int)a[0].j : 0;
+    int ok = hz > 0 && kl_ovrp_request_display_frequency((float)hz) != 0;
+    KLJ_LOG("AndroidThunkJava_SetNativeDisplayRefreshRate(%d) -> %s", hz, ok ? "granted" : "refused (not an offered rate)");
+    return (klj_val){.j = (uint64_t)ok};
 }
+// GetSupportedNativeDisplayRefreshRates()[I: the panel's rate and the lower cadences kl_ovrp offers.
 static klj_val klj_GA_getSupportedRefreshRates(void *env, void *self, const klj_val *a, int n) {
     (void)env; (void)self; (void)a; (void)n;
-    static void *arr;
-    if (!arr) {
-        arr = klj_new_array('I', NULL, 1);
-        int32_t *v = klj_arr(arr)->data;
-        v[0] = 90;
-    }
+    float hz[16];
+    int cnt = kl_ovrp_display_frequencies(hz, 16);
+    if (cnt <= 0) { hz[0] = (float)klj_ue4_refresh_hz(); cnt = 1; }
+    void *arr = klj_new_array('I', NULL, cnt);
+    int32_t *v = klj_arr(arr)->data;
+    for (int i = 0; i < cnt; i++) v[i] = (int32_t)(hz[i] + 0.5f);
     return (klj_val){.l = arr};
 }
 
-// The system font directory, as the Java finds it: the first of /system/fonts,
-// /system/font, /data/fonts that exists, with a trailing slash. A real Android
-// device answers the first. Nothing of the guest's is under it here, so a font
-// the engine then fails to open is a miss it reports itself — which is a better
-// place to find out than a directory name we invented.
+// The system font directory. The Java's answer is the first of /system/fonts, /system/font,
+// /data/fonts that exists, plus a trailing slash. There is no /system/fonts here, and a name with
+// nothing behind it is a directory the engine then fails to read from, so the answer is a REAL
+// directory: the baked-in menu font (kl_menu_font.S, DejaVu Sans) is written once into the guest's
+// cache dir and the names Android's fonts go by are links to it. The engine falls its faces back to
+// whatever it finds, so text renders instead of silently missing. Without the embedded font (or a
+// writable cache) the answer stays the Quest's "/system/fonts/".
+#ifdef __APPLE__
+extern const unsigned char kl_menu_font_ue4[] __asm__("_kl_menu_font");
+extern const unsigned char kl_menu_font_ue4_end[] __asm__("_kl_menu_font_end");
+#endif
+static char g_ue4_font_dir[320] = "/system/fonts/";
+static pthread_once_t g_ue4_font_once = PTHREAD_ONCE_INIT;
+
+static void klj_ue4_font_dir_init(void) {
+#ifdef __APPLE__
+    static const char *const names[] = {
+        "Roboto-Regular.ttf", "Roboto-Bold.ttf", "Roboto-Italic.ttf", "Roboto-BoldItalic.ttf",
+        "RobotoCondensed-Regular.ttf", "DroidSans.ttf", "DroidSans-Bold.ttf", "DroidSansMono.ttf",
+        "DroidSansFallback.ttf",
+    };
+    char gdir[256], gfile[320], tmp[1024];
+    snprintf(gdir, sizeof gdir, "/data/data/%s/cache/fonts", klj_guest_package());
+    kl_guest_mkdirs(gdir);
+    snprintf(gfile, sizeof gfile, "%s/%s", gdir, names[0]);
+    const char *host = kl_guest_path(gfile, tmp, sizeof tmp);
+    size_t len = (size_t)(kl_menu_font_ue4_end - kl_menu_font_ue4);
+    struct stat st;
+    if (stat(host, &st) != 0 || (size_t)st.st_size != len) {
+        FILE *f = fopen(host, "wb");
+        int ok = f && fwrite(kl_menu_font_ue4, 1, len, f) == len;
+        if (f) fclose(f);
+        if (!ok) { KLJ_LOG("GetFontDirectory: cannot write %s — answering /system/fonts/", host); return; }
+    }
+    for (size_t i = 1; i < sizeof names / sizeof names[0]; i++) {
+        char lf[320], lt[1024];
+        snprintf(lf, sizeof lf, "%s/%s", gdir, names[i]);
+        const char *lhost = kl_guest_path(lf, lt, sizeof lt);
+        if (stat(lhost, &st) != 0) (void)symlink(names[0], lhost);
+    }
+    snprintf(g_ue4_font_dir, sizeof g_ue4_font_dir, "%s/", gdir);
+    KLJ_LOG("GetFontDirectory -> %s (%zu-byte baked-in face, %zu names)", g_ue4_font_dir, len,
+            sizeof names / sizeof names[0]);
+#endif
+}
+
 static klj_val klj_GA_getFontDirectory(void *env, void *self, const klj_val *a, int n) {
     (void)env; (void)self; (void)a; (void)n;
-    return (klj_val){.l = kl_jni_new_string("/system/fonts/")};
+    pthread_once(&g_ue4_font_once, klj_ue4_font_dir_init);
+    return (klj_val){.l = kl_jni_new_string(g_ue4_font_dir)};
+}
+
+// ---- identity / ads / URLs: what the activity answers for a device with no Google services ----
+// GetAndroidId is Settings.Secure.ANDROID_ID -- the SAME string Settings.Secure.getString answers
+// (KLJ_ANDROID_ID), because a title that reads both must not see two devices. The advertising id
+// is empty: no Play Services, and an empty id is what a user who limited ad tracking has.
+static klj_val klj_GA_getAndroidId(void *env, void *self, const klj_val *a, int n) {
+    (void)env; (void)self; (void)a; (void)n;
+    return (klj_val){.l = kl_jni_new_string(KLJ_ANDROID_ID)};
+}
+static klj_val klj_GA_getAdvertisingId(void *env, void *self, const klj_val *a, int n) {
+    (void)env; (void)self; (void)a; (void)n;
+    return (klj_val){.l = kl_jni_new_string("")};
+}
+// LaunchURL(String): the engine asking the system to open a web page. There is no browser and no
+// network by design (offline-only), so nothing is opened -- said once per URL class, not dropped.
+static klj_val klj_GA_launchURL(void *env, void *self, const klj_val *a, int n) {
+    (void)env; (void)self;
+    KLJ_LOG("AndroidThunkJava_LaunchURL(\"%s\") — not available offline (no browser, no network); not opened",
+            n > 0 && klj_str(a[0].l) ? klj_str(a[0].l) : "");
+    return (klj_val){.j = 0};
+}
+
+// GetInputDeviceInfo(int): InputDevice.getDevice(id) -> its vendor/product/name. This device presents
+// no Android InputDevice (IsGamepadAttached is false; controllers come through OVRPlugin/OpenXR),
+// so every id names a device that is not there, which the activity reports as null.
+static klj_val klj_GA_getInputDeviceInfo(void *env, void *self, const klj_val *a, int n) {
+    (void)env; (void)self;
+    static int said;
+    if (!said++) KLJ_LOG("AndroidThunkJava_GetInputDeviceInfo(%d) -> null (no Android InputDevice presented)",
+                         n > 0 ? (int)a[0].j : -1);
+    return (klj_val){.l = NULL};
+}
+
+// ---- the clipboard: the host's own pasteboard where there is one ----
+// ClipboardCopy(String) / ClipboardPaste()String. On visionOS this is UIPasteboard.general, reached
+// through the objc runtime so this file stays plain C and builds without UIKit; the text is also kept
+// in-process, which is what a paste answers when there is no host pasteboard (or it is empty).
+static char g_ue4_clip[8192];
+static pthread_mutex_t g_ue4_clip_mu = PTHREAD_MUTEX_INITIALIZER;
+
+#ifdef __APPLE__
+#include <objc/message.h>
+#include <objc/runtime.h>
+#include <CoreFoundation/CoreFoundation.h>
+extern void *objc_autoreleasePoolPush(void);
+extern void  objc_autoreleasePoolPop(void *);
+static id klj_pasteboard(void) {
+    Class pb = objc_getClass("UIPasteboard");
+    return pb ? ((id (*)(Class, SEL))objc_msgSend)(pb, sel_registerName("generalPasteboard")) : (id)0;
+}
+static int klj_host_pasteboard_set(const char *utf8) {
+    void *pool = objc_autoreleasePoolPush();
+    int ok = 0;
+    id gen = klj_pasteboard();
+    if (gen) {
+        CFStringRef str = CFStringCreateWithCString(NULL, utf8, kCFStringEncodingUTF8);
+        if (str) { ((void (*)(id, SEL, id))objc_msgSend)(gen, sel_registerName("setString:"), (id)str); CFRelease(str); ok = 1; }
+    }
+    objc_autoreleasePoolPop(pool);
+    return ok;
+}
+static int klj_host_pasteboard_get(char *out, size_t cap) {
+    void *pool = objc_autoreleasePoolPush();
+    int ok = 0;
+    id gen = klj_pasteboard();
+    if (gen) {
+        CFStringRef str = (CFStringRef)((id (*)(id, SEL))objc_msgSend)(gen, sel_registerName("string"));
+        ok = str && CFStringGetCString(str, out, (CFIndex)cap, kCFStringEncodingUTF8);
+    }
+    objc_autoreleasePoolPop(pool);
+    return ok;
+}
+#else
+static int klj_host_pasteboard_set(const char *utf8) { (void)utf8; return 0; }
+static int klj_host_pasteboard_get(char *out, size_t cap) { (void)out; (void)cap; return 0; }
+#endif
+
+static klj_val klj_GA_clipboardCopy(void *env, void *self, const klj_val *a, int n) {
+    (void)env; (void)self;
+    const char *s = n > 0 ? klj_str(a[0].l) : NULL;
+    if (!s) return (klj_val){.j = 0};
+    pthread_mutex_lock(&g_ue4_clip_mu);
+    snprintf(g_ue4_clip, sizeof g_ue4_clip, "%s", s);
+    pthread_mutex_unlock(&g_ue4_clip_mu);
+    int host = klj_host_pasteboard_set(s);
+    KLJ_LOG("AndroidThunkJava_ClipboardCopy(%zu bytes) -> %s", strlen(s), host ? "host pasteboard" : "in-process only");
+    return (klj_val){.j = 0};
+}
+static klj_val klj_GA_clipboardPaste(void *env, void *self, const klj_val *a, int n) {
+    (void)env; (void)self; (void)a; (void)n;
+    char buf[sizeof g_ue4_clip];
+    if (!klj_host_pasteboard_get(buf, sizeof buf)) {
+        pthread_mutex_lock(&g_ue4_clip_mu);
+        memcpy(buf, g_ue4_clip, sizeof buf);
+        pthread_mutex_unlock(&g_ue4_clip_mu);
+    }
+    return (klj_val){.l = kl_jni_new_string(buf)};
+}
+
+// ---- the virtual keyboard ----
+// ShowVirtualKeyboardInput(int inputType, String label, String contents): the engine asking for a
+// text entry. There is no IME here, so the entry is CANCELLED straight away through the engine's
+// own result callback, nativeVirtualKeyboardResult(false, contents): a widget waiting on the
+// keyboard gets its answer (unchanged text, "cancelled") instead of waiting forever. Re-entrant
+// calls from inside the callback are ignored.
+static klj_val klj_GA_showVirtualKeyboardInput(void *env, void *self, const klj_val *a, int n) {
+    static __thread int busy;
+    const char *contents = n > 2 ? klj_str(a[2].l) : NULL;
+    KLJ_LOG("AndroidThunkJava_ShowVirtualKeyboardInput(type %d) — no on-screen keyboard; cancelled",
+            n > 0 ? (int)a[0].j : -1);
+    void *fn = klj_ue4_native("nativeVirtualKeyboardResult", "(ZLjava/lang/String;)V");
+    if (fn && !busy) {
+        busy = 1;
+        ((void (*)(void *, void *, uint8_t, void *))fn)(env, self, 0, kl_jni_new_string(contents ? contents : ""));
+        busy = 0;
+    }
+    return (klj_val){.j = 0};
+}
+static klj_val klj_GA_hideVirtualKeyboardInput(void *env, void *self, const klj_val *a, int n) {
+    (void)env; (void)self; (void)a; (void)n;
+    return (klj_val){.j = 0};          // nothing is shown, so there is nothing to hide
 }
 
 // UE4's own VR gate, and the same question Unity's is: GameActivity.onCreate
@@ -946,7 +1166,23 @@ const klj_binding klj_bind_ue4[] = {
     {"com/epicgames/ue4/GameActivity", "AndroidThunkJava_IsBhapticsAvailable",
      "()Z", klj_GA_void_noop},
     {"com/epicgames/ue4/GameActivity", "AndroidThunkJava_EnableMotion",
-     "(Z)V", klj_GA_void_noop},
+     "(Z)V", klj_GA_enableMotion},
+    {"com/epicgames/ue4/GameActivity", "AndroidThunkJava_GetAndroidId",
+     "()Ljava/lang/String;", klj_GA_getAndroidId},
+    {"com/epicgames/ue4/GameActivity", "AndroidThunkJava_GetAdvertisingId",
+     "()Ljava/lang/String;", klj_GA_getAdvertisingId},
+    {"com/epicgames/ue4/GameActivity", "AndroidThunkJava_LaunchURL",
+     "(Ljava/lang/String;)V", klj_GA_launchURL},
+    {"com/epicgames/ue4/GameActivity", "AndroidThunkJava_GetInputDeviceInfo",
+     "(I)Lcom/epicgames/ue4/GameActivity$InputDeviceInfo;", klj_GA_getInputDeviceInfo},
+    {"com/epicgames/ue4/GameActivity", "AndroidThunkJava_ClipboardCopy",
+     "(Ljava/lang/String;)V", klj_GA_clipboardCopy},
+    {"com/epicgames/ue4/GameActivity", "AndroidThunkJava_ClipboardPaste",
+     "()Ljava/lang/String;", klj_GA_clipboardPaste},
+    {"com/epicgames/ue4/GameActivity", "AndroidThunkJava_ShowVirtualKeyboardInput",
+     "(ILjava/lang/String;Ljava/lang/String;)V", klj_GA_showVirtualKeyboardInput},
+    {"com/epicgames/ue4/GameActivity", "AndroidThunkJava_HideVirtualKeyboardInput",
+     "()V", klj_GA_hideVirtualKeyboardInput},
     {"com/epicgames/ue4/GameActivity", "AndroidThunkJava_GetSharedPreferenceString",
      "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;",
      klj_GA_getSharedPreferenceString},

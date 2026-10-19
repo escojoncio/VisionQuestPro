@@ -760,26 +760,24 @@ void *kl_jni_activity(void) {
     return activity;
 }
 
-// SensorManager.getDefaultSensor(type) -> null, for every type.
+// SensorManager.getDefaultSensor(type) -> null, for every type -- the JAVA door only.
 //
-// This is not a gap, it is the SAME answer kl_ndk.c's ASensorManager already
-// gives through the other door, and the two must not disagree: Vision Pro
-// exposes no Android-shaped accelerometer or gyro to the guest, and a VR title
-// does not want one — head and controller poses arrive through the XR runtime,
-// not through Input.acceleration. An empty sensor set is a configuration real
-// Android devices ship, so the engine already handles it, whereas a fabricated
-// sensor would feed it invented motion.
-//
-// Null is also what makes the guest STOP asking: Unity keeps the non-null ones
-// and never registers a listener for the rest, so nothing downstream waits on
-// an event that cannot come.
+// The motion sensors exist (head-pose-derived accelerometer, gyroscope, gravity and rotation
+// vectors) and are served at the door engines actually read them from: the NDK ASensorManager in
+// kl_ndk.c, which Unity's Input.acceleration/gyro and native engines use, and UE4's
+// EnableMotion/PushSensorEvents thunks (kl_jni_ue4.c), which drive nativeHandleSensorEvents from
+// the same sample. What this door cannot do is deliver: a Java Sensor is only useful through
+// registerListener(SensorEventListener), whose onSensorChanged has to run guest Java -- and the
+// guest's dex never runs here, so a non-null Sensor would be a promise of callbacks that cannot
+// arrive. Null is also what makes the guest STOP asking (it keeps the non-null ones and registers
+// listeners only for those), so nothing downstream waits on an event that cannot come.
 static klj_val klj_SensorManager_getDefaultSensor(void *env, void *self,
                                                   const klj_val *a, int n) {
     (void)env; (void)self;
     static int said;
     if (!said++)
-        KLJ_LOG("SensorManager.getDefaultSensor(%d) -> null; no Android sensors are "
-                "presented (the NDK ASensor list is empty for the same reason)",
+        KLJ_LOG("SensorManager.getDefaultSensor(%d) -> null at the Java door; the "
+                "head-pose sensors are served through the NDK ASensor queue / UE4 thunks",
                 n > 0 ? (int)a[0].j : -1);
     return (klj_val){.l = NULL};
 }

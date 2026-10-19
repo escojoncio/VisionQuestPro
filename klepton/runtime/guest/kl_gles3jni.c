@@ -143,7 +143,7 @@ double kl_gles3jni_pump(double seconds, const volatile int *quit) {
     double elapsed = 0;
     for (unsigned t = 0; (quit ? !*quit : 1) && (seconds < 0 || elapsed < seconds); t++) {
         kl_ndk_pump_looper(100);
-        if ((t + 1) % 10 == 0) kl_jni_drain_ui_tasks();
+        if ((t + 1) % 10 == 0) { kl_jni_drain_ui_tasks(); kl_mem_pressure_deliver(); }   // decided by the timer, delivered here (game/UI thread)
         if ((t + 1) % 20 == 0) kl_xash_tail_enginelog();   // stream engine.log -> our log
         kl_jni_tick_choreographer();
         struct timespec now; clock_gettime(CLOCK_MONOTONIC, &now);

@@ -1266,13 +1266,39 @@ static _Atomic int g_lowmem_untold;   // last attempt found no nativeLowMemory r
 
 void kl_vulkan_trim(const char *why);   // kl_vulkan.c: destroyed OpenXR images, no grace
 
+// DECIDE vs DELIVER. nativeLowMemory is managed code (Unity -> IL2CPP), and IL2CPP only
+// tolerates it on the game thread, between frames: on a libdispatch worker the guest's x18
+// is 0 and the thread is not registered with IL2CPP (SIGSEGV in libil2cpp at the 65 %
+// crossing, Attack on Titan f68b619). So the timer, the OS pressure source and the
+// frame-loop poll only DECIDE (thresholds / hysteresis), do the host-side trim, and leave
+// g_lowmem_pending (1 warning, 2 critical) plus its reason; kl_mem_pressure_deliver runs on
+// the game thread from kl_driver_frame and makes the guest call. If the game is blocked in
+// a synchronous load the notification waits until it frames again: there is no safe way to
+// run managed code from another thread while it is mid-call.
+static _Atomic int g_lowmem_pending;                 // 0 none, 1 warning, 2 critical
+static _Atomic(const char *) g_lowmem_pending_why;   // always a string literal
+
+// Safe on any thread: host-only work and two atomics.
 void kl_mem_pressure_fire(const char *why) {
     // Our own garbage first, whatever the guest does: destroyed OpenXR swapchain images still
     // waiting out their grace period (the OpenXR CTS was killed holding them, log 61).
     kl_vulkan_trim(why);
-    // Callable from the timer / OS-pressure queues as well as the game thread: kl_jni_env()
-    // and the local-frame stack are per thread (TLS), so a frame of our own keeps whatever
-    // refs the native creates from leaking on a thread that never pops.
+    int lvl = (strstr(why, "critical") || !strcmp(why, "headroom")) ? 2 : 1;
+    atomic_store(&g_lowmem_pending_why, why);
+    int cur = atomic_load(&g_lowmem_pending);
+    while (cur < lvl && !atomic_compare_exchange_weak(&g_lowmem_pending, &cur, lvl)) {}
+}
+
+static _Atomic int g_lowmem_crit_armed = 1;
+
+// GAME THREAD ONLY (kl_driver_frame, between frames). Consumes the pending notification and
+// calls the guest. kl_jni_env() and the local-frame stack are per thread (TLS); the frame
+// pair keeps whatever refs the native creates from leaking.
+void kl_mem_pressure_deliver(void) {
+    if (!atomic_load(&g_lowmem_pending)) return;
+    if (!atomic_exchange(&g_lowmem_pending, 0)) return;
+    const char *why = atomic_load(&g_lowmem_pending_why);
+    if (!why) why = "?";
     kl_jni_local_frame_push();
     int told = kl_jni_low_memory();
     kl_jni_local_frame_pop();
@@ -1281,10 +1307,11 @@ void kl_mem_pressure_fire(const char *why) {
         if (atomic_fetch_add(&said, 1) == 0)
             fprintf(stderr, "  [mem] pressure (%s) and the guest registered no "
                             "nativeLowMemory — nothing to notify\n", why);
-        // The 100 ms timer can fire before JNI_OnLoad / RegisterNatives: do not spend the
-        // episode on nobody, retry on the next poll (the log line below is muted meanwhile).
+        // Can fire before JNI_OnLoad / RegisterNatives: do not spend the episode on
+        // nobody, retry on the next poll (the log line below is muted meanwhile).
         atomic_store(&g_lowmem_untold, 1);
         atomic_store(&g_lowmem_armed, 1);
+        atomic_store(&g_lowmem_crit_armed, 1);
         return;
     }
     atomic_store(&g_lowmem_untold, 0);
@@ -1303,8 +1330,6 @@ void kl_mem_pressure_fire(const char *why) {
 static uint64_t kl_mem_real_limit(uint64_t used, uint64_t avail) {
     return (used && avail) ? used + avail : kl_mem_total();
 }
-
-static _Atomic int g_lowmem_crit_armed = 1;
 
 // Cheap enough for once a frame: one task_info call.
 // Two tiers on the REAL limit, one notification each per episode (the guest's
@@ -1369,9 +1394,9 @@ void kl_mem_pressure_init(void) {
     if (atomic_exchange(&done, 1)) return;
     // Own 100 ms timer: the frame loop only polls between frames, and a synchronous level
     // load can add 1.6 GB in 2 s with the game thread blocked (AC Nexus, jetsam at 6.5 GB).
-    // The notification is a plain call into the guest's nativeLowMemory (kl_jni_low_memory),
-    // made on this queue's thread exactly as the OS-pressure source below already does —
-    // it does not need the game thread. The armed flag keeps the frame-loop poll and this
+    // The timer and the OS source below only decide and trim on the host; the call into
+    // the guest's nativeLowMemory is made by kl_mem_pressure_deliver on the game thread
+    // (see the DECIDE vs DELIVER note). The armed flag keeps the frame-loop poll and this
     // timer from both firing for one episode.
     dispatch_source_t tmr = dispatch_source_create(
         DISPATCH_SOURCE_TYPE_TIMER, 0, 0,

@@ -1392,6 +1392,12 @@ final class KleptonControllers {
     private var hapticSent: [(level: Float, sharp: Float)] = [(-1, -2), (-1, -2)]
     private var hapticRetryAt: [TimeInterval] = [0, 0]
     private var hapticFailures = [0, 0]
+    /// makeAdvancedPlayer failures in a row per hand; at 2 the hand stays in
+    /// discrete-pulse mode for the session (`hapticNoPlayer`), engine untouched.
+    /// Both reset by `releaseHaptics` (controller disconnect/reconnect).
+    private var hapticPlayerFails = [0, 0]
+    private var hapticPlayerRetryAt: [TimeInterval] = [0, 0]
+    private var hapticNoPlayer = [false, false]
     /// Discrete-event fallback: until when, and the last event's end / level.
     private var hapticPulseUntil: [TimeInterval] = [0, 0]
     private var hapticPulseEnd: [TimeInterval] = [0, 0]
@@ -1465,7 +1471,9 @@ final class KleptonControllers {
         /// Best locality for a hand among what the device supports.
         func locality(hand: Int, supported: Set<GCHapticsLocality>) -> GCHapticsLocality? {
             let handle: GCHapticsLocality = hand == 0 ? .leftHandle : .rightHandle
-            let order: [GCHapticsLocality] = twoPiece
+            // One engine per DISTINCT locality: the Sense gets its own handle
+            // per hand (not .default on both), when the controller lists it.
+            let order: [GCHapticsLocality] = (twoPiece || name == "PS VR2 Sense")
                 ? [handle, .handles, .all, .default]
                 : [.default, .all, handle, .handles]
             return order.first(where: { supported.contains($0) }) ?? supported.first
@@ -1571,7 +1579,7 @@ final class KleptonControllers {
         }
         if hapticEngine[hand] != nil, hapticFailures[hand] > 0,
            now - (hapticEngineSince[hand] ?? now) > 2 { hapticFailures[hand] = 0 }
-        if Self.pulseMode || now < hapticPulseUntil[hand] {
+        if Self.pulseMode || hapticNoPlayer[hand] || now < hapticPulseUntil[hand] {
             if level > 0 { playPulse(hand: hand, level: level, sharp: sharp,
                                      seconds: seconds, at: now) }
             else if hapticRunning[hand] { stopPlayer(hand) }
@@ -1709,6 +1717,9 @@ final class KleptonControllers {
 
     private func hapticsPlayer(for hand: Int, at now: TimeInterval) -> CHHapticAdvancedPatternPlayer? {
         if let existing = hapticPlayer[hand] { return existing }
+        if hapticNoPlayer[hand] || now < hapticPlayerRetryAt[hand] { return nil }
+        // hapticsEngine returns only an engine whose start() has completed
+        // (it is synchronous), so the player is never made on a half-started one.
         guard let engine = hapticsEngine(for: hand, at: now) else { return nil }
         do {
             // Intensity 1.0 in the pattern, because the dynamic parameter
@@ -1722,11 +1733,23 @@ final class KleptonControllers {
                 with: CHHapticPattern(events: [event], parameters: []))
             player.loopEnabled = true
             hapticPlayer[hand] = player
+            hapticPlayerFails[hand] = 0
             return player
         } catch {
-            NSLog("[cp] haptics: hand \(hand) has no continuous player (\(error))"
-                  + " — new engine, discrete pulses meanwhile")
-            failEngine(hand, at: now)
+            // Rebuilding the engine did not help in the field (the same 4097
+            // came back 97 times), so the engine is kept — discrete events
+            // still work on it — and the continuous player is given up after
+            // two failures in a row, until the controller reconnects.
+            hapticPlayerFails[hand] += 1
+            if hapticPlayerFails[hand] >= 2 {
+                hapticNoPlayer[hand] = true
+                NSLog("[cp] haptics: hand \(hand) continuous player failed twice (\(error))"
+                      + " — discrete pulse mode for the rest of the session (retry on reconnect)")
+            } else {
+                hapticPlayerRetryAt[hand] = now + 0.3
+                NSLog("[cp] haptics: hand \(hand) has no continuous player (\(error))"
+                      + " — retrying once on the same engine, discrete pulses meanwhile")
+            }
             return nil
         }
     }
@@ -1782,6 +1805,7 @@ final class KleptonControllers {
             return nil
         }
         engine.isAutoShutdownEnabled = false
+        engine.playsHapticsOnly = true      // no audio session for a controller engine
         // Identity-checked: the stop event of an engine we replaced must not
         // remove its successor.
         engine.stoppedHandler = { [weak self, weak engine] reason in
@@ -1848,6 +1872,9 @@ final class KleptonControllers {
                 self.hapticFailures[hand] = 0
                 self.hapticRetryAt[hand] = 0
                 self.hapticPulseUntil[hand] = 0
+                self.hapticPlayerFails[hand] = 0
+                self.hapticPlayerRetryAt[hand] = 0
+                self.hapticNoPlayer[hand] = false
             }
         }
     }

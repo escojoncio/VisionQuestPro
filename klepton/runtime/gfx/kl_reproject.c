@@ -202,6 +202,9 @@ static const char kl_msl_reproject[] =
 "    uint     fadeOn;     // ovrp_SetColorScaleAndOffset — kl_reproject.h\n"
 "    float    fadeScale[4];\n"
 "    float    fadeOffset[4];\n"
+"    float    rcasCon;    // RCAS fused in the composite: exp2(-stops), 0 = off\n"
+"    uint     rcasFlags;  // bit 0 = denoise, bit 1 = a UI mask is bound for this view (texture 2 / 3)\n"
+"    float    rcasRect[4];// x0 y0 x1 y1 in the eye texture's uv — the taps stay inside\n"
 "};\n"
 "\n"
 // The sRGB EOTF, piecewise as the spec has it rather than a 2.2 power. The
@@ -248,7 +251,8 @@ static const char kl_msl_reproject[] =
 // members, so a float3 here costs nothing and hides nothing.
 "              uint chromaOn [[flat]]; float3 chromaKey [[flat]];\n"
 "              float2 chromaRange [[flat]];\n"
-"              uint fadeOn [[flat]]; float3 fadeS [[flat]]; float3 fadeO [[flat]]; };\n"
+"              uint fadeOn [[flat]]; float3 fadeS [[flat]]; float3 fadeO [[flat]];\n"
+"              float rcasCon [[flat]]; uint rcasFlags [[flat]]; float4 rcasRect [[flat]]; };\n"
 "\n"
 // One place, so a rung of the probe ladder cannot disagree with the real pass
 // about which eye it is looking at — which is the failure this whole file keeps
@@ -261,6 +265,51 @@ static const char kl_msl_reproject[] =
 "{\n"
 "    return src == 0u ? kl_eye_sample(t0, samp, uv, slice, srgbDecode)\n"
 "                     : kl_eye_sample(t1, samp, uv, slice, srgbDecode);\n"
+"}\n"
+"\n"
+// RCAS (Robust Contrast Adaptive Sharpening, FSR 1/2) fused into the composite:
+// the same 5-tap cross, gamma-2.0 perceptual space, bounded lobe and constant as
+// VPKEngine's vpktaa_native_rcas (vpktaa_native.metal), but the taps are bilinear
+// reads of the guest's eye texture one TEXEL of that texture apart, so it runs
+// where the picture is resampled anyway and needs no pass, ring or command buffer
+// of its own. The taps are clamped to the rect the guest drew (rcasRect) so
+// nothing outside its viewport is mixed in. The UI mask (VPKEngine's R8 coverage of
+// menus / HUD / text, same uv as the eye texture) is applied by the caller:
+// mix(rcas, original, mask).
+"static float3 kl_rcas_tap(texture2d_array<float> t0, texture2d_array<float> t1,\n"
+"                          sampler samp, float2 uv, float2 lo, float2 hi,\n"
+"                          uint slice, uint srgbDecode, uint src)\n"
+"{\n"
+"    float3 c = kl_eye_sample2(t0, t1, samp, clamp(uv, lo, hi), slice, srgbDecode, src).rgb;\n"
+"    return sqrt(saturate(c));\n"
+"}\n"
+"\n"
+"static float3 kl_rcas(texture2d_array<float> t0, texture2d_array<float> t1,\n"
+"                      sampler samp, float2 uv, float3 centre, float con, uint flags,\n"
+"                      float4 rect, uint slice, uint srgbDecode, uint src)\n"
+"{\n"
+"    float2 px = 1.0 / float2(src == 0u ? float2(t0.get_width(), t0.get_height())\n"
+"                                       : float2(t1.get_width(), t1.get_height()));\n"
+"    float2 lo = rect.xy + 0.5 * px;\n"
+"    float2 hi = max(rect.zw - 0.5 * px, lo);\n"
+"    float3 bN = kl_rcas_tap(t0, t1, samp, uv + float2(0.0, -px.y), lo, hi, slice, srgbDecode, src);\n"
+"    float3 dW = kl_rcas_tap(t0, t1, samp, uv + float2(-px.x, 0.0), lo, hi, slice, srgbDecode, src);\n"
+"    float3 fE = kl_rcas_tap(t0, t1, samp, uv + float2(px.x, 0.0), lo, hi, slice, srgbDecode, src);\n"
+"    float3 hS = kl_rcas_tap(t0, t1, samp, uv + float2(0.0, px.y), lo, hi, slice, srgbDecode, src);\n"
+"    float3 e = sqrt(saturate(centre));\n"
+"    float3 mn = min(min(bN, dW), min(fE, hS)), mx = max(max(bN, dW), max(fE, hS));\n"
+"    float3 hitMin = min(mn, e) / (4.0 * max(mx, float3(1.0e-4)));\n"
+"    float3 hitMax = (1.0 - max(mx, e)) / min(4.0 * mn - 4.0, float3(-1.0e-4));\n"
+"    float3 l = max(-hitMin, hitMax);\n"
+"    float lobe = max(-0.1875, min(max(l.r, max(l.g, l.b)), 0.0)) * con;\n"
+"    if ((flags & 1u) != 0u) {\n"
+"        float3 lw = float3(0.5, 1.0, 0.5);\n"
+"        float lb = dot(bN, lw), ld = dot(dW, lw), le = dot(e, lw), lf = dot(fE, lw), lh = dot(hS, lw);\n"
+"        float range = max(max(max(lb, ld), max(le, lf)), lh) - min(min(min(lb, ld), min(le, lf)), lh);\n"
+"        lobe *= 1.0 - 0.5 * saturate(abs(0.25 * (lb + ld + lf + lh) - le) / max(range, 1.0e-4));\n"
+"    }\n"
+"    float3 s = saturate((lobe * (bN + dW + fE + hS) + e) / (4.0 * lobe + 1.0));\n"
+"    return s * s;\n"
 "}\n"
 "\n"
 // ---- the chroma key -------------------------------------------------------
@@ -383,6 +432,9 @@ static const char kl_msl_reproject[] =
 "    o.fadeOn = u.fadeOn;\n"
 "    o.fadeS = float3(u.fadeScale[0], u.fadeScale[1], u.fadeScale[2]);\n"
 "    o.fadeO = float3(u.fadeOffset[0], u.fadeOffset[1], u.fadeOffset[2]);\n"
+"    o.rcasCon = u.rcasCon;\n"
+"    o.rcasFlags = u.rcasFlags;\n"
+"    o.rcasRect = float4(u.rcasRect[0], u.rcasRect[1], u.rcasRect[2], u.rcasRect[3]);\n"
 "    // The amplification index IS the texture slot: the caller binds the views'\n"
 "    // textures in the order it amplified them. A single-view pass amplifies\n"
 "    // once, lands on 0, and binds one texture.\n"
@@ -420,9 +472,21 @@ static const char kl_msl_reproject[] =
 "fragment float4 kl_reproject_f(VOut in [[stage_in]],\n"
 "                               texture2d_array<float> tex [[texture(0)]],\n"
 "                               texture2d_array<float> tex1 [[texture(1)]],\n"
+"                               texture2d_array<float> uiMask0 [[texture(2)]],\n"
+"                               texture2d_array<float> uiMask1 [[texture(3)]],\n"
 "                               sampler samp [[sampler(0)]])\n"
 "{\n"
-"    float4 c = kl_eye_sample2(tex, tex1, samp, in.uv, in.slice, in.srgb, in.src);\n""    if (in.fadeOn != 0u) c.rgb = c.rgb * in.fadeS + in.fadeO;\n"
+"    float4 c = kl_eye_sample2(tex, tex1, samp, in.uv, in.slice, in.srgb, in.src);\n"
+"    if (in.rcasCon > 0.0) {\n"
+"        float3 s = kl_rcas(tex, tex1, samp, in.uv, c.rgb, in.rcasCon, in.rcasFlags, in.rcasRect,\n"
+"                           in.slice, in.srgb, in.src);\n"
+"        if ((in.rcasFlags & 2u) != 0u) {\n"
+"            float m = in.src == 0u ? uiMask0.sample(samp, in.uv, 0u).r : uiMask1.sample(samp, in.uv, 0u).r;\n"
+"            s = mix(s, c.rgb, saturate(m));\n"
+"        }\n"
+"        c.rgb = s;\n"
+"    }\n"
+"    if (in.fadeOn != 0u) c.rgb = c.rgb * in.fadeS + in.fadeO;\n"
 // The matte is applied HERE and in no probe below. A rung of the probe ladder
 // exists to answer "is the picture arriving", and one that could also be
 // keyed out would answer that question with the matte's opinion — which is the
@@ -465,6 +529,9 @@ static const char kl_msl_reproject[] =
 "    o.chromaOn = ua[amp].chromaOn;\n"
 "    o.chromaKey = float3(ua[amp].chromaKey);\n"
 "    o.chromaRange = float2(ua[amp].chromaMin, ua[amp].chromaMax);\n"
+"    o.rcasCon = 0.0;\n"
+"    o.rcasFlags = 0u;\n"
+"    o.rcasRect = float4(0.0, 0.0, 1.0, 1.0);\n"
 "    o.src = uint(amp);\n"
 "    o.pos = ua[amp].visible == 0u ? kl_offscreen\n"
 "                                  : float4(p * 2.0 - 1.0, 0.0, 1.0);\n"
@@ -892,6 +959,10 @@ kl_reproject_uniforms kl_reproject_build(const kl_ovrp_render_pose *rendered, in
                                                 &u.chroma_max);
     // The guest's fade (black while a level streams in, Batman), read per build.
     u.fade_on = (uint32_t)klr_fade(u.fade_scale, u.fade_offset, NULL);
+    // RCAS off until the compositor asks (the struct is not zero-initialised).
+    u.rcas_con = 0.0f;
+    u.rcas_flags = 0;
+    u.rcas_rect[0] = 0.0f; u.rcas_rect[1] = 0.0f; u.rcas_rect[2] = 1.0f; u.rcas_rect[3] = 1.0f;
     // Passthrough (kl_passthrough): keep the guest's alpha so the room shows
     // through where it cleared to alpha 0. Bits documented at kl_chroma_apply.
     if (kl_passthrough_active())

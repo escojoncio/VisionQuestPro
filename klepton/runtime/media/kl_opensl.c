@@ -1754,6 +1754,14 @@ void *kl_opensl_sym(const char *name) {
     return kl_named_stub(name, (void *)klsl_called);
 }
 
+// Static coverage for the launcher's scanner (kl_shim_known): pure -- no slot, no stub.
+int kl_opensl_known(const char *name) {
+    if (!name) return 0;
+    for (size_t i = 0; i < sizeof g_sl_syms / sizeof g_sl_syms[0]; i++)
+        if (strcmp(g_sl_syms[i].name, name) == 0) return 1;
+    return 0;
+}
+
 void kl_opensl_report(FILE *f) {
     static int done;
     if (done) return;

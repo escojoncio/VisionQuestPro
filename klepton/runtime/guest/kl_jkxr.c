@@ -543,7 +543,7 @@ double kl_jkxr_pump(double seconds, const volatile int *quit) {
         // The UI thread's task queue and the frame clock, on the same thread
         // that turns the looper — which is what makes it the UI thread by the
         // only definition that matters.
-        if ((t + 1) % 10 == 0) kl_jni_drain_ui_tasks();
+        if ((t + 1) % 10 == 0) { kl_jni_drain_ui_tasks(); kl_mem_pressure_deliver(); }   // decided by the timer, delivered here (game/UI thread)
         kl_jni_tick_choreographer();
         struct timespec now;
         clock_gettime(CLOCK_MONOTONIC, &now);

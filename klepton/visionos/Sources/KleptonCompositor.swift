@@ -583,6 +583,25 @@ final class KleptonCompositor {
     private let cmdLock = NSLock()
     private var cmdCompleted = 0
     private var cmdError: Error?
+    // GPU time of the composite command buffers (GPUEndTime - GPUStartTime), one line a second:
+    // `[cp] gpu p50/p95/max`. Written from the completion handler under cmdLock.
+    private var cpGpuMs: [Double] = []
+    private var cpGpuWindowStart = CFAbsoluteTimeGetCurrent()
+    /// RCAS fused into the eye pass (kl_reproject.c kl_rcas) for frames VPKTAA did not resolve.
+    private static let rcasCon: Float = KleptonTAA.rcasInCompositor
+        ? exp2f(-2 * (1 - KleptonTAA.rcasIntensity)) : 0
+    private static let rcasDenoise: UInt32 = getenv("VPVK_RCAS_DENOISE").map { String(cString: $0) == "1" } == true ? 1 : 0
+    private var loggedRcasComp = false
+    private var loggedUiMaskOn = false
+    private var loggedUiMaskNone = false
+    private var loggedUiMaskSize = false
+    /// 1x1 r8 2DArray bound where no UI mask is (the fragment declares the slots; the flag bit says whether to read them).
+    private lazy var uiMaskDummy: MTLTexture? = {
+        let d = MTLTextureDescriptor()
+        d.textureType = .type2DArray; d.pixelFormat = .r8Unorm
+        d.width = 1; d.height = 1; d.arrayLength = 1; d.usage = .shaderRead
+        return device.makeTexture(descriptor: d)
+    }()
     // Startup diagnostics for the signal-9 wall: what the last renderFrame saw,
     // surfaced into the alive report, plus a short per-frame trace of the first
     // few seconds so the log can say whether the loop keeps iterating and
@@ -2293,6 +2312,7 @@ final class KleptonCompositor {
             if first { self.cmdError = b.error }
             self.cmdLock.unlock()
             if n <= 12 { NSLog("[cp] cmdbuf #\(n) COMPLETED" + (b.error != nil ? " err=\(b.error!)" : "")) }
+            self.noteCompositeGpu(b)
             if first { NSLog("[cp] composite command buffer error: \(b.error!)") }
         }
         cmd.commit()
@@ -2499,6 +2519,13 @@ final class KleptonCompositor {
         // Automatic AA: store the game's detected eye MSAA for the app (whether or not VPKTAA
         // is on for this game).
         KleptonTAA.pollAADetection()
+        // GPU lost: the guest renders nothing any more, its eye images are unwritten memory. Black
+        // (taaHide -> no eye allocation), on every path; the run is being ended with a message
+        // (kl_jni_request_quit -> engineQuit -> launcher endMessage).
+        if kl_vulkan_gpu_lost() != 0 {
+            taaHide = true
+            return
+        }
         guard let taa else { return }
         // Inline mode (Vulkan guest on VPVulkan): the resolve runs at the guest's frame end on
         // VPKEngine's queue and is shown once its command buffer has COMPLETED, with its own
@@ -2648,6 +2675,8 @@ final class KleptonCompositor {
         // parallel to `uniforms` and must be appended to on every path through
         // the loop, including the ones that skip a view.
         var sources: [MTLTexture?] = []
+        // VPKEngine's UI mask view per pass position (parallel index to `uniforms`); absent = none.
+        var uiMasks: [Int: MTLTexture] = [:]
         var visible = 0
         for vi in viewIndices {
             let view = drawable.views[vi]
@@ -2699,6 +2728,18 @@ final class KleptonCompositor {
                 continue
             }
             u.visible = alloc == nil ? 0 : 1
+            // RCAS fused here for the guest's own (unresolved) eye; a VPKTAA-resolved picture was
+            // already sharpened inside the native pass.
+            if alloc != nil, Self.rcasCon > 0, taaOut[vi] == nil {
+                u.rcas_con = Self.rcasCon
+                u.rcas_flags = Self.rcasDenoise
+                // VPKEngine's UI mask for this eye (same eye texture space, same uv): HUD / text keep
+                // their original pixels. None this frame: plain RCAS, as before.
+                if let m = uiMaskView(eye: vi, eyeTexture: alloc?.texture) {
+                    u.rcas_flags |= 2
+                    uiMasks[uniforms.count] = m
+                }
+            }
             uniforms.append(u)
             sources.append(alloc?.texture)
         }
@@ -2913,6 +2954,31 @@ final class KleptonCompositor {
                     uniforms[n].grid_eye = 1
                 }
             }
+            // RCAS taps stay inside the rect the guest drew (the same crop the grid applies, in the
+            // texture's uv after the flip). A foveated eye texture is stored warped, so there the
+            // whole texture is the limit.
+            if uniforms.contains(where: { $0.rcas_con > 0 }) {
+                let foveated = kl_glfb_eye_rate_map() != nil
+                for (n, vi) in viewIndices.enumerated() where uniforms[n].rcas_con > 0 {
+                    let tex = n == 0 ? bind0 : bind1
+                    let vpr = vi == 0 ? gridViewport : gridViewportR
+                    var r: (Float, Float, Float, Float) = (0, 0, 1, 1)
+                    let tw = Float(tex.width), th = Float(tex.height)
+                    if !foveated, vpr.z > 0, vpr.w > 0, tw > 0, th > 0 {
+                        let x0 = vpr.x / tw, x1 = (vpr.x + vpr.z) / tw
+                        var y0 = vpr.y / th, y1 = (vpr.y + vpr.w) / th
+                        if uniforms[n].flip_y != 0 { (y0, y1) = (1 - y1, 1 - y0) }
+                        r = (min(max(x0, 0), 1), min(max(y0, 0), 1), min(max(x1, 0), 1), min(max(y1, 0), 1))
+                    }
+                    uniforms[n].rcas_rect = r
+                }
+                if !loggedRcasComp {
+                    loggedRcasComp = true
+                    NSLog("[cp] RCAS fused into the composite pass (nitidez \(String(format: "%.2f", KleptonTAA.rcasIntensity)), "
+                          + "constante \(String(format: "%.3f", Self.rcasCon)), sin pase ni anillo propios; "
+                          + "máscara UI de VPKEngine donde la haya)")
+                }
+            }
             let ptw = probePipeline == nil
                 ? ptwInputs(viewIndices: viewIndices, drawable: drawable, uniforms: uniforms,
                             rendered: rendered, haveRendered: haveRendered,
@@ -2923,6 +2989,8 @@ final class KleptonCompositor {
             if let depthState { enc.setDepthStencilState(depthState) }
             enc.setFragmentTexture(bind0, index: 0)
             enc.setFragmentTexture(bind1, index: 1)
+            enc.setFragmentTexture(uiMasks[0] ?? uiMaskDummy, index: 2)
+            enc.setFragmentTexture(uiMasks[1] ?? uiMaskDummy, index: 3)
             enc.setFragmentSamplerState(sampler, index: 0)
             uniforms.withUnsafeBytes { buf in
                 // Vertex only: the fragment stage has no amplification_id to index
@@ -2963,6 +3031,48 @@ final class KleptonCompositor {
         // its menu correctly, which is an instrument contradicting the display.
         if visible > 0 { return visible }
         return panels > 0 ? viewIndices.count : 0
+    }
+
+    /// VPKEngine's R8 UI mask of the newest eye pass of `eye`, as a 1-slice 2DArray view the composite shader can
+    /// sample (a 2D mask is viewed as an array of one; a 2-layer multiview mask is cut to the eye's layer). nil: no
+    /// mask this frame (no UI drawn, mask off, no VPKEngine device), or its size is not the eye texture's (the uv
+    /// would not line up). Each state is logged once.
+    private func uiMaskView(eye: Int, eyeTexture: MTLTexture?) -> MTLTexture? {
+        guard kl_vulkan_taa_ui_mask_on() != 0 else {
+            if !loggedUiMaskNone {
+                loggedUiMaskNone = true
+                NSLog("[cp] RCAS fused: no UI mask (VPKEngine without it or VPVK_TAA_UI_MASK=0) — RCAS over the whole eye")
+            }
+            return nil
+        }
+        var w: Int32 = 0, h: Int32 = 0, slice: Int32 = 0
+        guard let raw = kl_vulkan_ui_mask_texture(Int32(eye), &w, &h, &slice) else {
+            if !loggedUiMaskNone {
+                loggedUiMaskNone = true
+                NSLog("[cp] RCAS fused: no UI mask for eye \(eye) this frame (no UI drawn, or no VPKEngine device) — "
+                      + "plain RCAS; said once, the mask follows the frames that have UI")
+            }
+            return nil
+        }
+        let mask = Unmanaged<AnyObject>.fromOpaque(raw).takeRetainedValue() as! MTLTexture
+        if let et = eyeTexture, et.width != mask.width || et.height != mask.height {
+            if !loggedUiMaskSize {
+                loggedUiMaskSize = true
+                NSLog("[cp] RCAS fused: UI mask \(mask.width)x\(mask.height) is not the eye texture's "
+                      + "\(et.width)x\(et.height) — not used (plain RCAS)")
+            }
+            return nil
+        }
+        let s = max(Int(slice), 0)
+        guard s < mask.arrayLength,
+              let v = mask.makeTextureView(pixelFormat: mask.pixelFormat, textureType: .type2DArray,
+                                           levels: 0..<1, slices: s..<(s + 1)) else { return nil }
+        if !loggedUiMaskOn {
+            loggedUiMaskOn = true
+            NSLog("[cp] RCAS fused: UI mask from VPKEngine in use (eye \(eye), \(mask.width)x\(mask.height), "
+                  + "layers \(mask.arrayLength), slice \(s)): mix(rcas, original, mask)")
+        }
+        return v
     }
 
     /// The guest's PROJECTION layers, each as its own quad with its own frustum,
@@ -3059,6 +3169,8 @@ final class KleptonCompositor {
             enc.setRenderPipelineState(pipeline)
             enc.setFragmentTexture(bind0, index: 0)
             enc.setFragmentTexture(bind1, index: 1)
+            enc.setFragmentTexture(uiMaskDummy, index: 2)
+            enc.setFragmentTexture(uiMaskDummy, index: 3)
             enc.setFragmentSamplerState(sampler, index: 0)
             uniforms.withUnsafeBytes { buf in
                 enc.setVertexBytes(buf.baseAddress!, length: buf.count, index: 0)
@@ -4558,6 +4670,28 @@ final class KleptonCompositor {
         return (c, 0)
     }
 
+    /// GPU time of this composite command buffer; once a second prints p50/p95/max of the window.
+    private func noteCompositeGpu(_ b: MTLCommandBuffer) {
+        let ms = (b.gpuEndTime - b.gpuStartTime) * 1000
+        guard b.gpuStartTime > 0, ms > 0, ms < 1000 else { return }
+        var window: [Double] = []
+        cmdLock.lock()
+        cpGpuMs.append(ms)
+        let now = CFAbsoluteTimeGetCurrent()
+        if now - cpGpuWindowStart >= 1 {
+            window = cpGpuMs.sorted()
+            cpGpuMs.removeAll(keepingCapacity: true)
+            cpGpuWindowStart = now
+        }
+        cmdLock.unlock()
+        guard !window.isEmpty else { return }
+        let p50 = window[window.count / 2]
+        let p95 = window[min(window.count - 1, Int(Double(window.count) * 0.95))]
+        NSLog(String(format: "[cp] gpu p50/p95/max %.2f/%.2f/%.2f ms (%ld cmdbufs, rcas %@)",
+                     p50, p95, window[window.count - 1], window.count,
+                     KleptonTAA.rcasInCompositor ? String(format: "fused %.2f", KleptonTAA.rcasIntensity) : "off/native"))
+    }
+
     /// GPU ms per composite command buffer, PTW vs rotation-only, every 5 s while KL_CP_PTW=1.
     private func ptwNoteGpu(_ b: MTLCommandBuffer, ptw: Bool) {
         let ms = (b.gpuEndTime - b.gpuStartTime) * 1000
@@ -4761,6 +4895,17 @@ final class KleptonCompositor {
                          source, w, h, vp.width, vp.height, drawable.colorTextures.count))
         }
         kl_ovrp_set_eye_texture_size(Int32(w), Int32(h))
+        // The size the guest was actually given, kept for the NEXT launch: VQLaunch pushes it before
+        // the guest boots (the guest races this first drawable and would otherwise build its eye
+        // layer at the default size and rebuild it here, two swapchains alive). Keyed on the env
+        // that shapes the result; kl_ovrp_set_eye_texture_size ignores a push that changes nothing.
+        var fw: Int32 = 0, fh: Int32 = 0
+        kl_ovrp_eye_texture_size(&fw, &fh)
+        if fw > 0, fh > 0 {
+            let env = { (k: String) -> String in getenv(k).map { String(cString: $0) } ?? "-" }
+            let sig = [env("KL_OVRP_EYE_BASE"), env("KL_OVRP_EYE_SCALE"), env("KL_OVRP_EYE_MAX")].joined(separator: "|")
+            UserDefaults.standard.set("\(sig)=\(fw)x\(fh)", forKey: "vq.eyeSizeFinal")
+        }
     }
 
     /// The tracker the pose-at-time callback queries.

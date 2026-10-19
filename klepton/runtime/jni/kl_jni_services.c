@@ -1369,26 +1369,8 @@ static klj_val klj_UbiJavaInterface_injectActivity(void *env, void *self,
 // (78 method ids on RE4 before the first call). They are transcribed from the
 // APK's own GameActivity.smali, like every other binding here.
 //
-// The font directory is the first one any UE4 title reaches, because Slate
-// wants a typeface before it has a window. The guest's own implementation is a
-// three-entry search — /system/fonts, /system/font, /data/fonts — returning the
-// first that File.exists(), and then appending "/" to whatever it found. Note
-// what it does when it finds NOTHING: `v3` stays null, StringBuilder.append
-// spells that "null", and the method returns the literal string "null/". That
-// is not a case worth reproducing; it is what a device without fonts would say,
-// and we are presenting a Quest, which has /system/fonts like any other
-// Android device.
-//
-// So the answer is the Quest's, and the path is MAPPED rather than invented —
-// kl_guest_path already redirects the guest's absolute paths, and a font
-// directory that answers a name and then has no files in it is the shape of
-// a read that silently finds nothing, where the guest is entitled to assume the
-// directory it was handed exists. Whether the engine actually loads
-// from here is the next run's question; until it does, this is a name.
-static klj_val klj_UE4_GetFontDirectory(void *env, void *self, const klj_val *a, int n) {
-    (void)env; (void)self; (void)a; (void)n;
-    return (klj_val){.l = kl_jni_new_string("/system/fonts/")};
-}
+// (The font directory, the first thunk any UE4 title reaches, lives in kl_jni_ue4.c with the rest of
+// the activity's device queries: klj_GA_getFontDirectory.)
 
 static klj_val klj_Environment_getExternalStorageState(void *env, void *self, const klj_val *a, int n) {
     (void)env; (void)self; (void)a; (void)n;
@@ -1633,7 +1615,7 @@ static klj_val klj_PlayAssetDelivery_missing(void *env, void *self, const klj_va
     return (klj_val){.j = 1};        // Play Core is absent — see above
 }
 
-static klj_val klj_Context_getAssets(void *env, void *self, const klj_val *a, int n) {
+klj_val klj_Context_getAssets(void *env, void *self, const klj_val *a, int n) {
     (void)env; (void)self; (void)a; (void)n;
     static void *am;
     return klj_singleton("android/content/res/AssetManager", &am);
@@ -1980,9 +1962,6 @@ const klj_binding klj_bind_services[] = {
     // Same singleton the Context hands out — there is one application here.
     {"android/content/pm/PackageManager", "getApplicationInfo",
      "(Ljava/lang/String;I)Landroid/content/pm/ApplicationInfo;", klj_Context_getApplicationInfo},
-    // Unreal Engine 4's GameActivity — see klj_UE4_GetFontDirectory.
-    {"com/epicgames/ue4/GameActivity", "AndroidThunkJava_GetFontDirectory",
-     "()Ljava/lang/String;", klj_UE4_GetFontDirectory},
     {"android/os/Environment", "getExternalStorageState", "()Ljava/lang/String;", klj_Environment_getExternalStorageState},
     {"android/os/Environment", "getExternalStorageDirectory", "()Ljava/io/File;", klj_Environment_getExternalStorageDirectory},
     {"android/os/Environment", "isExternalStorageManager", "()Z", klj_Environment_isExternalStorageManager},

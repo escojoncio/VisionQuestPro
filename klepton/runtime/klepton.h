@@ -181,7 +181,8 @@ void kl_madv_report(void);
 // _fire is the on-demand knob — the way to A/B this without a headset.
 void kl_mem_pressure_init(void);
 void kl_mem_pressure_poll(void);
-void kl_mem_pressure_fire(const char *why);
+void kl_mem_pressure_fire(const char *why);   // decide-only, any thread
+void kl_mem_pressure_deliver(void);           // calls the guest: game thread, between frames only
 void kl_mem_report(void);
 
 // The budget and what is left of it, for the other doors a guest asks the same

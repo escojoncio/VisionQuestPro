@@ -41,8 +41,12 @@ final class KleptonTAA {
         guard let v = getenv("KL_RCAS"), let f = Float(String(cString: v)) else { return 0 }
         return min(max(f, 0), 1)
     }()
-    /// The hook is needed for VPKTAA and/or RCAS.
-    static let passEnabled: Bool = enabled || rcasIntensity > 0
+    /// RCAS applied by the compositor's composite pass to every frame the native VPKTAA did not resolve
+    /// (kl_reproject.c kl_rcas): no pass, ring or hook of its own. KL_RCAS_COMPOSITOR=0 = the separate
+    /// native pass (kl_vulkan_rcas_on reads the same variable).
+    static let rcasInCompositor: Bool = rcasIntensity > 0 && klEnvOn("KL_RCAS_COMPOSITOR", default: true)
+    /// The hook is needed for VPKTAA and/or a separate RCAS pass.
+    static let passEnabled: Bool = enabled || (rcasIntensity > 0 && !rcasInCompositor)
     private static func envS(_ k: String) -> String? {
         guard let v = getenv(k) else { return nil }
         return String(cString: v)
@@ -242,7 +246,11 @@ final class KleptonTAA {
     private let coreLock = NSLock()
     // At most 2 resolves on the GPU: the third frame end waits (bounded) for the oldest.
     private let inFlight = DispatchSemaphore(value: 2)
-    private static let ringSize = 5                 // 2 in flight + the published + 2 pinned
+    // Slots needed when a resolve takes one: inFlight (2) caps the busy ones at 1 besides the new
+    // one, + the published one + 1 older slot still pinned by a composite on the GPU = 4. With 3 a
+    // pinned-old slot starves the ring ("no free output": an unresolved frame); 4 saves a full
+    // eye-size texture (76 MB at 2976x1912) over the old 5 without that risk.
+    private static let ringSize = 4
     // The output ring, under `lock`. A slot is written only when it is neither in flight,
     // published, nor sampled by a composite still on the GPU (pinned) — the resolve runs on
     // VPKEngine's queue, the composite on the compositor's, and Metal tracks no hazards across
@@ -319,6 +327,9 @@ final class KleptonTAA {
     /// and no frame was waited for: every live eye may still be on the GPU. nil = no inline
     /// frame at all yet (the compositor's own default).
     func acquireInline(for cmd: MTLCommandBuffer) -> InlineShow? {
+        // Never compose an eye whose frame did not complete: a lost GPU shows nothing (belt and braces
+        // with prepareTAA's check; kl_vulkan also stops filing raw records once lost).
+        if kl_vulkan_gpu_lost() != 0 { return .hide }
         let raw = UInt64(kl_vulkan_taa_raw_record())
         lock.lock()
         let pub = inPublished
@@ -419,20 +430,24 @@ final class KleptonTAA {
             if inBusy.contains(true) || inPins.contains(where: { $0 > 0 }) {
                 return (nil, "output ring busy (eye size change)")
             }
+            // Nothing is busy or pinned here: release the old ring BEFORE allocating the new one,
+            // so the two never coexist (peak ~ one ring instead of old + new). The generation
+            // bump makes any late completed handler of the old ring a no-op.
+            let oldDesc = inOuts.isEmpty ? "" : "\(inOuts[0].w)x\(inOuts[0].h)"
+            inOuts = []; inBusy = []; inPins = []; inPublished = nil
+            inGen += 1
             var ring: [InlineOut] = []
             for k in 0..<KleptonTAA.ringSize {
                 guard let o = makeInlineOut(w, h, fmt, k) else { return (nil, "output allocation failed") }
                 ring.append(o)
             }
-            if !inOuts.isEmpty {
-                NSLog("[taa-inline] eye \(inOuts[0].w)x\(inOuts[0].h) -> \(w)x\(h): output ring rebuilt "
-                      + "(old outputs released)")
+            if !oldDesc.isEmpty {
+                NSLog("[taa-inline] eye \(oldDesc) -> \(w)x\(h): output ring rebuilt "
+                      + "(old outputs released first)")
             }
             inOuts = ring
             inBusy = Array(repeating: false, count: ring.count)
             inPins = Array(repeating: 0, count: ring.count)
-            inPublished = nil
-            inGen += 1
         }
         for i in 0..<inOuts.count {
             let k = (inNext + i) % inOuts.count

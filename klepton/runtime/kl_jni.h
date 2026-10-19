@@ -234,6 +234,7 @@ void kl_jni_report(FILE *out);
 // kl_jni_note_log feeds the reason (E/Unity graphics errors); the guest log paths call it.
 void kl_jni_note_log(int prio, const char *tag, const char *msg);
 int  kl_jni_quit_requested(void);
+void kl_jni_request_quit(const char *reason);   // end the run from the host side (does not park the caller)
 const char *kl_jni_quit_reason(void);
 int  kl_jni_knows_class(const char *cls);   // static coverage: any binding or field for this class
 

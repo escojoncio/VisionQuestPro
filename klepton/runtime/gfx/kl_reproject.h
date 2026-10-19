@@ -157,6 +157,21 @@ typedef struct {
     uint32_t      fade_on;
     float         fade_scale[4];
     float         fade_offset[4];
+    // ---- RCAS fused into the composite -------------------------------------
+    //
+    // The sharpening pass (VPKEngine's RCAS, "Nitidez") applied while the eye is
+    // sampled, instead of as a separate compute pass with its own output ring.
+    // `rcas_con` is exp2(-2 (1 - intensity)), the same constant the native pass
+    // uses; 0 = off (kl_reproject_build always starts it at 0, the compositor
+    // sets it for a frame whose picture is the guest's own, unresolved eye).
+    // `rcas_flags` bit 0 = denoise, bit 1 = a VPKEngine UI mask is bound for this view
+    // (fragment texture 2 for the first view, 3 for the second): where it is 1 the
+    // unsharpened picture is kept (HUD / text). `rcas_rect` = x0, y0, x1, y1: the part of the
+    // eye texture the guest drew, in the texture's uv (after the flip), which the
+    // 5 taps are clamped to. Scalars only, for the layout reason above.
+    float         rcas_con;
+    uint32_t      rcas_flags;
+    float         rcas_rect[4];
 } kl_reproject_uniforms;
 
 // The blit's uniforms — buffer(0) of its FRAGMENT stage. It carried a bare
