@@ -323,8 +323,6 @@ struct VQSettingsView: View {
                     }
                     .pickerStyle(.segmented)
                     Toggle(VQL("ASW desactivado (todos los frames reales)", "ASW off (every frame real)"), isOn: $settings.aswDisabled)
-                    Stepper(VQL("Intensidad de la vibración de los mandos: \(Int(settings.hapticsGain * 100)) %", "Controller vibration strength: \(Int(settings.hapticsGain * 100)) %"),
-                            value: $settings.hapticsGain, in: 0...2, step: 0.1)
                     Toggle(VQL("Precompilar shaders antes de jugar", "Precompile shaders before playing"), isOn: $settings.precompileShaders)
                     Toggle(VQL("Caché de shaders en QUEST (sobrevive a reinstalar)", "Shader cache in QUEST (survives reinstall)"), isOn: $settings.shaderCacheInQuest)
                     Toggle(VQL("Shaders AOT (todo compilado antes de jugar, experimental)", "AOT shaders (all compiled before playing, experimental)"), isOn: $settings.aotShaders)

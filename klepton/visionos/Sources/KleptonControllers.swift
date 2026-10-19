@@ -1368,9 +1368,11 @@ final class KleptonControllers {
     //     its healthy successor. Now: identity-checked.
     //   * every level was multiplied by 0.25 (ALVR's PSVR2 scale) on top of
     //     amplitudes that were already small (AC: peaks of 0.00-0.03 reached the
-    //     actuator). Now: gain defaults to 1.0 (app setting "Intensidad de la
-    //     vibración", KL_HAPTICS_GAIN) and anything that survives the gain is
-    //     lifted to a perceptible floor.
+    //     actuator). Now: no user setting at all — the controller is recognised
+    //     (`HapticProfile.detect`) and a per-type table gives gain, response
+    //     curve (a soft floor, not a step), frequency->sharpness map and
+    //     locality, so an amplitude of 1.0 is the strongest buzz that
+    //     controller can give and small ones stay perceptible.
 
     private struct HapticCmd {
         var level: Float = 0, sharp: Float = -1, seconds: Float = 0
@@ -1407,21 +1409,73 @@ final class KleptonControllers {
     /// `KL_HAPTICS_OFF=1` turns the path off outright — the pull still runs, so
     /// the guest's queue cannot back up, but nothing is played.
     private static let hapticsEnabled = !klEnvOn("KL_HAPTICS_OFF", default: false)
-    /// `KL_HAPTICS_GAIN` scales every level; the launcher's "Intensidad de la
-    /// vibración" setting sets it (1.0 = what the game asked for). It used to
-    /// default to 0.25 (ALVR's PSVR2 scale), which on top of Quest-sized
-    /// amplitudes left most pulses below what a hand can feel.
-    private static let gain = max(0, klEnvFloat("KL_HAPTICS_GAIN", 1.0))
-    /// Below this (after gain) a level is treated as silence, and any level
-    /// above it is lifted to at least `floorLevel`: an actuator has a
-    /// threshold under which a command is simply not felt, and a game's
-    /// "subtle" 0.05 is a real event, not silence. Both are unmeasured on a
-    /// Sense controller — the knobs are the A/B.
-    private static let feltMin = klEnvFloat("KL_HAPTICS_MIN", 0.03)
-    private static let floorLevel = klEnvFloat("KL_HAPTICS_FLOOR", 0.15)
-    /// `KL_HAPTICS_SHARPNESS` — the event's base sharpness, and what a source
-    /// with no frequency plays at. 1.0 is ALVR's constant: crisp.
-    private static let sharpness = klEnvFloat("KL_HAPTICS_SHARPNESS", 1.0)
+    /// `KL_HAPTICS_GAIN` — internal debugging multiplier on top of the profile's
+    /// own gain (no UI; the launcher no longer has a setting for it).
+    /// Per-controller-type calibration. Numbers are unmeasured starting points
+    /// (no Mac/lab here): `gain` scales the game's amplitude, `curve` < 1 lifts
+    /// small amplitudes (output = floor + (1-floor) * x^curve, with a short
+    /// ramp below `feltMin` so there is no cliff), `sharpLo...sharpHi` is the
+    /// range the game's normalised frequency is mapped into, `baseSharp` is
+    /// what a source with no frequency plays at, and `twoPiece` says the
+    /// device is one body used for both hands (so the handle for that hand is
+    /// the best locality) rather than one controller per hand.
+    struct HapticProfile {
+        var name: String
+        var gain: Float, floor: Float, feltMin: Float, curve: Float
+        var sharpLo: Float, sharpHi: Float, baseSharp: Float
+        var twoPiece: Bool
+
+        static let senseVR2 = HapticProfile(name: "PS VR2 Sense", gain: 1.0, floor: 0.12, feltMin: 0.02,
+                                            curve: 0.6, sharpLo: 0.35, sharpHi: 1.0, baseSharp: 1.0, twoPiece: false)
+        static let dualSense = HapticProfile(name: "DualSense", gain: 1.0, floor: 0.10, feltMin: 0.02,
+                                             curve: 0.7, sharpLo: 0.3, sharpHi: 1.0, baseSharp: 0.9, twoPiece: true)
+        static let joyCon = HapticProfile(name: "Joy-Con", gain: 0.9, floor: 0.08, feltMin: 0.02,
+                                          curve: 0.8, sharpLo: 0.2, sharpHi: 1.0, baseSharp: 0.8, twoPiece: false)
+        static let xbox = HapticProfile(name: "Xbox", gain: 1.0, floor: 0.20, feltMin: 0.03,
+                                        curve: 0.55, sharpLo: 0.5, sharpHi: 1.0, baseSharp: 1.0, twoPiece: true)
+        static let generic = HapticProfile(name: "genérico", gain: 1.0, floor: 0.15, feltMin: 0.03,
+                                           curve: 0.65, sharpLo: 0.4, sharpHi: 1.0, baseSharp: 1.0, twoPiece: false)
+
+        /// Recognise a controller by productCategory / vendorName.
+        static func detect(_ c: GCController) -> (type: String, profile: HapticProfile) {
+            let cat = c.productCategory
+            let id = (cat + " " + (c.vendorName ?? "")).lowercased()
+            if id.contains("spatial") || id.contains("sense") || id.contains("vr2") { return (cat, senseVR2) }
+            if id.contains("dualsense") || id.contains("dualshock") { return (cat, dualSense) }
+            if id.contains("joy-con") || id.contains("joycon") { return (cat, joyCon) }
+            if id.contains("xbox") { return (cat, xbox) }
+            return (cat, generic)
+        }
+
+        /// The level a game's amplitude becomes at the actuator.
+        func shape(_ raw: Float) -> Float {
+            guard raw > 0 else { return 0 }
+            let x = min(raw * gain * HapticsTuning.debugGain, 1)
+            if x < 0.005 { return 0 }
+            let full = floor + (1 - floor) * pow(x, curve)
+            if x >= feltMin { return min(full, 1) }
+            return full * (x - 0.005) / (feltMin - 0.005)   // ramp, not a cliff
+        }
+
+        /// The sharpness a game's frequency (0...1, or < 0 for none) becomes.
+        func sharpness(_ s: Float) -> Float {
+            s < 0 ? baseSharp : sharpLo + (sharpHi - sharpLo) * min(max(s, 0), 1)
+        }
+
+        /// Best locality for a hand among what the device supports.
+        func locality(hand: Int, supported: Set<GCHapticsLocality>) -> GCHapticsLocality? {
+            let handle: GCHapticsLocality = hand == 0 ? .leftHandle : .rightHandle
+            let order: [GCHapticsLocality] = twoPiece
+                ? [handle, .handles, .all, .default]
+                : [.default, .all, handle, .handles]
+            return order.first(where: { supported.contains($0) }) ?? supported.first
+        }
+    }
+    private enum HapticsTuning {
+        static let debugGain = max(0, klEnvFloat("KL_HAPTICS_GAIN", 1.0))
+    }
+    private var hapticProfile: [Int: HapticProfile] = [:]
+
     /// `KL_HAPTICS_PULSE=1` — discrete per-frame events (ALVR's shape) instead
     /// of the continuous player. The A/B if the buzz is ever wrong.
     private static let pulseMode = klEnvOn("KL_HAPTICS_PULSE", default: false)
@@ -1472,14 +1526,6 @@ final class KleptonControllers {
         if kick { hapticQueue.async { [weak self] in self?.hapticDrain() } }
     }
 
-    /// The level a game's amplitude becomes at the actuator.
-    private static func shape(_ raw: Float) -> Float {
-        guard raw > 0 else { return 0 }
-        let x = raw * gain
-        if x < feltMin { return 0 }
-        return min(max(x, floorLevel), 1)
-    }
-
     private func hapticDrain() {
         hapticMail.lock()
         let batch = hapticPending
@@ -1491,7 +1537,11 @@ final class KleptonControllers {
         if !hapticWatchdogArmed { hapticWatchdogArmed = true; armHapticWatchdog() }
         for hand in 0...1 {
             let cmd = batch[hand] ?? HapticCmd()
-            let level = Self.shape(cmd.level)
+            if hapticProfile[hand] == nil, cmd.level > 0,
+               let dev = Self.spatialControllers().first(where: { Self.hand(of: $0) == hand }) {
+                hapticProfile[hand] = HapticProfile.detect(dev).profile
+            }
+            let level = (hapticProfile[hand] ?? .generic).shape(cmd.level)
             traceBurst(hand: hand, level: level, at: now)
             hapticStep(hand: hand, level: level, sharp: cmd.sharp, seconds: cmd.seconds, at: now)
         }
@@ -1578,7 +1628,8 @@ final class KleptonControllers {
     private func send(hand: Int, level: Float, sharp: Float) {
         guard let player = hapticPlayer[hand] else { return }
         let q = (level * 100).rounded() / 100
-        let target = sharp < 0 ? Self.sharpness : min(max(sharp, 0), 1)
+        let prof = hapticProfile[hand] ?? .generic
+        let target = prof.sharpness(sharp)
         let sq = (target * 100).rounded() / 100
         if q == hapticSent[hand].level && sq == hapticSent[hand].sharp { return }
         do {
@@ -1586,7 +1637,7 @@ final class KleptonControllers {
                 CHHapticDynamicParameter(parameterID: .hapticIntensityControl,
                                          value: q, relativeTime: 0),
                 CHHapticDynamicParameter(parameterID: .hapticSharpnessControl,
-                                         value: min(max(sq - Self.sharpness, -1), 1),
+                                         value: min(max(sq - prof.baseSharp, -1), 1),
                                          relativeTime: 0),
             ], atTime: CHHapticTimeImmediate)
             hapticSent[hand] = (q, sq)
@@ -1605,11 +1656,12 @@ final class KleptonControllers {
         if now < hapticPulseEnd[hand] - 0.01, abs(level - hapticPulseLevel[hand]) < 0.15 { return }
         guard let engine = hapticsEngine(for: hand, at: now) else { return }
         let length = Double(max(seconds, Self.minOn))
+        let prof = hapticProfile[hand] ?? .generic
         do {
             let event = CHHapticEvent(eventType: .hapticContinuous, parameters: [
                 CHHapticEventParameter(parameterID: .hapticIntensity, value: level),
                 CHHapticEventParameter(parameterID: .hapticSharpness,
-                                       value: sharp < 0 ? Self.sharpness : min(max(sharp, 0), 1)),
+                                       value: prof.sharpness(sharp)),
             ], relativeTime: 0, duration: length)
             let pattern = try CHHapticPattern(events: [event], parameters: [])
             try engine.makePlayer(with: pattern).start(atTime: CHHapticTimeImmediate)
@@ -1633,7 +1685,7 @@ final class KleptonControllers {
         guard !hapticFirstPulse[hand] else { return }
         hapticFirstPulse[hand] = true
         NSLog(String(format: "[cp] haptics: FIRST REAL PULSE hand %d — intensity %.2f sharpness %.2f via %@",
-                     hand, level, sharp < 0 ? Self.sharpness : sharp, how))
+                     hand, level, (hapticProfile[hand] ?? .generic).sharpness(sharp), how))
     }
 
     /// One line per BURST rather than per frame: at 90 Hz a held buzz would
@@ -1664,7 +1716,7 @@ final class KleptonControllers {
             // The event's own duration is irrelevant: the player loops.
             let event = CHHapticEvent(eventType: .hapticContinuous, parameters: [
                 CHHapticEventParameter(parameterID: .hapticIntensity, value: 1.0),
-                CHHapticEventParameter(parameterID: .hapticSharpness, value: Self.sharpness),
+                CHHapticEventParameter(parameterID: .hapticSharpness, value: (hapticProfile[hand] ?? .generic).baseSharp),
             ], relativeTime: 0, duration: 1.0)
             let player = try engine.makeAdvancedPlayer(
                 with: CHHapticPattern(events: [event], parameters: []))
@@ -1700,11 +1752,12 @@ final class KleptonControllers {
             hapticRetryAt[hand] = now + 10
             return nil
         }
-        // A Sense controller IS the hand, so the whole device is the usual
-        // locality; ALVR asks for the handle first because its reference device
-        // is one gamepad with two grips. Which one the Sense accepts is not
-        // known — the supported set is logged and KL_HAPTICS_LOCALITY is the
-        // A/B.
+        // Profile from the detected controller; locality from what it supports.
+        let (type, prof) = HapticProfile.detect(device)
+        hapticProfile[hand] = prof
+        var made: CHHapticEngine?
+        var used = "?"
+        let supported = haptics.supportedLocalities
         var candidates: [GCHapticsLocality] = []
         switch Self.localityOverride ?? "" {
         case "all":     candidates = [.all]
@@ -1713,14 +1766,12 @@ final class KleptonControllers {
         case "right":   candidates = [.rightHandle]
         case "default": candidates = [.default]
         default:
-            candidates = [.default, .all, hand == 0 ? .leftHandle : .rightHandle, .handles]
+            if let best = prof.locality(hand: hand, supported: supported) { candidates = [best] }
         }
-        var made: CHHapticEngine?
-        var used = "?"
         for loc in candidates {
             if let e = haptics.createEngine(withLocality: loc) { made = e; used = "\(loc.rawValue)"; break }
         }
-        if made == nil, let any = haptics.supportedLocalities.first {
+        if made == nil, let any = supported.first {
             made = haptics.createEngine(withLocality: any)
             used = "\(any.rawValue)"
         }
@@ -1763,6 +1814,8 @@ final class KleptonControllers {
             hapticRetryAt[hand] = now + min(5.0, 0.25 * pow(2.0, Double(hapticFailures[hand] - 1)))
             return nil
         }
+        noteHaptics(String(format: "[cp] haptics: mando %@ → perfil %@ (ganancia %.2f, curva %.2f suelo %.2f, localidad %@)",
+                           type, prof.name, prof.gain * HapticsTuning.debugGain, prof.curve, prof.floor, used))
         NSLog("[cp] haptics: hand \(hand) engine up on \(device.vendorName ?? "?") — "
               + "locality \(used), supported \(haptics.supportedLocalities.map { $0.rawValue })")
         hapticEngine[hand] = engine
@@ -1791,6 +1844,7 @@ final class KleptonControllers {
             guard let self else { return }
             for hand in 0...1 {
                 self.dropHapticsEngine(hand)
+                self.hapticProfile.removeValue(forKey: hand)
                 self.hapticFailures[hand] = 0
                 self.hapticRetryAt[hand] = 0
                 self.hapticPulseUntil[hand] = 0

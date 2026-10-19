@@ -345,3 +345,4 @@ VPKEngine `main` = e6c3f3b.
 - Caché de shaders: 64 ficheros (2048 PSO) < 4101 de AC ⇒ evicción y recompilación cada arranque. kMaxArchiveFiles 512 + índice `.keys` por fichero (archive_index.h). Log `gpu.prewarm ar_hits/ar_misses/reason`.
 - Riesgos: campos task_vm_info sin compilar en Mac; RAM de 512 archivos; vpgles con EXTERNAL_OES.
 - Revisión háptica: watchdog en cola vq.haptics (0,4 s sin drain → nivel 0 y pausa players; evita vibración pegada al salir/pausar); XR_FB_haptic_pcm samplesConsumed = mínimo real entre manos.
+- Háptica automática: quitado el ajuste de intensidad (clave vq.hapticsGain borrada). `HapticProfile.detect` por productCategory/vendorName (Sense, DualSense, Joy-Con, Xbox, genérico) con ganancia, curva suelo+(1-suelo)·x^curva, rango frecuencia→sharpness y localidad automática. Log `[cp] haptics: mando … → perfil …`. Valores de perfil sin medir.
