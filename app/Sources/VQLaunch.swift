@@ -780,6 +780,17 @@ final class VQPrewarm: ObservableObject {
         VQLog.log("Shaders: precompilados \(n) pipelines en \(ms) ms")
     }
 
+    /// Version of the translator's output (vpvk_translator_tag), not of its sources: it changes only when a
+    /// component changes what it produces. An older VPVulkan without it falls back to the source fingerprint.
+    static func translatorTag() -> String? {
+        typealias FP = @convention(c) () -> UnsafePointer<CChar>?
+        for name in ["vpvk_translator_tag", "vpmsl_translator_fingerprint"] {
+            if let sym = dlsym(UnsafeMutableRawPointer(bitPattern: -2), name),
+               let c = unsafeBitCast(sym, to: FP.self)() { return String(String(cString: c).prefix(32)) }
+        }
+        return nil
+    }
+
     /// AOT (setting "Shaders AOT", VPVK_AOT=1): harvest the game's SPIR-V once, then translate it
     /// all and compile every known pipeline (recipes of earlier runs + compute variants) into the
     /// game's MTLBinaryArchive. Repeats only when the translator or the number of recipes changes
@@ -787,10 +798,7 @@ final class VQPrewarm: ObservableObject {
     static func aot(gameFolder: URL, cache: URL) {
         let fm = FileManager.default
         var tag = "v\(firstRunVersion)"
-        if let sym = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "vpmsl_translator_fingerprint") {
-            typealias FP = @convention(c) () -> UnsafePointer<CChar>?
-            if let c = unsafeBitCast(sym, to: FP.self)() { tag += "." + String(String(cString: c).prefix(16)) }
-        }
+        if let c = translatorTag() { tag += "." + c }
         guard dlsym(UnsafeMutableRawPointer(bitPattern: -2), "vpvk_aot_build") != nil else {
             VQLog.log("Shaders AOT: VPVulkan sin vpvk_aot_build")
             return
@@ -835,10 +843,7 @@ final class VQPrewarm: ObservableObject {
         let fm = FileManager.default
         // Stamp follows the translator's source fingerprint: any translator change re-runs the precompile.
         var tag = "v\(firstRunVersion)"
-        if let sym = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "vpmsl_translator_fingerprint") {
-            typealias FP = @convention(c) () -> UnsafePointer<CChar>?
-            if let c = unsafeBitCast(sym, to: FP.self)() { tag = "v\(firstRunVersion)." + String(String(cString: c).prefix(16)) }
-        }
+        if let c = translatorTag() { tag = "v\(firstRunVersion)." + c }
         let stamp = cache.appendingPathComponent("firstrun.\(tag)")
         if fm.fileExists(atPath: stamp.path) { return }
         // Only with VPVulkan loaded (MoltenVK path has no precompiler): avoids re-scanning every launch.
