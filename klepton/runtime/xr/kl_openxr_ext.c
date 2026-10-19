@@ -385,7 +385,7 @@ static const char *const k_simul_fns[] = {
 static const char *const k_meta_fns[] = {
     "xrSetFeatureEnabledMETA", "xrSetFeatureFidelityMETA", "xrGetFeatureFidelityStateMETA",
     "xrGetRecommendedLayerResolutionMETA", "xrSetTilePropertiesHintMETA",
-    "xrGetDeviceSampleRateFB", NULL};
+    NULL};
 static const char *const k_core_fns[] = {
     "xrConvertTimeToWin32PerformanceCounterKHR", "xrConvertWin32PerformanceCounterToTimeKHR",
     "xrGetD3D11GraphicsRequirementsKHR", "xrGetD3D12GraphicsRequirementsKHR",
@@ -404,6 +404,6 @@ void kl_openxr_ext_register(void) {
     klxr_register_refused("XR_FB_eye_tracking_social", k_eye_fns);
     klxr_register_refused("XR_FB_face_tracking(2)", k_face_fns);
     klxr_register_refused("XR_META_simultaneous_hands_and_controllers", k_simul_fns);
-    klxr_register_refused("XR_META (feature fidelity, tile hint, PCM rate, rec. resolution)", k_meta_fns);
+    klxr_register_refused("XR_META (feature fidelity, tile hint, rec. resolution)", k_meta_fns);
     klxr_register_refused("core/KHR (Win32, D3D, GL, Metal, layer entry points)", k_core_fns);
 }

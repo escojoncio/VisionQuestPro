@@ -106,6 +106,9 @@ enum {
     XR_TYPE_EVENT_DATA_SESSION_STATE_CHANGED = 18,
     XR_TYPE_EVENT_DATA_INTERACTION_PROFILE_CHANGED = 52,
     XR_TYPE_HAPTIC_VIBRATION            = 13,
+    XR_TYPE_HAPTIC_AMPLITUDE_ENVELOPE_VIBRATION_FB = 1000173001,
+    XR_TYPE_HAPTIC_PCM_VIBRATION_FB                = 1000209001,
+    XR_TYPE_DEVICE_PCM_SAMPLE_RATE_STATE_FB        = 1000209002,
     XR_TYPE_HAPTIC_ACTION_INFO          = 59,
     XR_TYPE_REFERENCE_SPACE_CREATE_INFO = 37,
     XR_TYPE_SPACE_LOCATION              = 42,
@@ -332,6 +335,17 @@ typedef struct { int32_t type; const void *next; } XrHapticBaseHeader;
 typedef struct { int32_t type; const void *next;
                  int64_t duration;          // XrDuration, NANOSECONDS
                  float frequency, amplitude; } XrHapticVibration;
+
+// XR_FB_haptic_amplitude_envelope / XR_FB_haptic_pcm: two more things the same
+// `feedback` header can be, and the reply struct of xrGetDeviceSampleRateFB.
+typedef struct { int32_t type; const void *next;
+                 int64_t duration;          // XrDuration, NANOSECONDS
+                 uint32_t amplitudeCount; const float *amplitudes; } XrHapticAmplitudeEnvelopeVibrationFB;
+typedef struct { int32_t type; const void *next;
+                 uint32_t bufferSize; const float *buffer;
+                 float sampleRate; uint32_t append;
+                 uint32_t *samplesConsumed; } XrHapticPcmVibrationFB;
+typedef struct { int32_t type; void *next; float sampleRate; } XrDevicePcmSampleRateStateFB;
 
 // XR_MIN_HAPTIC_DURATION is -1, not 0, and means "the shortest pulse the
 // hardware can produce" — a click. A guest asking for it wants an event, not
@@ -676,7 +690,9 @@ enum { KLXR_VIEW_CONFIG_PRIMARY_STEREO = 2 };
     X(xrLocateHandJointsEXT) X(xrGetHandMeshFB)                               \
     /* XR_FB_render_model */                                                  \
     X(xrEnumerateRenderModelPathsFB) X(xrGetRenderModelPropertiesFB)          \
-    X(xrLoadRenderModelFB)
+    X(xrLoadRenderModelFB)                                                    \
+    /* XR_FB_haptic_pcm (+ XR_FB_haptic_amplitude_envelope, struct-only) */   \
+    X(xrGetDeviceSampleRateFB)
 
 // ------------------------------------------------------------------ bookkeeping
 // One row per entry point: resolved counts lookups, called counts calls. The
@@ -1212,6 +1228,11 @@ static const struct { const char *name; uint32_t version; int gate; } g_extensio
     // Controller render models: none available (0 paths), the title falls
     // back to its own meshes.
     { "XR_FB_render_model",                   4, KLXR_GATE_ALWAYS },
+    // Haptics beyond the one core struct: an amplitude envelope and raw PCM.
+    // Both end up on the Sense controllers' CoreHaptics engines through the
+    // same 320 Hz queue the OVRPlugin entry points feed (kl_ovrp.c).
+    { "XR_FB_haptic_amplitude_envelope",      1, KLXR_GATE_ALWAYS },
+    { "XR_FB_haptic_pcm",                     1, KLXR_GATE_ALWAYS },
     // Application SpaceWarp: struct-only, but XrSystemSpaceWarpPropertiesFB
     // (the motion-vector size) is a chained output this runtime does not write,
     // so it stays opt-in (KL_XR_SPACEWARP=1) until it does.
@@ -1258,6 +1279,7 @@ static const struct { const char *ext; const char *fn[5]; } g_ext_fns[] = {
     { "XR_EXT_hand_tracking", { "xrCreateHandTrackerEXT", "xrDestroyHandTrackerEXT",
                                 "xrLocateHandJointsEXT" } },
     { "XR_FB_hand_tracking_mesh", { "xrGetHandMeshFB" } },
+    { "XR_FB_haptic_pcm", { "xrGetDeviceSampleRateFB" } },
     { "XR_FB_render_model", { "xrEnumerateRenderModelPathsFB",
                               "xrGetRenderModelPropertiesFB", "xrLoadRenderModelFB" } },
 };
@@ -4688,15 +4710,55 @@ static XrResult klxr_ApplyHapticFeedback(void *session, const XrHapticActionInfo
     if (!s->action_sets_attached) KLXR_RET(KLXR_ERROR_ACTIONSET_NOT_ATTACHED);
     klxr_log_chain("xrApplyHapticFeedback", info->next);
 
-    // Read `type` before casting, exactly as a composition layer is read. The
-    // only type in core OpenXR is XrHapticVibration; an extension one would be
-    // a different struct, and four bytes of it interpreted as an amplitude is
-    // the sort of thing that produces a controller buzzing at full power.
+    // Read `type` before casting, exactly as a composition layer is read. Three
+    // feedback types are served — core XrHapticVibration and the two XR_FB
+    // ones; anything else would be four bytes of somebody else's struct read
+    // as an amplitude, which is a controller buzzing at full power.
+    int hands = klxr_haptic_hands(a, info->subactionPath);
+    if (feedback->type == XR_TYPE_HAPTIC_AMPLITUDE_ENVELOPE_VIBRATION_FB) {
+        const XrHapticAmplitudeEnvelopeVibrationFB *e =
+            (const XrHapticAmplitudeEnvelopeVibrationFB *)feedback;
+        if (!e->amplitudes || !e->amplitudeCount) KLXR_RET(KLXR_ERROR_VALIDATION_FAILURE);
+        // XR_MIN_HAPTIC_DURATION for an envelope has no meaning (the samples
+        // ARE the shape); spread them over the shortest useful pulse.
+        double seconds = e->duration > 0 ? (double)e->duration * 1e-9 : 0.032;
+        for (int h = 0; h < 2; h++)
+            if (hands & (1 << h)) {
+                kl_ovrp_haptics_xr_envelope(h, e->amplitudes, e->amplitudeCount, seconds);
+                g_xr_input.haptic_pulses++;
+            }
+        static int said_env;
+        if (hands && !said_env++)
+            fprintf(stderr, "  [xr] haptics: XR_FB_haptic_amplitude_envelope \"%s\" — %u "
+                            "amplitude(s) over %.0f ms, played on the Sense controllers\n",
+                    a->name, e->amplitudeCount, seconds * 1000.0);
+        return KLXR_SUCCESS;
+    }
+    if (feedback->type == XR_TYPE_HAPTIC_PCM_VIBRATION_FB) {
+        const XrHapticPcmVibrationFB *p = (const XrHapticPcmVibrationFB *)feedback;
+        if (!p->buffer || !p->samplesConsumed) KLXR_RET(KLXR_ERROR_VALIDATION_FAILURE);
+        uint32_t took = 0; int have = 0;
+        for (int h = 0; h < 2; h++)
+            if (hands & (1 << h)) {
+                uint32_t t = kl_ovrp_haptics_xr_pcm(h, p->buffer, p->bufferSize,
+                                                    p->sampleRate, p->append != 0);
+                if (!have || t < took) took = t;
+                have = 1;      // the fuller queue's answer
+                g_xr_input.haptic_pulses++;
+            }
+        *p->samplesConsumed = hands ? took : 0;
+        static int said_pcm;
+        if (hands && !said_pcm++)
+            fprintf(stderr, "  [xr] haptics: XR_FB_haptic_pcm \"%s\" — %u sample(s) @ %.0f Hz, "
+                            "%u consumed, played on the Sense controllers\n",
+                    a->name, p->bufferSize, (double)p->sampleRate, *p->samplesConsumed);
+        return KLXR_SUCCESS;
+    }
     if (feedback->type != XR_TYPE_HAPTIC_VIBRATION) {
         static int said;
         if (!said++)
             fprintf(stderr, "  [xr] xrApplyHapticFeedback: feedback type %d is "
-                            "not XrHapticVibration — ignored\n", feedback->type);
+                            "not one this runtime serves — ignored\n", feedback->type);
         return KLXR_SUCCESS;
     }
     const XrHapticVibration *v = (const XrHapticVibration *)feedback;
@@ -4707,19 +4769,36 @@ static XrResult klxr_ApplyHapticFeedback(void *session, const XrHapticActionInfo
     // from turning every click into silence.
     float seconds = v->duration == XR_MIN_HAPTIC_DURATION
                         ? 0.0f : (float)((double)v->duration * 1e-9);
-    int hands = klxr_haptic_hands(a, info->subactionPath);
     for (int h = 0; h < 2; h++)
         if (hands & (1 << h)) {
-            kl_ovrp_haptics_apply(h, v->amplitude, seconds);
+            kl_ovrp_haptics_apply2(h, v->amplitude, seconds, v->frequency);
             g_xr_input.haptic_pulses++;
         }
     if (!hands) return KLXR_SUCCESS;    // bound to nothing: nothing to buzz
     static int said;
     if (!said++)
         fprintf(stderr, "  [xr] haptics: \"%s\" amp %.2f for %.0f ms "
-                        "(frequency %.0f Hz, not used)\n",
+                        "(frequency %.0f Hz -> CoreHaptics sharpness)\n",
                 a->name, (double)v->amplitude, (double)seconds * 1000.0,
                 (double)v->frequency);
+    return KLXR_SUCCESS;
+}
+
+// xrGetDeviceSampleRateFB: the rate a PCM buffer must be sent at. Ours is the
+// queue's own (320 Hz), the same number GetControllerHapticsDesc reports.
+static XrResult klxr_GetDeviceSampleRateFB(void *session, const XrHapticActionInfo *info,
+                                           XrDevicePcmSampleRateStateFB *out) {
+    klxr_session *s = klxr_sess(session);
+    if (!s) KLXR_RET(KLXR_ERROR_HANDLE_INVALID);
+    if (!info || !out) KLXR_RET(KLXR_ERROR_VALIDATION_FAILURE);
+    if (info->type != XR_TYPE_HAPTIC_ACTION_INFO ||
+        out->type != XR_TYPE_DEVICE_PCM_SAMPLE_RATE_STATE_FB)
+        KLXR_RET(KLXR_ERROR_VALIDATION_FAILURE);
+    out->sampleRate = kl_ovrp_haptics_sample_rate();
+    static int said;
+    if (!said++)
+        fprintf(stderr, "  [xr] haptics: xrGetDeviceSampleRateFB -> %.0f Hz\n",
+                (double)out->sampleRate);
     return KLXR_SUCCESS;
 }
 
@@ -7919,6 +7998,7 @@ static void klxr_install(void) {
                                    (void *)klxr_GetInputSourceLocalizedName},
         {"xrApplyHapticFeedback",  (void *)klxr_ApplyHapticFeedback},
         {"xrStopHapticFeedback",   (void *)klxr_StopHapticFeedback},
+        {"xrGetDeviceSampleRateFB", (void *)klxr_GetDeviceSampleRateFB},
         // swapchains — the eye images, and the compositor seam
         {"xrEnumerateSwapchainFormats",
                                    (void *)klxr_EnumerateSwapchainFormats},

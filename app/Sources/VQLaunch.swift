@@ -127,6 +127,8 @@ final class VQSettings: ObservableObject {
     /// Head-locked FPS counter in the compositor (KL_FPS_HUD).
     @Published var showFps: Bool { didSet { save() } }
     @Published var aswDisabled: Bool { didSet { save() } }
+    /// Controller vibration strength, 0...2 (1 = what the game asked for) → KL_HAPTICS_GAIN.
+    @Published var hapticsGain: Double { didSet { save() } }
     @Published var quest3Profile: Bool { didSet { save() } }
     @Published var forceVulkan: Bool { didSet { save() } }
     @Published var diagCaptures: Bool { didSet { save() } }
@@ -187,6 +189,7 @@ final class VQSettings: ObservableObject {
         }
         showFps = d.object(forKey: "vq.showFps") as? Bool ?? false
         aswDisabled = d.object(forKey: "vq.aswOff") as? Bool ?? true
+        hapticsGain = d.object(forKey: "vq.hapticsGain") as? Double ?? 1.0
         quest3Profile = d.object(forKey: "vq.quest3v2") as? Bool ?? true  // Quest 3 for every game by default
         forceVulkan = d.object(forKey: "vq.forceVulkan") as? Bool ?? true
         diagCaptures = d.object(forKey: "vq.diagCaptures2") as? Bool ?? false
@@ -241,6 +244,7 @@ final class VQSettings: ObservableObject {
         d.set(resolutionBase, forKey: "vq.resBase")
         d.set(showFps, forKey: "vq.showFps")
         d.set(aswDisabled, forKey: "vq.aswOff")
+        d.set(hapticsGain, forKey: "vq.hapticsGain")
         d.set(quest3Profile, forKey: "vq.quest3v2")
         d.set(forceVulkan, forKey: "vq.forceVulkan")
         d.set(diagCaptures, forKey: "vq.diagCaptures2")
@@ -360,6 +364,7 @@ final class VQSettings: ObservableObject {
         // -> unsupported), so every frame is real; the setting is passed on for VPVulkan.
         // The ASW setting also reaches the compositor's extrapolation (KL_CP_ASW, behind its own gate).
         setenv("KL_CP_ASW_OFF", aswDisabled ? "1" : "0", 1)
+        setenv("KL_HAPTICS_GAIN", String(format: "%.2f", hapticsGain), 1)
         var c = vq_gfx_config()
         c.foveation_mode = Int32(foveation.rawValue)
         c.sharp_zone = Float(sharpZone)

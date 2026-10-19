@@ -199,11 +199,15 @@ void kl_ovrp_set_controller_input(int hand, uint32_t buttons, uint32_t touches,
 // at least KL_HAPTICS_MIN_MS (32 ms) even if the samples ran out sooner,
 // because an actuator cannot act on a 10 ms burst.
 //
-// Frequency is deliberately not part of this seam. OVRPlugin's is a selector
-// between two fixed Touch motor rates, and the second axis a Sense controller
-// actually has is CoreHaptics sharpness, which is a different quantity; there
-// is no measurement here that would justify mapping one onto the other.
+// Frequency IS part of the seam now, as CoreHaptics sharpness, through
+// kl_ovrp_haptics_pull2 (see the note above klovrp_hap_sharp_ovr in kl_ovrp.c:
+// a monotonic stand-in, not a measured equivalence). The pull below is the
+// same drain without it.
 int kl_ovrp_haptics_pull(int hand, float *amplitude, float *seconds);
+// Same drain, and `*sharpness` (if non-NULL) receives CoreHaptics sharpness
+// 0..1 for the source that set the level, or -1 when that source carries no
+// frequency (buffered samples, PCM, envelope: the frontend picks its default).
+int kl_ovrp_haptics_pull2(int hand, float *amplitude, float *seconds, float *sharpness);
 
 // ---------------------------------------------------------------------------
 // Timewarp bookkeeping
@@ -864,10 +868,24 @@ enum {
 // XR_MIN_HAPTIC_DURATION, which means "as short as the hardware can do" and
 // here means the same 32 ms floor the pull already holds every level for.
 //
-// Frequency is not a parameter, the same decision and for the same reason as
-// the rest of this seam: see the note above `kl_ovrp_haptics_pull`.
+// `frequency_hz` (XR_FREQUENCY_UNSPECIFIED = 0 = none) becomes sharpness.
 void kl_ovrp_haptics_apply(int hand, float amplitude, float seconds);
+void kl_ovrp_haptics_apply2(int hand, float amplitude, float seconds, float frequency_hz);
+// Ends the action's vibration AND anything queued for that hand (an envelope
+// or PCM effect started through xrApplyHapticFeedback).
 void kl_ovrp_haptics_stop(int hand);
+
+// XR_FB_haptic_amplitude_envelope / XR_FB_haptic_pcm: the same two producers
+// the OVRPlugin entry points use, one hand per call. The envelope is `count`
+// amplitudes (0..1) evenly over `seconds` and REPLACES what is playing; PCM is
+// floats at `sample_rate` Hz and returns how many of them were consumed.
+// kl_ovrp_haptics_sample_rate() is what xrGetDeviceSampleRateFB answers, and
+// what GetControllerHapticsDesc says: 320 Hz.
+void     kl_ovrp_haptics_xr_envelope(int hand, const float *amplitudes, uint32_t count,
+                                     double seconds);
+uint32_t kl_ovrp_haptics_xr_pcm(int hand, const float *buffer, uint32_t count,
+                                float sample_rate, int append);
+float    kl_ovrp_haptics_sample_rate(void);
 
 // Compositor → shim: 1 while the VPKTAA resolve runs (gates projection jitter).
 void kl_ovrp_set_taa_active(int on);

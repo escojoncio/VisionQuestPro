@@ -435,12 +435,6 @@ static ovrpResult klovrp_GetControllerState3(unsigned mask, void *out) {
     return KLOVRP_SUCCESS;
 }
 
-// The haptics shapes below have no layout to read. The buffered and PCM paths
-// (SetControllerHaptics, SetControllerHapticsPcm) are the ones served.
-static ovrpResult klovrp_SetControllerHaptics2(int controller, const void *state) {
-    (void)controller; (void)state;
-    return kl_ovrp_ok("ovrp_SetControllerHaptics2");
-}
 static ovrpResult klovrp_SetRemoteHandedness(int controller, int handedness) {
     (void)controller; (void)handedness;
     return kl_ovrp_ok("ovrp_SetRemoteHandedness");
@@ -749,7 +743,6 @@ static const kl_ovrp_entry k_tab[] = {
     {"ovrp_GetTrackerPose",      (void *)klovrp_GetTrackerPose_entry},
     {"ovrp_GetControllerState3", (void *)klovrp_GetControllerState3},
     {"ovrp_GetInputState",       (void *)klovrp_GetInputState},
-    {"ovrp_SetControllerHaptics2", (void *)klovrp_SetControllerHaptics2},
     {"ovrp_SetRemoteHandedness", (void *)klovrp_SetRemoteHandedness},
     {"ovrp_AreHandPosesGeneratedByControllerData", (void *)klovrp_AreHandPosesGeneratedByControllerData},
     {"ovrp_AreControllerDrivenHandPosesNatural",   (void *)klovrp_AreControllerDrivenHandPosesNatural},
@@ -767,7 +760,7 @@ static const kl_ovrp_entry k_tab[] = {
 // envelope, GetHandTrackingState).
 static const char *const k_refused[] = {
     // haptics
-    "ovrp_SetControllerHapticsAmplitudeEnvelope", "ovrp_SetControllerHapticsParametric",
+    "ovrp_SetControllerHapticsParametric",
     "ovrp_GetControllerParametricProperties",
     // OpenXR action layer
     "ovrp_GetActionStateBoolean", "ovrp_GetActionStateFloat", "ovrp_GetActionStatePose",
