@@ -24,6 +24,7 @@
 #include "kl_x18.h"       // claim the veneers' TSD slot before anything else can
 #include "kl_env.h"
 #include "kl_sample.h"    // kl_sample_snapshot — the frame-stall watchdog
+#include "kl_vulkan.h"    // kl_vulkan_mem_stats — the heartbeat's GPU line
 
 // --- Which guest ------------------------------------------------------------
 //
@@ -562,6 +563,7 @@ static void *heartbeat(void *arg) {
     // lifecycle was described by a single "phase=start" line.
     const char *last_phase = NULL;
     int ticks = 0;
+    long long prev_foot = -1;   // footprint at the previous 250 ms tick (jump detector)
     for (;;) {
         const char *phase = g_phase;
         if (phase != last_phase || ticks % 8 == 0) {
@@ -569,21 +571,25 @@ static void *heartbeat(void *arg) {
             clock_gettime(CLOCK_REALTIME, &ts);
             struct tm tm;
             localtime_r(&ts.tv_sec, &tm);
+            char mb[160];
+            kl_mem_breakdown(mb, sizeof mb);
             if (ticks % 64 == 0) {
                 int ports, fds;
                 kl_ipc_counts(&ports, &fds);
-                char mb[160];
-                kl_mem_breakdown(mb, sizeof mb);
                 fprintf(stderr, "[hb] %02d:%02d:%02d  phase=%s  foot=%lldM avail=%lldM ports=%d fds=%d  %s\n",
                         tm.tm_hour, tm.tm_min, tm.tm_sec, phase,
                         kl_phys_footprint() >> 20, kl_avail_memory() >> 20, ports, fds, mb);
+                char gb[1024];
+                if (kl_vulkan_mem_stats(gb, sizeof gb))
+                    fprintf(stderr, "[hb] gpu %s\n", gb);
             } else
-            fprintf(stderr, "[hb] %02d:%02d:%02d  phase=%s  foot=%lldM avail=%lldM\n",
+            fprintf(stderr, "[hb] %02d:%02d:%02d  phase=%s  foot=%lldM avail=%lldM  %s\n",
                     tm.tm_hour, tm.tm_min, tm.tm_sec, phase,
-                    kl_phys_footprint() >> 20, kl_avail_memory() >> 20);
+                    kl_phys_footprint() >> 20, kl_avail_memory() >> 20, mb);
             fflush(stderr);
             last_phase = phase;
         }
+        int blocked = 0;   // set by the watchdog below: guest frame serial stuck >= 500 ms
         // Guest frame-stall watchdog. A game whose frame serial stops advancing while
         // the process is alive (music playing, compositor re-showing the last frame)
         // is parked somewhere — a lock, a join, a fence. Without a Mac the only way
@@ -604,6 +610,7 @@ static void *heartbeat(void *arg) {
                     still_ticks = 0;
                 } else if (advanced > 30 && g_phase && strcmp(g_phase, "frame pump") == 0) {
                     still_ticks++;
+                    blocked = still_ticks >= 2 && (still_ticks - 2) % 16 == 0;   // first at 500 ms, then every 4 s
                     if ((still_ticks == 32 && snaps == 0) || (still_ticks == 160 && snaps == 1)) {
                         char why[96];
                         snprintf(why, sizeof why, "guest frame stall (serial %llu, %d s)",
@@ -613,6 +620,29 @@ static void *heartbeat(void *arg) {
                         snaps++;
                     }
                 }
+            }
+        }
+        // Footprint jump / blocked-game sampling. A synchronous level load can add GBs in a
+        // couple of seconds with the game thread parked (no pose, no frames), so the 16 s
+        // line never sees it: on a >200 MiB rise since the last tick, and on every tick while
+        // the frame serial has been still for >= 500 ms, print breakdown + GPU stats at once.
+        // One sample per 250 ms tick at most (vpvk_mem_stats may take try_locks).
+        {
+            long long foot = kl_phys_footprint();
+            long long jump = (prev_foot >= 0 && foot >= 0) ? (foot - prev_foot) >> 20 : 0;
+            if (foot >= 0) prev_foot = foot;
+            if (jump > 200 || blocked) {
+                char mb2[160], gb2[1024];
+                kl_mem_breakdown(mb2, sizeof mb2);
+                if (jump > 200)
+                    fprintf(stderr, "[hb] jump +%lld MiB  phase=%s  foot=%lldM avail=%lldM  %s\n",
+                            jump, g_phase, foot >> 20, kl_avail_memory() >> 20, mb2);
+                else
+                    fprintf(stderr, "[hb] blocked  phase=%s  foot=%lldM  %s\n",
+                            g_phase, foot >> 20, mb2);
+                if (kl_vulkan_mem_stats(gb2, sizeof gb2))
+                    fprintf(stderr, "[hb] gpu %s\n", gb2);
+                fflush(stderr);
             }
         }
         ticks++;

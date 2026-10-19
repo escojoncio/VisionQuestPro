@@ -115,6 +115,7 @@ int   kl_vulkan_aa_detected(int *dm) { if (dm) *dm = -1; return -1; }
 int   kl_vulkan_aa_gate(void) { return 0; }
 int   kl_vulkan_native_submit(void (*fn)(void *, void *), void *u) { (void)fn; (void)u; return 0; }
 void *kl_vulkan_native_device(void) { return NULL; }
+size_t kl_vulkan_mem_stats(char *out, size_t cap) { (void)out; (void)cap; return 0; }
 int   kl_vulkan_taa_native_on(void) { return 0; }
 int   kl_vulkan_taa_native_encode(const void *f, void *cb) { (void)f; (void)cb; return 0; }
 void *kl_vulkan_eye_color_mtl(int s, int e, int *sl, int *w, int *h) {
@@ -3677,6 +3678,8 @@ static struct {
     // weak: VPKEngine with the zero-init queries (vpvk/config.h "vpvk_image_zero_pending")
     int   (*image_zero_pending)(void *mtl);
     int   (*image_zero_clear)(void *mtl);
+    // weak: VPKEngine with vpvk_mem_stats (vpvk/config.h)
+    size_t (*mem_stats)(char *out, size_t cap);
 } g_vpvk;
 static pthread_mutex_t g_vpvk_mu = PTHREAD_MUTEX_INITIALIZER;
 
@@ -3699,6 +3702,7 @@ static void klvk_vpvk_resolve(void) {
             (void *(*)(void *, void *, int, int, int))mvk_sym("vpvk_depth_resolve_encode");
         g_vpvk.image_zero_pending = (int (*)(void *))mvk_sym("vpvk_image_zero_pending");
         g_vpvk.image_zero_clear   = (int (*)(void *))mvk_sym("vpvk_image_zero_clear");
+        g_vpvk.mem_stats = (size_t (*)(char *, size_t))mvk_sym("vpvk_mem_stats");
         __atomic_store_n(&g_vpvk.resolved, 1, __ATOMIC_RELEASE);
     }
     pthread_mutex_unlock(&g_vpvk_mu);
@@ -3837,6 +3841,12 @@ int kl_vulkan_native_submit(void (*fn)(void *mtl_cmdbuf, void *user), void *user
 void *kl_vulkan_native_device(void) {
     klvk_vpvk_resolve();
     return g_vpvk.native_device ? g_vpvk.native_device() : NULL;
+}
+
+size_t kl_vulkan_mem_stats(char *out, size_t cap) {
+    if (!out || cap < 640) return 0;   // vpvk_mem_stats needs >= 640 bytes
+    klvk_vpvk_resolve();
+    return g_vpvk.mem_stats ? g_vpvk.mem_stats(out, cap) : 0;
 }
 
 int kl_vulkan_taa_native_on(void) {

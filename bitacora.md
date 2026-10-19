@@ -247,3 +247,9 @@ VPKEngine `main` = e6c3f3b.
 - Carátulas (VQCover.swift): log de resultados de búsqueda, búsqueda de reserva por nombre con puntuación, marcador `soon` 12 h, todas las claves y URLs de la ficha al log, clave `img`, markerVersion v4.
 - Hash de build: `vqBuildCommit` en VQBuildInfo.swift (CI escribe GITHUB_SHA::7), primera línea del log.
 - Pendiente: entitlement increased-memory-limit y medir sobrecoste de memoria propio; Demeo en AR (anclas/planos vía ARKit según inventario); pausa con corona.
+
+## Medición de memoria y liberación de PSO
+- Estimación (sin medir): sobrecoste vs Quest ~1-2 GB = PSO/funciones nunca liberados (0.25-0.8 GB) + TAA/compositor/etapas del ojo (0.6-1.0 GB). ASTC nativo (sin descompresión), VkDeviceMemory sin duplicar. MSAA 4x del juego sigue activo en tile memory (riesgo si tile_rejected>0).
+- VPKEngine: liberación de PSO por refcount en vkDestroyPipeline + MTLFunction/MTLLibrary al morir su último PSO; `vpvk_mem_stats` (alloc, ws_max, tex_*, buf_*, pso/fn/lib, ar_*, tile_rejected, recipes_*).
+- `klepton/runtime/gfx/kl_vulkan.c/.h`: `kl_vulkan_mem_stats` (símbolo débil). `klepton/visionos/Sources/kl_app.c`: breakdown en todos los `[hb]`, `[hb] gpu` en el largo, `[hb] jump +N MiB` (>200 MiB/tick) y `[hb] blocked` (500 ms y luego cada 4 s).
+- Pendiente: con el log real decidir recortes (etapas del ojo 3→2, historial TAA, prewarm sin owner).

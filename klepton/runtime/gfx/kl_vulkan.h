@@ -317,6 +317,9 @@ int  kl_vulkan_aa_gate(void);
 int  kl_vulkan_native_submit(void (*fn)(void *mtl_cmdbuf, void *user), void *user);
 // vpvk_native_device: id<MTLDevice>, unretained. NULL without VPVulkan.
 void *kl_vulkan_native_device(void);
+// vpvk_mem_stats: one key=value line of the driver's memory counters (weak; any thread, cheap).
+// Returns its length, 0 without VPVulkan / older VPKEngine. cap must be >= 640.
+size_t kl_vulkan_mem_stats(char *out, size_t cap);
 // VPKTAA NATIVO (VPKEngine's own pass, vpvk_taa_native_*): 1 when KL_VPKTAA=1
 // and the driver reports it on (app setting «VPKTAA nativo» / VPVK_TAA_NATIVE).
 // Then VPKEngine also picks the jitter (its own Halton(2,3)); the inline hook
