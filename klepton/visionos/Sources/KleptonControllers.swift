@@ -1757,8 +1757,8 @@ final class KleptonControllers {
         }
         do { try engine.start() } catch {
             noteHaptics("[cp] haptics: hand \(hand) engine would not start: \(error)")
-            engine.stoppedHandler = nil
-            engine.resetHandler = nil
+            engine.stoppedHandler = { _ in }
+            engine.resetHandler = { }
             hapticFailures[hand] += 1
             hapticRetryAt[hand] = now + min(5.0, 0.25 * pow(2.0, Double(hapticFailures[hand] - 1)))
             return nil
@@ -1779,8 +1779,8 @@ final class KleptonControllers {
         hapticRunning[hand] = false
         hapticSilentSince[hand] = 0
         hapticSent[hand] = (-1, -2)
-        engine?.stoppedHandler = nil
-        engine?.resetHandler = nil
+        engine?.stoppedHandler = { _ in }
+        engine?.resetHandler = { }
         engine?.stop(completionHandler: nil)
     }
 
