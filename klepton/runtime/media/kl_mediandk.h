@@ -52,6 +52,19 @@ void *kl_mediandk_lookup(const char *name);
 // along do not have to include CoreVideo.
 void *kl_mediandk_buffer_pixels(const void *ahardwarebuffer);
 
+// Host-side consumer of the codec's output surface — the java SurfaceTexture
+// (kl_jni_hostvideo.c). new/window: the reader and the ANativeWindow AMediaCodec_configure
+// takes; on_frame runs on the reader's dispatch thread per published frame;
+// take_rgba pulls the newest frame as RGBA8 (1 = new frame, 0 = none, -1 = unconvertible;
+// the buffer is reader-owned, valid until the next call); abandon = release().
+#include <stdint.h>
+void *kl_media_surface_new(void (*on_frame)(void *), void *ctx);
+void  kl_media_surface_set_cb(void *reader, void (*on_frame)(void *), void *ctx);
+void *kl_media_surface_window(void *reader);
+void  kl_media_surface_set_size(void *reader, int w, int h);
+int   kl_media_surface_take_rgba(void *reader, uint8_t **rgba, int *w, int *h, int64_t *pts_us);
+void  kl_media_surface_abandon(void *reader);
+
 void kl_mediandk_report(FILE *f);
 
 #endif

@@ -2867,6 +2867,17 @@ final class KleptonCompositor {
                 vp1 = SIMD4<Float>(Float(r.0), Float(r.1), Float(r.2), Float(r.3))
                 vpOf = SIMD2<Float>(Float(rendered.viewport_of.0),
                                     Float(rendered.viewport_of.1))
+                if vp0.z > 0 || vp1.z > 0 {
+                    lastKnownViewport[stage] = (vp0, vp1, vpOf)
+                } else if let k = lastKnownViewport[stage] {
+                    (vp0, vp1, vpOf) = k
+                    if !loggedViewportReuse {
+                        loggedViewportReuse = true
+                        NSLog("[cp] record for stage \(stage) has a zero render viewport; reusing the "
+                              + "last known rect \(Int(vp0.x)),\(Int(vp0.y)) \(Int(vp0.z))x\(Int(vp0.w)) / "
+                              + "\(Int(vp1.x)),\(Int(vp1.y)) \(Int(vp1.z))x\(Int(vp1.w))")
+                    }
+                }
                 // Said once, and said even when it is ZERO — which is the whole
                 // point. `[ovrp] render viewport` is printed by the guest's own
                 // EndFrame4 on the guest's thread, and until this line existed there
@@ -4360,6 +4371,11 @@ final class KleptonCompositor {
     private var gridPerEye = false
     private var loggedSplitViewports = false
     private var loggedReadViewport = false
+    /// Last non-zero render rect per eye texture stage (index = stage), with the texture size it
+    /// was relative to. Used when a record arrives with a zero viewport for a stage that already
+    /// had a known rect (a frame filed without an eye layer must not read as "whole texture").
+    private var lastKnownViewport: [Int: (SIMD4<Float>, SIMD4<Float>, SIMD2<Float>)] = [:]
+    private var loggedViewportReuse = false
     private var loggedViewportOfSkew = false
 
     /// The reprojection quad's mesh, with texture coordinates that already undo

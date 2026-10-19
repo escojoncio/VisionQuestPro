@@ -28,6 +28,10 @@ void *kl_gles_vk_handle(void);
 uint32_t kl_gles_layer_texture(int is_eye, int eye, int stage, int w, int h, uint32_t gl_internal_fmt,
                                int layers);
 
+// Legacy (Unity-owned name) eye texture: as kl_gles_layer_texture(is_eye=1), but the VkImage becomes the
+// storage of the GL texture `name` Unity already holds. Returns `name`, 0 on failure.
+uint32_t kl_gles_legacy_eye_texture(uint32_t name, int eye, int stage, int w, int h, uint32_t gl_internal_fmt, int layers);
+
 // The MTLTexture behind a GL name made by kl_gles_layer_texture (any is_eye), or NULL.
 void *kl_gles_texture_mtl(uint32_t name);
 

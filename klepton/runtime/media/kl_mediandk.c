@@ -985,6 +985,15 @@ typedef struct {
     pthread_t dispatch;
     int       running;
     int       pending;          // listener calls owed to the guest
+
+    // Host-side consumer (a java SurfaceTexture, kl_jni_hostvideo.c): called from
+    // the dispatch thread, like the guest's listener, when a frame is published.
+    void    (*host_cb)(void *ctx);
+    void     *host_ctx;
+    int       abandoned;        // SurfaceTexture.release(): publish drops frames
+    uint8_t  *rgba;             // last take_rgba conversion (owned)
+    size_t    rgba_cap;
+    int       converting;       // take_rgba is using rgba outside the lock
 } klm_reader;
 
 #define KLM_READER_MAGIC 0x4b4c5244u   /* 'KLRD' */
@@ -1021,7 +1030,10 @@ static void *reader_dispatch(void *arg) {
         r->pending--;
         klm_listener l = r->listener;
         int have = r->have_listener;
+        void (*hcb)(void *) = r->host_cb;
+        void *hctx = r->host_ctx;
         pthread_mutex_unlock(&r->lock);
+        if (hcb) hcb(hctx);
         if (have && l.onImageAvailable) {
             KLM_FIRST(said_cb, "first onImageAvailable delivered to the guest\n");
             l.onImageAvailable(l.context, r);
@@ -1145,6 +1157,7 @@ static void klm_AImageReader_delete(void *reader) {
 static void klm_reader_publish(klm_reader *r, CVPixelBufferRef pb, int64_t pts_us) {
     if (!r || r->magic != KLM_READER_MAGIC) return;
     pthread_mutex_lock(&r->lock);
+    if (r->abandoned) { pthread_mutex_unlock(&r->lock); return; }
     if (r->count == KLM_READER_MAX) {
         CVPixelBufferRelease((CVPixelBufferRef)r->q[r->head].pb);
         r->head = (r->head + 1) % KLM_READER_MAX;
@@ -1168,6 +1181,158 @@ static void klm_reader_publish(klm_reader *r, CVPixelBufferRef pb, int64_t pts_u
               (long long)pts_us);
     pthread_cond_signal(&r->cv);
     pthread_mutex_unlock(&r->lock);
+}
+
+
+// ---------------------------------------------------------------------------
+// Host-side surface: the consumer end of an AImageReader that is a java
+// SurfaceTexture rather than guest native code. The codec renders into
+// kl_media_surface_window() exactly as for a guest AImageReader; the host gets a
+// callback per published frame and pulls the latest one as RGBA8 (the pixels
+// SurfaceTexture.updateTexImage uploads to the guest's GL texture).
+void *kl_media_surface_new(void (*on_frame)(void *), void *ctx) {
+    klm_reader *keep = g_reader;
+    void *out = NULL;
+    if (klm_AImageReader_newWithUsage(1, 1, 0x22 /* PRIVATE */, 0, 8, &out) != AMEDIA_OK)
+        return NULL;
+    g_reader = keep;                      // the report's reader stays the guest's
+    klm_reader *r = out;
+    pthread_mutex_lock(&r->lock);
+    r->host_cb = on_frame; r->host_ctx = ctx;
+    pthread_mutex_unlock(&r->lock);
+    return r;
+}
+void kl_media_surface_set_cb(void *reader, void (*on_frame)(void *), void *ctx) {
+    klm_reader *r = reader;
+    if (!r || r->magic != KLM_READER_MAGIC) return;
+    pthread_mutex_lock(&r->lock);
+    r->host_cb = on_frame; r->host_ctx = ctx;
+    pthread_mutex_unlock(&r->lock);
+}
+void *kl_media_surface_window(void *reader) {
+    klm_reader *r = reader;
+    return (r && r->magic == KLM_READER_MAGIC) ? r->window : NULL;
+}
+void kl_media_surface_set_size(void *reader, int w, int h) {
+    klm_reader *r = reader;
+    if (r && r->magic == KLM_READER_MAGIC && w > 0 && h > 0) kl_ndk_window_set_size(r->window, w, h);
+}
+// SurfaceTexture.release(): no more callbacks or frames. The reader itself is
+// NOT freed — a codec configured onto its window may still hold the pointer
+// (AMediaCodec_configure keeps c->surface), and freeing it under the codec is a
+// use-after-free; the struct (a few hundred bytes) and its parked state leak.
+void kl_media_surface_abandon(void *reader) {
+    klm_reader *r = reader;
+    if (!r || r->magic != KLM_READER_MAGIC) return;
+    pthread_mutex_lock(&r->lock);
+    r->abandoned = 1; r->host_cb = NULL; r->have_listener = 0;
+    r->running = 0;
+    pthread_cond_broadcast(&r->cv);
+    pthread_mutex_unlock(&r->lock);
+    pthread_join(r->dispatch, NULL);
+    pthread_mutex_lock(&r->lock);
+    while (r->count) {
+        CVPixelBufferRelease((CVPixelBufferRef)r->q[r->head].pb);
+        r->head = (r->head + 1) % KLM_READER_MAX;
+        r->count--;
+    }
+    if (!r->converting) { free(r->rgba); r->rgba = NULL; r->rgba_cap = 0; }   // else take_rgba frees it
+    pthread_mutex_unlock(&r->lock);
+}
+
+static int klm_pb_is_nv12(CVPixelBufferRef pb);
+typedef struct { int yoff, yk, rv, gu, gv, bu; } klm_yuv_k;
+// Fixed point /256. Video range scales Y by 255/219; full range does not.
+static const klm_yuv_k klm_k601v = {16, 298, 409, -100, -208, 516}, klm_k709v = {16, 298, 459, -55, -136, 541},
+                       klm_k601f = {0, 256, 359, -88, -183, 454},   klm_k709f = {0, 256, 403, -48, -120, 475};
+static inline uint8_t klm_clamp8(int v) { return v < 0 ? 0 : v > 255 ? 255 : (uint8_t)v; }
+
+// Newest published frame as tightly packed RGBA8 (top row first). Returns 1 with
+// *rgba valid until the next call (reader-owned), 0 if no new frame since the
+// last call, -1 if the frame's pixel format is not one we convert.
+int kl_media_surface_take_rgba(void *reader, uint8_t **rgba, int *w, int *h, int64_t *pts_us) {
+    klm_reader *r = reader;
+    if (!r || r->magic != KLM_READER_MAGIC || r->abandoned) return 0;
+    pthread_mutex_lock(&r->lock);
+    if (!r->count) { pthread_mutex_unlock(&r->lock); return 0; }
+    while (r->count > 1) {
+        CVPixelBufferRelease((CVPixelBufferRef)r->q[r->head].pb);
+        r->head = (r->head + 1) % KLM_READER_MAX;
+        r->count--;
+        r->n_dropped++;
+    }
+    CVPixelBufferRef pb = (CVPixelBufferRef)r->q[r->head].pb;
+    int64_t pts = r->q[r->head].pts_us;
+    r->head = (r->head + 1) % KLM_READER_MAX;
+    r->count--;
+    r->n_acquired++;
+    r->converting = 1;
+    pthread_mutex_unlock(&r->lock);
+
+    int fw = (int)CVPixelBufferGetWidth(pb), fh = (int)CVPixelBufferGetHeight(pb);
+    size_t need = (size_t)fw * fh * 4;
+    int rc = -1;
+    if (r->rgba_cap < need) {
+        uint8_t *n = realloc(r->rgba, need);
+        if (n) { r->rgba = n; r->rgba_cap = need; }
+    }
+    if (r->rgba && r->rgba_cap >= need &&
+        CVPixelBufferLockBaseAddress(pb, kCVPixelBufferLock_ReadOnly) == kCVReturnSuccess) {
+        OSType t = CVPixelBufferGetPixelFormatType(pb);
+        uint8_t *dst = r->rgba;
+        if (klm_pb_is_nv12(pb) && CVPixelBufferGetPlaneCount(pb) >= 2) {
+            const klm_yuv_k *k = t == kCVPixelFormatType_420YpCbCr8BiPlanarFullRange
+                                     ? (fh >= 720 ? &klm_k709f : &klm_k601f)
+                                     : (fh >= 720 ? &klm_k709v : &klm_k601v);
+            const uint8_t *y = CVPixelBufferGetBaseAddressOfPlane(pb, 0);
+            const uint8_t *uv = CVPixelBufferGetBaseAddressOfPlane(pb, 1);
+            size_t ys = CVPixelBufferGetBytesPerRowOfPlane(pb, 0), uvs = CVPixelBufferGetBytesPerRowOfPlane(pb, 1);
+            if (y && uv) {
+                for (int j = 0; j < fh; j++) {
+                    const uint8_t *yr = y + (size_t)j * ys, *ur = uv + (size_t)(j >> 1) * uvs;
+                    uint8_t *o = dst + (size_t)j * fw * 4;
+                    for (int i = 0; i < fw; i++, o += 4) {
+                        int u = ur[(i & ~1)] - 128, v = ur[(i & ~1) + 1] - 128;
+                        int yy = (yr[i] - k->yoff) * k->yk + 128;
+                        o[0] = klm_clamp8((yy + k->rv * v) >> 8);
+                        o[1] = klm_clamp8((yy + k->gu * u + k->gv * v) >> 8);
+                        o[2] = klm_clamp8((yy + k->bu * u) >> 8);
+                        o[3] = 255;
+                    }
+                }
+                rc = 1;
+            }
+        } else if (t == kCVPixelFormatType_32BGRA) {
+            const uint8_t *src = CVPixelBufferGetBaseAddress(pb);
+            size_t ss = CVPixelBufferGetBytesPerRow(pb);
+            if (src) {
+                for (int j = 0; j < fh; j++) {
+                    const uint8_t *s = src + (size_t)j * ss;
+                    uint8_t *o = dst + (size_t)j * fw * 4;
+                    for (int i = 0; i < fw; i++, s += 4, o += 4) { o[0] = s[2]; o[1] = s[1]; o[2] = s[0]; o[3] = s[3]; }
+                }
+                rc = 1;
+            }
+        }
+        CVPixelBufferUnlockBaseAddress(pb, kCVPixelBufferLock_ReadOnly);
+    }
+    CVPixelBufferRelease(pb);
+    pthread_mutex_lock(&r->lock);
+    r->converting = 0;
+    if (r->abandoned) {   // release() ran meanwhile: the buffer is ours to free, the frame is not wanted
+        free(r->rgba); r->rgba = NULL; r->rgba_cap = 0;
+        pthread_mutex_unlock(&r->lock);
+        return 0;
+    }
+    pthread_mutex_unlock(&r->lock);
+    if (rc != 1) {
+        KLM_FIRST(said_rgbfail, "kl_media_surface_take_rgba: cannot convert the frame "
+                                "(format/lock/alloc) — texture not updated\n");
+        return -1;
+    }
+    *rgba = r->rgba; *w = fw; *h = fh;
+    if (pts_us) *pts_us = pts;
+    return 1;
 }
 
 // ---------------------------------------------------------------------------

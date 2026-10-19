@@ -3421,6 +3421,7 @@ static void klovrp_record_overlays(const void *layer_submits, int count);
 // pictures with the head still; several frames of rotation apart when turning, per eye
 // slice, i.e. eyes that do not line up. Now the stage is published only after the wait.
 static __thread int t_defer_complete;
+static __thread int t_skip_eye_file;   // set by EndFrame4 around klovrp_end_frame_impl
 static void klovrp_publish_deferred(void) {
     pthread_mutex_lock(&g_frames.mu);
     if (g_frames.deferred_complete >= 0) {
@@ -3562,6 +3563,9 @@ static uint64_t klovrp_end_frame_impl(int guest_frame_index, const int *viewport
     // remain the fallback. There, nothing composites and nothing reads these
     // records, so the old behaviour is preserved rather than reasoned about.
     int drop = binds == 0 && observed >= 0;
+    // EndFrame4 with layers but no eye layer (loading screen: quads only): no new eye
+    // picture, so nothing is filed and last_complete stays on the last good frame.
+    if (t_skip_eye_file) drop = 1;
 
     // ...and the same rule for a guest the GL observation cannot see at all.
     //
@@ -3771,9 +3775,22 @@ static uint64_t klovrp_EndFrame4(int guest_frame_index, const void *layer_submit
     uint64_t pend_serial = g_frames.pending.serial;
     pthread_mutex_unlock(&g_frames.mu);
     t_defer_complete = kl_vulkan_guest_active() && kl_env_on("KL_OVRP_PUBLISH_AFTER_GPU", 1);
+    // Layers present but none is the eye layer, in a guest that already sent one:
+    // a quads-only (loading) frame. Do not file an eye record for it. A guest that
+    // never sent an eye layer here keeps the old behaviour (legacy/other routes).
+    static int ever_eye_layer, in_noeye_episode;
+    if (have) { ever_eye_layer = 1; in_noeye_episode = 0; }
+    t_skip_eye_file = !have && layer_submit_count > 0 && ever_eye_layer;
+    if (t_skip_eye_file && !in_noeye_episode) {
+        in_noeye_episode = 1;
+        fprintf(stderr, "  [ovrp] EndFrame4 frameIdx=%d: %d layer(s) but no eye layer — eye record NOT "
+                        "filed, last good frame stays (quad layers still updated)\n",
+                guest_frame_index, layer_submit_count);
+    }
     uint64_t r = klovrp_end_frame_impl(guest_frame_index, have ? vp : NULL,
                                        have ? of : NULL, named);
     t_defer_complete = 0;
+    t_skip_eye_file = 0;
 
     // BONELAB / the Vulkan path: this call IS the guest's assertion that it has
     // finished drawing the eye textures, so it is where they can be read back
@@ -5834,6 +5851,15 @@ static uint64_t klovrp_SetupEyeTexture2(int eye, int stage, uintptr_t handle,
     // to — tell kl_glfb which names are eyes (it is a no-op consumer when the
     // null driver is doing the "rendering").
     kl_glfb_note_eye_texture(eye, stage, (uint32_t)handle);
+    // VPKEngine's own GLES (kl_gles.h, gated): the storage is a VkImage of vpgles' device
+    // bound to Unity's own GL name. Multiview (Array): Unity calls once (eye 0) per stage and
+    // the name is the 2-slice array; otherwise one 2D texture per eye. Size h-by-w like below
+    // (measured: guest w=1912 h=2383 for a 2383x1912 eye).
+    if (kl_gles_enabled() && !kl_vulkan_guest_active()) {
+        const int mv = kl_ovrp_multiview();
+        if (mv && eye != 0) return 1;
+        return kl_gles_legacy_eye_texture((uint32_t)handle, eye, stage, h, w, KL_OVRP_TEXFMT_EYE, mv ? 2 : 1) ? 1 : 0;
+    }
     // When the host has MTLTextures for the compositor to sample, the eye
     // texture's storage IS one of them — glEGLImageTargetTexture2DOES in place
     // of glTexStorage2D, and nothing else about this function changes. The h,w

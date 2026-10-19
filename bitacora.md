@@ -325,3 +325,11 @@ VPKEngine `main` = e6c3f3b.
 - Requiere VPKTAA nativo; declina con MSAA, resolves, clears de área, formatos no soportados (log `gpu.fov decline reason=`). Logs `vk.fov plan`, `gpu.fov map`.
 - Riesgos: metal_backend.mm sin compilar/probar en visor; mapa identidad 16384²; sombras untracked entre frames; coste fold/expand sin medir.
 - Ideas de PTVisionPro no aplicadas: foveado de Compositor Services (isFoveationEnabled, VRR dinámica), resolutionScale por preset.
+
+## Lote 2026-10-19 tarde: SuperHOT, Hellsplit, Demeo vídeo, memoria AC, caché de shaders
+- SuperHOT negro: `klovrp_SetupEyeTexture2` solo ANGLE. Rama vpgles: `kl_gles_legacy_eye_texture` + `vpgles_wrap_image_as` (ata VkImage al nombre GL de Unity; multiview 2 capas, eye≠0 no-op). glsl/link.cpp `sameType` estructural para uniform blocks entre etapas.
+- Hellsplit ojos separados en cargas: EndFrame4 sin capa de ojo tras haber tenido una (`ever_eye_layer`) ⇒ `drop` (no se archiva record con viewport 0). Compositor `lastKnownViewport` por stage.
+- Demeo atascado en vídeo de logos: SurfaceTexture/Surface reales (kl_jni_hostvideo.c), `kl_ANativeWindow_fromSurface` → ventana del reader (kl_media_surface_*), NV12→RGBA, `updateTexImage` sube a EXTERNAL_OES (fallback 2D), `onFrameAvailable` desde el hilo del reader (listener pinned). Diag `gles.diag INVALID_ENUM first at`.
+- AC jetsam: no hay fuga propia (contadores planos); pico de memoria gráfica no contabilizada por Metal (~1,8 GB/s) en carga síncrona hasta ~8,19 GiB. `kl_mem_total` 8192 (`KL_MEM_TOTAL_MB` revierte), avisos sobre límite real foot+avail al 65 % y crítico 80 %; `kl_mem_breakdown` con ledger_tag_graphics/media/net/purg/fp_peak/lim_rem; `kl_mem_regions` por user_tag en jump/blocked; snapshot "mem jump".
+- Caché de shaders: 64 ficheros (2048 PSO) < 4101 de AC ⇒ evicción y recompilación cada arranque. kMaxArchiveFiles 512 + índice `.keys` por fichero (archive_index.h). Log `gpu.prewarm ar_hits/ar_misses/reason`.
+- Riesgos: campos task_vm_info sin compilar en Mac; RAM de 512 archivos; vpgles con EXTERNAL_OES.

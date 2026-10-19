@@ -571,7 +571,7 @@ static void *heartbeat(void *arg) {
             clock_gettime(CLOCK_REALTIME, &ts);
             struct tm tm;
             localtime_r(&ts.tv_sec, &tm);
-            char mb[160];
+            char mb[512];
             kl_mem_breakdown(mb, sizeof mb);
             if (ticks % 64 == 0) {
                 int ports, fds;
@@ -632,7 +632,7 @@ static void *heartbeat(void *arg) {
             long long jump = (prev_foot >= 0 && foot >= 0) ? (foot - prev_foot) >> 20 : 0;
             if (foot >= 0) prev_foot = foot;
             if (jump > 200 || blocked) {
-                char mb2[160], gb2[1024];
+                char mb2[512], gb2[1024], rg2[512];
                 kl_mem_breakdown(mb2, sizeof mb2);
                 if (jump > 200)
                     fprintf(stderr, "[hb] jump +%lld MiB  phase=%s  foot=%lldM avail=%lldM  %s\n",
@@ -642,6 +642,15 @@ static void *heartbeat(void *arg) {
                             g_phase, foot >> 20, mb2);
                 if (kl_vulkan_mem_stats(gb2, sizeof gb2))
                     fprintf(stderr, "[hb] gpu %s\n", gb2);
+                if (kl_mem_regions(rg2, sizeof rg2))
+                    fprintf(stderr, "[hb] vm %s\n", rg2);
+                // First big jump near the ceiling: who is running right now (the guest thread
+                // that is loading), once per process.
+                static int jump_snap_done;
+                if (jump > 200 && foot > (5500LL << 20) && !jump_snap_done) {
+                    jump_snap_done = 1;
+                    kl_sample_snapshot(stderr, "mem jump");
+                }
                 fflush(stderr);
             }
         }

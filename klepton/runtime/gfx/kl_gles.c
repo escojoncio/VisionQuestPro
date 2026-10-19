@@ -39,6 +39,7 @@ typedef void (*vpgles_flush_fn)(int);
 static vpgles_proc_fn   g_proc;
 static vpgles_device_fn g_device;
 static vpgles_wrap_fn   g_wrap;
+static uint32_t (*g_wrap_as)(uint32_t, void *, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t);
 static vpgles_flush_fn  g_flush;
 static void            *g_vk_gipa;
 static void            *g_vk_lib;
@@ -216,6 +217,7 @@ static void kl_gles_bringup(void) {
     g_proc   = (vpgles_proc_fn)dlsym(h, "vpgles_proc");
     g_device = (vpgles_device_fn)dlsym(h, "vpgles_device");
     g_wrap   = (vpgles_wrap_fn)dlsym(h, "vpgles_wrap_image");
+    g_wrap_as = (uint32_t (*)(uint32_t, void *, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t))dlsym(h, "vpgles_wrap_image_as");
     g_flush  = (vpgles_flush_fn)dlsym(h, "vpgles_flush");
     g_vk_gipa = dlsym(h, "vkGetInstanceProcAddr");
     if (!init || !g_proc || !g_device || !g_wrap || !g_flush || !g_vk_gipa) {
@@ -296,7 +298,7 @@ void *kl_gles_texture_mtl(uint32_t name) {
     return NULL;
 }
 
-uint32_t kl_gles_layer_texture(int is_eye, int eye, int stage, int w, int h, uint32_t glfmt, int layers) {
+static uint32_t layer_texture_impl(uint32_t as_name, int is_eye, int eye, int stage, int w, int h, uint32_t glfmt, int layers) {
 #ifdef KL_GLES_HAVE_VK
     if (!kl_gles_enabled() || w <= 0 || h <= 0) return 0;
     void *inst = NULL, *phys = NULL, *dev = NULL, *queue = NULL;
@@ -335,7 +337,9 @@ uint32_t kl_gles_layer_texture(int is_eye, int eye, int stage, int w, int h, uin
     bind((VkDevice)dev, img, mem, 0);
     // The storage lives for the run (swapchain images are few and re-created only on resize).
     const uint32_t target = layers > 1 ? 0x8C1A /* TEXTURE_2D_ARRAY */ : 0x0DE1 /* TEXTURE_2D */;
-    uint32_t name = g_wrap((void *)img, (uint32_t)fmt, target, (uint32_t)w, (uint32_t)h, (uint32_t)layers, 1);
+    uint32_t name = as_name ? (g_wrap_as ? g_wrap_as(as_name, (void *)img, (uint32_t)fmt, target, (uint32_t)w, (uint32_t)h,
+                                                     (uint32_t)layers, 1) : 0)
+                            : g_wrap((void *)img, (uint32_t)fmt, target, (uint32_t)w, (uint32_t)h, (uint32_t)layers, 1);
     if (!name) return 0;
     void *mtl = mtl_of(img);
     if (mtl) {
@@ -362,7 +366,18 @@ uint32_t kl_gles_layer_texture(int is_eye, int eye, int stage, int w, int h, uin
             is_eye ? "eye" : "quad", eye, stage, name, (void *)img, w, h, layers, layers > 1 ? "s" : "", glfmt);
     return name;
 #else
-    (void)is_eye; (void)eye; (void)stage; (void)w; (void)h; (void)glfmt; (void)layers;
+    (void)as_name; (void)is_eye; (void)eye; (void)stage; (void)w; (void)h; (void)glfmt; (void)layers;
     return 0;
 #endif
+}
+
+uint32_t kl_gles_layer_texture(int is_eye, int eye, int stage, int w, int h, uint32_t glfmt, int layers) {
+    return layer_texture_impl(0, is_eye, eye, stage, w, h, glfmt, layers);
+}
+
+uint32_t kl_gles_legacy_eye_texture(uint32_t name, int eye, int stage, int w, int h, uint32_t glfmt, int layers) {
+    uint32_t r = layer_texture_impl(name, 1, eye, stage, w, h, glfmt, layers);
+    fprintf(stderr, "  [gles] legacy eye texture %u (eye %d stage %d %dx%d, %d layer%s) wrapped: %s\n", name, eye, stage, w, h,
+            layers, layers > 1 ? "s" : "", r ? "ok" : "FAILED");
+    return r;
 }

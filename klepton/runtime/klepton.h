@@ -189,7 +189,8 @@ void kl_mem_report(void);
 // Java, and the two must not answer differently.
 uint64_t kl_mem_budget_bytes(void);
 uint64_t kl_mem_available_bytes(void);
-void kl_mem_breakdown(char *buf, size_t n);   // heap/internal/compressed/file, for [hb]
+void kl_mem_breakdown(char *buf, size_t n);   // heap/internal/compressed/file + ledger tags, for [hb]
+int  kl_mem_regions(char *buf, size_t n);     // resident bytes by VM user_tag, top 8; 0 if rate-limited (2 s)
 
 // The futex emulation (kl_libc.c). _dump prints every futex word that has
 // waiters (or was woken recently) with its value, waiter count, the waiters'

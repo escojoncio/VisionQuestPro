@@ -306,6 +306,8 @@ static int32_t kl_ANativeWindow_getWidth(kl_native_window *w)  { return w ? w->w
 static int32_t kl_ANativeWindow_getHeight(kl_native_window *w) { return w ? w->height : 0; }
 static int32_t kl_ANativeWindow_getFormat(kl_native_window *w) { return w ? w->format : 0; }
 
+void *kl_jni_surface_window(void *surface);   // kl_jni_hostvideo.c; NULL unless Surface(SurfaceTexture)
+
 static void *kl_ANativeWindow_fromSurface(void *env, void *surface) {
     (void)env;
     // XR_KHR_android_surface_swapchain: a Surface handed back by
@@ -325,6 +327,12 @@ static void *kl_ANativeWindow_fromSurface(void *env, void *surface) {
                             "surface window %p (%dx%d)\n", surface, win, w, h);
             return win;
         }
+    }
+    // Surface(SurfaceTexture): the window is the reader behind that SurfaceTexture
+    // (kl_jni_hostvideo.c), so AMediaCodec_configure decodes into it for real.
+    if (surface) {
+        void *w = kl_jni_surface_window(surface);
+        if (w) { kl_ANativeWindow_acquire(w); return w; }
     }
     kl_ANativeWindow_acquire(&g_window);
     return &g_window;

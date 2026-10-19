@@ -1092,7 +1092,13 @@ static uint64_t kl_mem_total(void) {
     uint64_t host = 0;
     size_t   sz   = sizeof host;
     if (sysctlbyname("hw.memsize", &host, &sz, NULL, 0) != 0) host = 0;
-    uint64_t want = (uint64_t)kl_env_int("KL_MEM_TOTAL_MB", 6144) << 20;
+    // What the guest SEES as RAM: a Quest 3's 8 GB, so sizing heuristics (Unity, UE pool
+    // sizes) pick the profile the title was tuned for. It is NOT the kill line: the real
+    // per-process limit on visionOS is ~8190 MiB of phys_footprint (foot + os_proc_available
+    // measured constant) and is tracked separately by kl_mem_real_limit(), which is what the
+    // low-memory notifications and MemAvailable are driven from. 6144 made MemAvailable hit 0
+    // at 6 GB of footprint, ~2 GB before the real limit, and the guest then starved itself.
+    uint64_t want = (uint64_t)kl_env_int("KL_MEM_TOTAL_MB", 8192) << 20;
     total = (host && host < want) ? host : want;
     return total;
 }
@@ -1249,10 +1255,11 @@ int klb_sysinfo(void *out) {
 //  2. The OS's own signal (DISPATCH_SOURCE_TYPE_MEMORYPRESSURE), which on
 //     visionOS is the only warning that arrives before jetsam does.
 //
-// KL_LOWMEM_AT is the footprint percentage that fires source 1 (default 80,
-// 0 disables). It re-arms only after the footprint falls back below
-// KL_LOWMEM_CLEAR (default 70), so a guest that cannot free anything is asked
-// once rather than every frame.
+// KL_LOWMEM_AT is the footprint percentage (of the REAL process limit, see
+// kl_mem_real_limit) that fires source 1 (default 65, 0 disables), KL_LOWMEM_CRIT the
+// second tier (default 80). Each re-arms only after the footprint falls back below
+// KL_LOWMEM_CLEAR (55) / KL_LOWMEM_CRIT_CLEAR (70), so a guest that cannot free anything
+// is asked once per tier rather than every frame.
 static _Atomic int g_lowmem_armed = 1;
 static _Atomic uint64_t g_lowmem_fired;
 static _Atomic int g_lowmem_untold;   // last attempt found no nativeLowMemory registered yet
@@ -1288,49 +1295,73 @@ void kl_mem_pressure_fire(const char *why) {
             (unsigned long long)(kl_mem_total() >> 20), (unsigned long long)n);
 }
 
-// Cheap enough for once a frame: one task_info call.
-void kl_mem_pressure_poll(void) {
-    int at = kl_env_int("KL_LOWMEM_AT", 80);
-    if (at <= 0) return;
-    int clear = kl_env_int("KL_LOWMEM_CLEAR", 70);
+// The kill line: phys_footprint + os_proc_available_memory() is constant (~8190 MiB on a
+// Vision Pro) whatever the footprint does, so it is the real limit of this process. The
+// guest-visible total (kl_mem_total) is deliberately a Quest-like 8 GB; pressure is judged
+// against THIS number so the notifications arrive before jetsam, not against the facade.
+// Falls back to the guest total when the OS gives no headroom.
+static uint64_t kl_mem_real_limit(uint64_t used, uint64_t avail) {
+    return (used && avail) ? used + avail : kl_mem_total();
+}
 
-    // The real limit first: os_proc_available_memory() is the headroom before
-    // jetsam, and on visionOS the app is killed at a phys_footprint well under
-    // the KL_MEM_TOTAL budget — so the percentage test below (fraction of a
-    // 6 GB budget) never trips and the guest is never told to shed. Fire when
-    // the OS says fewer than KL_LOWMEM_FREE_MB (default 384) bytes remain, so
-    // Unity runs UnloadUnusedAssets before the kill rather than after it.
+static _Atomic int g_lowmem_crit_armed = 1;
+
+// Cheap enough for once a frame: one task_info call.
+// Two tiers on the REAL limit, one notification each per episode (the guest's
+// nativeLowMemory has no level argument, so the second one is a repeat ask at a worse moment):
+//   warning  KL_LOWMEM_AT   (default 65 %), re-arms below KL_LOWMEM_CLEAR (default 55 %)
+//   critical KL_LOWMEM_CRIT (default 80 %) or OS headroom <= KL_LOWMEM_FREE_MB (384),
+//            re-arms below KL_LOWMEM_CRIT_CLEAR (default 70 %) and 1.5x the floor.
+// Why 65/80 of ~8190: a synchronous load adds ~1.8 GB/s of graphics/IOKit memory that no
+// allocator counter sees, so from 80 % (6.5 GB) there are under 1 s left; the warning at
+// 65 % (5.3 GB) gives UnloadUnusedAssets a few seconds of room.
+void kl_mem_pressure_poll(void) {
+    int at = kl_env_int("KL_LOWMEM_AT", 65);
+    if (at <= 0) return;
+    int clear = kl_env_int("KL_LOWMEM_CLEAR", 55);
+    int crit = kl_env_int("KL_LOWMEM_CRIT", 80);
+    int crit_clear = kl_env_int("KL_LOWMEM_CRIT_CLEAR", 70);
+
     uint64_t avail = kl_proc_available();
-    uint64_t total = kl_mem_total(), used = kl_mem_footprint();
-    int pct = (total && used) ? (int)((used * 100) / total) : -1;
-    // Two independent triggers share ONE armed flag so the guest is asked once per
-    // episode: the OS headroom (below) and the footprint fraction of the budget. The
-    // old code returned after the headroom test whenever the OS gave a value, so the
-    // 80% test never ran and AC Nexus was jetsammed at ~6.5 GB with ~1.6 GB "available".
-    int hot = 0, cold = 1;
+    uint64_t used = kl_mem_footprint();
+    uint64_t limit = kl_mem_real_limit(used, avail);
+    int pct = (limit && used) ? (int)((used * 100) / limit) : -1;
+    int warn_hot = 0, warn_cold = 1, crit_hot = 0, crit_cold = 1;
     const char *why = "footprint";
     if (avail) {
         uint64_t floor = (uint64_t)kl_env_int("KL_LOWMEM_FREE_MB", 384) << 20;
         uint64_t clearf = floor + (floor >> 1);          // re-arm at 1.5x the floor
-        if (avail <= floor) { hot = 1; why = "headroom"; }
-        if (avail < clearf) cold = 0;
+        if (avail <= floor) { crit_hot = 1; why = "headroom"; }
+        if (avail < clearf) { warn_cold = 0; crit_cold = 0; }
     }
     if (pct >= 0) {
-        if (pct >= at) hot = 1;
-        if (pct >= clear) cold = 0;
+        if (pct >= at) warn_hot = 1;
+        if (pct >= clear) warn_cold = 0;
+        if (pct >= crit) crit_hot = 1;
+        if (pct >= crit_clear) crit_cold = 0;
     }
-    if (hot) {
-        if (atomic_exchange(&g_lowmem_armed, 0)) {
-            if (!atomic_load(&g_lowmem_untold))
-            fprintf(stderr, "  [mem] threshold (%s): footprint %llu MiB of %llu MiB budget "
-                            "(%d%%), OS headroom %llu MiB\n", why,
-                    (unsigned long long)(used >> 20), (unsigned long long)(total >> 20),
-                    pct, (unsigned long long)(avail >> 20));
-            kl_mem_pressure_fire(why);
-        }
-    } else if (cold) {
-        atomic_store(&g_lowmem_armed, 1);
+    if (crit_hot) warn_hot = 1;   // never reach critical without the warning having fired
+    int fire = 0;
+    if (crit_hot && atomic_exchange(&g_lowmem_crit_armed, 0)) {
+        atomic_store(&g_lowmem_armed, 0);
+        fire = 1;
+        if (!strcmp(why, "footprint")) why = "footprint critical";
+    } else if (warn_hot && atomic_exchange(&g_lowmem_armed, 0)) {
+        fire = 1;
+        why = "footprint warning";
     }
+    if (fire) {
+        if (!atomic_load(&g_lowmem_untold))
+            fprintf(stderr, "  [mem] threshold (%s): footprint %llu MiB of %llu MiB real limit "
+                            "(%d%%), OS headroom %llu MiB, guest-visible total %llu MiB\n", why,
+                    (unsigned long long)(used >> 20), (unsigned long long)(limit >> 20),
+                    pct, (unsigned long long)(avail >> 20),
+                    (unsigned long long)(kl_mem_total() >> 20));
+        kl_mem_pressure_fire(why);
+        if (atomic_load(&g_lowmem_untold)) atomic_store(&g_lowmem_crit_armed, 1);
+    }
+    if (!crit_hot && crit_cold) atomic_store(&g_lowmem_crit_armed, 1);
+    if (!warn_hot && warn_cold) atomic_store(&g_lowmem_armed, 1);
 }
 
 void kl_mem_pressure_init(void) {
@@ -1367,6 +1398,7 @@ void kl_mem_pressure_init(void) {
                 (unsigned long long)(kl_mem_footprint() >> 20), (unsigned long long)(av >> 20));
         kl_mem_pressure_fire(crit ? "system critical" : "system warning");
         atomic_store(&g_lowmem_armed, 0);
+        if (crit) atomic_store(&g_lowmem_crit_armed, 0);
     });
     dispatch_resume(src);   // deliberately never cancelled: it lives as long as
                             // the process, and there is nothing to release it to
@@ -1384,17 +1416,195 @@ void kl_mem_breakdown(char *buf, size_t n) {
     memset(&ms, 0, sizeof ms);
     malloc_zone_statistics(NULL, &ms);
     task_vm_info_data_t    ti;
+    memset(&ti, 0, sizeof ti);
     mach_msg_type_number_t cnt = TASK_VM_INFO_COUNT;
     if (task_info(mach_task_self(), TASK_VM_INFO, (task_info_t)&ti, &cnt) != KERN_SUCCESS) {
         snprintf(buf, n, "heap=%lluM", (unsigned long long)(ms.size_in_use >> 20));
         return;
     }
-    snprintf(buf, n, "heap=%lluM(res %lluM) internal=%lluM comp=%lluM file=%lluM",
+    int w = snprintf(buf, n, "heap=%lluM(res %lluM) internal=%lluM comp=%lluM file=%lluM",
              (unsigned long long)(ms.size_in_use >> 20),
              (unsigned long long)(ms.size_allocated >> 20),
              (unsigned long long)((uint64_t)ti.internal >> 20),
              (unsigned long long)((uint64_t)ti.compressed >> 20),
              (unsigned long long)((uint64_t)ti.external >> 20));
+    if (w < 0 || (size_t)w >= n) return;
+    // Ledger tags (task_vm_info rev >= 5): the footprint's own accounting of what no malloc
+    // counter sees. gfx = graphics-tagged memory inside the footprint, gfx_nofp = graphics
+    // memory the ledger holds outside it; the difference between foot-internal-comp and these
+    // says whether the 1.8 GB/s climb is IOAccelerator/IOSurface-tagged. A field is only read
+    // when `cnt` (ints the kernel filled) covers it, otherwise it would be the memset zero and
+    // look like a measurement. ledger_iokit_mapped / ledger_alternate_accounting /
+    // ledger_page_table are not members of the public task_vm_info_data_t (only of the kernel
+    // ledger template), so they cannot be read from user space; the region map below
+    // (kl_mem_regions) is the substitute for IOKit-mapped memory.
+#define KL_TI_HAS(f) (cnt * sizeof(natural_t) >= __builtin_offsetof(task_vm_info_data_t, f) + sizeof ti.f)
+#define KL_TI_ADD(label, f) \
+    do { if (KL_TI_HAS(f) && (size_t)w < n) \
+        w += snprintf(buf + w, n - (size_t)w, " " label "=%lluM", \
+                      (unsigned long long)((uint64_t)ti.f >> 20)); } while (0)
+    KL_TI_ADD("gfx", ledger_tag_graphics_footprint);
+    KL_TI_ADD("gfx_nofp", ledger_tag_graphics_nofootprint);
+    KL_TI_ADD("media", ledger_tag_media_footprint);
+    KL_TI_ADD("media_nofp", ledger_tag_media_nofootprint);
+    KL_TI_ADD("net", ledger_tag_network_nonvolatile);
+    KL_TI_ADD("purg", ledger_purgeable_nonvolatile);
+    KL_TI_ADD("fp_peak", ledger_phys_footprint_peak);
+    KL_TI_ADD("lim_rem", limit_bytes_remaining);
+#undef KL_TI_ADD
+#undef KL_TI_HAS
+    if ((size_t)w < n)
+        snprintf(buf + w, n - (size_t)w, " physfp=%lluM",
+                 (unsigned long long)((uint64_t)ti.phys_footprint >> 20));
+}
+
+// Region map by user_tag, for the jump/blocked samples: sums RESIDENT bytes per VM_MEMORY_*
+// tag over every region of the address space (vm_region_recurse_64, descending into
+// submaps), top 8. IOAccelerator / IOSurface / IOKit-tagged residency is the part of the
+// footprint no allocator counter and no MTLDevice.currentAllocatedSize shows. Costs a walk
+// of the whole map (tens of thousands of regions), so it is rate-limited to once per 2 s
+// and meant only for jump / blocked samples. Returns 0 (buf empty) when rate-limited.
+static const char *kl_vm_tag_name(unsigned t) {
+    switch (t) {
+#ifdef VM_MEMORY_MALLOC
+    case VM_MEMORY_MALLOC: return "MALLOC";
+#endif
+#ifdef VM_MEMORY_MALLOC_SMALL
+    case VM_MEMORY_MALLOC_SMALL: return "MALLOC_SMALL";
+#endif
+#ifdef VM_MEMORY_MALLOC_LARGE
+    case VM_MEMORY_MALLOC_LARGE: return "MALLOC_LARGE";
+#endif
+#ifdef VM_MEMORY_MALLOC_LARGE_REUSABLE
+    case VM_MEMORY_MALLOC_LARGE_REUSABLE: return "MALLOC_LARGE_REUSABLE";
+#endif
+#ifdef VM_MEMORY_MALLOC_LARGE_REUSED
+    case VM_MEMORY_MALLOC_LARGE_REUSED: return "MALLOC_LARGE_REUSED";
+#endif
+#ifdef VM_MEMORY_MALLOC_TINY
+    case VM_MEMORY_MALLOC_TINY: return "MALLOC_TINY";
+#endif
+#ifdef VM_MEMORY_MALLOC_NANO
+    case VM_MEMORY_MALLOC_NANO: return "MALLOC_NANO";
+#endif
+#ifdef VM_MEMORY_STACK
+    case VM_MEMORY_STACK: return "STACK";
+#endif
+#ifdef VM_MEMORY_IOKIT
+    case VM_MEMORY_IOKIT: return "IOKit";
+#endif
+#ifdef VM_MEMORY_IOACCELERATOR
+    case VM_MEMORY_IOACCELERATOR: return "IOAccelerator";
+#endif
+#ifdef VM_MEMORY_IOSURFACE
+    case VM_MEMORY_IOSURFACE: return "IOSurface";
+#endif
+#ifdef VM_MEMORY_COREGRAPHICS
+    case VM_MEMORY_COREGRAPHICS: return "CG";
+#endif
+#ifdef VM_MEMORY_COREGRAPHICS_DATA
+    case VM_MEMORY_COREGRAPHICS_DATA: return "CG_data";
+#endif
+#ifdef VM_MEMORY_COREGRAPHICS_BACKINGSTORES
+    case VM_MEMORY_COREGRAPHICS_BACKINGSTORES: return "CG_backing";
+#endif
+#ifdef VM_MEMORY_COREANIMATION
+    case VM_MEMORY_COREANIMATION: return "CoreAnimation";
+#endif
+#ifdef VM_MEMORY_ANALYTICS
+    case VM_MEMORY_ANALYTICS: return "analytics";
+#endif
+#ifdef VM_MEMORY_SQLITE
+    case VM_MEMORY_SQLITE: return "sqlite";
+#endif
+#ifdef VM_MEMORY_DYLIB
+    case VM_MEMORY_DYLIB: return "dylib";
+#endif
+#ifdef VM_MEMORY_DYLD
+    case VM_MEMORY_DYLD: return "dyld";
+#endif
+#ifdef VM_MEMORY_DYLD_MALLOC
+    case VM_MEMORY_DYLD_MALLOC: return "dyld_malloc";
+#endif
+#ifdef VM_MEMORY_MAPPED_FILE
+    case VM_MEMORY_MAPPED_FILE: return "mapped_file";
+#endif
+#ifdef VM_MEMORY_SHARED_PMAP
+    case VM_MEMORY_SHARED_PMAP: return "shared_pmap";
+#endif
+#ifdef VM_MEMORY_FOUNDATION
+    case VM_MEMORY_FOUNDATION: return "Foundation";
+#endif
+#ifdef VM_MEMORY_OBJC_DISPATCHERS
+    case VM_MEMORY_OBJC_DISPATCHERS: return "objc_disp";
+#endif
+#ifdef VM_MEMORY_IMAGEIO
+    case VM_MEMORY_IMAGEIO: return "ImageIO";
+#endif
+#ifdef VM_MEMORY_CGIMAGE
+    case VM_MEMORY_CGIMAGE: return "CGImage";
+#endif
+#ifdef VM_MEMORY_LAYERKIT
+    case VM_MEMORY_LAYERKIT: return "LayerKit";
+#endif
+#ifdef VM_MEMORY_JAVASCRIPT_JIT_EXECUTABLE_ALLOCATOR
+    case VM_MEMORY_JAVASCRIPT_JIT_EXECUTABLE_ALLOCATOR: return "JIT";
+#endif
+    case 0: return "untagged";
+    default: return NULL;
+    }
+}
+
+int kl_mem_regions(char *buf, size_t n) {
+    if (!buf || !n) return 0;
+    buf[0] = 0;
+    static _Atomic uint64_t last_ns;
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    uint64_t now = (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
+    uint64_t prev = atomic_load(&last_ns);
+    if (prev && now - prev < 2000000000ull) return 0;
+    if (!atomic_compare_exchange_strong(&last_ns, &prev, now)) return 0;
+
+    uint64_t res[256], virt[256];
+    memset(res, 0, sizeof res);
+    memset(virt, 0, sizeof virt);
+    vm_size_t page = 0;
+    if (host_page_size(mach_host_self(), &page) != KERN_SUCCESS || !page) page = 16384;
+    vm_address_t addr = 0;
+    natural_t depth = 0;
+    unsigned nreg = 0;
+    uint64_t total_res = 0;
+    while (nreg < 400000) {
+        vm_size_t size = 0;
+        vm_region_submap_info_data_64_t info;
+        mach_msg_type_number_t icnt = VM_REGION_SUBMAP_INFO_COUNT_64;
+        kern_return_t kr = vm_region_recurse_64(mach_task_self(), &addr, &size, &depth,
+                                                (vm_region_recurse_info_t)&info, &icnt);
+        if (kr != KERN_SUCCESS) break;
+        if (info.is_submap) { depth++; continue; }
+        unsigned tag = info.user_tag & 0xff;
+        uint64_t r = (uint64_t)info.pages_resident * page;
+        res[tag] += r;
+        virt[tag] += size;
+        total_res += r;
+        nreg++;
+        addr += size;
+    }
+    int w = snprintf(buf, n, "regions=%u resident=%lluM:", nreg, (unsigned long long)(total_res >> 20));
+    for (int k = 0; k < 8 && w > 0 && (size_t)w < n; k++) {
+        int best = -1;
+        for (int t = 0; t < 256; t++)
+            if (res[t] && (best < 0 || res[t] > res[best])) best = t;
+        if (best < 0) break;
+        const char *nm = kl_vm_tag_name((unsigned)best);
+        char tmp[16];
+        if (!nm) { snprintf(tmp, sizeof tmp, "tag%d", best); nm = tmp; }
+        w += snprintf(buf + w, n - (size_t)w, " %s=%lluM/%lluMv", nm,
+                      (unsigned long long)(res[best] >> 20), (unsigned long long)(virt[best] >> 20));
+        res[best] = 0;
+    }
+    return 1;
 }
 
 void kl_mem_report(void) {
