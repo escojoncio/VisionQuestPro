@@ -15,7 +15,8 @@ echo "host-tests: -j$JOBS, work $WORK"
 
 gpu_host() {
   cmake -S "$VPK/gpu" -B "$WORK/gpu" -DCMAKE_BUILD_TYPE=Release || return 1
-  cmake --build "$WORK/gpu" -j "$JOBS" || return 1
+  # -k: report every compile error at once, not only the first.
+  cmake --build "$WORK/gpu" -j "$JOBS" -- -k || return 1
   (cd "$WORK/gpu" && ctest -j "$JOBS" --output-on-failure)
 }
 metal2_xros() {
