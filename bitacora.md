@@ -3,6 +3,14 @@
 Historial completo: `git log -p bitacora.md` (compactada el 2026-10-18; detalle de cada paso en los commits
 «Integrar paso-aN» y en las ramas `paso-aN` de GitHub).
 
+## 2026-10-19 — VPKTAA único = nativo de VPKEngine (sin compilar Swift/.mm/.c, sin probar en visor)
+- Quitado el toggle «VPKTAA nativo» y `vq.vpktaaNative` (se borra la clave guardada al cargar): `app/Sources/VQLaunch.swift`, `VQLauncher.swift`. Con VPKTAA permitido (modo VPKTAA o Automático sin MSAA) la app pone siempre `taa_native=1` y `VPVK_TAA_NATIVE=1`; si no, 0.
+- Eliminadas las rutas VPKTAA no nativas: `VPKTAACore.swift` borrado (queda `VPKTAAInput.swift` con las structs de entrada, sin jitter); `KleptonTAA.swift` sin cola async, anillo async, `submit/acquire`, `core.encode`, sondeo de jitter/lag/votos; `KleptonCompositor.swift` sin `taaWait` ni camino async (`prepareTAA` solo inline; sin gancho = sin TAA y `kl_ovrp_set_taa_active(0)`).
+- `gfx/kl_vulkan.c/.h`: el modo inline exige el nativo (`kl_vulkan_taa_native_on`); nuevo `kl_vulkan_taa_ui_mask_on` (símbolo `vpvk_taa_ui_mask_enabled`).
+- Log: `VPKTAA nativo activo (máscara UI: sí/no) — ojo WxH, P %, nitidez S` en el primer frame resuelto (`KleptonTAA.swift`).
+- Sin cobertura del nativo (quedan SIN TAA, no con el viejo): juegos GLES/ANGLE, MoltenVK, OpenXR (sin registro de frame `kl_ovrp_*`).
+- Pendiente: compilar en Mac/CI; probar en visor (AC Nexus, AoT); simplificar `kl_ovrp.c` (sondeo de jitter de frustum ya inerte); foveado propio con rate map (ver VPKEngine/bitacora.md).
+
 ## EMPEZAR AQUÍ — 2026-10-19: lote nocturno sin probar (build lanzada)
 Estado: cambios en el árbol de trabajo (25 ficheros, +1017/-48) sobre fc2f217; VPKEngine con cambios propios (11 ficheros, +770/-64). Nada verificado en el visor.
 
@@ -291,3 +299,17 @@ VPKEngine `main` = e6c3f3b.
 - AoT bajones: no son regresiones; GPU al límite (pase MSAA x2 2976x1912x2) → visionOS fija 50 Hz; pico puntual coincide con compilación de PSO en worker + guardado de .metalar (sin confirmar). Instrumentación: `gpu.sec` (p50/p95/max/over10) y `[cp] HALF RATE held` con gaps y estado térmico.
 - AA: el selector por juego (Automático/VPKTAA/MSAA/Off) ya existía; en Automático con MSAA detectado se mantiene el MSAA. A2C → alpha test (discard <0.5, sin early fragment tests) al forzar 1x. Log "Antialiasing efectivo: …".
 - Pendiente: confirmar la causa del pico de AoT; valorar VPKTAA por defecto en juegos MSAA.
+
+## VPKTAA nativo también en vpgles (ovrp / OpenXR) y Vulkan+OpenXR (sin compilar)
+- Jitter y máscara UI: vpgles usa el Translator de VPVulkan, así que ya valen. Profundidad: el motor la toma del pase de ojo si el host no la da.
+- kl_vulkan.c: `kl_vulkan_taa_gles_frame_end` (gancho de fin de frame de vpgles), `kl_vulkan_taa_eye_bottom_up`, `kl_vulkan_eye_color_top_left`, color del ojo desde la tabla de kl_glfb (`kl_glfb_eye_mtl_live`).
+- kl_ovrp.c EndFrame4 (rama vpgles) y kl_openxr.c xrEndFrame llaman al gancho; en Vulkan+OpenXR el registro se archiva ANTES de `kl_vulkan_frame_done`.
+- KleptonTAA.swift: flipY por ojo, tangentes espejadas si la memoria es bottom-up, `color_base`, log con la ruta.
+- Pendiente/riesgos: `pollAADetection` sigue limitado a Vulkan (en vpgles no hay detección MSAA); pose por ojo de OpenXR usa `kl_ovrp_eye_local` (no la pose por vista del layer); formato de ojo no sRGB8 sin TAA; nada compilado en Mac.
+
+## VPKTAA nativo único en todas las rutas
+- Eliminados VPKTAACore.swift y rutas async/no nativas; toggle vq.vpktaaNative borrado. Modo VPKTAA (o Automático sin MSAA) ⇒ nativo.
+- Rutas cubiertas: Vulkan+ovrp, Vulkan+OpenXR, vpgles+ovrp (`kl_vulkan_taa_gles_frame_end` en EndFrame4), vpgles+OpenXR (xrEndFrame). Profundidad desde el registro de pase de ojo del Translator.
+- vpgles: ojos `top_left=0` (`kl_glfb_note_eye_mtl_texture_o`), bottom-up con tangentes espejadas. `drop_repeat` en `klovrp_end_frame_impl` solo con stages > 1.
+- Logs TRIANGLE: el guest de TRIANGLE es Vulkan (UE4), no vpgles.
+- Pendiente: foveado propio (MTLRasterizationRateMap por ojo en metal2, desdoblado en compositor, TAA físico↔lógico; M5 solo en hardware M5). Detección de MSAA solo en Vulkan. Verificar orientación vpgles en visor.

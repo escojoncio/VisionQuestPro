@@ -41,6 +41,7 @@ static vpgles_device_fn g_device;
 static vpgles_wrap_fn   g_wrap;
 static vpgles_flush_fn  g_flush;
 static void            *g_vk_gipa;
+static void            *g_vk_lib;
 static int              g_state;  // 0 unknown, 1 up, -1 off/failed
 static pthread_once_t   g_once = PTHREAD_ONCE_INIT;
 
@@ -230,7 +231,8 @@ static void kl_gles_bringup(void) {
                    "KL_GLES_VPK=1 pero vpgles_init fallo (fallback)");
         return;
     }
-    g_state = 1;
+    g_vk_lib = h;
+    __atomic_store_n(&g_state, 1, __ATOMIC_RELEASE);
     fprintf(stderr, "  [gles] guest GLES served by VPKEngine (vpgles on VPVulkan)\n");
     gles_route("VPKEngine (vpgles)", "KL_GLES_VPK=1 y vpgles_init correcto; las entradas gl*/egl* vienen de vpgles");
 }
@@ -239,6 +241,10 @@ int kl_gles_enabled(void) {
     pthread_once(&g_once, kl_gles_bringup);
     return g_state == 1;
 }
+
+int kl_gles_vpk_up(void) { return __atomic_load_n(&g_state, __ATOMIC_ACQUIRE) == 1; }
+
+void *kl_gles_vk_handle(void) { return kl_gles_vpk_up() ? g_vk_lib : NULL; }
 
 void *kl_gles_sym(const char *name) {
     if (!name || !kl_gles_enabled()) return NULL;
@@ -341,13 +347,13 @@ uint32_t kl_gles_layer_texture(int is_eye, int eye, int stage, int w, int h, uin
         // eye < 0 (DoubleWide): one wide image holds both eyes, slice 0; each eye is cropped by
         // its own submit viewport, so both (eye, stage) keys are registered.
         if (layers > 1) {
-            kl_glfb_note_eye_mtl_texture(0, stage, mtl, 0, w, h);
-            kl_glfb_note_eye_mtl_texture(1, stage, mtl, 1, w, h);
+            kl_glfb_note_eye_mtl_texture_o(0, stage, mtl, 0, w, h, 0);
+            kl_glfb_note_eye_mtl_texture_o(1, stage, mtl, 1, w, h, 0);
         } else if (eye < 0) {
-            kl_glfb_note_eye_mtl_texture(0, stage, mtl, 0, w, h);
-            kl_glfb_note_eye_mtl_texture(1, stage, mtl, 0, w, h);
+            kl_glfb_note_eye_mtl_texture_o(0, stage, mtl, 0, w, h, 0);
+            kl_glfb_note_eye_mtl_texture_o(1, stage, mtl, 0, w, h, 0);
         } else {
-            kl_glfb_note_eye_mtl_texture(eye, stage, mtl, 0, w, h);
+            kl_glfb_note_eye_mtl_texture_o(eye, stage, mtl, 0, w, h, 0);
         }
         kl_glfb_note_eye_texture(eye < 0 ? 0 : eye, stage, name);
         if (eye < 0 || layers > 1) kl_glfb_note_eye_texture(1, stage, name);

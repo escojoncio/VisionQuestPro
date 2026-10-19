@@ -5232,8 +5232,8 @@ static void klxr_publish_eye_gles(klxr_swapchain *sc, int eye, int slice) {
     if (eye < 0 || eye > 1 || (sc->gles_pub & (1 << eye))) return;
     if (sc->array_size <= 1) slice = 0;
     for (int k = 0; k < sc->count; k++)
-        kl_glfb_note_eye_mtl_texture(eye, k, sc->gles_mtl[k], slice,
-                                     (int)sc->width, (int)sc->height);
+        kl_glfb_note_eye_mtl_texture_o(eye, k, sc->gles_mtl[k], slice,
+                                       (int)sc->width, (int)sc->height, 0);   // vpgles: bottom-up
     for (int i = 0; i < KLXR_SWAPCHAIN_MAX; i++)
         if (&g_swapchains[i] != sc) g_swapchains[i].gles_pub &= ~(1 << eye);
     sc->gles_pub |= 1 << eye;
@@ -7054,8 +7054,21 @@ static XrResult klxr_EndFrame(void *session, const XrFrameEndInfo *info) {
     // frame was submitted" into "the picture is complete" — the eye MTLTextures
     // are the guest's own images, so nothing of ours is in its submissions and
     // there is no MTLSharedEvent to wait on instead.
-    if (drawn_stage >= 0 && s->gfx == KLXR_GFX_VULKAN)
+    // VPKTAA inline: kl_vulkan_frame_done runs the resolve hook, which reads this
+    // frame's record — so on Vulkan the record is filed BEFORE it (ovrp does the same).
+    int record_filed = 0;
+    if (drawn_stage >= 0 && s->gfx == KLXR_GFX_VULKAN) {
+        if (kl_vulkan_taa_inline()) {
+            kl_ovrp_frame_end_external(drawn_stage,
+                                       have_layer_pose ? layer_pose : NULL,
+                                       have_layer_pose ? layer_tan : NULL);
+            record_filed = 1;
+            kl_ovrp_render_pose rp;
+            if (kl_ovrp_stage_render_pose(drawn_stage, &rp))
+                kl_vulkan_taa_frame_record(drawn_stage, rp.serial);
+        }
         kl_vulkan_frame_done(drawn_stage);
+    }
 
     // ...and this is the VR path's swap. kl_glfb's capture and the frontend
     // seams both hang off eglSwapBuffers, which an OpenXR guest never calls —
@@ -7101,10 +7114,17 @@ static XrResult klxr_EndFrame(void *session, const XrFrameEndInfo *info) {
         klxr_pose_note(s, KLXR_POSE_SRC_SUBMIT, sub);
     }
     klxr_pose_trace_report(s);
-    if (drawn_stage >= 0)
+    if (drawn_stage >= 0 && !record_filed) {
         kl_ovrp_frame_end_external(drawn_stage,
                                    have_layer_pose ? layer_pose : NULL,
                                    have_layer_pose ? layer_tan : NULL);
+        // vpgles + OpenXR: the record exists now, so run the VPKTAA end-of-frame seam.
+        if (s->gfx != KLXR_GFX_VULKAN) {
+            kl_ovrp_render_pose rp;
+            if (kl_ovrp_stage_render_pose(drawn_stage, &rp))
+                kl_vulkan_taa_gles_frame_end(drawn_stage, rp.serial);
+        }
+    }
 
     // ...and this frame's PROJECTION layers, in the order the guest submitted
     // them, replaced whole for the same reason the panels below are. Filed only

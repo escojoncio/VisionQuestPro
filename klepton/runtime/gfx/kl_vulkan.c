@@ -117,6 +117,7 @@ int   kl_vulkan_native_submit(void (*fn)(void *, void *), void *u) { (void)fn; (
 void *kl_vulkan_native_device(void) { return NULL; }
 size_t kl_vulkan_mem_stats(char *out, size_t cap) { (void)out; (void)cap; return 0; }
 int   kl_vulkan_taa_native_on(void) { return 0; }
+int   kl_vulkan_taa_ui_mask_on(void) { return 0; }
 int   kl_vulkan_taa_native_encode(const void *f, void *cb) { (void)f; (void)cb; return 0; }
 void *kl_vulkan_eye_color_mtl(int s, int e, int *sl, int *w, int *h) {
     (void)s; (void)e; if (sl) *sl = 0; if (w) *w = 0; if (h) *h = 0; return NULL;
@@ -129,6 +130,9 @@ int   kl_vulkan_taa_applied(float *jx, float *jy, int *tw, int *th,
     return 0;
 }
 void  kl_vulkan_taa_frame_record(int s, unsigned long long n) { (void)s; (void)n; }
+int   kl_vulkan_taa_gles_frame_end(int s, unsigned long long n) { (void)s; (void)n; return 0; }
+int   kl_vulkan_taa_eye_bottom_up(void) { return 0; }
+int   kl_vulkan_eye_color_top_left(int s, int e) { (void)s; (void)e; return 1; }
 // The OpenXR seam. Answering "not supported" here is what keeps
 // XR_KHR_vulkan_enable OUT of the advertised extension list on a checkout with
 // no MoltenVK, so a Vulkan OpenXR guest is refused at xrCreateInstance — where
@@ -166,6 +170,7 @@ void kl_vulkan_trim(const char *why) { (void)why; }
 #define VK_USE_PLATFORM_METAL_EXT 1
 #include <vulkan/vulkan.h>
 #include "kl_glfb.h"
+#include "kl_gles.h"
 
 #include <zlib.h>
 
@@ -2637,7 +2642,8 @@ static void klvk_ed_frame_done(klvk_device *d, int stage) {
             if (e == 0 && f >= 60 && said_none < 3 && (f % 600 == 60 || said_none == 0)) {
                 said_none++;
                 VKI("[taa-depth] frame %u stage %d: no eye depth found (%u pass(es) with the eye "
-                    "image attached, none with a depth of the eye's size) — VPKTAA rotation-only\n",
+                    "image attached, none with a depth of the eye's size) — VPKTAA takes VPKEngine's own "
+                    "eye-pass depth, else rotation-only\n",
                     f, stage, eye_passes);
             }
             continue;
@@ -3674,6 +3680,7 @@ static struct {
     // weak: VPKEngine with the native VPKTAA (vpvk/config.h "VPKTAA nativo")
     int   (*taa_native_enabled)(void);
     int   (*taa_native_encode)(const void *frame, void *mtl_cmdbuf);
+    int   (*taa_ui_mask_enabled)(void);
     void *(*depth_resolve_encode)(void *mtl_cmdbuf, void *depth_ms, int reversed_z, int mode, int key);
     // weak: VPKEngine with the zero-init queries (vpvk/config.h "vpvk_image_zero_pending")
     int   (*image_zero_pending)(void *mtl);
@@ -3687,22 +3694,27 @@ static pthread_mutex_t g_vpvk_mu = PTHREAD_MUTEX_INITIALIZER;
 // every answer below is 0 / NULL. Not resolved before g_mvk exists, so an
 // early caller does not freeze "absent" for the run.
 static void klvk_vpvk_resolve(void) {
-    if (__atomic_load_n(&g_vpvk.resolved, __ATOMIC_ACQUIRE) || !g_mvk) return;
+    if (__atomic_load_n(&g_vpvk.resolved, __ATOMIC_ACQUIRE)) return;
+    // A Vulkan guest loads the driver here (g_mvk); a GLES guest on vpgles never does, but vpgles
+    // lives in the same VPVulkan dylib (kl_gles.c holds its handle) — the same vpvk_* exports.
+    void *lib = g_mvk ? g_mvk : kl_gles_vk_handle();
+    if (!lib) return;
     pthread_mutex_lock(&g_vpvk_mu);
     if (!g_vpvk.resolved) {
-        g_vpvk.set_jitter    = (void (*)(const klvk_vpvk_taa_jitter *))mvk_sym("vpvk_taa_set_jitter");
-        g_vpvk.get_applied   = (int (*)(klvk_vpvk_taa_applied *))mvk_sym("vpvk_taa_get_applied");
-        g_vpvk.native_submit = (int (*)(klvk_vpvk_encode_fn, void *))mvk_sym("vpvk_native_submit");
-        g_vpvk.native_device = (void *(*)(void))mvk_sym("vpvk_native_device");
-        g_vpvk.msaa_detected   = (int (*)(void))mvk_sym("vpvk_msaa_detected");
-        g_vpvk.msaa_device_max = (int (*)(void))mvk_sym("vpvk_msaa_device_max");
-        g_vpvk.taa_native_enabled = (int (*)(void))mvk_sym("vpvk_taa_native_enabled");
-        g_vpvk.taa_native_encode = (int (*)(const void *, void *))mvk_sym("vpvk_taa_native_encode");
+        g_vpvk.set_jitter    = (void (*)(const klvk_vpvk_taa_jitter *))dlsym(lib, "vpvk_taa_set_jitter");
+        g_vpvk.get_applied   = (int (*)(klvk_vpvk_taa_applied *))dlsym(lib, "vpvk_taa_get_applied");
+        g_vpvk.native_submit = (int (*)(klvk_vpvk_encode_fn, void *))dlsym(lib, "vpvk_native_submit");
+        g_vpvk.native_device = (void *(*)(void))dlsym(lib, "vpvk_native_device");
+        g_vpvk.msaa_detected   = (int (*)(void))dlsym(lib, "vpvk_msaa_detected");
+        g_vpvk.msaa_device_max = (int (*)(void))dlsym(lib, "vpvk_msaa_device_max");
+        g_vpvk.taa_native_enabled = (int (*)(void))dlsym(lib, "vpvk_taa_native_enabled");
+        g_vpvk.taa_native_encode = (int (*)(const void *, void *))dlsym(lib, "vpvk_taa_native_encode");
+        g_vpvk.taa_ui_mask_enabled = (int (*)(void))dlsym(lib, "vpvk_taa_ui_mask_enabled");
         g_vpvk.depth_resolve_encode =
-            (void *(*)(void *, void *, int, int, int))mvk_sym("vpvk_depth_resolve_encode");
-        g_vpvk.image_zero_pending = (int (*)(void *))mvk_sym("vpvk_image_zero_pending");
-        g_vpvk.image_zero_clear   = (int (*)(void *))mvk_sym("vpvk_image_zero_clear");
-        g_vpvk.mem_stats = (size_t (*)(char *, size_t))mvk_sym("vpvk_mem_stats");
+            (void *(*)(void *, void *, int, int, int))dlsym(lib, "vpvk_depth_resolve_encode");
+        g_vpvk.image_zero_pending = (int (*)(void *))dlsym(lib, "vpvk_image_zero_pending");
+        g_vpvk.image_zero_clear   = (int (*)(void *))dlsym(lib, "vpvk_image_zero_clear");
+        g_vpvk.mem_stats = (size_t (*)(char *, size_t))dlsym(lib, "vpvk_mem_stats");
         __atomic_store_n(&g_vpvk.resolved, 1, __ATOMIC_RELEASE);
     }
     pthread_mutex_unlock(&g_vpvk_mu);
@@ -3727,22 +3739,24 @@ static int g_taa_inline = -1;    // -1 undecided
 int kl_vulkan_taa_inline(void) {
     int v = __atomic_load_n(&g_taa_inline, __ATOMIC_ACQUIRE);
     if (v >= 0) return v;
-    // Undecided until a Vulkan guest exists: a GLES guest asks too (kl_ovrp's
-    // frustum), and must not freeze a "no" a later Vulkan device would change.
-    if (!kl_vulkan_guest_active()) return 0;
+    // Undecided until a Vulkan guest exists (or vpgles is serving a GLES one): a GLES guest on
+    // ANGLE asks too (kl_ovrp's frustum), and must not freeze a "no" a later Vulkan device would change.
+    if (!kl_vulkan_guest_active() && !kl_gles_vpk_up()) return 0;
     klvk_vpvk_resolve();
     const char *why = NULL;
     if (!kl_env_on("KL_VPKTAA", 0)) v = 0;      // VPKTAA off: nothing to say
-    else if (!kl_env_on("KL_VPKTAA_INLINE", 1)) why = "KL_VPKTAA_INLINE=0 (async compositor path)", v = 0;
-    else if (!g_vpvk.native_submit) why = "the Vulkan driver has no vpvk_native_submit (MoltenVK?) — async compositor path", v = 0;
+    else if (!kl_env_on("KL_VPKTAA_INLINE", 1)) why = "KL_VPKTAA_INLINE=0 — no VPKTAA (the native pass is the only one)", v = 0;
+    else if (!g_vpvk.native_submit) why = "the Vulkan driver has no vpvk_native_submit (MoltenVK?) — no VPKTAA", v = 0;
+    else if (!kl_vulkan_taa_native_on()) why = "VPKEngine without the native VPKTAA (vpvk_taa_native_*) — no VPKTAA (there is no other one)", v = 0;
     else v = 1;
     int expect = -1;
     if (__atomic_compare_exchange_n(&g_taa_inline, &expect, v, 0,
                                     __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
         if (v)
-            VKI("[taa-inline] ON: resolve at the guest's frame end on VPKEngine's queue; viewport "
+            VKI("[taa-inline] ON (%s): resolve at the guest's frame end on VPKEngine's queue; viewport "
                 "jitter by VPKEngine (set_jitter %s, get_applied %s, native_device %s), frustum "
                 "jitter off, live eye depth (MSAA included), no depth snapshots\n",
+                kl_vulkan_guest_active() ? "Vulkan guest" : "GLES guest on vpgles",
                 g_vpvk.set_jitter ? "yes" : "MISSING", g_vpvk.get_applied ? "yes" : "MISSING",
                 g_vpvk.native_device ? "yes" : "MISSING");
         else if (why)
@@ -3783,7 +3797,7 @@ static int klvk_taa_wants_ms_depth(void) {
 
 int kl_vulkan_aa_detected(int *device_max) {
     if (device_max) *device_max = -1;
-    if (!kl_vulkan_guest_active()) return -1;
+    if (!kl_vulkan_guest_active() && !kl_gles_vpk_up()) return -1;
     klvk_vpvk_resolve();
     if (device_max && g_vpvk.msaa_device_max) *device_max = g_vpvk.msaa_device_max();
     return g_vpvk.msaa_detected ? g_vpvk.msaa_detected() : -1;
@@ -3856,6 +3870,11 @@ int kl_vulkan_taa_native_on(void) {
     return 0;   // driver without the native pass (MoltenVK, older VPKEngine)
 }
 
+int kl_vulkan_taa_ui_mask_on(void) {
+    klvk_vpvk_resolve();
+    return g_vpvk.taa_ui_mask_enabled ? g_vpvk.taa_ui_mask_enabled() != 0 : 0;
+}
+
 int kl_vulkan_taa_native_encode(const void *frame, void *mtl_cmdbuf) {
     klvk_vpvk_resolve();
     return g_vpvk.taa_native_encode ? g_vpvk.taa_native_encode(frame, mtl_cmdbuf) : 0;
@@ -3887,12 +3906,26 @@ static void *klvk_ed_ms_resolve(klvk_device *d, VkImage img, int key, int rev) {
 static struct { VkImage img; void *mtl; } g_taa_color_cache[KLVK_EYE_STAGES][2];
 static pthread_mutex_t g_taa_color_mu = PTHREAD_MUTEX_INITIALIZER;
 
+// The eye images that did not come from ovrp (an OpenXR swapchain, a vpgles one) are in kl_glfb's
+// table only (kl_glfb_note_eye_mtl_texture); its LIVE entry is what the guest drew.
+static int klvk_eye_is_ovrp_image(int stage, int eye) {
+    return kl_vulkan_guest_active() && stage >= 0 && stage < KLVK_EYE_STAGES && eye >= 0 && eye < 2 &&
+           (g_eye[stage][0].img || g_eye[stage][eye].img);
+}
+
+int kl_vulkan_eye_color_top_left(int stage, int eye) {
+    return klvk_eye_is_ovrp_image(stage, eye) ? 1 : kl_glfb_eye_mtl_origin_top_left(eye, stage);
+}
+
+int kl_vulkan_taa_eye_bottom_up(void) { return !kl_vulkan_guest_active() && kl_gles_vpk_up(); }
+
 void *kl_vulkan_eye_color_mtl(int stage, int eye, int *slice, int *w, int *h) {
     if (slice) *slice = 0;
     if (w) *w = 0;
     if (h) *h = 0;
-    if (!kl_vulkan_guest_active() || stage < 0 || stage >= KLVK_EYE_STAGES || eye < 0 || eye > 1)
-        return NULL;
+    if (eye < 0 || eye > 1 || stage < 0 || stage >= KLVK_EYE_STAGES) return NULL;
+    if (!klvk_eye_is_ovrp_image(stage, eye))
+        return kl_glfb_eye_mtl_live(eye, stage, slice, w, h);
     // g_eye, not kl_glfb's table: that table may hold the VPKTAA output (the
     // override) or the eye shadow, and the resolve must read what the guest drew.
     // Array layout: slot 0 owns the one image, the eye is its layer.
@@ -4190,6 +4223,17 @@ void kl_vulkan_trim(const char *why) {
 }
 
 
+// The size of `stage`'s eye picture: ovrp's table, else what kl_glfb holds live for it (an OpenXR
+// swapchain, a vpgles one). 0 x 0 = unknown.
+static void klvk_eye_wh(int stage, unsigned *w, unsigned *h) {
+    *w = *h = 0;
+    if (stage < 0 || stage >= KLVK_EYE_STAGES) return;
+    if (g_eye[stage][0].img) { *w = g_eye[stage][0].w; *h = g_eye[stage][0].h; return; }
+    int gw = 0, gh = 0;
+    kl_glfb_eye_mtl_live(0, stage, NULL, &gw, &gh);
+    if (gw > 0 && gh > 0) { *w = (unsigned)gw; *h = (unsigned)gh; }
+}
+
 static float klvk_halton(unsigned i, unsigned b) {
     float f = 1.0f, r = 0.0f;
     while (i > 0) { f /= (float)b; r += f * (float)(i % b); i /= b; }
@@ -4205,7 +4249,7 @@ static float klvk_halton(unsigned i, unsigned b) {
 // (kl_vulkan_taa_applied reports 0 draws), so a dropped frame costs nothing.
 // Set as soon as the hook has committed (VPKEngine applies it to submits
 // translated from then on: the next frame's), no GPU wait needed.
-static void klvk_taa_next_jitter(int stage, int resolving, int hook_on, int gate) {
+static void klvk_taa_next_jitter(unsigned eye_w, unsigned eye_h, int resolving, int hook_on, int gate) {
     if (!g_vpvk.set_jitter) {
         static int said;
         if (!said++) VKI("[taa-inline] vpvk_taa_set_jitter missing — frames are rendered without jitter\n");
@@ -4222,7 +4266,7 @@ static void klvk_taa_next_jitter(int stage, int resolving, int hook_on, int gate
     // jitter is rendered into.
     unsigned long long n = __atomic_load_n(&g_frame_issued, __ATOMIC_ACQUIRE) + 1;
     j.tag = n;
-    if (stage >= 0 && stage < KLVK_EYE_STAGES) { j.width = g_eye[stage][0].w; j.height = g_eye[stage][0].h; }
+    j.width = eye_w; j.height = eye_h;
     j.enabled = want && resolving && j.width && j.height;
     if (j.enabled) {
         unsigned k = (unsigned)(n % 8u) + 1u;
@@ -4422,7 +4466,49 @@ void kl_vulkan_frame_done(int stage) {
     // ...and the next frame's jitter. Jitter only stays on while frames are
     // actually resolved: a jittered picture nobody resolves is pure shimmer
     // (failed resolve, AA gate closed, unsupported eye format...).
-    if (taa_inline) klvk_taa_next_jitter(stage, committed, hook_on, gate);
+    if (taa_inline) {
+        unsigned ew, eh;
+        klvk_eye_wh(stage, &ew, &eh);
+        klvk_taa_next_jitter(ew, eh, committed, hook_on, gate);
+    }
+}
+
+// VPKTAA inline for a GLES guest on vpgles (kl_vulkan.h): the frame-end of kl_vulkan_frame_done
+// without the Vulkan bits. The caller has waited for the guest's GL work (kl_gles_frame_end), so
+// an unresolved frame's live picture is already complete.
+int kl_vulkan_taa_gles_frame_end(int stage, unsigned long long rec_serial) {
+    if (kl_vulkan_guest_active() || !kl_gles_vpk_up() || !kl_vulkan_taa_inline()) return 0;
+    kl_vulkan_taa_hook_fn fn;
+    void *user;
+    pthread_mutex_lock(&g_taa_hook_mu);
+    fn = g_taa_hook.fn; user = g_taa_hook.user;
+    pthread_mutex_unlock(&g_taa_hook_mu);
+    int mine = rec_serial && stage >= 0 && stage < KLVK_EYE_STAGES;
+    if (mine) __atomic_add_fetch(&g_taa_inline_frames, 1, __ATOMIC_RELEASE);
+    int gate = kl_vulkan_aa_gate();
+    int committed = 0, hook_called = 0;
+    if (fn && mine && gate) {
+        hook_called = 1;
+        committed = fn(stage, 0, user) != 0;
+    } else if (fn && !mine) {
+        static unsigned said;
+        if (said < 4) {
+            said++;
+            VKI("[taa-inline] GLES frame end on stage %d without this frame's record (serial %llu) — "
+                "shown unresolved\n", stage, rec_serial);
+        }
+    }
+    // Once per frame (the read resets VPKEngine's counters), as kl_vulkan_frame_done does.
+    if (!hook_called && g_vpvk.get_applied) {
+        klvk_vpvk_taa_applied a;
+        memset(&a, 0, sizeof a);
+        g_vpvk.get_applied(&a);
+    }
+    if (!committed && mine) __atomic_store_n(&g_taa_raw_record, rec_serial, __ATOMIC_RELEASE);
+    unsigned ew, eh;
+    klvk_eye_wh(stage, &ew, &eh);
+    klvk_taa_next_jitter(ew, eh, committed, fn != NULL, gate);
+    return committed;
 }
 
 static VkResult klvk_QueuePresentKHR(VkQueue q, const VkPresentInfoKHR *pi) {

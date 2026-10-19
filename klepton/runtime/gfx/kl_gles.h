@@ -13,6 +13,14 @@ int kl_gles_enabled(void);
 // The guest's GL/EGL entry point from vpgles, or NULL (the caller keeps its own answer).
 void *kl_gles_sym(const char *name);
 
+// 1 once vpgles is serving the guest; never starts it (kl_gles_enabled does): a Vulkan run asking
+// must not bring up a second instance/device.
+int kl_gles_vpk_up(void);
+
+// The VPVulkan dylib vpgles came from (dlopen handle, RTLD_LOCAL), or NULL while vpgles is not up:
+// where kl_vulkan finds vpvk_* (native VPKTAA, native submit) for a GLES guest.
+void *kl_gles_vk_handle(void);
+
 // OVRPlugin eye/layer storage on the vpgles path: a VkImage of vpgles' device, `layers` array
 // slices (2 = both eyes, multiview), wrapped as a GL texture of the current context and published
 // to the compositor (kl_glfb_note_eye_mtl_texture) for eyes; eye = -1 registers one image for both

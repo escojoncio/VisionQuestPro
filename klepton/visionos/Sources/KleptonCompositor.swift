@@ -232,8 +232,6 @@ final class KleptonCompositor {
     /// is left out for this composite rather than sample an eye the GPU is still drawing.
     private var taaHide = false
     private var taaFlip: [Bool] = [false, false]
-    // The guest fence the VPKTAA job must wait on (GL guests), set with the composite's own.
-    private var taaWait: (MTLSharedEvent, UInt64)?
     private var depthState: MTLDepthStencilState?
     /// Always-pass, no write — for coplanar draws after the first. See where
     /// `depthState` is built for why the two cannot be one.
@@ -2029,11 +2027,9 @@ final class KleptonCompositor {
         cmdLock.lock(); let doneNow = cmdCompleted; cmdLock.unlock()
         let outstanding = cmdCommitted - doneNow
         let haveGuestContent = projLayerCount > 0
-        taaWait = nil
         if let ev = guestFrameEvent, glFence != 0, !noFence,
            haveGuestContent, outstanding <= maxFenceBacklog {
             cmd.encodeWaitForEvent(ev, value: glFence)
-            taaWait = (ev, glFence)
         } else if glFence != 0 && !noFence && (!haveGuestContent || outstanding > maxFenceBacklog) {
             fenceBacklogSkips += 1
             if !warnedFenceBacklog {
@@ -2491,10 +2487,9 @@ final class KleptonCompositor {
         return n
     }
 
-    /// VPKTAA (async, KleptonTAA.submit): hands a NEW guest frame to the VPKTAA queue and
-    /// picks up the newest FINISHED resolve, whose pose replaces `rendered` for the eye quads
-    /// (taaPose) so picture and pose always belong to the same guest frame. Both eyes or none.
-    /// Only the shared-array eye layout is handled; anything else composites untouched.
+    /// VPKTAA (inline, VPKEngine's native pass): picks up the newest COMPLETED resolve, whose pose
+    /// replaces `rendered` for the eye quads (taaPose) so picture and pose always belong to the
+    /// same guest frame. Both eyes or none; anything else composites untouched.
     private func prepareTAA(cmd: MTLCommandBuffer, stage: Int, completeStage: Int,
                             rendered: kl_ovrp_render_pose, haveRendered: Bool) {
         taaOut.removeAll(keepingCapacity: true)
@@ -2509,7 +2504,7 @@ final class KleptonCompositor {
         // VPKEngine's queue and is shown once its command buffer has COMPLETED, with its own
         // frame record (or, while frames go out unresolved, the newest waited-for frame with
         // its record and stage). Nothing to submit here; the frustum jitter stays off
-        // (VPKEngine jitters). Never falls back to the async path once the hook path is seen.
+        // (VPKEngine jitters).
         if taa.pollInline() {
             kl_ovrp_set_taa_active(0)
             switch taa.acquireInline(for: cmd) {
@@ -2527,29 +2522,10 @@ final class KleptonCompositor {
             }
             return
         }
-        // Async path: on a Vulkan guest only while kl_vulkan's AA gate is open (KL_AA_MODE).
-        guard taa.asyncAllowed() else { taa.invalidate(); kl_ovrp_set_taa_active(0); return }
-        // Jitter is only served to the game while resolves really run (else it would shimmer).
-        defer { kl_ovrp_set_taa_active(taa.running ? 1 : 0) }
-        guard completeStage >= 0, kl_ovrp_eye_layer_live() != 0, projLayerCount == 0 else {
-            taa.invalidate(); return
-        }
-        if haveRendered {
-            // VPKTAA picks the frame record itself (newest one whose eye depth is filed, see
-            // KleptonTAA.submit) and asks for that stage's eye textures.
-            taa.submit(newest: rendered, wait: taaWait) { st in
-                var srcs: [(MTLTexture, Int, Bool)] = []
-                for eye in 0..<2 {
-                    if let a = self.eyeSource(eye, st) { srcs.append((a.texture, a.slice, a.flipY)) }
-                }
-                return srcs.count == 2 ? srcs : nil
-            }
-        }
-        if let p = taa.acquire(for: cmd, newestSerial: haveRendered ? rendered.serial : 0) {
-            taaOut[0] = p.out[0]; taaOut[1] = p.out[1]
-            taaFlip = p.flipY
-            taaPose = p.pose
-        }
+        // No inline hook (GLES/ANGLE guest, MoltenVK, VPKEngine without the native pass): no VPKTAA.
+        // The native pass is the only one, so these guests are shown untouched and the game gets
+        // no frustum jitter.
+        kl_ovrp_set_taa_active(0)
     }
 
     private func encodeViews(_ viewIndices: [Int],

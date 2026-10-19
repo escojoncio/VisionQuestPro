@@ -277,6 +277,9 @@ void *kl_glfb_eye_mtl_texture(int eye, int stage, int *out_slice);
 // frees.
 void kl_glfb_note_eye_mtl_texture(int eye, int stage, void *texture, int slice,
                                   int w, int h);
+// As above with the origin stated: top_left 1 = Vulkan guest image, 0 = vpgles (GL rows, bottom-up).
+void kl_glfb_note_eye_mtl_texture_o(int eye, int stage, void *texture, int slice,
+                                    int w, int h, int top_left);
 
 // VPKTAA inline (kl_vulkan_taa_publish): a texture that REPLACES what
 // kl_glfb_eye_mtl_texture answers for (eye, stage), without touching the live
@@ -290,6 +293,12 @@ void kl_glfb_note_eye_mtl_texture(int eye, int stage, void *texture, int slice,
 // when the live entry is empty or its size is not w x h. texture = NULL clears.
 // Not retained: the caller keeps it alive while it is published.
 int kl_glfb_set_eye_mtl_override(int eye, int stage, void *texture, int w, int h);
+
+// The LIVE entry of (eye, stage) — what the guest draws into — whatever override sits on top of
+// it (kl_glfb_eye_mtl_texture answers the override first). VPKTAA reads the guest's own picture
+// here when the eye did not come through kl_vulkan's ovrp table (a GLES guest on vpgles, an
+// OpenXR swapchain). NULL when nothing is registered. `slice`, `w`, `h` optional.
+void *kl_glfb_eye_mtl_live(int eye, int stage, int *slice, int *w, int *h);
 
 // Copy one array LAYER of a guest-owned texture into a provider-backed 2D eye
 // texture, and return the SLOT that now holds that picture (-1 on failure).

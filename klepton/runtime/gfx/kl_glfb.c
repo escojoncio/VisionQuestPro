@@ -3215,16 +3215,40 @@ void *kl_glfb_eye_mtl_texture(int eye, int stage, int *out_slice) {
     return g_eye_mtl[eye][stage].tex;
 }
 
+void *kl_glfb_eye_mtl_live(int eye, int stage, int *slice, int *w, int *h) {
+    if (slice) *slice = 0;
+    if (w) *w = 0;
+    if (h) *h = 0;
+    if (eye < 0 || eye > 1 || stage < 0 || stage >= KL_MTL_MAX_STAGES || !g_eye_mtl[eye][stage].tex)
+        return NULL;
+    if (slice) *slice = g_eye_mtl[eye][stage].slice;
+    if (w) *w = g_eye_mtl[eye][stage].w;
+    if (h) *h = g_eye_mtl[eye][stage].h;
+    return g_eye_mtl[eye][stage].tex;
+}
+
 // The Vulkan path's way into the same table — see kl_glfb.h. There is no
 // EGLImage and no GL name on that path, so those two fields stay zero and
 // kl_glfb_release_eye_texture has nothing of its own to drop; the VkImage is
 // kl_vulkan.c's to free.
 void kl_glfb_note_eye_mtl_texture(int eye, int stage, void *texture, int slice,
                                   int w, int h) {
+    kl_glfb_note_eye_mtl_texture_o(eye, stage, texture, slice, w, h, 1);
+}
+
+// Same, with the origin stated. vpgles stores GL rows bottom-up in memory (GL row 0 = memory
+// row 0, like the ANGLE textures the compositor's default mapping expects), so its eyes pass 0
+// and the compositor flips them; a Vulkan guest's images are top-left (1).
+void kl_glfb_note_eye_mtl_texture_o(int eye, int stage, void *texture, int slice,
+                                    int w, int h, int top_left) {
     if (eye < 0 || eye > 1 || stage < 0 || stage >= KL_MTL_MAX_STAGES) return;
+    top_left = top_left ? 1 : 0;
     if (g_eye_mtl[eye][stage].tex == texture &&
         g_eye_mtl[eye][stage].slice == slice &&
-        g_eye_mtl[eye][stage].w == w && g_eye_mtl[eye][stage].h == h) return;
+        g_eye_mtl[eye][stage].w == w && g_eye_mtl[eye][stage].h == h) {
+        g_eye_mtl[eye][stage].top_left = top_left;
+        return;
+    }
     // The live storage changed: a VPKTAA output resolved from the old one is
     // no longer a picture of this stage (kl_glfb_set_eye_mtl_override).
     if (__atomic_exchange_n(&g_eye_ovr[eye][stage], NULL, __ATOMIC_ACQ_REL))
@@ -3237,10 +3261,11 @@ void kl_glfb_note_eye_mtl_texture(int eye, int stage, void *texture, int slice,
     g_eye_mtl[eye][stage].w = w;
     g_eye_mtl[eye][stage].h = h;
     // Vulkan's framebuffer origin is the top left, like Metal's and unlike GL's.
-    g_eye_mtl[eye][stage].top_left = 1;
+    g_eye_mtl[eye][stage].top_left = top_left;
     fprintf(stderr, "  [glfb] eye %d stage %d is MTLTexture %p slice %d (%dx%d), "
-                    "from Vulkan — top-left origin, the compositor can sample it\n",
-            eye, stage, texture, slice, w, h);
+                    "from %s — %s origin, the compositor can sample it\n",
+            eye, stage, texture, slice, w, h, top_left ? "Vulkan" : "vpgles",
+            top_left ? "top-left" : "bottom-up (GL)");
 }
 
 int kl_glfb_eye_mtl_origin_top_left(int eye, int stage) {

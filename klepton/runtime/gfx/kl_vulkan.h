@@ -300,6 +300,21 @@ unsigned long long kl_vulkan_taa_inline_frames(void);
 // newest published output (gaps: loading, AA gate closed, refused resolves).
 unsigned long long kl_vulkan_taa_raw_record(void);
 
+// A GLES guest on vpgles (KL_GLES_VPK=1, kl_gles.h) has no kl_vulkan_frame_done but runs through the same
+// VPKEngine queue and the same native pass. Its frame end is reported here by whoever ends the guest's frame
+// (kl_ovrp's EndFrame4, kl_openxr's xrEndFrame) AFTER the GL work was waited for (kl_gles_frame_end) and the
+// frame record was filed under `stage` (`record_serial` = its kl_ovrp_render_pose.serial). Same contract as
+// the hook above: runs it when the gate is open, else marks the frame as unresolved-but-complete
+// (kl_vulkan_taa_raw_record); then sets the next frame's jitter. 1 = a resolve was committed. The eye
+// pictures come from kl_glfb's live table (kl_vulkan_eye_color_mtl); VPKEngine finds the eye pass depth itself.
+int  kl_vulkan_taa_gles_frame_end(int stage, unsigned long long record_serial);
+// 1 when the eye pictures of this run are stored BOTTOM-UP (vpgles: GL row 0 = memory row 0), so the
+// reprojection geometry must be mirrored (top and bottom tangents swapped and negated).
+int  kl_vulkan_taa_eye_bottom_up(void);
+// The `flipY`/origin flag of the live eye (stage, eye) as the compositor reads it: 1 = row 0 is the TOP
+// (ovrp's Vulkan eye table), else kl_glfb_eye_mtl_origin_top_left (OpenXR and vpgles eyes noted there).
+int  kl_vulkan_eye_color_top_left(int stage, int eye);
+
 // Automatic AA (KL_AA_MODE = auto | vpktaa | msaa | off).
 // The game's ORIGINAL eye-pass sample count from VPKEngine (vpvk_msaa_detected,
 // looked up weakly in the loaded driver): 0 = not seen yet, 1 = no MSAA, 2/4/8;
@@ -320,12 +335,12 @@ void *kl_vulkan_native_device(void);
 // vpvk_mem_stats: one key=value line of the driver's memory counters (weak; any thread, cheap).
 // Returns its length, 0 without VPVulkan / older VPKEngine. cap must be >= 640.
 size_t kl_vulkan_mem_stats(char *out, size_t cap);
-// VPKTAA NATIVO (VPKEngine's own pass, vpvk_taa_native_*): 1 when KL_VPKTAA=1
-// and the driver reports it on (app setting «VPKTAA nativo» / VPVK_TAA_NATIVE).
+// VPKTAA NATIVO (VPKEngine's own pass, vpvk_taa_native_*; the ONLY VPKTAA): 1 when KL_VPKTAA=1
+// and the driver reports it on (the app sets VPVK_TAA_NATIVE=1 whenever VPKTAA is allowed).
 // Then VPKEngine also picks the jitter (its own Halton(2,3)); the inline hook
 // hands it the frame (`frame` = vpvk_taa_native_frame, mirrored in
 // KleptonTAA.swift) inside kl_vulkan_native_submit's callback, and the pass
-// replaces VPKTAACore's resolve for that frame.
+// is the resolve of that frame (no other resolver exists: without it frames go out untouched).
 // Mirror of VPKEngine's vpvk_taa_native_eye / vpvk_taa_native_frame
 // (gpu/vulkan/include/vpvk/config.h), field for field.
 typedef struct {
@@ -337,6 +352,7 @@ typedef struct {
     float    position[3];
     float    tangents[4];
     float    crop[4];
+    void    *color_base;   // the texture `color` is a view of (or NULL): lets VPKEngine find the eye pass
 } kl_vulkan_taa_native_eye;
 typedef struct {
     kl_vulkan_taa_native_eye eye[2];
@@ -347,6 +363,9 @@ typedef struct {
     int      reset;
 } kl_vulkan_taa_native_frame;
 int  kl_vulkan_taa_native_on(void);
+// 1 when the native pass also uses the reactive UI mask (R8: UI/2D stays sharp, only the 3D is
+// smoothed); 0 without it or on an older VPKEngine.
+int  kl_vulkan_taa_ui_mask_on(void);
 int  kl_vulkan_taa_native_encode(const void *frame, void *mtl_cmdbuf);
 // The guest's LIVE eye colour for (stage, eye) — the image it rendered, never
 // the VPKTAA output published over it. id<MTLTexture> (borrowed); *slice is

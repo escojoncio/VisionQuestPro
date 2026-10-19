@@ -3586,7 +3586,8 @@ static uint64_t klovrp_end_frame_impl(int guest_frame_index, const int *viewport
     // turns it off.
     static int drop_repeat = -1;
     if (drop_repeat < 0) drop_repeat = kl_env_on("KL_OVRP_DROP_REPEAT", 1);
-    if (!drop && drop_repeat && observed < 0 && named_stage >= 0 &&
+    // A single-stage ring (stages == 1) names the same stage every frame by construction.
+    if (!drop && drop_repeat && observed < 0 && stages > 1 && named_stage >= 0 &&
         named_stage < stages && named_stage == g_frames.last_named) {
         drop = 1;
         g_frames.repeat_drop++;
@@ -3843,6 +3844,30 @@ static uint64_t klovrp_EndFrame4(int guest_frame_index, const void *layer_submit
             pthread_mutex_unlock(&g_frames.mu);
             kl_vulkan_eye_depth_tag(named < 0 ? 0 : named, tag);
         }
+    }
+    else if (kl_gles_vpk_up()) {
+        // vpgles on VPVulkan: the same end-of-frame seam kl_vulkan_frame_done is for a
+        // Vulkan guest. The record was filed above, so find the stage it went to and let
+        // the VPKTAA hook resolve it (no-op unless the inline path is on).
+        int filed = -1;
+        pthread_mutex_lock(&g_frames.mu);
+        for (int st = 0; pend_serial && st < KLOVRP_MAX_STAGES && filed < 0; st++)
+            if (g_frames.r[st].serial == pend_serial &&
+                (g_frames.r[st].complete || st == g_frames.deferred_complete)) filed = st;
+        pthread_mutex_unlock(&g_frames.mu);
+        // vpgles does not feed kl_glfb's draw observation (binds == 0, observed < 0): the stage
+        // is the one the eye layer's submit named (else the counter), and `complete` is set when
+        // the record is filed. filed < 0 therefore means the frame was dropped / not filed.
+        if (filed < 0) {
+            static int said_nostage;
+            if (!said_nostage) {
+                said_nostage = 1;
+                fprintf(stderr, "  [ovrp] vpgles: no filed stage for this frame (serial %llu) — VPKTAA "
+                                "cannot resolve it and the live picture is shown (further frames silent)\n",
+                        (unsigned long long)pend_serial);
+            }
+        }
+        kl_vulkan_taa_gles_frame_end(filed, filed >= 0 ? pend_serial : 0);
     }
     klovrp_publish_deferred();   // no-op unless a deferred stage is still pending
     ovrp_log_ret("EndFrame4", r, &nr_end);

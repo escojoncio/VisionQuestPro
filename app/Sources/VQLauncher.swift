@@ -493,11 +493,6 @@ struct VQVPKTAATuning: View {
         Text(VQL("Enfoque aplicado después del suavizado, para recuperar el detalle que el TAA difumina. Demasiado alto: halos y bordes que parpadean. Recomendado 20–30 %; 0 % lo desactiva.",
                  "Sharpening applied after the smoothing, to recover the detail TAA blurs. Too high: halos and flickering edges. Recommended 20–30 %; 0 % turns it off."))
             .font(.caption)
-        Toggle(VQL("VPKTAA nativo (pase del motor VPKEngine; experimental)", "Native VPKTAA (VPKEngine pass; experimental)"),
-               isOn: $settings.vpktaaNative)
-        Text(VQL("El TAA corre dentro de VPKEngine con su propio jitter, los dos ojos en un pase y afilado RCAS. Apagado: el VPKTAA de siempre. Se aplica al lanzar el juego.",
-                 "TAA runs inside VPKEngine with its own jitter, both eyes in one pass and RCAS sharpening. Off: the usual VPKTAA. Applied when the game launches."))
-            .font(.caption)
     }
 }
 
