@@ -24,6 +24,7 @@
 // is therefore never shown to a game that does not need it.
 import ARKit
 import simd
+import QuartzCore
 
 enum KleptonSpatial {
     nonisolated(unsafe) private static var plane: PlaneDetectionProvider?
