@@ -24,6 +24,8 @@ int vq_gfx_config_forward(void) {
     // Newer VPKEngine only (also read from VPVK_MSAA by the driver): weak, may be absent.
     void (*set_msaa)(int) = (void (*)(int))dlsym(RTLD_DEFAULT, "vpvk_config_set_msaa_override");
     void (*set_native)(int) = (void (*)(int))dlsym(RTLD_DEFAULT, "vpvk_config_set_taa_native");
+    // Own foveation (rate map per eye): the mode chosen in the app turns it on; Off keeps the frame as before.
+    void (*set_fov_apply)(int) = (void (*)(int))dlsym(RTLD_DEFAULT, "vpvk_config_set_foveation_apply");
     if (!set_fov || !set_taa) {
         fprintf(stderr, "vq.fov config stored; VPVulkan not loaded (MoltenVK path): own foveation/VPKTAA not applied\n");
         return 0;
@@ -31,6 +33,7 @@ int vq_gfx_config_forward(void) {
     vpvk_foveation f = { g_cfg.foveation_mode, g_cfg.sharp_zone, g_cfg.periphery, g_cfg.height };
     vpvk_vpktaa t = { g_cfg.vpktaa_enabled, g_cfg.vpktaa_percent, g_cfg.vpktaa_sharpness };
     set_fov(&f);
+    if (set_fov_apply) set_fov_apply(g_cfg.foveation_mode != 0);
     set_taa(&t);
     if (set_scale) set_scale(g_cfg.render_scale);
     if (set_asw) set_asw(g_cfg.asw_disabled);

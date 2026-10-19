@@ -338,8 +338,8 @@ struct VQSettingsView: View {
                     Toggle(VQL("Capturas de diagnóstico", "Diagnostic captures"), isOn: $settings.diagCaptures)
                     Toggle(VQL("Diagnóstico de rendimiento", "Performance diagnostics"), isOn: $settings.perfDiag)
                     Toggle(VQL("Diagnóstico de ficheros (log grande)", "File diagnostics (large log)"), isOn: $settings.fsDiag)
-                    Text(VQL("El foveado propio del juego (Quest) está siempre apagado. Foveado y VPKTAA los aplica VPKEngine (aún sin efecto con MoltenVK). M5 solo aparece en un Vision Pro M5. Se aplica al lanzar el juego.",
-                             "The game's own (Quest) foveation is always off. Foveation and VPKTAA are applied by VPKEngine (no effect yet with MoltenVK). M5 only appears on a Vision Pro M5. Applied when the game launches."))
+                    Text(VQL("El foveado propio del juego (Quest) está siempre apagado. Foveado y VPKTAA los aplica VPKEngine (no con MoltenVK). El foveado necesita VPKTAA nativo y juegos de renderizado estéreo sin MSAA. M5 solo aparece en un Vision Pro M5. Se aplica al lanzar el juego.",
+                             "The game's own (Quest) foveation is always off. Foveation and VPKTAA are applied by VPKEngine (not with MoltenVK). Foveation needs native VPKTAA and stereo games without MSAA. M5 only appears on a Vision Pro M5. Applied when the game launches."))
                         .font(.caption)
                 }
                 VQConformanceSettings(settings: settings)

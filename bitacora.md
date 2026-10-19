@@ -313,3 +313,15 @@ VPKEngine `main` = e6c3f3b.
 - vpgles: ojos `top_left=0` (`kl_glfb_note_eye_mtl_texture_o`), bottom-up con tangentes espejadas. `drop_repeat` en `klovrp_end_frame_impl` solo con stages > 1.
 - Logs TRIANGLE: el guest de TRIANGLE es Vulkan (UE4), no vpgles.
 - Pendiente: foveado propio (MTLRasterizationRateMap por ojo en metal2, desdoblado en compositor, TAA físico↔lógico; M5 solo en hardware M5). Detección de MSAA solo en Vulkan. Verificar orientación vpgles en visor.
+
+## Foveado propio en la app (2026-10-19)
+- `VQLauncher.swift`: quitado «aún sin efecto con MoltenVK» (ahora: no con MoltenVK; necesita VPKTAA nativo y juego estéreo sin MSAA). Selector M5 sigue solo en M5 (`VQSettings.isM5`).
+- `app/Native/vq_config.c`: reenvía `vpvk_config_set_foveation_apply(modo != apagado)` (dlsym; ausente en VPVulkan antiguo). Por defecto el ajuste es Apagado = como antes. Foveado de VPKEngine sin probar en visor (ver VPKEngine/bitacora.md); `VPVK_FOVEATION=0` lo anula.
+- Pendiente: reenviar tangentes de ojo (`vpvk_config_set_foveation_eyes`) cuando el XR las dé; probar M2/M5 en visor.
+
+## Foveado propio (opt-in)
+- VPKEngine: MTLRasterizationRateMap por ojo en pases de ojo (registro TAA, 2 vistas, 1x), fold/expand con sombras físicas, `viewport_array_index` por vista, `vp_rrm [[buffer(28)]]` para FragCoord, UI a resolución completa (`fovUiSplit`). Interruptor `vpvk_config_set_foveation_apply` / `VPVK_FOVEATION`; la app lo activa si el modo de foveado ≠ Apagado (por defecto Apagado). Con foveado apagado: MSL y recetas idénticos.
+- Presets de PTVisionPro: M2 centro 60° periferia 10 %, M5 70°/15 %, centerUp −10°, fade 0.15 (tan(deg/2)/1.2). Perfil separable (cuadrado redondeado), no circular.
+- Requiere VPKTAA nativo; declina con MSAA, resolves, clears de área, formatos no soportados (log `gpu.fov decline reason=`). Logs `vk.fov plan`, `gpu.fov map`.
+- Riesgos: metal_backend.mm sin compilar/probar en visor; mapa identidad 16384²; sombras untracked entre frames; coste fold/expand sin medir.
+- Ideas de PTVisionPro no aplicadas: foveado de Compositor Services (isFoveationEnabled, VRR dinámica), resolutionScale por preset.
