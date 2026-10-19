@@ -171,3 +171,8 @@ Medido (log AC): `[cp] gpu` 4-5 ms p50 / 7 p95 / 9 max sobre 10 ms de periodo co
 - El runtime (`klepton/runtime/gfx/kl_vulkan.c`) no interviene: la creación asíncrona de pipelines vive en VPVulkan (`VPVK_ASYNC_PIPELINES`, por defecto activa; `VPVK_EXTRA_EXTENSIONS=1` la desactiva). Diagnóstico nuevo en el log del visor: `vk.boot_summary`, `vk.pipeline_skip`, `vk.pipeline_wait what=…`.
 
 - Build en verde: run CI 39324812218 (Gate OK), IPA publicado en el release `visionos`. Incluye hang split con MSAA, JNI completo, VTPixelTransfer, frame congelado >3 s a backfill, timestamps por pase del compositor, cache de shaders estable y pipelines asincronos. Sin probar en visor.
+
+## 11. CallNonvirtual<T>Method variádicos planos (sin build; pendiente de verificar en visor)
+- `klepton/runtime/libc/kl_va_thunks.S`: `KL_JNITHUNK` añade `klv_jni_CallNonvirtual<T>Method` (10 tipos) con 4 GP con nombre (env, obj, cls, mid), misma plantilla `KL_VTHUNK` AAPCS64 que el resto.
+- `klepton/runtime/kl_jni.c`: handlers `klh_jni_CallNonvirtual<T>Method` (reenvían a `klj_CallNonvirtual<T>MethodV`), `extern` en `KLJ_VA_DECL` y registro en `ENVNV` de `klj_build_tables`. Ya no queda ningún slot JNIEnv >3 en `klj_unimpl` (comprobado preprocesando contra `kl_jni_slots.h`).
+- Verificado: `clang -fsyntax-only -D_GNU_SOURCE` de `kl_jni.c` sin errores (stub de CommonCrypto), `clang -c --target=aarch64-linux-gnu` del .S ok (gr_offs=-32, `&va` en x4). Sin test host: ningún thunk variádico tiene uno. NO verificado: ejecución en visor.

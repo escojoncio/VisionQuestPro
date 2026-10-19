@@ -1401,9 +1401,8 @@ static void klj_CallStaticVoidMethodV(void *env, void *cls, void *mid, kl_va *va
 // because the V forms already take a `kl_va *` — there is no re-marshalling to
 // do, only a va_list to construct.
 //
-// Nonvirtual is deliberately absent: it has no V form to delegate to (see the
-// A-form macro below, which is where it does exist), and nothing has called
-// one. It stays an abort-by-name, per the rule that a call is an assertion.
+// Nonvirtual has its own handlers further down (four named args, after its V
+// forms, which are defined after this block).
 #define KLJ_VA_CALL(Name, Ret)                                                          \
     Ret klh_jni_Call##Name##Method(void *env, void *self, void *mid, kl_va *va) {        \
         return klj_Call##Name##MethodV(env, self, mid, va);                              \
@@ -1424,8 +1423,8 @@ KLJ_VA_CALL(Void,    void)
 #undef KLJ_VA_CALL
 
 // CallNonvirtual<T>MethodV: same as the instance V form (no hierarchy to skip
-// through). The PLAIN varargs CallNonvirtual<T>Method still needs an asm thunk
-// (kl_va_thunks.S) and stays an abort-by-name.
+// through). The PLAIN varargs CallNonvirtual<T>Method goes through an asm thunk
+// (kl_va_thunks.S) into the klh_ handlers right below.
 #define KLJ_CALL_NV_V(Name, Ret, Kind, Expr)                                              \
     static Ret klj_CallNonvirtual##Name##MethodV(void *env, void *self, void *cls,       \
                                                  void *mid, kl_va *va) {                  \
@@ -1444,6 +1443,23 @@ KLJ_CALL_NV_V(Double,  double,   'D', r.d)
 static void klj_CallNonvirtualVoidMethodV(void *env, void *self, void *cls, void *mid, kl_va *va) {
     (void)cls; klj_call(env, self, mid, va, 'V');
 }
+// Plain varargs Nonvirtual: the thunk passes (env, obj, cls, mid, &va).
+#define KLJ_VA_CALL_NV(Name, Ret)                                                         \
+    Ret klh_jni_CallNonvirtual##Name##Method(void *env, void *self, void *cls, void *mid, \
+                                             kl_va *va) {                                 \
+        return klj_CallNonvirtual##Name##MethodV(env, self, cls, mid, va);                \
+    }
+KLJ_VA_CALL_NV(Object,  void *)
+KLJ_VA_CALL_NV(Boolean, uint8_t)
+KLJ_VA_CALL_NV(Byte,    int8_t)
+KLJ_VA_CALL_NV(Char,    uint16_t)
+KLJ_VA_CALL_NV(Short,   int16_t)
+KLJ_VA_CALL_NV(Int,     kl_jint)
+KLJ_VA_CALL_NV(Long,    int64_t)
+KLJ_VA_CALL_NV(Float,   float)
+KLJ_VA_CALL_NV(Double,  double)
+KLJ_VA_CALL_NV(Void,    void)
+#undef KLJ_VA_CALL_NV
 
 // The same family over the `A` convention. Generated rather than typed out for
 // the reason the V forms are: these differ only in the return kind, and a
@@ -2709,7 +2725,8 @@ static kl_jint klj_DestroyJavaVM(void *vm) { (void)vm; return 0; }
 // ABI that the thunk and the handler already agree on.
 #define KLJ_VA_DECL(Name) \
     extern void klv_jni_Call##Name##Method(void); \
-    extern void klv_jni_CallStatic##Name##Method(void)
+    extern void klv_jni_CallStatic##Name##Method(void); \
+    extern void klv_jni_CallNonvirtual##Name##Method(void)
 KLJ_VA_DECL(Object);  KLJ_VA_DECL(Boolean); KLJ_VA_DECL(Byte);  KLJ_VA_DECL(Char);
 KLJ_VA_DECL(Short);   KLJ_VA_DECL(Int);     KLJ_VA_DECL(Long);  KLJ_VA_DECL(Float);
 KLJ_VA_DECL(Double);  KLJ_VA_DECL(Void);
@@ -2847,7 +2864,9 @@ static void klj_build_tables(void) {
     ENV(AllocObject,           klj_AllocObject);
     ENV(ToReflectedMethod,     klj_ToReflectedMethod);
     ENV(ToReflectedField,      klj_ToReflectedField);
-#define ENVNV(Name) ENV(CallNonvirtual##Name##MethodV, klj_CallNonvirtual##Name##MethodV)
+#define ENVNV(Name) \
+    ENV(CallNonvirtual##Name##MethodV, klj_CallNonvirtual##Name##MethodV); \
+    ENV(CallNonvirtual##Name##Method, klv_jni_CallNonvirtual##Name##Method)
     ENVNV(Object); ENVNV(Boolean); ENVNV(Byte); ENVNV(Char); ENVNV(Short);
     ENVNV(Int); ENVNV(Long); ENVNV(Float); ENVNV(Double); ENVNV(Void);
 #undef ENVNV

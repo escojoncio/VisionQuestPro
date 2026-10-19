@@ -98,12 +98,14 @@ KL_VTHUNK klv_swscanf,            klh_swscanf,           2
 // va_start and call the ...V forms, which already receive an AAPCS64 descriptor
 // by reference. Steam Link is C.
 //
-// Named GP args are 3 throughout: (env, obj|cls, methodID). The handlers in
+// Named GP args are 3 throughout: (env, obj|cls, methodID); Nonvirtual has 4
+// (env, obj, cls, methodID). The handlers in
 // kl_jni.c forward straight to the matching ...V implementation, so the return
 // value comes back in w0/x0/d0 untouched by the epilogue below.
 .macro KL_JNITHUNK Name
     KL_VTHUNK klv_jni_Call\Name\()Method,       klh_jni_Call\Name\()Method,       3
     KL_VTHUNK klv_jni_CallStatic\Name\()Method, klh_jni_CallStatic\Name\()Method, 3
+    KL_VTHUNK klv_jni_CallNonvirtual\Name\()Method, klh_jni_CallNonvirtual\Name\()Method, 4
 .endm
 
 KL_JNITHUNK Object
