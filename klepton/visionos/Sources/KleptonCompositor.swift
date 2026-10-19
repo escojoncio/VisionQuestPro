@@ -543,6 +543,9 @@ final class KleptonCompositor {
     private var cadenceDisagreed = 0
     // Gaps of the current cadence window, for its median. Cleared with the window.
     private var cadenceGaps: [Double] = []
+    // Last 100 present gaps (seconds), kept across windows: gpu_ms is not visible from here, so the
+    // cadence stands in for it in the "HALF RATE held" diagnostic.
+    private var recentGaps: [Double] = []
     // Half-rate recovery (see cadenceSummary). visionOS can drop us to 2.0 periods after a burst of
     // late frames and not give the rate back; the only lever is minimumFrameRepeatCount, and we
     // only ever lower it to 0 (we never ask for a slower rate). KL_CP_HALFRATE_RECOVER=0 disables it.
@@ -4153,6 +4156,8 @@ final class KleptonCompositor {
         cadenceN += 1
         cadenceSum += seconds
         cadenceGaps.append(seconds)
+        recentGaps.append(seconds)
+        if recentGaps.count > 100 { recentGaps.removeFirst(recentGaps.count - 100) }
         cadenceMax = max(cadenceMax, seconds)
         cadenceMin = min(cadenceMin, seconds)
         if gap >= 1.5 { cadenceRepeats += 1 }
@@ -4282,6 +4287,15 @@ final class KleptonCompositor {
                         halfRateLoggedHeld = true
                         NSLog("[cp] HALF RATE held by the system (minimumFrameRepeatCount already 0; "
                               + "nothing to re-assert)")
+                        if !recentGaps.isEmpty {
+                            let g = recentGaps.sorted()
+                            let mean = g.reduce(0, +) / Double(g.count)
+                            let p95 = g[min(g.count - 1, Int(Double(g.count) * 0.95))]
+                            NSLog(String(format: "[cp] HALF RATE held: last %d present gaps mean %.2f ms p95 %.2f ms max %.2f ms "
+                                         + "(gpu_ms not available here, see gpu.sec) thermal=%d",
+                                         g.count, mean * 1000, p95 * 1000, g[g.count - 1] * 1000,
+                                         ProcessInfo.processInfo.thermalState.rawValue))
+                        }
                     }
                 }
             } else if halfRateActive && periods < 1.15 {

@@ -6959,6 +6959,24 @@ void kl_ovrp_eye_layer_external(int submitted) {
 }
 int kl_ovrp_eye_layer_live(void) { return g_eye_layer_live; }
 
+// Size of the newest live eye layer's textures (what the guest reserved), or 0
+// when none exists yet. ovrp_GetEyeLayerRecommendedResolution answers with it so
+// recommended == reserved and Unity's dynamic resolution stays at 1.0.
+int kl_ovrp_active_eye_layer_size(int *w, int *h) {
+    int best = 0, bw = 0, bh = 0;
+    for (int i = 0; i < KLOVRP_MAX_LAYERS; i++) {
+        const struct klovrp_layer *l = &g_layers[i];
+        if (l->id > best && l->is_eye && l->desc.texture_size.w > 0 &&
+            l->desc.texture_size.h > 0) {
+            best = l->id; bw = l->desc.texture_size.w; bh = l->desc.texture_size.h;
+        }
+    }
+    if (!best) return 0;
+    if (w) *w = bw;
+    if (h) *h = bh;
+    return 1;
+}
+
 int kl_ovrp_overlay_count(void) {
     pthread_mutex_lock(&g_frames.mu);
     int n = g_overlays.n;

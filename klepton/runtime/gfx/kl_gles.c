@@ -281,6 +281,15 @@ static void *mtl_of(VkImage img) {
 }
 #endif
 
+#define KL_GLES_MTL_MAX 512
+static uint32_t g_mtl_name[KL_GLES_MTL_MAX];
+static void *g_mtl_tex[KL_GLES_MTL_MAX];
+void *kl_gles_texture_mtl(uint32_t name) {
+    for (int i = 0; i < KL_GLES_MTL_MAX && g_mtl_name[i]; i++)
+        if (g_mtl_name[i] == name) return g_mtl_tex[i];
+    return NULL;
+}
+
 uint32_t kl_gles_layer_texture(int is_eye, int eye, int stage, int w, int h, uint32_t glfmt, int layers) {
 #ifdef KL_GLES_HAVE_VK
     if (!kl_gles_enabled() || w <= 0 || h <= 0) return 0;
@@ -322,8 +331,12 @@ uint32_t kl_gles_layer_texture(int is_eye, int eye, int stage, int w, int h, uin
     const uint32_t target = layers > 1 ? 0x8C1A /* TEXTURE_2D_ARRAY */ : 0x0DE1 /* TEXTURE_2D */;
     uint32_t name = g_wrap((void *)img, (uint32_t)fmt, target, (uint32_t)w, (uint32_t)h, (uint32_t)layers, 1);
     if (!name) return 0;
+    void *mtl = mtl_of(img);
+    if (mtl) {
+        static int n_mtl;
+        if (n_mtl < KL_GLES_MTL_MAX) { g_mtl_name[n_mtl] = name; g_mtl_tex[n_mtl] = mtl; n_mtl++; }
+    }
     if (is_eye) {
-        void *mtl = mtl_of(img);
         // Array: both eyes are slices of this one image; Stereo: one image per eye, slice 0.
         // eye < 0 (DoubleWide): one wide image holds both eyes, slice 0; each eye is cropped by
         // its own submit viewport, so both (eye, stage) keys are registered.

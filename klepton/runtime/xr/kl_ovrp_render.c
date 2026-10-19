@@ -420,7 +420,17 @@ static int32_t r_RecreateEyeTexture(void) { FN(RecreateEyeTexture); return 1; }
 static ovrpResult r_GetEyeLayerRecommendedResolution(ovrpSizei *out) {
     FN(GetEyeLayerRecommendedResolution);
     if (!pok(out)) return KLOVRP_INVALID_PARAM;
-    int w = 0, h = 0; kl_ovrp_eye_texture_size(&w, &h);   // what GetLayerRecommendedResolution falls back to
+    // The real size of the active eye layer (what Unity reserved, e.g. 2976x1912),
+    // so recommended/reserved = 1.0 and dynamic resolution does not shrink the
+    // viewport. Before any layer exists, the eye texture size (Unity sizes from it).
+    // No live eye layer yet: -1004 without writing (the good build's behaviour).
+    int w = 0, h = 0;
+    if (!kl_ovrp_active_eye_layer_size(&w, &h)) return (ovrpResult)-1004;
+    static int last_w, last_h;
+    if (w != last_w || h != last_h) {
+        last_w = w; last_h = h;
+        fprintf(stderr, "  [ovrp] GetEyeLayerRecommendedResolution -> %dx%d (live eye layer size)\n", w, h);
+    }
     out->w = w; out->h = h;
     return KLOVRP_SUCCESS;
 }

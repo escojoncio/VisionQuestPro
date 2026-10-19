@@ -55,6 +55,7 @@
 // checkout with no MoltenVK vendored (the stub half of kl_vulkan.c answers
 // "not supported" and the extension is then never advertised).
 #include "kl_vulkan.h"
+#include "kl_gles.h"
 #include "klepton.h"
 #include "kl_passthrough.h"
 #include "../diag/kl_wait.h"   // kl_game_beat: game-thread silence watcher
@@ -4805,6 +4806,9 @@ typedef struct {
     uint32_t width, height, array_size, mip_count;
     uint64_t usage;
     uint32_t tex[KLXR_SWAPCHAIN_IMAGES];       // GLES: texture names
+    void    *gles_mtl[KLXR_SWAPCHAIN_IMAGES];  // vpgles: MTLTexture behind tex[i]; NULL = plain GL
+    int      gles_pub;                         // vpgles: bitmask of eyes whose images are published
+    int      vpgles;                           // images are vpgles VkImage-backed (backed in place)
     uint64_t vk_img[KLXR_SWAPCHAIN_IMAGES];    // Vulkan: VkImage handles
     int      count;
     // Acquire / wait / release follow the spec's FIFO: up to `count` images may be acquired at
@@ -5078,6 +5082,33 @@ static XrResult klxr_CreateSwapchain(void *session, const XrSwapchainCreateInfo 
         return KLXR_SUCCESS;
     }
 
+    // VPKEngine's own GLES (KL_GLES_VPK=1): colour images are VkImages of vpgles wrapped as GL
+    // names, so the compositor samples the guest's own storage ("backs in place", like the Vulkan
+    // route). Which swapchain is an eye is decided at xrEndFrame (klxr_publish_eye_gles); nothing
+    // is published here. Depth stays plain GL (never composited). Any failure falls back to plain GL.
+    if (kl_gles_enabled() && !kl_vulkan_guest_active() &&
+        !klxr_format_is_depth(s, sc->format) && sc->mip_count == 1) {
+        int ok = 1;
+        for (int i = 0; i < sc->count && ok; i++) {
+            sc->tex[i] = kl_gles_layer_texture(0, 0, i, (int)sc->width, (int)sc->height,
+                                               (uint32_t)sc->format, (int)sc->array_size);
+            sc->gles_mtl[i] = sc->tex[i] ? kl_gles_texture_mtl(sc->tex[i]) : NULL;
+            if (!sc->tex[i] || !sc->gles_mtl[i]) ok = 0;
+        }
+        if (ok) {
+            sc->vpgles = 1;
+            fprintf(stderr, "  [xr] swapchain %ux%u fmt 0x%llx array %u -> %d vpgles image(s) "
+                            "(GL %u %u %u)\n", sc->width, sc->height,
+                    (unsigned long long)sc->format, sc->array_size, sc->count,
+                    sc->tex[0], sc->tex[1], sc->tex[2]);
+            *swapchain = sc;
+            return KLXR_SUCCESS;
+        }
+        fprintf(stderr, "  [xr] xrCreateSwapchain: vpgles image/MTLTexture failed — plain GL\n");
+        memset(sc->tex, 0, sizeof sc->tex);
+        memset(sc->gles_mtl, 0, sizeof sc->gles_mtl);
+    }
+
     klxr_gl_init();
     if (!gl_GenTextures || !gl_BindTexture) {
         fprintf(stderr, "  [xr] xrCreateSwapchain: no GL gateway\n");
@@ -5193,6 +5224,21 @@ static void klxr_publish_eye_vulkan(klxr_swapchain *sc, int eye, int slice) {
                         "for this eye\n",
                 eye, done, sc->count, sc->width, sc->height);
     }
+}
+
+// vpgles route: images already are MTLTextures; publish them as the eye's (idempotent, and the
+// newest asserting swapchain owns the eye, as on the Vulkan route).
+static void klxr_publish_eye_gles(klxr_swapchain *sc, int eye, int slice) {
+    if (eye < 0 || eye > 1 || (sc->gles_pub & (1 << eye))) return;
+    if (sc->array_size <= 1) slice = 0;
+    for (int k = 0; k < sc->count; k++)
+        kl_glfb_note_eye_mtl_texture(eye, k, sc->gles_mtl[k], slice,
+                                     (int)sc->width, (int)sc->height);
+    for (int i = 0; i < KLXR_SWAPCHAIN_MAX; i++)
+        if (&g_swapchains[i] != sc) g_swapchains[i].gles_pub &= ~(1 << eye);
+    sc->gles_pub |= 1 << eye;
+    fprintf(stderr, "  [xr] eye %d: %d vpgles swapchain image(s) %ux%u slice %d published "
+                    "as MTLTextures\n", eye, sc->count, sc->width, sc->height, slice);
 }
 
 static void klxr_back_eye_images(klxr_swapchain *sc, int eye) {
@@ -5358,6 +5404,13 @@ static void klxr_back_layer_images(klxr_swapchain *sc, int slice) {
             if (tex) kl_glfb_note_layer_mtl_texture(id, k, tex,
                                                     (int)sc->width, (int)sc->height);
         }
+        return;
+    }
+    if (sc->vpgles) {
+        for (int k = 0; k < sc->count; k++)
+            if (sc->gles_mtl[k])
+                kl_glfb_note_layer_mtl_texture(id, k, sc->gles_mtl[k],
+                                               (int)sc->width, (int)sc->height);
         return;
     }
     if (!kl_glfb_has_mtl_layer_provider()) {
@@ -6153,6 +6206,9 @@ static XrResult klxr_EndFrame(void *session, const XrFrameEndInfo *info) {
     klxr_log_chain("xrEndFrame", info->next);
     if (!s->running) KLXR_RET(KLXR_ERROR_SESSION_NOT_RUNNING);
     if (!s->frame_begun) KLXR_RET(KLXR_ERROR_CALL_ORDER_INVALID);
+    // vpgles (gated, no-op otherwise): the frame's GL work is submitted and complete before any
+    // layer is published for the compositor to sample.
+    if (s->gfx == KLXR_GFX_GLES) kl_gles_frame_end();
     // Validation first: a rejected xrEndFrame leaves the frame begun (the next begin
     // reports it discarded), as the spec and the CTS expect.
     if (info->displayTime <= 0) KLXR_RET(KLXR_ERROR_TIME_INVALID);
@@ -6673,6 +6729,10 @@ static XrResult klxr_EndFrame(void *session, const XrFrameEndInfo *info) {
                     // GL path's array-vs-2D split has no counterpart.
                     klxr_publish_eye_vulkan(sc, (int)v,
                                             (int)proj->views[v].subImage.imageArrayIndex);
+                    slot = sc->last_released;
+                } else if (sc->vpgles) {
+                    klxr_publish_eye_gles(sc, (int)v,
+                                          (int)proj->views[v].subImage.imageArrayIndex);
                     slot = sc->last_released;
                 } else if (klxr_eye_mirror_on() || sc->array_size > 1) {
                     slot = klxr_mirror_eye_image(sc, (int)v,

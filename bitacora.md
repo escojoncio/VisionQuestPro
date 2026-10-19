@@ -281,3 +281,13 @@ VPKEngine `main` = e6c3f3b.
 - Política ARKit por manifiesto (VQLaunch): escena solo con USE_SCENE, anclas con USE_ANCHOR_API; puertas de extensiones `available || política`. runARKit reintenta sin proveedores espaciales si `run` falla.
 - Verificado: clang -fsyntax-only, tests host `t_ovrp_input`, `spatial_test`; tipos OpenXR contra openxr.h oficial. Sin compilar Swift ni probar en visor.
 - Pendiente: probar TRIANGLE/AC/AoT (cambios de respuesta: espaciales ya no -1004, GetTimeInSeconds Result+out, predicados escriben out), Demeo en AR, orientación del bind de manos, eventos discovery 104/105 sin verificar.
+
+## Log de antialiasing efectivo
+- `app/Sources/VQLaunch.swift`: línea "Antialiasing efectivo: <modo> — <motivo>" tras el log de Gráficos. El selector por juego (auto/VPKTAA/MSAA/off, `VQGameAA`) ya existía; "VPKTAA permitido=false" = modo auto + juego visto con MSAA (`vq.aaDetected.<key>`>1). Swift sin compilar.
+
+## Fixes tras pruebas de 61762c5
+- AC 3D deformado: `ovrp_GetEyeLayerRecommendedResolution` devolvía 2383x1912 con layer de 2976x1912 → resolución dinámica de Unity con viewport reducido y y≠0. Ahora -1004 sin layer de ojo vivo y tamaño real con layer (`kl_ovrp_active_eye_layer_size`, kl_ovrp.c). Log `[ovrp] GetEyeLayerRecommendedResolution -> WxH`.
+- Demeo negro: Unity OpenXR + GLES con vpgles no tenía ruta de imagen (klxr_mirror_eye_image exigía ANGLE). Ruta vpgles en kl_openxr.c (kl_gles_layer_texture, `klxr_publish_eye_gles`, quads, `kl_gles_frame_end`) + `kl_gles_texture_mtl` en kl_gles.c.
+- AoT bajones: no son regresiones; GPU al límite (pase MSAA x2 2976x1912x2) → visionOS fija 50 Hz; pico puntual coincide con compilación de PSO en worker + guardado de .metalar (sin confirmar). Instrumentación: `gpu.sec` (p50/p95/max/over10) y `[cp] HALF RATE held` con gaps y estado térmico.
+- AA: el selector por juego (Automático/VPKTAA/MSAA/Off) ya existía; en Automático con MSAA detectado se mantiene el MSAA. A2C → alpha test (discard <0.5, sin early fragment tests) al forzar 1x. Log "Antialiasing efectivo: …".
+- Pendiente: confirmar la causa del pico de AoT; valorar VPKTAA por defecto en juegos MSAA.

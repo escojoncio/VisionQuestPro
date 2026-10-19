@@ -562,6 +562,7 @@ void kl_ovrp_proj_layers_external(const kl_ovrp_proj_layer *v, int n);
 // every OpenXR guest that submits a projection layer every frame) is unchanged.
 void kl_ovrp_eye_layer_external(int submitted);
 int  kl_ovrp_eye_layer_live(void);
+int  kl_ovrp_active_eye_layer_size(int *w, int *h);   // 1 + size of the live eye layer, 0 if none
 
 // How many swapchain stages we tell the guest it has (KL_OVRP_STAGES). The
 // answer to ovrp_GetEyeTextureStageCount, so it bounds every (eye, stage) key

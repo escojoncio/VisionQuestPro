@@ -429,6 +429,29 @@ final class VQSettings: ObservableObject {
         unsetenv("VPVK_TAA_JITTER")  // set to 0 by the conformance runs only (VQConformance.neutralGraphics)
         let detText = detected.map { "\($0)x" } ?? "no"
         VQLog.log("Gráficos: foveado Quest siempre apagado; foveado propio \(foveation), AA: modo \(aa.mode.rawValue), MSAA override \(msaaOverride), detectado \(detText) (juego \(aaKey.isEmpty ? "?" : aaKey)\(aa.stored ? "" : ", por defecto")), VPKTAA permitido \(vpktaa) nativo \(vpktaaNative) \(Int(vpktaaPercent)) % nitidez \(vpktaaSharpness), forzar 1x \(c.force_single_sample != 0), anisotrópico x\(anisoLevel), diagnóstico de rendimiento \(perfDiag), diagnóstico de ficheros \(fsDiag), escala \(effScale), ASW apagado \(aswDisabled), perfil Quest 3 \(quest3Profile), perfil Vulkan completo \(vkFullProfile), FPS en pantalla \(showFps)")
+        // Effective antialiasing and why (one line, so a log alone explains what the eye pass will be).
+        let aaEffective: String
+        let aaWhy: String
+        switch aa.mode {
+        case .vpktaa:
+            aaEffective = vpktaaNative ? "VPKTAA nativo (MSAA del juego forzado a 1x)" : "VPKTAA de Klepton (MSAA del juego forzado a 1x)"
+            aaWhy = "elegido explícitamente para este juego"
+        case .auto:
+            if msaaGame {
+                aaEffective = "MSAA del juego (\(detected ?? 1)x), sin VPKTAA"
+                aaWhy = "modo automático y el juego ya se vio con MSAA \(detText); para quitarlo y usar VPKTAA, elige «VPKTAA» en los ajustes del juego"
+            } else {
+                aaEffective = vpktaaNative ? "VPKTAA nativo" : "VPKTAA de Klepton"
+                aaWhy = "modo automático y el juego \(detected == nil ? "aún no se ha visto (se decidirá en vivo)" : "no usa MSAA")"
+            }
+        case .msaa:
+            aaEffective = "MSAA del juego, sin VPKTAA"
+            aaWhy = "elegido explícitamente para este juego"
+        case .off:
+            aaEffective = "sin antialiasing añadido"
+            aaWhy = "elegido explícitamente para este juego"
+        }
+        VQLog.log("Antialiasing efectivo: \(aaEffective) — \(aaWhy)")
         VQLog.log("Ajustes: sin red \(offline), log del juego \(guestLog), vigilante \(Int(watchdogSeconds)) s")
     }
 }
