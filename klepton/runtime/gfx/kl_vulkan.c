@@ -4156,6 +4156,20 @@ static double klvk_now_s(void) {
     return (double)ts.tv_sec + (double)ts.tv_nsec / 1e9;
 }
 
+// Frame-end QueueWaitIdle that took >= 500 ms: how long, and how much GPU work VPKEngine still
+// reports queued (vpvk_gpu_backlog_ms). Capped at 40 lines per run; the wait's own result is unchanged.
+static void klvk_slow_wait_note(const char *which, double t0_s) {
+    double ms = (klvk_now_s() - t0_s) * 1000.0;
+    if (ms < 500.0) return;
+    static int lines;
+    if (lines >= 40) return;
+    int n = __atomic_add_fetch(&lines, 1, __ATOMIC_RELAXED);
+    if (n > 40) return;
+    unsigned backlog = g_vpvk.gpu_backlog_ms ? g_vpvk.gpu_backlog_ms() : 0;
+    VKI("[frame-end] %s waited %.0f ms (gpu backlog %u ms, serial %llu)%s\n", which, ms, backlog,
+        (unsigned long long)kl_vulkan_frame_serial(), n == 40 ? " — further lines silenced" : "");
+}
+
 static unsigned g_retire_live;   // entries waiting (atomic hint for klvk_retire_touch)
 
 static void klvk_retire_touch(VkImage img, const char *how) {
@@ -4598,7 +4612,9 @@ void kl_vulkan_frame_done(int stage) {
         if (!nowait && taa_inline) VKI("[taa-inline] KL_VPKTAA_NOWAIT=0 — resolved frames are waited for too\n");
     }
     if (committed && !nowait) {
+        double tw0 = klvk_now_s();
         if (d && d->queue && d->QueueWaitIdle) d->QueueWaitIdle(d->queue);
+        klvk_slow_wait_note("QueueWaitIdle (resolved frame, NOWAIT=0)", tw0);
         klvk_serial_advance(issued);
     }
     // ASYNC frame end (default, KL_VK_FRAME_ASYNC=1): instead of vkQueueWaitIdle — which
@@ -4614,9 +4630,11 @@ void kl_vulkan_frame_done(int stage) {
     }
     if (!committed) {
         if (kl_env_on("KL_VK_FRAME_SYNC", 1) && d && d->queue) {
+            double tw0 = klvk_now_s();
             VkResult r = d->QueueWaitIdle ? d->QueueWaitIdle(d->queue)
                        : d->DeviceWaitIdle ? d->DeviceWaitIdle(d->dev)
                                            : VK_SUCCESS;
+            klvk_slow_wait_note("QueueWaitIdle (frame end)", tw0);
             if (r != VK_SUCCESS) {
                 static int said;
                 if (!said++)

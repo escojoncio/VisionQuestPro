@@ -351,6 +351,15 @@ final class KleptonCompositor {
     private var guestFrameEvent: MTLSharedEvent!
     private var lastGuestFrame: UInt64 = 0
     private var staleInARow = 0
+    // Frozen-guest policy (global, every game): the guest's serial has not moved for
+    // `staleHideSeconds` of wall clock, so the picture on screen is an old frame reprojected
+    // against a pose that keeps getting older. From there the composite shows what it shows when
+    // there is no guest frame yet (black backfill / loading skybox, no eye, no overlays) until a
+    // new serial arrives. `[cp] stale -> backfill` / `[cp] fresh again`.
+    private static let staleHideSeconds = Double(klEnvFloat("KL_CP_STALE_HIDE_S", 3.0))
+    private var staleHide = false
+    private var lastFreshTime = CFAbsoluteTimeGetCurrent()
+    private var staleHideCount = 0
 
     // Keyed by (eye, stage). Indexed by stage from the start rather than kept
     // as a "last texture" global, because ovrp_GetEyeTextureStageCount is ours
@@ -2067,7 +2076,25 @@ final class KleptonCompositor {
         } else {
             staleInARow = 0
             lastGuestFrame = frameValue
+            lastFreshTime = CFAbsoluteTimeGetCurrent()
         }
+        // Wall clock, not a frame count: the panel period changes (half rate, 90/100/120 Hz) and
+        // `staleInARow` alone would mean three different times. The count only guards against a
+        // first frame after a long stall of this very thread.
+        let frozenFor = CFAbsoluteTimeGetCurrent() - lastFreshTime
+        let frozen = staleInARow >= 8 && frozenFor >= Self.staleHideSeconds
+        if frozen != staleHide {
+            staleHide = frozen
+            if frozen {
+                staleHideCount += 1
+                NSLog(String(format: "[cp] stale -> backfill: guest serial %llu frozen for %.1f s "
+                                     + "(%ld panel frames), its last picture is no longer reprojected (#%ld)",
+                             UInt64(frameValue), frozenFor, staleInARow, staleHideCount))
+            } else {
+                NSLog("[cp] fresh again: guest serial \(frameValue) (freeze #\(staleHideCount))")
+            }
+        }
+        if staleHide { projLayerCount = 0 }
 
         // The pose the picture will be *shown* at, as freshly predicted as we
         // can make it: re-queried here rather than reused from updatePoses,
@@ -2246,6 +2273,7 @@ final class KleptonCompositor {
         let capNow = guestLive && FrameCapture.enabled
             && (FrameCapture.frames.contains(capGuestFrames) || capGuestFrames == overlayCapFrame)
         hudCount(rendered: rendered, haveRendered: haveRendered)
+        ptReserve()
         for (di, drawable) in drawables.enumerated() {
             // Per drawable, not once: each one is presented separately and each
             // is reprojected by the system against its own anchor.
@@ -2302,8 +2330,12 @@ final class KleptonCompositor {
         let ptwDrew = ptwDrewThisCmd
         ptwDrewThisCmd = false
         ptwReport()
+        ptReleaseUnused()
+        let ptSlot = ptUsed
+        ptUsed = nil
         cmd.addCompletedHandler { [weak self] b in
             guard let self else { return }
+            if let ptSlot { self.ptCollect(slot: ptSlot, cmd: b) }
             if self.ptwWanted { self.ptwNoteGpu(b, ptw: ptwDrew) }
             self.cmdLock.lock()
             self.cmdCompleted += 1
@@ -2618,6 +2650,22 @@ final class KleptonCompositor {
         // nil while the drawable is foveated fills the physical texture
         // uniformly and the unwarp then distorts a correct picture.
         pass.rasterizationRateMap = rateMap
+        if let slot = ptCur {
+            ptCur = nil
+            ptUsed = slot
+            let a = pass.sampleBufferAttachments[0]
+            a?.sampleBuffer = ptSets[slot]
+            a?.startOfVertexSampleIndex = 0
+            a?.endOfVertexSampleIndex = 1
+            a?.startOfFragmentSampleIndex = 2
+            a?.endOfFragmentSampleIndex = 3
+            let rtW: Int = pass.colorAttachments[0].texture?.width ?? 0
+            let rtH: Int = pass.colorAttachments[0].texture?.height ?? 0
+            let layout: String = layered ? "layered" : "per-eye"
+            let fov: String = rateMap != nil ? "foveated" : "uniform"
+            let shape = "rt \(rtW)x\(rtH) \(layout) \(fov)"
+            cmdLock.lock(); ptShape = shape; cmdLock.unlock()
+        }
 
         guard let enc = cmd.makeRenderCommandEncoder(descriptor: pass) else { return 0 }
         enc.label = "klepton composite view\(viewIndices)"
@@ -2695,7 +2743,7 @@ final class KleptonCompositor {
             // menu, out of the SAME swapchains) that is one screen composited
             // twice, full-field underneath its own panel. kl_ovrp.h has the
             // measurement.
-            var alloc = (completeStage < 0 || kl_ovrp_eye_layer_live() == 0 || taaHide) ? nil : a
+            var alloc = (completeStage < 0 || kl_ovrp_eye_layer_live() == 0 || taaHide || staleHide) ? nil : a
             // VPKTAA: the resolved picture replaces the guest's, same geometry (slice 0 of its
             // own array, same flip).
             if alloc != nil, let t = taaOut[vi] {
@@ -2818,7 +2866,8 @@ final class KleptonCompositor {
         if nproj == 0, visible == 0, kl_passthrough_active() == 0 {
             drawBlackBackfill(enc, viewIndices: viewIndices, drawable: drawable,
                               layered: layered, originFromHead: originFromHead)
-            let why = taaHide ? "taa hidden"
+            let why = staleHide ? "guest frozen"
+                : taaHide ? "taa hidden"
                 : completeStage < 0 ? "no complete stage"
                 : kl_ovrp_eye_layer_live() == 0 ? "eye layer not live"
                 : !haveEyes ? "no eye texture" : "views not visible"
@@ -3020,9 +3069,11 @@ final class KleptonCompositor {
                 enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: gridVerts)
             }
         }
-        let panels = encodeOverlays(enc, viewIndices: viewIndices, drawable: drawable,
-                                    originFromHead: originFromHead,
-                                    writeDepth: visible == 0)
+        // A frozen guest's quads are as old as its eye picture: not drawn either (staleHide).
+        let panels = staleHide ? 0
+            : encodeOverlays(enc, viewIndices: viewIndices, drawable: drawable,
+                             originFromHead: originFromHead,
+                             writeDepth: visible == 0)
         drawFpsHud(enc, viewIndices: viewIndices, drawable: drawable, originFromHead: originFromHead)
         enc.endEncoding()
         // "How many eyes got a picture", which is what the caller counts black
@@ -4670,11 +4721,123 @@ final class KleptonCompositor {
         return (c, 0)
     }
 
+    // MARK: - Per-pass GPU timing (KL_CP_PASSTIME=0 turns it off)
+    //
+    // The composite command buffer is ONE render pass (both eyes, one draw), so the buffer's GPU
+    // time says little about WHERE it goes: the interval also spans the game's work interleaved on
+    // the same GPU. Stage-boundary counter samples bracket the pass itself: vertex start/end and
+    // fragment start/end (4 samples). A ring of 4 sample buffers (a slot is busy from encode to the
+    // buffer's completion); only the first pass of a frame is sampled. Appended to `[cp] gpu`.
+    private var ptSets: [MTLCounterSampleBuffer] = []
+    private var ptBusy: [Bool] = []                 // under cmdLock
+    private var ptCur: Int?                         // slot reserved for this frame (render thread)
+    private var ptUsed: Int?                        // slot the pass really carries (render thread)
+    private var ptFragMs: [Double] = []             // under cmdLock
+    private var ptVertMs: [Double] = []             // under cmdLock
+    private var ptShape = ""                        // under cmdLock
+    private var ptCalCPU: MTLTimestamp = 0
+    private var ptCalGPU: MTLTimestamp = 0
+    private var ptCalTime = CFAbsoluteTimeGetCurrent()
+    private var ptNsPerTick: Double?                // under cmdLock
+    private var ptLoggedScale = false
+    private lazy var ptEnabled: Bool = setupPassTimer()
+
+    private func setupPassTimer() -> Bool {
+        guard klEnvOn("KL_CP_PASSTIME", default: true), let dev = queue?.device else { return false }
+        guard dev.supportsCounterSampling(.atStageBoundary),
+              let set = dev.counterSets?.first(where: { $0.name == MTLCommonCounterSet.timestamp.rawValue })
+        else {
+            NSLog("[cp] per-pass GPU timing unavailable (no stage-boundary timestamp counters on this device)")
+            return false
+        }
+        let d = MTLCounterSampleBufferDescriptor()
+        d.counterSet = set
+        d.storageMode = .shared
+        d.sampleCount = 4
+        d.label = "klepton composite pass timestamps"
+        var made: [MTLCounterSampleBuffer] = []
+        for _ in 0..<4 {
+            guard let b = try? dev.makeCounterSampleBuffer(descriptor: d) else {
+                NSLog("[cp] per-pass GPU timing unavailable (makeCounterSampleBuffer failed)")
+                return false
+            }
+            made.append(b)
+        }
+        ptSets = made
+        ptBusy = [Bool](repeating: false, count: made.count)
+        dev.sampleTimestamps(&ptCalCPU, gpuTimestamp: &ptCalGPU)
+        ptCalTime = CFAbsoluteTimeGetCurrent()
+        NSLog("[cp] per-pass GPU timing on: vertex/fragment stage-boundary timestamps of the composite pass")
+        return true
+    }
+
+    /// Reserves a sample-buffer slot for this frame's first composite pass (render thread).
+    private func ptReserve() {
+        guard ptEnabled else { return }
+        cmdLock.lock()
+        // A slot left over from a frame that never reached its completion handler is freed here.
+        if let i = ptCur { ptBusy[i] = false }
+        if let i = ptUsed { ptBusy[i] = false }
+        ptCur = nil
+        ptUsed = nil
+        if let i = ptBusy.firstIndex(of: false) { ptBusy[i] = true; ptCur = i }
+        cmdLock.unlock()
+    }
+
+    /// Frees a reserved slot whose pass was never encoded (render thread).
+    private func ptReleaseUnused() {
+        guard let i = ptCur else { return }
+        ptCur = nil
+        cmdLock.lock(); ptBusy[i] = false; cmdLock.unlock()
+    }
+
+    /// Reads the 4 timestamps of `slot` when its command buffer has completed, and frees the slot.
+    private func ptCollect(slot: Int, cmd b: MTLCommandBuffer) {
+        defer { cmdLock.lock(); ptBusy[slot] = false; cmdLock.unlock() }
+        let stride = MemoryLayout<MTLCounterResultTimestamp>.stride
+        guard b.status == .completed,
+              let data = ptSets[slot].resolveCounterRange(NSRange(location: 0, length: 4)), data.count >= 4 * stride else { return }
+        var ts: [UInt64] = []
+        data.withUnsafeBytes { (raw: UnsafeRawBufferPointer) -> Void in
+            for i in 0..<4 {
+                ts.append(raw.loadUnaligned(fromByteOffset: i * stride, as: MTLCounterResultTimestamp.self).timestamp)
+            }
+        }
+        // MTLCounterErrorValue (all ones) or zeros: that stage did not report.
+        guard ts.allSatisfy({ $0 != UInt64.max && $0 != 0 }), ts[1] >= ts[0], ts[3] >= ts[2] else { return }
+        cmdLock.lock()
+        if ptNsPerTick == nil, CFAbsoluteTimeGetCurrent() - ptCalTime >= 1.0, let dev = queue?.device {
+            // GPU ticks -> ns, from the CPU/GPU timestamp pair taken at start and now.
+            var cpu: MTLTimestamp = 0, gpu: MTLTimestamp = 0
+            dev.sampleTimestamps(&cpu, gpuTimestamp: &gpu)
+            if gpu > ptCalGPU, cpu > ptCalCPU { ptNsPerTick = Double(cpu - ptCalCPU) / Double(gpu - ptCalGPU) }
+        }
+        let scale = ptNsPerTick
+        cmdLock.unlock()
+        guard let scale else { return }
+        let vert = Double(ts[1] - ts[0]) * scale / 1e6
+        let frag = Double(ts[3] - ts[2]) * scale / 1e6
+        cmdLock.lock()
+        ptVertMs.append(vert); ptFragMs.append(frag)
+        let first = !ptLoggedScale
+        ptLoggedScale = true
+        cmdLock.unlock()
+        if first {
+            // Sanity for the unit assumption (CPU timestamps in ns): the pass cannot be longer than
+            // the command buffer that holds it.
+            NSLog(String(format: "[cp] pass timing: %.4f ns/tick; first pass vertex %.2f ms fragment %.2f ms "
+                                 + "inside a command buffer of %.2f ms",
+                         scale, vert, frag, (b.gpuEndTime - b.gpuStartTime) * 1000))
+        }
+    }
+
     /// GPU time of this composite command buffer; once a second prints p50/p95/max of the window.
     private func noteCompositeGpu(_ b: MTLCommandBuffer) {
         let ms = (b.gpuEndTime - b.gpuStartTime) * 1000
         guard b.gpuStartTime > 0, ms > 0, ms < 1000 else { return }
         var window: [Double] = []
+        var frag: [Double] = [], vert: [Double] = []
+        var shape = ""
         cmdLock.lock()
         cpGpuMs.append(ms)
         let now = CFAbsoluteTimeGetCurrent()
@@ -4682,14 +4845,26 @@ final class KleptonCompositor {
             window = cpGpuMs.sorted()
             cpGpuMs.removeAll(keepingCapacity: true)
             cpGpuWindowStart = now
+            frag = ptFragMs.sorted(); vert = ptVertMs.sorted()
+            ptFragMs.removeAll(keepingCapacity: true); ptVertMs.removeAll(keepingCapacity: true)
+            shape = ptShape
         }
         cmdLock.unlock()
         guard !window.isEmpty else { return }
         let p50 = window[window.count / 2]
         let p95 = window[min(window.count - 1, Int(Double(window.count) * 0.95))]
-        NSLog(String(format: "[cp] gpu p50/p95/max %.2f/%.2f/%.2f ms (%ld cmdbufs, rcas %@)",
+        // The pass alone (stage-boundary timestamps): its fragment stage is the per-pixel cost
+        // (RCAS taps, mask, depth/colour write), its vertex stage the grid; the rest of the buffer's
+        // time is waiting behind / interleaved with the game's work and the present.
+        var parts = ""
+        if !frag.isEmpty {
+            parts = String(format: " | pass frag p50/max %.2f/%.2f vert p50 %.2f ms (%ld samples) %@",
+                           frag[frag.count / 2], frag[frag.count - 1], vert[vert.count / 2], frag.count, shape)
+        }
+        NSLog(String(format: "[cp] gpu p50/p95/max %.2f/%.2f/%.2f ms (%ld cmdbufs, rcas %@)%@",
                      p50, p95, window[window.count - 1], window.count,
-                     KleptonTAA.rcasInCompositor ? String(format: "fused %.2f", KleptonTAA.rcasIntensity) : "off/native"))
+                     KleptonTAA.rcasInCompositor ? String(format: "fused %.2f", KleptonTAA.rcasIntensity) : "off/native",
+                     parts))
     }
 
     /// GPU ms per composite command buffer, PTW vs rotation-only, every 5 s while KL_CP_PTW=1.

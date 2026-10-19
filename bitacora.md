@@ -137,3 +137,29 @@ Logs: `QUEST/Registros/` (también compartibles desde la app); línea 1 = hash d
 - Tras un fallo: leer `visionos.txt` en `ci-logs` (ver sección 5).
 - Identidad de commits: `Claude <noreply@anthropic.com>`. Ningún dato personal en el repo.
 - Bitácora: actualizar tras cada función, bug o build.
+
+## 8. Lote JNI completo + take_rgba (sin build; pendiente de verificar en visor)
+
+Causa (log Demeo b83ac15): SIGABRT por `GetPrimitiveArrayCritical` (slot 222) → `klj_unimpl`; antes, `kl_media_surface_take_rgba` no convertía el formato nativo '&8v0' del decodificador con ventana.
+
+- `klepton/runtime/kl_jni.c`: implementados y registrados en `klj_build_tables` GetPrimitiveArrayCritical/Release (puntero directo, isCopy=0), GetStringCritical/Release (copia UTF-16), GetStringRegion, GetStringUTFRegion (lanzan StringIndexOutOfBounds), MonitorEnter/Exit (mutex recursivo por objeto, lista con `users`; Exit sin Enter devuelve -1), GetObjectRefType, GetSuperclass, IsAssignableFrom, DefineClass (NoClassDefFoundError), AllocObject, ToReflectedMethod/Field, CallNonvirtual<T>MethodV, y Get/Set de campos Byte/Char/Short/Double (instancia y estáticos) + SetStatic* completos. `klj_unimpl` ahora imprime hilo e imagen+offset del llamador (`kl_addr_image(__builtin_return_address(0))` tomado en el stub).
+- Siguen en `klj_unimpl` solo los 10 `CallNonvirtual<T>Method` variádicos planos (requieren thunk `.S` en `kl_va_thunks.S`) y los slots reservados 0-3.
+- `klepton/runtime/media/kl_mediandk.c`: `take_rgba` convierte todo lo que no sea 32BGRA con un `VTPixelTransferSession` del reader a un CVPixelBuffer 32BGRA reutilizado (IOSurface), y luego usa la copia BGRA→RGBA existente; si falla y el frame es NV12 cae a la ruta CPU. Sesión y buffer se liberan en `klm_AImageReader_delete` y en abandon/ruta abandoned de `take_rgba` (`klm_reader_free_xfer`); `delete` también libra `r->rgba`. Diagnóstico `[media] take_rgba #N: 'fourcc' WxH via … (OSStatus), xfer ms, total ms` en las 3 primeras llamadas y en los primeros 16 fallos.
+- Verificado: clang -fsyntax-only de kl_jni.c sin errores nuevos; test host (gcc ASan+UBSan, stubs) de GetPrimitiveArrayCritical, monitores, regiones de string, RefType y que ningún slot >3 sea NULL. NO verificado: la compilación de kl_mediandk.c (headers Darwin), VTPixelTransfer con '&8v0' real, coste en 4K.
+- Pendiente: mirar en el log de Demeo `[media] take_rgba #1` (¿via VTPixelTransfer->BGRA, OSStatus 0?, ms) y que no vuelva el abort en slot 222.
+
+## 9. Compositor: política de frame congelado, desglose por pase, registros (sin build; pendiente de verificar en visor)
+
+Medido (log AC): `[cp] gpu` 4-5 ms p50 / 7 p95 / 9 max sobre 10 ms de periodo con el juego a 100 fps; con el juego congelado (serial 638) el compositor reproyectó 22 s el mismo frame ("513 stale in a row", pose de hasta 8,7 s).
+
+- `klepton/visionos/Sources/KleptonCompositor.swift`:
+  - Frame congelado (global): `staleHide` = serial sin cambiar `KL_CP_STALE_HIDE_S` (3,0) s de reloj y `staleInARow >= 8`. Con él: sin ojo (`alloc = nil`), `projLayerCount = 0`, sin overlays, y entra la ruta existente `drawBlackBackfill` (o el skybox de carga si el vídeo de carga está activo). Un serial nuevo lo apaga. Logs una vez por cambio: `[cp] stale -> backfill: …` / `[cp] fresh again: …`; motivo de backfill `guest frozen`.
+  - Desglose por pase: ring de 4 `MTLCounterSampleBuffer` (timestamp, `.atStageBoundary`), 4 muestras por pase (inicio/fin vertex y fragment), solo el primer pase de cada frame. Se añade a la línea `[cp] gpu`: ` | pass frag p50/max … vert p50 … ms (N samples) rt WxH layered|per-eye foveated|uniform`. Una línea `[cp] pass timing: X ns/tick; first pass …` valida la unidad (se asume CPU timestamp en ns). `KL_CP_PASSTIME=0` lo apaga; sin soporte, `[cp] per-pass GPU timing unavailable`.
+  - Estructura del composite (sin cambios, ya mínima): 1 cmdbuf, 1 pase de render con ambos ojos (vertex amplification, `renderTargetArrayLength=2`), 1 draw de rejilla, rate map del drawable aplicado, RCAS+máscara UI fusionados en `kl_reproject_f`, sin MSAA, sin blits/cómputo (salvo KL_CAPTURE). Profundidad `.store` obligatoria (visionOS reproyecta con ella).
+- `klepton/runtime/gfx/kl_reproject.c` (`kl_reproject_f`): la máscara UI se lee antes y, donde vale 1.0, se saltan las 4 taps RCAS (`mix(s,c,1)==c`: misma imagen).
+- `klepton/runtime/gfx/kl_vulkan.c`: `klvk_slow_wait_note` registra `[frame-end] … waited N ms (gpu backlog M ms, serial S)` cuando el `QueueWaitIdle` de fin de frame (ambas ramas) pasa de 500 ms; tope 40 líneas.
+- `app/Sources/VQLog.swift`: `shareable` incluye `crashAttachments` (`gpu-hang-*.metal`, `metrickit-*.json`, `*.ips` de Documents/Registros y QUEST/Registros); `VQMetrics.didReceive` escribe cada payload MetricKit en `Registros/metrickit-<ts>.json`. No existe zip: el botón compartir pasa la lista de ficheros a `ShareLink` y `saveToQuest` los copia a QUEST/Registros/<fecha>.
+- Verificado: `clang -fsyntax-only` (XROS_CFLAGS sin SDK) de `kl_vulkan.c` sin errores nuevos; `t_ptw` con gcc ASan+UBSan ok. NO verificado: Swift (no compila aquí), `kl_reproject.c` (requiere simd/Darwin), MSL en dispositivo, soporte de counters en visionOS, unidad ns de `sampleTimestamps`.
+- Pendiente: en el próximo log mirar `[cp] gpu … | pass frag` (frag p50 vs cmdbuf p50: si frag << cmdbuf el resto es solapamiento con el juego), `[cp] stale -> backfill`, `[frame-end] … waited`.
+
+- Revisión adversarial (sin build): `resolveCounterRange` ahora con `NSRange(location:length:)` (Range<Int> no compila); `withUnsafeBytes` con tipo explícito; `ptReserve` libera el slot huérfano; umbral de frame congelado 1,0 → 3,0 s (cargas de 1-3 s y juegos a <1 fps parpadeaban negro/frame); `VQLog.crashAttachments` lista solo la carpeta local en el acto y QUEST/Registros desde caché refrescada en segundo plano (30 s, `refreshQuestAttachments`), porque `shareable` se evalúa en cada render de SwiftUI.

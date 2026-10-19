@@ -60,17 +60,26 @@ enum { KL_JVM_SLOTS(KLJ_ENUM_VM) };
 // A slot we have not implemented aborts by name. It cannot do anything else:
 // we do not know the return type, so there is no value we could invent. This is
 // the instrument that makes the JNI surface measurable instead of guessable.
-static __attribute__((noreturn)) void klj_unimpl(const char *table, int idx, const char *name) {
+static __attribute__((noreturn)) void klj_unimpl(const char *table, int idx, const char *name,
+                                                 const void *ra) {
     fprintf(stderr, "\n[jni] UNIMPLEMENTED %s slot %d: %s\n", table, idx, name);
+    {   // who asked: thread name and the guest caller as image+offset
+        char tn[64] = "?";
+        pthread_getname_np(pthread_self(), tn, sizeof tn);
+        size_t off = 0;
+        const char *img = kl_addr_image(ra, &off);
+        fprintf(stderr, "[jni]   thread \"%s\", called from %s+0x%zx (%p)\n",
+                tn, img ? img : "(host)", img ? off : (size_t)0, ra);
+    }
     fprintf(stderr, "[jni] this is a work item — the guest wants it, so implement it.\n");
     kl_jni_report(stderr);
     kl_egl_report(stderr);
     kl_fatal_prepare(); abort();
 }
 #define KLJ_STUB_ENV(idx, name) \
-    static __attribute__((noreturn)) void klj_env_stub_##name(void) { klj_unimpl("JNIEnv", idx, #name); }
+    static __attribute__((noreturn)) void klj_env_stub_##name(void) { klj_unimpl("JNIEnv", idx, #name, __builtin_return_address(0)); }
 #define KLJ_STUB_VM(idx, name) \
-    static __attribute__((noreturn)) void klj_vm_stub_##name(void) { klj_unimpl("JavaVM", idx, #name); }
+    static __attribute__((noreturn)) void klj_vm_stub_##name(void) { klj_unimpl("JavaVM", idx, #name, __builtin_return_address(0)); }
 KL_JNI_SLOTS(KLJ_STUB_ENV)
 KL_JVM_SLOTS(KLJ_STUB_VM)
 
@@ -1414,6 +1423,28 @@ KLJ_VA_CALL(Double,  double)
 KLJ_VA_CALL(Void,    void)
 #undef KLJ_VA_CALL
 
+// CallNonvirtual<T>MethodV: same as the instance V form (no hierarchy to skip
+// through). The PLAIN varargs CallNonvirtual<T>Method still needs an asm thunk
+// (kl_va_thunks.S) and stays an abort-by-name.
+#define KLJ_CALL_NV_V(Name, Ret, Kind, Expr)                                              \
+    static Ret klj_CallNonvirtual##Name##MethodV(void *env, void *self, void *cls,       \
+                                                 void *mid, kl_va *va) {                  \
+        (void)cls; klj_val r = klj_call(env, self, mid, va, Kind); (void)r; return Expr;  \
+    }
+KLJ_CALL_NV_V(Object,  void *,   'L', r.l)
+KLJ_CALL_NV_V(Boolean, uint8_t,  'Z', (uint8_t)r.j)
+KLJ_CALL_NV_V(Byte,    int8_t,   'B', (int8_t)r.j)
+KLJ_CALL_NV_V(Char,    uint16_t, 'C', (uint16_t)r.j)
+KLJ_CALL_NV_V(Short,   int16_t,  'S', (int16_t)r.j)
+KLJ_CALL_NV_V(Int,     kl_jint,  'I', (kl_jint)r.j)
+KLJ_CALL_NV_V(Long,    int64_t,  'J', (int64_t)r.j)
+KLJ_CALL_NV_V(Float,   float,    'F', (float)r.d)
+KLJ_CALL_NV_V(Double,  double,   'D', r.d)
+#undef KLJ_CALL_NV_V
+static void klj_CallNonvirtualVoidMethodV(void *env, void *self, void *cls, void *mid, kl_va *va) {
+    (void)cls; klj_call(env, self, mid, va, 'V');
+}
+
 // The same family over the `A` convention. Generated rather than typed out for
 // the reason the V forms are: these differ only in the return kind, and a
 // hand-written set is where a copy-paste picks the wrong one. Nonvirtual is the
@@ -1628,6 +1659,15 @@ static void klj_SetObjectArrayElement(void *env, void *a, kl_jint i, void *v) {
         if (!arr || start < 0 || len < 0 || start + len > arr->len) return;           \
         memcpy((char *)arr->data + (size_t)start * arr->elem, buf, (size_t)len * arr->elem); \
     }
+// The critical pair is the same direct pointer as Get<T>ArrayElements, for any
+// element type; Release has nothing to write back because there is never a copy.
+static void *klj_GetPrimitiveArrayCritical(void *env, void *a, uint8_t *isCopy) {
+    (void)env; if (isCopy) *isCopy = 0;
+    klj_array *arr = klj_arr(a); return arr ? arr->data : NULL;
+}
+static void klj_ReleasePrimitiveArrayCritical(void *env, void *a, void *p, kl_jint m) {
+    (void)env; (void)a; (void)p; (void)m;
+}
 KLJ_PRIM_ARRAY(Boolean, 'Z') KLJ_PRIM_ARRAY(Byte,  'B') KLJ_PRIM_ARRAY(Char,   'C')
 KLJ_PRIM_ARRAY(Short,   'S') KLJ_PRIM_ARRAY(Int,   'I') KLJ_PRIM_ARRAY(Long,   'J')
 KLJ_PRIM_ARRAY(Float,   'F') KLJ_PRIM_ARRAY(Double,'D')
@@ -1844,6 +1884,195 @@ static float   klj_GetFloatField(void *e, void *o, void *f)        { (void)e; re
 // frames in.
 static int64_t klj_GetStaticLongField(void *e, void *c, void *f)   { (void)e; return (int64_t)klj_field_value(c, f, 'J').j; }
 static int64_t klj_GetLongField(void *e, void *o, void *f)         { (void)e; return (int64_t)klj_field_value(o, f, 'J').j; }
+
+
+// Remaining field accessors. Same lookup as Int/Float above; Byte/Char/Short
+// travel as the integer payload and Double as .d, like Float.
+#define KLJ_FIELD_INT(Name, T, want)                                                      \
+    static T klj_GetStatic##Name##Field(void *e, void *c, void *f) { (void)e; return (T)klj_field_value(c, f, want).j; } \
+    static T klj_Get##Name##Field(void *e, void *o, void *f)       { (void)e; return (T)klj_field_value(o, f, want).j; } \
+    static void klj_Set##Name##Field(void *e, void *o, void *f, T v) { (void)e; klj_field_store(o, f, (klj_val){.j = (uint64_t)(int64_t)v}); } \
+    static void klj_SetStatic##Name##Field(void *e, void *c, void *f, T v) { (void)e; klj_field_store(c, f, (klj_val){.j = (uint64_t)(int64_t)v}); }
+#define KLJ_FIELD_SET_STATIC(Name, T, init)                                               \
+    static void klj_SetStatic##Name##Field(void *e, void *c, void *f, T v) { (void)e; klj_field_store(c, f, (klj_val){init}); }
+KLJ_FIELD_INT(Byte,  int8_t,   'B')
+KLJ_FIELD_INT(Char,  uint16_t, 'C')
+KLJ_FIELD_INT(Short, int16_t,  'S')
+#undef KLJ_FIELD_INT
+static double klj_GetStaticDoubleField(void *e, void *c, void *f) { (void)e; return klj_field_value(c, f, 'D').d; }
+static double klj_GetDoubleField(void *e, void *o, void *f)       { (void)e; return klj_field_value(o, f, 'D').d; }
+static void klj_SetDoubleField(void *e, void *o, void *f, double v) { (void)e; klj_field_store(o, f, (klj_val){.d = v}); }
+KLJ_FIELD_SET_STATIC(Double,  double,   .d = v)
+KLJ_FIELD_SET_STATIC(Float,   float,    .d = v)
+KLJ_FIELD_SET_STATIC(Object,  void *,   .l = v)
+KLJ_FIELD_SET_STATIC(Int,     kl_jint,  .j = (uint64_t)(int64_t)v)
+KLJ_FIELD_SET_STATIC(Long,    int64_t,  .j = (uint64_t)v)
+KLJ_FIELD_SET_STATIC(Boolean, uint8_t,  .j = v)
+#undef KLJ_FIELD_SET_STATIC
+
+// ------------------------------------------------ remaining standard slots
+// Monitors: the JNI is multithreaded (guest threads attach), so MonitorEnter is
+// a real per-object recursive lock. Records live only while someone holds or
+// waits on them; `users` counts holders+waiters so a record is never freed under
+// a waiter.
+typedef struct klj_mon { void *obj; pthread_mutex_t m; int users; struct klj_mon *next; } klj_mon;
+static pthread_mutex_t g_mon_lock = PTHREAD_MUTEX_INITIALIZER;
+static klj_mon *g_mons;
+
+static kl_jint klj_MonitorEnter(void *env, void *obj) {
+    (void)env;
+    if (!obj) return -1;
+    pthread_mutex_lock(&g_mon_lock);
+    klj_mon *m = g_mons;
+    while (m && m->obj != obj) m = m->next;
+    if (!m) {
+        m = calloc(1, sizeof *m);
+        if (!m) { pthread_mutex_unlock(&g_mon_lock); return -1; }
+        pthread_mutexattr_t at;
+        pthread_mutexattr_init(&at);
+        pthread_mutexattr_settype(&at, PTHREAD_MUTEX_RECURSIVE);
+        pthread_mutex_init(&m->m, &at);
+        pthread_mutexattr_destroy(&at);
+        m->obj = obj; m->next = g_mons; g_mons = m;
+    }
+    m->users++;
+    pthread_mutex_unlock(&g_mon_lock);
+    pthread_mutex_lock(&m->m);
+    return 0;
+}
+
+static kl_jint klj_MonitorExit(void *env, void *obj) {
+    (void)env;
+    if (!obj) return -1;
+    pthread_mutex_lock(&g_mon_lock);
+    klj_mon **pp = &g_mons;
+    while (*pp && (*pp)->obj != obj) pp = &(*pp)->next;
+    klj_mon *m = *pp;
+    if (!m || pthread_mutex_unlock(&m->m) != 0) {   // not held by this thread
+        pthread_mutex_unlock(&g_mon_lock);
+        return -1;
+    }
+    if (--m->users == 0) {
+        *pp = m->next;
+        pthread_mutex_destroy(&m->m);
+        free(m);
+    }
+    pthread_mutex_unlock(&g_mon_lock);
+    return 0;
+}
+
+// String critical = GetStringChars (a UTF-16 copy that Release frees).
+static const uint16_t *klj_GetStringCritical(void *env, void *jstr, uint8_t *isCopy) {
+    return klj_GetStringChars(env, jstr, isCopy);
+}
+static void klj_ReleaseStringCritical(void *env, void *jstr, const uint16_t *chars) {
+    klj_ReleaseStringChars(env, jstr, chars);
+}
+
+// Both Region calls index UTF-16 units; out of range throws like the JVM does.
+static void klj_GetStringRegion(void *env, void *jstr, kl_jint start, kl_jint len, uint16_t *buf) {
+    (void)env;
+    kl_jint units = 0;
+    uint16_t *u = klj_utf8_to_utf16(klj_str(jstr), &units);
+    if (!u || start < 0 || len < 0 || (int64_t)start + len > units) {
+        free(u);
+        klj_throw_new("java/lang/StringIndexOutOfBoundsException", "GetStringRegion");
+        return;
+    }
+    memcpy(buf, u + start, (size_t)len * sizeof(uint16_t));
+    free(u);
+}
+// Writes the region as UTF-8 plus a NUL (the caller sizes buf for 3*len+1).
+static void klj_GetStringUTFRegion(void *env, void *jstr, kl_jint start, kl_jint len, char *buf) {
+    (void)env;
+    kl_jint units = 0;
+    uint16_t *u = klj_utf8_to_utf16(klj_str(jstr), &units);
+    if (!u || start < 0 || len < 0 || (int64_t)start + len > units) {
+        free(u);
+        klj_throw_new("java/lang/StringIndexOutOfBoundsException", "GetStringUTFRegion");
+        return;
+    }
+    size_t o = 0;
+    for (kl_jint i = start; i < start + len; i++) {
+        uint32_t c = u[i];
+        if (c >= 0xD800 && c <= 0xDBFF && i + 1 < start + len && u[i + 1] >= 0xDC00 && u[i + 1] <= 0xDFFF)
+            c = 0x10000 + ((c - 0xD800) << 10) + (u[++i] - 0xDC00);
+        if (c < 0x80)         buf[o++] = (char)c;
+        else if (c < 0x800)   { buf[o++] = (char)(0xC0 | (c >> 6)); buf[o++] = (char)(0x80 | (c & 0x3F)); }
+        else if (c < 0x10000) { buf[o++] = (char)(0xE0 | (c >> 12)); buf[o++] = (char)(0x80 | ((c >> 6) & 0x3F));
+                                buf[o++] = (char)(0x80 | (c & 0x3F)); }
+        else                  { buf[o++] = (char)(0xF0 | (c >> 18)); buf[o++] = (char)(0x80 | ((c >> 12) & 0x3F));
+                                buf[o++] = (char)(0x80 | ((c >> 6) & 0x3F)); buf[o++] = (char)(0x80 | (c & 0x3F)); }
+    }
+    buf[o] = 0;
+    free(u);
+}
+
+// A reference here is always a local or a global one we cannot tell apart, and
+// weak refs are plain identities: pinned objects read as global, the rest local.
+// JNIInvalidRefType (0) for anything that is not one of our objects.
+static kl_jint klj_GetObjectRefType(void *env, void *obj) {
+    (void)env;
+    klj_object *o = klj_as_object(obj);
+    if (!o) return 0;
+    return o->pinned ? 2 : 1;   // JNIGlobalRefType : JNILocalRefType
+}
+
+// Class relations, over the same g_supers chain IsInstanceOf walks.
+static const char *klj_super_name(const char *cur) {
+    for (int i = 0; g_supers[i].cls; i++)
+        if (strcmp(g_supers[i].cls, cur) == 0) return g_supers[i].super;
+    return NULL;
+}
+static void *klj_GetSuperclass(void *env, void *clazz) {
+    (void)env;
+    const char *n = klj_class_name(clazz);
+    if (!strcmp(n, "java/lang/Object")) return NULL;
+    const char *s = klj_super_name(n);
+    return klj_class_object(s ? s : "java/lang/Object");
+}
+static uint8_t klj_IsAssignableFrom(void *env, void *sub, void *sup) {
+    (void)env;
+    const char *want = klj_class_name(sup);
+    if (!strcmp(want, "java/lang/Object")) return 1;
+    for (const char *cur = klj_class_name(sub); cur; cur = klj_super_name(cur))
+        if (!strcmp(cur, want)) return 1;
+    return 0;
+}
+// A jclass is an interned name, never loaded bytecode: there is nothing to define.
+static void *klj_DefineClass(void *env, const char *name, void *loader, const void *buf, kl_jint len) {
+    (void)env; (void)loader; (void)buf; (void)len;
+    KLJ_LOG("DefineClass %s: no bytecode loader, refused", name ? name : "(null)");
+    klj_throw_new("java/lang/NoClassDefFoundError", name);
+    return NULL;
+}
+static void *klj_AllocObject(void *env, void *clazz) {
+    (void)env;
+    return kl_jni_new_object(klj_class_name(clazz));
+}
+static void klj_refl_free(void *p) {
+    klj_method_obj *m = p;   // klj_field_obj has the same layout
+    if (!m) return;
+    free((void *)m->cls); free((void *)m->name); free((void *)m->sig);
+    free(m);
+}
+static void *klj_to_reflected(void *mid, int is_static, const char *kind_cls) {
+    klj_wanted *w = mid;
+    if (!w || w < g_wanted || w >= g_wanted + KLJ_MAX_WANTED) return NULL;
+    klj_method_obj *m = calloc(1, sizeof *m);
+    if (!m) return NULL;
+    m->cls = strdup(w->cls); m->name = strdup(w->name); m->sig = strdup(w->sig);
+    m->is_static = is_static;
+    return klj_own(klj_new_object_data(kind_cls, m), klj_refl_free);
+}
+static void *klj_ToReflectedMethod(void *env, void *clazz, void *mid, uint8_t is_static) {
+    (void)env; (void)clazz;
+    return klj_to_reflected(mid, is_static, KLJ_CLASS_METHOD);
+}
+static void *klj_ToReflectedField(void *env, void *clazz, void *fid, uint8_t is_static) {
+    (void)env; (void)clazz;
+    return klj_to_reflected(fid, is_static, KLJ_CLASS_FIELD);
+}
 
 // UE4's copy of Build.VERSION.SDK_INT — see the table entry below for why it
 // exists. Reads the table it is in, so there is one number.
@@ -2592,6 +2821,36 @@ static void klj_build_tables(void) {
     ENV(SetLongField,          klj_SetLongField);
     ENV(SetBooleanField,       klj_SetBooleanField);
     ENV(SetFloatField,         klj_SetFloatField);
+    ENV(GetByteField, klj_GetByteField);       ENV(GetCharField, klj_GetCharField);
+    ENV(GetShortField, klj_GetShortField);     ENV(GetDoubleField, klj_GetDoubleField);
+    ENV(SetByteField, klj_SetByteField);       ENV(SetCharField, klj_SetCharField);
+    ENV(SetShortField, klj_SetShortField);     ENV(SetDoubleField, klj_SetDoubleField);
+    ENV(GetStaticByteField, klj_GetStaticByteField);   ENV(GetStaticCharField, klj_GetStaticCharField);
+    ENV(GetStaticShortField, klj_GetStaticShortField); ENV(GetStaticDoubleField, klj_GetStaticDoubleField);
+    ENV(SetStaticObjectField, klj_SetStaticObjectField);   ENV(SetStaticBooleanField, klj_SetStaticBooleanField);
+    ENV(SetStaticByteField, klj_SetStaticByteField);       ENV(SetStaticCharField, klj_SetStaticCharField);
+    ENV(SetStaticShortField, klj_SetStaticShortField);     ENV(SetStaticIntField, klj_SetStaticIntField);
+    ENV(SetStaticLongField, klj_SetStaticLongField);       ENV(SetStaticFloatField, klj_SetStaticFloatField);
+    ENV(SetStaticDoubleField, klj_SetStaticDoubleField);
+    ENV(GetPrimitiveArrayCritical,     klj_GetPrimitiveArrayCritical);
+    ENV(ReleasePrimitiveArrayCritical, klj_ReleasePrimitiveArrayCritical);
+    ENV(GetStringCritical,     klj_GetStringCritical);
+    ENV(ReleaseStringCritical, klj_ReleaseStringCritical);
+    ENV(GetStringRegion,       klj_GetStringRegion);
+    ENV(GetStringUTFRegion,    klj_GetStringUTFRegion);
+    ENV(MonitorEnter,          klj_MonitorEnter);
+    ENV(MonitorExit,           klj_MonitorExit);
+    ENV(GetObjectRefType,      klj_GetObjectRefType);
+    ENV(GetSuperclass,         klj_GetSuperclass);
+    ENV(IsAssignableFrom,      klj_IsAssignableFrom);
+    ENV(DefineClass,           klj_DefineClass);
+    ENV(AllocObject,           klj_AllocObject);
+    ENV(ToReflectedMethod,     klj_ToReflectedMethod);
+    ENV(ToReflectedField,      klj_ToReflectedField);
+#define ENVNV(Name) ENV(CallNonvirtual##Name##MethodV, klj_CallNonvirtual##Name##MethodV)
+    ENVNV(Object); ENVNV(Boolean); ENVNV(Byte); ENVNV(Char); ENVNV(Short);
+    ENVNV(Int); ENVNV(Long); ENVNV(Float); ENVNV(Double); ENVNV(Void);
+#undef ENVNV
 #undef ENV
 
 #define VM(name, fn) g_vm_vtable[KLJ_VM_##name] = (void *)(fn)

@@ -38,6 +38,7 @@ enum VQLog {
         let line = "VisionQuestPro \(info["CFBundleShortVersionString"] ?? "?") (\(info["CFBundleVersion"] ?? "?")) commit \(vqBuildCommit.isEmpty ? "local" : vqBuildCommit), "
             + "visionOS \(ProcessInfo.processInfo.operatingSystemVersionString)\n"
         handle?.write(Data(line.utf8))
+        refreshQuestAttachments(force: true)   // warm the cache off the main thread
     }
 
     static func log(_ message: String) {
@@ -54,7 +55,66 @@ enum VQLog {
          directory.appendingPathComponent("conformidad-detalle.txt"),
          directory.appendingPathComponent("meta-api.txt")]
             .filter { FileManager.default.fileExists(atPath: $0.path) }
-            + captures
+            + captures + crashAttachments
+    }
+
+    /// Crash / hang evidence the app can read: the MSL of the shaders of a GPU hang
+    /// (gpu-hang-*.metal, VPKEngine writes them to KL_CAPTURE_DIR = QUEST/Registros, else to this
+    /// app's Registros), the MetricKit payloads saved by VQMetrics (metrickit-*.json) and any .ips
+    /// report found there (the system keeps its own crash logs out of the sandbox, so only a copy
+    /// someone put in the folder shows up). Same names in both folders: the app's own wins.
+    /// `shareable` is read by SwiftUI on every render of the views that hold a ShareLink, so this
+    /// must be cheap and must never block the main thread: the app's own folder (local sandbox) is
+    /// listed on the spot; QUEST/Registros (File Provider, and `VQFolder.url` may resolve a bookmark /
+    /// keychain) is listed on a background queue at most every 30 s and read from the cache here.
+    private static let attachLock = NSLock()
+    private static var questAttachments: [URL] = []
+    private static var questAttachmentsAt = Date.distantPast
+    private static var questAttachmentsBusy = false
+
+    private static func isCrashAttachment(_ u: URL) -> Bool {
+        let n = u.lastPathComponent
+        return (n.hasPrefix("gpu-hang-") && u.pathExtension == "metal")
+            || (n.hasPrefix("metrickit-") && u.pathExtension == "json")
+            || u.pathExtension == "ips"
+    }
+
+    private static func attachments(in dir: URL) -> [URL] {
+        ((try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil)) ?? [])
+            .filter { isCrashAttachment($0) }
+            .sorted { $0.lastPathComponent < $1.lastPathComponent }
+    }
+
+    /// Re-lists QUEST/Registros in the background (no-op while one is running or the cache is fresh).
+    static func refreshQuestAttachments(force: Bool = false) {
+        attachLock.lock()
+        if questAttachmentsBusy || (!force && Date().timeIntervalSince(questAttachmentsAt) < 30) {
+            attachLock.unlock(); return
+        }
+        questAttachmentsBusy = true
+        attachLock.unlock()
+        DispatchQueue.global(qos: .utility).async {
+            var found: [URL] = []
+            if let quest = VQFolder.shared.url {
+                found = attachments(in: quest.appendingPathComponent("Registros", isDirectory: true))
+            }
+            attachLock.lock()
+            questAttachments = found
+            questAttachmentsAt = Date()
+            questAttachmentsBusy = false
+            attachLock.unlock()
+        }
+    }
+
+    static var crashAttachments: [URL] {
+        refreshQuestAttachments()
+        attachLock.lock(); let quest = questAttachments; attachLock.unlock()
+        var seen = Set<String>()
+        var out: [URL] = []
+        for u in attachments(in: directory) + quest {
+            if seen.insert(u.lastPathComponent).inserted { out.append(u) }
+        }
+        return out
     }
 
     /// Copies the logs to QUEST/Registros/<date>-<label>/ (Files app): a way to get them that does
@@ -254,6 +314,9 @@ final class VQMetrics: NSObject, MXMetricManagerSubscriber {
 
     func didReceive(_ payloads: [MXDiagnosticPayload]) {
         for p in payloads {
+            // The payload as the system gave it, next to the logs, so the share button carries it.
+            let stamp = Int(p.timeStampEnd.timeIntervalSince1970)
+            try? p.jsonRepresentation().write(to: VQLog.directory.appendingPathComponent("metrickit-\(stamp).json"))
             VQLog.log("MetricKit: diagnóstico \(p.timeStampBegin) - \(p.timeStampEnd): "
                       + "\(p.crashDiagnostics?.count ?? 0) cierre(s), \(p.hangDiagnostics?.count ?? 0) bloqueo(s), "
                       + "\(p.cpuExceptionDiagnostics?.count ?? 0) CPU, \(p.diskWriteExceptionDiagnostics?.count ?? 0) disco")

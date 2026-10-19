@@ -994,6 +994,13 @@ typedef struct {
     uint8_t  *rgba;             // last take_rgba conversion (owned)
     size_t    rgba_cap;
     int       converting;       // take_rgba is using rgba outside the lock
+    // take_rgba's hardware path for any frame that is not already BGRA: one
+    // VTPixelTransferSession and one reused 32BGRA target (a pool of one: the
+    // transfer is synchronous, so the target is free again on return). Touched
+    // only by take_rgba and, under !converting, by abandon/delete.
+    void     *xfer;             // VTPixelTransferSessionRef
+    void     *xdst;             // CVPixelBufferRef, 32BGRA
+    size_t    xw, xh;
 } klm_reader;
 
 #define KLM_READER_MAGIC 0x4b4c5244u   /* 'KLRD' */
@@ -1131,6 +1138,16 @@ static int klm_AImageReader_acquireLatestImage(void *reader, void **out) {
     return AMEDIA_OK;
 }
 
+static void klm_reader_free_xfer(klm_reader *r) {
+    if (r->xfer) {
+        VTPixelTransferSessionInvalidate((VTPixelTransferSessionRef)r->xfer);
+        CFRelease(r->xfer);
+        r->xfer = NULL;
+    }
+    if (r->xdst) { CVPixelBufferRelease((CVPixelBufferRef)r->xdst); r->xdst = NULL; }
+    r->xw = r->xh = 0;
+}
+
 static void klm_AImageReader_delete(void *reader) {
     klm_reader *r = reader;
     if (!r || r->magic != KLM_READER_MAGIC) return;
@@ -1145,6 +1162,8 @@ static void klm_AImageReader_delete(void *reader) {
         r->count--;
     }
     kl_ndk_window_free(r->window);
+    klm_reader_free_xfer(r);
+    free(r->rgba);
     pthread_mutex_destroy(&r->lock);
     pthread_cond_destroy(&r->cv);
     g_life_published += r->n_queued; g_life_acquired += r->n_acquired;
@@ -1236,7 +1255,10 @@ void kl_media_surface_abandon(void *reader) {
         r->head = (r->head + 1) % KLM_READER_MAX;
         r->count--;
     }
-    if (!r->converting) { free(r->rgba); r->rgba = NULL; r->rgba_cap = 0; }   // else take_rgba frees it
+    if (!r->converting) {   // else take_rgba frees it
+        free(r->rgba); r->rgba = NULL; r->rgba_cap = 0;
+        klm_reader_free_xfer(r);
+    }
     pthread_mutex_unlock(&r->lock);
 }
 
@@ -1246,6 +1268,46 @@ typedef struct { int yoff, yk, rv, gu, gv, bu; } klm_yuv_k;
 static const klm_yuv_k klm_k601v = {16, 298, 409, -100, -208, 516}, klm_k709v = {16, 298, 459, -55, -136, 541},
                        klm_k601f = {0, 256, 359, -88, -183, 454},   klm_k709f = {0, 256, 403, -48, -120, 475};
 static inline uint8_t klm_clamp8(int v) { return v < 0 ? 0 : v > 255 ? 255 : (uint8_t)v; }
+
+// Hardware YUV (or any other native layout) -> 32BGRA into the reader's reused
+// target, so a 4K frame never goes through the CPU YUV->RGB loop. Returns the
+// reader-owned target (not retained) or NULL; *st gets the OSStatus (-1 when
+// something before the transfer failed).
+static CVPixelBufferRef klm_reader_to_bgra(klm_reader *r, CVPixelBufferRef pb, OSStatus *st) {
+    size_t w = CVPixelBufferGetWidth(pb), h = CVPixelBufferGetHeight(pb);
+    *st = -1;
+    if (r->xdst && (r->xw != w || r->xh != h)) {
+        CVPixelBufferRelease((CVPixelBufferRef)r->xdst);
+        r->xdst = NULL;
+    }
+    if (!r->xdst) {
+        CFDictionaryRef iosurf = CFDictionaryCreate(kCFAllocatorDefault, NULL, NULL, 0,
+                                                    &kCFTypeDictionaryKeyCallBacks,
+                                                    &kCFTypeDictionaryValueCallBacks);
+        const void *k[1] = { kCVPixelBufferIOSurfacePropertiesKey };
+        const void *v[1] = { iosurf };
+        CFDictionaryRef attrs = iosurf ? CFDictionaryCreate(kCFAllocatorDefault, k, v, 1,
+                                                            &kCFTypeDictionaryKeyCallBacks,
+                                                            &kCFTypeDictionaryValueCallBacks) : NULL;
+        CVPixelBufferRef nb = NULL;
+        if (CVPixelBufferCreate(kCFAllocatorDefault, w, h, kCVPixelFormatType_32BGRA,
+                                attrs, &nb) == kCVReturnSuccess) {
+            r->xdst = nb; r->xw = w; r->xh = h;
+        }
+        if (attrs) CFRelease(attrs);
+        if (iosurf) CFRelease(iosurf);
+    }
+    if (!r->xfer) {
+        VTPixelTransferSessionRef sess = NULL;
+        if (VTPixelTransferSessionCreate(kCFAllocatorDefault, &sess) == noErr) r->xfer = (void *)sess;
+    }
+    if (!r->xdst || !r->xfer) return NULL;
+    *st = VTPixelTransferSessionTransferImage((VTPixelTransferSessionRef)r->xfer, pb,
+                                              (CVPixelBufferRef)r->xdst);
+    return *st == noErr ? (CVPixelBufferRef)r->xdst : NULL;
+}
+
+static char klm_fcc_char(uint32_t v) { return v >= 32 && v < 127 ? (char)v : '.'; }
 
 // Newest published frame as tightly packed RGBA8 (top row first). Returns 1 with
 // *rgba valid until the next call (reader-owned), 0 if no new frame since the
@@ -1272,21 +1334,36 @@ int kl_media_surface_take_rgba(void *reader, uint8_t **rgba, int *w, int *h, int
     int fw = (int)CVPixelBufferGetWidth(pb), fh = (int)CVPixelBufferGetHeight(pb);
     size_t need = (size_t)fw * fh * 4;
     int rc = -1;
+    int64_t t0_us = klm_now_us(), xfer_us = 0;
+    OSType t_in = CVPixelBufferGetPixelFormatType(pb);
+    OSStatus xst = noErr;
+    const char *via = "direct";
+    // Anything that is not BGRA is converted in hardware first (the decoder's
+    // native visionOS format '&8v0' is neither NV12 nor BGRA); the BGRA copy
+    // below then finishes the job. If the transfer fails an NV12 frame still has
+    // the CPU YUV path.
+    CVPixelBufferRef use = pb;
+    if (t_in != kCVPixelFormatType_32BGRA) {
+        CVPixelBufferRef cv = klm_reader_to_bgra(r, pb, &xst);
+        xfer_us = klm_now_us() - t0_us;
+        if (cv) { use = cv; via = "VTPixelTransfer->BGRA"; }
+        else via = klm_pb_is_nv12(pb) ? "CPU NV12 (transfer failed)" : "none (transfer failed)";
+    }
     if (r->rgba_cap < need) {
         uint8_t *n = realloc(r->rgba, need);
         if (n) { r->rgba = n; r->rgba_cap = need; }
     }
     if (r->rgba && r->rgba_cap >= need &&
-        CVPixelBufferLockBaseAddress(pb, kCVPixelBufferLock_ReadOnly) == kCVReturnSuccess) {
-        OSType t = CVPixelBufferGetPixelFormatType(pb);
+        CVPixelBufferLockBaseAddress(use, kCVPixelBufferLock_ReadOnly) == kCVReturnSuccess) {
+        OSType t = CVPixelBufferGetPixelFormatType(use);
         uint8_t *dst = r->rgba;
-        if (klm_pb_is_nv12(pb) && CVPixelBufferGetPlaneCount(pb) >= 2) {
+        if (klm_pb_is_nv12(use) && CVPixelBufferGetPlaneCount(use) >= 2) {
             const klm_yuv_k *k = t == kCVPixelFormatType_420YpCbCr8BiPlanarFullRange
                                      ? (fh >= 720 ? &klm_k709f : &klm_k601f)
                                      : (fh >= 720 ? &klm_k709v : &klm_k601v);
-            const uint8_t *y = CVPixelBufferGetBaseAddressOfPlane(pb, 0);
-            const uint8_t *uv = CVPixelBufferGetBaseAddressOfPlane(pb, 1);
-            size_t ys = CVPixelBufferGetBytesPerRowOfPlane(pb, 0), uvs = CVPixelBufferGetBytesPerRowOfPlane(pb, 1);
+            const uint8_t *y = CVPixelBufferGetBaseAddressOfPlane(use, 0);
+            const uint8_t *uv = CVPixelBufferGetBaseAddressOfPlane(use, 1);
+            size_t ys = CVPixelBufferGetBytesPerRowOfPlane(use, 0), uvs = CVPixelBufferGetBytesPerRowOfPlane(use, 1);
             if (y && uv) {
                 for (int j = 0; j < fh; j++) {
                     const uint8_t *yr = y + (size_t)j * ys, *ur = uv + (size_t)(j >> 1) * uvs;
@@ -1303,8 +1380,8 @@ int kl_media_surface_take_rgba(void *reader, uint8_t **rgba, int *w, int *h, int
                 rc = 1;
             }
         } else if (t == kCVPixelFormatType_32BGRA) {
-            const uint8_t *src = CVPixelBufferGetBaseAddress(pb);
-            size_t ss = CVPixelBufferGetBytesPerRow(pb);
+            const uint8_t *src = CVPixelBufferGetBaseAddress(use);
+            size_t ss = CVPixelBufferGetBytesPerRow(use);
             if (src) {
                 for (int j = 0; j < fh; j++) {
                     const uint8_t *s = src + (size_t)j * ss;
@@ -1314,22 +1391,31 @@ int kl_media_surface_take_rgba(void *reader, uint8_t **rgba, int *w, int *h, int
                 rc = 1;
             }
         }
-        CVPixelBufferUnlockBaseAddress(pb, kCVPixelBufferLock_ReadOnly);
+        CVPixelBufferUnlockBaseAddress(use, kCVPixelBufferLock_ReadOnly);
     }
     CVPixelBufferRelease(pb);
     pthread_mutex_lock(&r->lock);
     r->converting = 0;
-    if (r->abandoned) {   // release() ran meanwhile: the buffer is ours to free, the frame is not wanted
+    if (r->abandoned) {   // release() ran meanwhile: the buffers are ours to free, the frame is not wanted
         free(r->rgba); r->rgba = NULL; r->rgba_cap = 0;
+        klm_reader_free_xfer(r);
         pthread_mutex_unlock(&r->lock);
         return 0;
     }
     pthread_mutex_unlock(&r->lock);
-    if (rc != 1) {
-        KLM_FIRST(said_rgbfail, "kl_media_surface_take_rgba: cannot convert the frame "
-                                "(format/lock/alloc) — texture not updated\n");
-        return -1;
+    {   // first 3 calls and every failure (capped), never a line per frame
+        static unsigned ncall, nfail;
+        unsigned nth = ++ncall;
+        int bad = rc != 1;
+        if (nth <= 3 || (bad && nfail++ < 16))
+            fprintf(stderr, "  [media] take_rgba #%u: '%c%c%c%c' %dx%d via %s (OSStatus %d), "
+                            "xfer %.2f ms, total %.2f ms -> %s\n", nth,
+                    klm_fcc_char(t_in >> 24), klm_fcc_char((t_in >> 16) & 255),
+                    klm_fcc_char((t_in >> 8) & 255), klm_fcc_char(t_in & 255), fw, fh, via,
+                    (int)xst, xfer_us / 1000.0, (klm_now_us() - t0_us) / 1000.0,
+                    bad ? "FAILED (texture not updated)" : "ok");
     }
+    if (rc != 1) return -1;
     *rgba = r->rgba; *w = fw; *h = fh;
     if (pts_us) *pts_us = pts;
     return 1;

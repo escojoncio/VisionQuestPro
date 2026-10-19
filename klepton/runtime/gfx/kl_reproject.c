@@ -478,13 +478,17 @@ static const char kl_msl_reproject[] =
 "{\n"
 "    float4 c = kl_eye_sample2(tex, tex1, samp, in.uv, in.slice, in.srgb, in.src);\n"
 "    if (in.rcasCon > 0.0) {\n"
-"        float3 s = kl_rcas(tex, tex1, samp, in.uv, c.rgb, in.rcasCon, in.rcasFlags, in.rcasRect,\n"
-"                           in.slice, in.srgb, in.src);\n"
-"        if ((in.rcasFlags & 2u) != 0u) {\n"
-"            float m = in.src == 0u ? uiMask0.sample(samp, in.uv, 0u).r : uiMask1.sample(samp, in.uv, 0u).r;\n"
-"            s = mix(s, c.rgb, saturate(m));\n"
+// The UI mask is read FIRST: where it is fully covered (menus, HUD, text) the result is the
+// original pixel, mix(s, c, 1) == c, so the four RCAS taps are skipped. Same output, fewer
+// fetches on every UI pixel; the branch is coherent (the mask is flat over UI quads).
+"        float m = 0.0;\n"
+"        if ((in.rcasFlags & 2u) != 0u)\n"
+"            m = saturate(in.src == 0u ? uiMask0.sample(samp, in.uv, 0u).r : uiMask1.sample(samp, in.uv, 0u).r);\n"
+"        if (m < 1.0) {\n"
+"            float3 s = kl_rcas(tex, tex1, samp, in.uv, c.rgb, in.rcasCon, in.rcasFlags, in.rcasRect,\n"
+"                               in.slice, in.srgb, in.src);\n"
+"            c.rgb = mix(s, c.rgb, m);\n"
 "        }\n"
-"        c.rgb = s;\n"
 "    }\n"
 "    if (in.fadeOn != 0u) c.rgb = c.rgb * in.fadeS + in.fadeO;\n"
 // The matte is applied HERE and in no probe below. A rung of the probe ladder
