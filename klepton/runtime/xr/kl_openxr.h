@@ -163,4 +163,8 @@ void kl_openxr_grip_tune(float *grip_pitch_deg, float *aim_pitch_deg,
 void kl_openxr_status_log(const char *tag, const char *text);
 int  kl_openxr_status_text(char *buf, int cap);
 
+// ProcessInfo.thermalState.rawValue (0 nominal, 1 fair, 2 serious, 3 critical): feeds
+// XR_EXT_thermal_query and its XrEventDataPerfSettingsEXT (kl_openxr_ext.c).
+void kl_openxr_ext_set_thermal_state(int state);
+
 #endif

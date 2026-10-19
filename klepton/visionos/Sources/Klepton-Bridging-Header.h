@@ -51,3 +51,10 @@
 #import "vp_codesign.h"
 #import "vp_pkcs12.h"
 #include <dlfcn.h>
+// ...and the spatial store (planes, meshes, rooms, anchors) ARKit feeds: kl_spatial.
+#import "kl_spatial.h"
+// ...and the environment depth ring KleptonEnvDepth.swift renders into: kl_envdepth.
+#import "kl_envdepth.h"
+// ...the 26 hand joints ARKit's HandTrackingProvider feeds the ovrp hand state (kl_ovrp_input.c).
+void kl_ovrp_set_hand_joints(int hand, const float *pose7x26, uint32_t tracked_mask,
+                             const float *pinch5, uint32_t pinch_bits);

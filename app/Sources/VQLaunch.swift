@@ -71,6 +71,11 @@ enum VQLaunch {
         setenv("KL_GUEST_KIND", game.guestKind, 1)
         setenv("KL_GUEST_ENTRY", game.entryLib, 1)
         if game.nativeFuncName.isEmpty { unsetenv("KL_GUEST_FUNC") } else { setenv("KL_GUEST_FUNC", game.nativeFuncName, 1) }
+        // What the APK's manifest asks of the room (Meta scene / anchor permissions): decides which ARKit providers runARKit adds, before it runs.
+        let manifest = game.manifestText
+        let wantsAnchors = manifest.contains("\"com.oculus.permission.USE_ANCHOR_API\"")
+        let wantsScene = manifest.contains("\"com.oculus.permission.USE_SCENE\"")
+        kl_spatial_set_policy(wantsScene ? 1 : 0, wantsAnchors ? 1 : 0)
         let rc = kl_app_configure_game(game.id, choice.prepared.tree.path, game.apk.path, choice.prepared.dylibs.path,
                                        files.path, obbRel, documents)
         VQLog.log("Arranque: kl_app_configure_game -> \(rc): \(String(cString: kl_app_status()))")

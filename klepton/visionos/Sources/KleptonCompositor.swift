@@ -440,6 +440,7 @@ final class KleptonCompositor {
     private var cadenceMin: TimeInterval = .infinity   // shortest gap this window (panel re-latch)
     private var fasterPanelSeen = 0
     nonisolated(unsafe) private static var lastThermal: ProcessInfo.ThermalState = .nominal
+    private var thermalObserver: NSObjectProtocol?
     nonisolated(unsafe) private static var thermalTick = 0
     private var cadenceShort = 0   // gaps this window clearly shorter than the latched period
     private var lastPresentation: TimeInterval = 0
@@ -634,6 +635,17 @@ final class KleptonCompositor {
 
     private func startARKit() { Task { await runARKit() } }
 
+    /// The OS thermal state to the XR_EXT_thermal_query seam: now, and on every change.
+    private func installThermalFeed() {
+        kl_openxr_ext_set_thermal_state(Int32(ProcessInfo.processInfo.thermalState.rawValue))
+        if let old = thermalObserver { NotificationCenter.default.removeObserver(old) }
+        thermalObserver = NotificationCenter.default.addObserver(
+            forName: ProcessInfo.thermalStateDidChangeNotification, object: nil, queue: nil
+        ) { _ in
+            kl_openxr_ext_set_thermal_state(Int32(ProcessInfo.processInfo.thermalState.rawValue))
+        }
+    }
+
     /// Build the provider set and run the session.
     ///
     /// Idempotent and **re-runnable**: `AccessoryTrackingProvider` takes its
@@ -658,7 +670,17 @@ final class KleptonCompositor {
             if HandTrackingProvider.isSupported { providers.append(handTracking) }
             let accessories = await controllers.makeAccessoryProvider()
             if let accessories { providers.append(accessories) }
-            try await arSession.run(providers)
+            let spatial = KleptonSpatial.providers()   // planes / rooms / scene (kl_spatial)
+            do {
+                try await arSession.run(providers + spatial)
+            } catch where !spatial.isEmpty {
+                // A scene provider that cannot run (unauthorised, unsupported) must not take head,
+                // hands and accessories down with it: run again without them.
+                NSLog("[cp] ARKit failed with the spatial providers (\(error)); retrying without them")
+                KleptonSpatial.dropProviders()
+                try await arSession.run(providers)
+            }
+            KleptonSpatial.sessionStarted(arSession)
             arRunning = true
             NSLog("[cp] ARKit running (hands: \(HandTrackingProvider.isSupported), "
                   + "sense: \(controllers.senseConnected))")
@@ -1543,6 +1565,7 @@ final class KleptonCompositor {
         }
         installProvider()
         applyRenderQuality()
+        installThermalFeed()
         startARKit()
 
         // Before the guest, not after: the frustum and the display rate can
@@ -1874,6 +1897,10 @@ final class KleptonCompositor {
             updatePoses(at: LayerRenderer.Clock.Instant.epoch.duration(to: timing.presentationTime)
                             .timeInterval)
         }
+
+        // Environment depth (kl_envdepth): rasterises the ARKit scene mesh from each eye when a
+        // guest started a depth provider, and hands the recenter to the spatial store.
+        KleptonEnvDepth.frame(recenter: recenterXform)
 
         // Offer the guest this frame's pose and carry straight on. The guest
         // wakes on its own thread, ticks the Choreographer,

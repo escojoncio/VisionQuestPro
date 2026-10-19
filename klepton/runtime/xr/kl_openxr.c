@@ -41,6 +41,7 @@
 #include <math.h>
 #include <unistd.h>
 #include "kl_openxr.h"
+#include "kl_openxr_priv.h"   // batch seam: rows, extensions, events
 #include <pthread.h>
 #include <stdatomic.h>
 #include <ctype.h>
@@ -681,22 +682,35 @@ enum { KLXR_VIEW_CONFIG_PRIMARY_STEREO = 2 };
 // two are reported separately for the reason in the header — a name the guest
 // resolved and never called is not a work item, and conflating them is how a
 // work list doubles in size for no reason.
-typedef struct { const char *name; void *fn; unsigned resolved, called; } klxr_row;
+typedef struct { const char *name; void *fn; unsigned resolved, called; int refused; } klxr_row;
 
 #define X(n) static int klxr_stub_##n(void);
 KL_XR_ENTRY_POINTS(X)
 #undef X
 
-static klxr_row g_xr[] = {
-#define X(n) { #n, (void *)klxr_stub_##n, 0, 0 },
+// Rows declared by KL_XR_ENTRY_POINTS, counted at compile time.
+enum { KLXR_STATIC_COUNT = 0
+#define X(n) + 1
     KL_XR_ENTRY_POINTS(X)
 #undef X
 };
-#define KLXR_COUNT ((int)(sizeof g_xr / sizeof g_xr[0]))
+// VisionQuestPro: one slot per trampoline. The first KLXR_STATIC_COUNT rows are
+// the X-macro's; the rest are appended at run time by klxr_register_rows /
+// klxr_register_refused (batch files, see kl_openxr_priv.h). Fixed capacity, so
+// a row's address (and its trampoline index, row - g_xr) never changes.
+#define KLXR_TRAMPS 1024
+static klxr_row g_xr[KLXR_TRAMPS] = {
+#define X(n) { #n, (void *)klxr_stub_##n, 0, 0, 0 },
+    KL_XR_ENTRY_POINTS(X)
+#undef X
+};
+static int g_xr_n = KLXR_STATIC_COUNT;
+#define KLXR_COUNT ((int)__atomic_load_n(&g_xr_n, __ATOMIC_ACQUIRE))
+_Static_assert(KLXR_STATIC_COUNT <= KLXR_TRAMPS, "raise KLXR_TRAMPS");
 static void *klxr_guest_fn(klxr_row *row);   // trampolines, near kl_openxr_lookup
 // The refusal each row starts with, in the same order: a row whose fn is still
 // this after klxr_install is an entry point nothing implements.
-static void *const g_xr_stub_fn[] = {
+static void *g_xr_stub_fn[KLXR_TRAMPS] = {
 #define X(n) (void *)klxr_stub_##n,
     KL_XR_ENTRY_POINTS(X)
 #undef X
@@ -796,6 +810,138 @@ static int klxr_unimplemented(klxr_row *row) {
     }
 KL_XR_ENTRY_POINTS(X)
 #undef X
+
+static void klxr_install(void);
+
+// ------------------------------------- rows, extensions and events from batches
+// (kl_openxr_priv.h). Nothing here is on a hot path except xrPollEvent's check.
+static pthread_mutex_t g_xr_reg_mu = PTHREAD_MUTEX_INITIALIZER;
+
+// Refusal handler for dynamic rows: a kl_named_stub puts the row's name in x0.
+static int klxr_refuse_by_name(const char *name) {
+    klxr_row *row = klxr_row_for(name);
+    if (!row) return KLXR_ERROR_FUNCTION_UNSUPPORTED;
+    return klxr_unimplemented(row);
+}
+
+// Appends a dynamic row; caller holds g_xr_reg_mu. NULL when full.
+static klxr_row *klxr_add_row(const char *name, void *fn, int refused) {
+    int n = g_xr_n;
+    if (n >= KLXR_TRAMPS) {
+        fprintf(stderr, "  [xr] row table full (%d): '%s' dropped\n", KLXR_TRAMPS, name);
+        return NULL;
+    }
+    g_xr[n].name = name;
+    g_xr[n].fn = fn;
+    g_xr[n].resolved = g_xr[n].called = 0;
+    g_xr[n].refused = refused;
+    g_xr_stub_fn[n] = NULL;            // never equal to fn: not a generic stub
+    __atomic_store_n(&g_xr_n, n + 1, __ATOMIC_RELEASE);
+    return &g_xr[n];
+}
+
+void klxr_register_rows(const klxr_row_def *defs, size_t n) {
+    pthread_mutex_lock(&g_xr_reg_mu);
+    for (size_t i = 0; defs && i < n; i++) {
+        if (!defs[i].name || !defs[i].fn) continue;
+        klxr_row *r = klxr_row_for(defs[i].name);
+        if (r) { r->fn = defs[i].fn; r->refused = 0; }
+        else klxr_add_row(defs[i].name, defs[i].fn, 0);
+    }
+    pthread_mutex_unlock(&g_xr_reg_mu);
+}
+
+void klxr_register_refused(const char *ext, const char *const *names) {
+    unsigned made = 0;
+    pthread_mutex_lock(&g_xr_reg_mu);
+    for (; names && *names; names++) {
+        klxr_row *r = klxr_row_for(*names);
+        if (r) {                      // already a row: a refusal stub, or served
+            if (r->fn == g_xr_stub_fn[r - g_xr]) r->refused = 1;
+            continue;
+        }
+        void *stub = kl_named_stub(*names, (void *)klxr_refuse_by_name);
+        if (stub && klxr_add_row(*names, stub, 1)) made++;
+    }
+    pthread_mutex_unlock(&g_xr_reg_mu);
+    if (made)
+        fprintf(stderr, "  [xr] %s: %u entry point(s) refused by design\n",
+                ext ? ext : "?", made);
+}
+
+// Extensions announced by batch files.
+#define KLXR_EXT_REG_MAX 96
+static struct { const char *name; uint32_t version; int (*gate)(void);
+                const char *const *fns; } g_ext_reg[KLXR_EXT_REG_MAX];
+static unsigned g_ext_nreg;
+
+void klxr_register_extension(const char *name, uint32_t version, int (*gate)(void),
+                             const char *const *fns) {
+    if (!name) return;
+    pthread_mutex_lock(&g_xr_reg_mu);
+    if (g_ext_nreg < KLXR_EXT_REG_MAX) {
+        g_ext_reg[g_ext_nreg].name = name;
+        g_ext_reg[g_ext_nreg].version = version;
+        g_ext_reg[g_ext_nreg].gate = gate;
+        g_ext_reg[g_ext_nreg].fns = fns;
+        g_ext_nreg++;
+    } else {
+        fprintf(stderr, "  [xr] extension registry full: %s dropped\n", name);
+    }
+    pthread_mutex_unlock(&g_xr_reg_mu);
+}
+
+// Events pushed from outside the session's own state machine.
+#define KLXR_PUSHQ     64
+#define KLXR_PUSH_MAX  480
+static struct { uint32_t type, len; uint64_t vis; uint8_t data[KLXR_PUSH_MAX]; }
+    g_xr_pushq[KLXR_PUSHQ];
+static unsigned g_xr_push_head, g_xr_push_count;
+static uint64_t g_xr_polls;
+static pthread_mutex_t g_xr_push_mu = PTHREAD_MUTEX_INITIALIZER;
+
+int klxr_push_event(uint32_t type, const void *payload, size_t len) {
+    if (len > KLXR_PUSH_MAX || (len && !payload)) return -1;
+    int rc = -1;
+    pthread_mutex_lock(&g_xr_push_mu);
+    if (g_xr_push_count < KLXR_PUSHQ) {
+        unsigned i = (g_xr_push_head + g_xr_push_count) % KLXR_PUSHQ;
+        g_xr_pushq[i].type = type;
+        g_xr_pushq[i].len = (uint32_t)len;
+        g_xr_pushq[i].vis = g_xr_polls + 1;   // not for the poll in progress
+        if (len) memcpy(g_xr_pushq[i].data, payload, len);
+        g_xr_push_count++;
+        rc = 0;
+    }
+    pthread_mutex_unlock(&g_xr_push_mu);
+    return rc;
+}
+
+// Fills `data` (an XrEventDataBuffer) with the oldest deliverable pushed event.
+static int klxr_pop_pushed(void *data) {
+    int rc = 0;
+    pthread_mutex_lock(&g_xr_push_mu);
+    g_xr_polls++;
+    if (g_xr_push_count && g_xr_pushq[g_xr_push_head].vis <= g_xr_polls) {
+        uint8_t *b = (uint8_t *)data;
+        uint32_t type = g_xr_pushq[g_xr_push_head].type;
+        memcpy(b, &type, 4);
+        memset(b + 8, 0, 8);                         // next = NULL
+        memcpy(b + 16, g_xr_pushq[g_xr_push_head].data, g_xr_pushq[g_xr_push_head].len);
+        g_xr_push_head = (g_xr_push_head + 1) % KLXR_PUSHQ;
+        g_xr_push_count--;
+        rc = 1;
+    }
+    pthread_mutex_unlock(&g_xr_push_mu);
+    return rc;
+}
+
+// Called at the end of klxr_install, once, with the core table filled.
+static void klxr_batches_init(void) {
+    kl_openxr_spatial_register();
+    kl_openxr_ext_register();
+    kl_openxr_vendor_register();
+}
 
 // --------------------------------------------------- what we do implement
 //
@@ -1157,7 +1303,7 @@ static void klxr_ext_extra_init(void) {
 // separately — those were two expressions that had to agree about which entries
 // were hidden, and the agreement was positional.
 static struct { const char *name; uint32_t version; }
-       g_ext_live[KLXR_EXT_ALL + KLXR_EXT_EXTRA_MAX];
+       g_ext_live[KLXR_EXT_ALL + KLXR_EXT_REG_MAX + KLXR_EXT_EXTRA_MAX];
 static uint32_t g_ext_nlive;
 
 static int klxr_ext_gate_open(int gate) {
@@ -1205,6 +1351,7 @@ static void klxr_ext_resolve(void) {
     static int done;
     if (done) return;
     done = 1;
+    klxr_install();                 // runs the batch registrations (extensions below)
     klxr_ext_extra_init();
     for (uint32_t i = 0; i < KLXR_EXT_ALL; i++) {
         if (!klxr_ext_gate_open(g_extensions[i].gate)) {
@@ -1213,6 +1360,20 @@ static void klxr_ext_resolve(void) {
         }
         g_ext_live[g_ext_nlive].name    = g_extensions[i].name;
         g_ext_live[g_ext_nlive].version = g_extensions[i].version;
+        g_ext_nlive++;
+    }
+    // Announced by batch files: only when their gate passes, never twice.
+    for (unsigned i = 0; i < g_ext_nreg; i++) {
+        int dup = 0;
+        for (uint32_t k = 0; k < g_ext_nlive; k++)
+            if (!strcmp(g_ext_live[k].name, g_ext_reg[i].name)) { dup = 1; break; }
+        if (dup) continue;
+        if (g_ext_reg[i].gate && !g_ext_reg[i].gate()) {
+            fprintf(stderr, "  [xr] extension withheld: %s\n", g_ext_reg[i].name);
+            continue;
+        }
+        g_ext_live[g_ext_nlive].name    = g_ext_reg[i].name;
+        g_ext_live[g_ext_nlive].version = g_ext_reg[i].version;
         g_ext_nlive++;
     }
     for (uint32_t i = 0; i < g_ext_nextra; i++) {
@@ -1730,7 +1891,11 @@ static XrResult klxr_CreateInstance_rt(const XrInstanceCreateInfo *info, void **
         if (strcmp(name, "XR_KHR_opengl_es_enable") == 0) g_instance.ext_opengl_es = 1;
         if (strcmp(name, "XR_KHR_vulkan_enable") == 0)    g_instance.ext_vulkan = 1;
         if (strcmp(name, "XR_EXT_hand_tracking") == 0 ||
-            strcmp(name, "XR_FB_render_model") == 0)       g_instance.ext_sysprops = 1;
+            strcmp(name, "XR_FB_render_model") == 0 ||
+            strcmp(name, "XR_META_environment_depth") == 0 ||
+            strncmp(name, "XR_FB_spatial_entity", 20) == 0 ||
+            strcmp(name, "XR_FB_scene") == 0 ||
+            strcmp(name, "XR_EXT_plane_detection") == 0)   g_instance.ext_sysprops = 1;
     }
 
     *instance = &g_instance;
@@ -1846,6 +2011,8 @@ static XrResult klxr_GetSystemProperties(void *instance, XrSystemId system_id,
             if (t == 1000051000 || t == 1000119004) *(XrBool32 *)((char *)n + 16) = 0;
             n = *(void **)((char *)n + 8);
         }
+        // Spatial / environment-depth capability structs (written TRUE where served).
+        kl_openxr_spatial_system_props(props->next);
     }
     return KLXR_SUCCESS;
 }
@@ -2464,6 +2631,10 @@ static int64_t klxr_now(void) {
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return (int64_t)ts.tv_sec * 1000000000LL + ts.tv_nsec;
 }
+int64_t klxr_time_now(void) { return klxr_now(); }
+void *klxr_current_session(void) {
+    return g_session.magic == KLXR_MAGIC_SESSION ? (void *)&g_session : NULL;
+}
 
 static const char *klxr_state_name(int s) {
     switch (s) {
@@ -2689,7 +2860,8 @@ static XrResult klxr_PollEvent(void *instance, XrEventDataBuffer *data) {
     if (!klxr_inst(instance)) KLXR_RET(KLXR_ERROR_HANDLE_INVALID);
     if (!data) KLXR_RET(KLXR_ERROR_VALIDATION_FAILURE);
     klxr_session *s = &g_session;
-    if (s->magic != KLXR_MAGIC_SESSION || s->qcount == 0) return KLXR_EVENT_UNAVAILABLE;
+    if (s->magic != KLXR_MAGIC_SESSION || s->qcount == 0)
+        return klxr_pop_pushed(data) ? KLXR_SUCCESS : KLXR_EVENT_UNAVAILABLE;
 
     int kind = s->queue[s->qhead].kind, state = s->queue[s->qhead].state;
     s->qhead = (s->qhead + 1) % KLXR_EVENT_QUEUE;
@@ -2748,9 +2920,12 @@ static XrResult klxr_PollEvent(void *instance, XrEventDataBuffer *data) {
 // consumer to the unlatched value would reintroduce it in a new place. So
 // spaces are created and named here, and the locate lands with the frame loop
 // that latches.
-enum { KLXR_MAGIC_SPACE = 0x584b4c50 /* 'XKLP' */, KLXR_SPACE_MAX = 32 };
+enum { KLXR_MAGIC_SPACE = 0x584b4c50 /* 'XKLP' */, KLXR_SPACE_MAX = 1024 };
 
 enum { KLXR_REF_SPACE_VIEW = 1, KLXR_REF_SPACE_LOCAL = 2, KLXR_REF_SPACE_STAGE = 3 };
+// Internal type of a space whose pose another batch owns (spatial entities,
+// kl_openxr_spatial.c): never a value the guest can pass.
+enum { KLXR_REF_SPACE_EXTERNAL = -2 };
 // LOCAL_FLOOR (OpenXR 1.1 core / XR_EXT_local_floor): LOCAL's x/z and yaw with
 // y = 0 on the floor. Our LOCAL and STAGE share their origin and yaw (both are
 // the recentred tracking space; LOCAL only lifts y to eye height), so
@@ -2763,6 +2938,7 @@ typedef struct {
     int     reference_type;       // one of the three above, 0 for an action space
     XrPosef offset;               // poseInReferenceSpace / poseInActionSpace
     void   *action;               // action spaces only: what this is anchored to
+    void   *user;                 // external spaces only: the owner's cookie
     XrPath  subaction_path;       // ...and which hand of it
 } klxr_space;
 
@@ -2777,10 +2953,16 @@ static klxr_space *klxr_space_of(void *h) {
     return s;
 }
 
+// The slot is claimed (magic set) under a lock: external spaces are created from
+// ARKit completion threads as well as from the guest's.
+static pthread_mutex_t g_space_mu = PTHREAD_MUTEX_INITIALIZER;
 static klxr_space *klxr_space_alloc(void) {
+    klxr_space *r = NULL;
+    pthread_mutex_lock(&g_space_mu);
     for (int i = 0; i < KLXR_SPACE_MAX; i++)
-        if (!g_spaces[i].magic) return &g_spaces[i];
-    return NULL;
+        if (!g_spaces[i].magic) { g_spaces[i].magic = KLXR_MAGIC_SPACE; r = &g_spaces[i]; break; }
+    pthread_mutex_unlock(&g_space_mu);
+    return r;
 }
 
 static const char *klxr_ref_space_name(int t) {
@@ -3307,6 +3489,15 @@ static XrPosef klxr_space_pose_ex(const klxr_space *sp, int *tracked,
         if (motion_known) *motion_known = kl_ovrp_head_motion(lin, ang);
     } else if (sp->reference_type == KLXR_REF_SPACE_LOCAL) {
         base.position.y = kl_ovrp_eye_height();
+    } else if (sp->reference_type == KLXR_REF_SPACE_EXTERNAL) {
+        // A spatial-entity space: the owner places it in the tracking space.
+        float q[4] = {0, 0, 0, 1}, p[3] = {0, 0, 0};
+        int ok = kl_openxr_spatial_pose(sp->user, q, p);
+        if (tracked) *tracked = ok;
+        if (ok) {
+            base.orientation = (XrQuaternionf){ q[0], q[1], q[2], q[3] };
+            base.position = (XrVector3f){ p[0], p[1], p[2] };
+        }
     } else if (sp->reference_type == 0) {
         // An ACTION space — anchored to whatever its pose action is following,
         // which here is one of the two hands. The pose and its motion come out
@@ -3405,8 +3596,26 @@ static XrResult klxr_CreateReferenceSpace(void *session,
 static XrResult klxr_DestroySpace(void *space) {
     klxr_space *sp = klxr_space_of(space);
     if (!sp) KLXR_RET(KLXR_ERROR_HANDLE_INVALID);
+    void *user = sp->reference_type == KLXR_REF_SPACE_EXTERNAL ? sp->user : NULL;
     memset(sp, 0, sizeof *sp);
+    if (user) kl_openxr_spatial_space_destroyed(user);
     return KLXR_SUCCESS;
+}
+
+// A pooled XrSpace whose pose comes from kl_openxr_spatial_pose(user, ...).
+// Created by kl_openxr_spatial.c; NULL = pool exhausted.
+void *klxr_space_create_external(void *user) {
+    klxr_space *sp = klxr_space_alloc();
+    if (!sp) return NULL;          // the slot comes back claimed and zeroed
+    sp->session = &g_session;
+    sp->reference_type = KLXR_REF_SPACE_EXTERNAL;
+    sp->offset.orientation = (XrQuaternionf){0, 0, 0, 1};
+    sp->user = user;
+    return sp;
+}
+
+void *klxr_current_instance(void) {
+    return g_instance.magic == KLXR_MAGIC_INSTANCE ? (void *)&g_instance : NULL;
 }
 
 // The play area, in metres. XR_SPACE_BOUNDS_UNAVAILABLE is a SUCCESS code (7),
@@ -7491,10 +7700,22 @@ static void klxr_ext_selfcheck(void) {
         for (int k = 0; k < 5 && g_ext_fns[e].fn[k]; k++) {
             total++;
             klxr_row *r = klxr_row_for(g_ext_fns[e].fn[k]);
-            if (!r || r->fn == g_xr_stub_fn[r - g_xr]) {
+            if (!r || r->refused || r->fn == g_xr_stub_fn[r - g_xr]) {
                 bad++;
                 fprintf(stderr, "  [xr] SELFCHECK %s advertised but %s is not served\n",
                         g_ext_fns[e].ext, g_ext_fns[e].fn[k]);
+            }
+        }
+    }
+    for (unsigned e = 0; e < g_ext_nreg; e++) {
+        if (!g_ext_reg[e].fns || !klxr_ext_advertised(g_ext_reg[e].name)) continue;
+        for (const char *const *f = g_ext_reg[e].fns; *f; f++) {
+            total++;
+            klxr_row *r = klxr_row_for(*f);
+            if (!r || r->refused || r->fn == g_xr_stub_fn[r - g_xr]) {
+                bad++;
+                fprintf(stderr, "  [xr] SELFCHECK %s advertised but %s is not served\n",
+                        g_ext_reg[e].name, *f);
             }
         }
     }
@@ -7661,6 +7882,9 @@ static void klxr_install(void) {
         klxr_row *r = klxr_row_for(impl[i].name);
         if (r) r->fn = impl[i].fn;
     }
+    // After the core rows, so a batch may override a core name; and before
+    // `done`, so every table is complete when the first lookup returns.
+    klxr_batches_init();
     done = 1;
     pthread_mutex_unlock(&mu);
 }
@@ -7672,8 +7896,7 @@ static void klxr_install(void) {
 // row's implementation, or the API layer's entry once one is routed in front
 // (klxr_layer_route). Only built for arm64 Apple; elsewhere rows are handed out
 // directly and layers are unavailable.
-#define KLXR_TRAMPS 512
-_Static_assert(KLXR_COUNT <= KLXR_TRAMPS, "raise KLXR_TRAMPS");
+// (KLXR_TRAMPS, the row capacity, is defined with g_xr above.)
 __attribute__((visibility("hidden"))) _Atomic(void *) kl_xr_slots[KLXR_TRAMPS];
 #if defined(__aarch64__) && defined(__APPLE__)
 #define KLXR_HAVE_TRAMPS 1
@@ -7683,7 +7906,7 @@ __asm__(
     ".private_extern _kl_xr_tramp\n"
     "_kl_xr_tramp:\n"
     ".set kl_xr_i, 0\n"
-    ".rept 512\n"
+    ".rept 1024\n"
     "  adrp x16, _kl_xr_slots@PAGE\n"
     "  add  x16, x16, _kl_xr_slots@PAGEOFF\n"
     "  ldr  x16, [x16, #(kl_xr_i * 8)]\n"
@@ -7713,6 +7936,7 @@ int kl_openxr_status(const char *name) {
     klxr_install();
     klxr_row *row = name ? klxr_row_for(name) : NULL;
     if (!row) return -1;
+    if (row->refused) return 3;
     return row->fn == g_xr_stub_fn[row - g_xr] ? 0 : 2;
 }
 

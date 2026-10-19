@@ -15,6 +15,7 @@
 #include <mach/mach.h>   // vm_read_overwrite — probe a guest pointer without faulting
 #include "klepton.h"
 #include "kl_ovrp.h"
+#include "kl_ovrp_priv.h"   // batch seam: registration, events, pose helpers
 #include "../guest/kl_driver.h"
 #include "../guest/kl_slink.h"
 #include "../guest/kl_il2cpp.h"   // kl_il2cpp_method_at, for ovrp_log_chain
@@ -1964,9 +1965,13 @@ static uint64_t klovrp_GetNodeFrustum2(int node, void *out) {
     return OVRP_SUCCESS;
 }
 
+// ovrpResult ovrp_GetTiledMultiResLevel(ovrpTiledMultiResLevel *out) (1.117:
+// RESULT, -1002/-1001/0): success is 0, so the old ovrpBool 1 read as a positive
+// "success" only by luck of the sign test.
 static uint64_t klovrp_GetTiledMultiResLevel(int* out) {
-    if (out) *out = 0; // TiledMultiResLevel.Off
-    return OVRP_TRUE;                       // ovrpBool
+    if (!out) return OVRP_FAIL_INVALID_PARAM;
+    *out = 0; // TiledMultiResLevel.Off
+    return OVRP_SUCCESS;
 }
 
 // ovrpTrackingOrigin: EyeLevel=0, FloorLevel=1, Stage=2. This decides what
@@ -2014,27 +2019,126 @@ static uint64_t klovrp_SetTrackingOriginType2(int origin) {
 //
 // It refuses either NULL with -1001, answers -1002 with no plugin, and when its
 // internal fetch comes back empty it answers **-1006** without touching either
-// pointer. That last one is the steady state here: we generate no plugin events
-// at all — no display refresh changes, no boundary or tracking-state
-// transitions, none of the things the queue carries — so every poll is an empty
-// one. Answering ovrpSuccess instead would tell the guest an event IS waiting
+// pointer. That last one is the answer for an empty queue, which is the usual
+// state: only the batch files push events (kl_ovrp_push_event). Answering ovrpSuccess instead would tell the guest an event IS waiting
 // and hand it an uninitialised type and pointer to parse.
 //
 // Deliberately NOT a shared-handler entry: the out-params are the whole call.
+// VisionQuestPro: a real queue behind both spellings. Producers are the batch
+// files (kl_ovrp_spatial.c: SpatialAnchorCreate, SpaceQueryComplete, ...) and
+// any host thread, through kl_ovrp_push_event. Slots are fixed-size so a push
+// never allocates; an event is deliverable only from the poll AFTER the one in
+// progress at push time (g_ev_polls counts polls as they begin), so the
+// requestId a creating call returns is in the guest's hands before the event
+// that names it, even when another guest thread is polling at that moment.
+#define KLOVRP_EVQ      64
+#define KLOVRP_EV_MAX   256
+static struct { int32_t type; uint32_t len; uint64_t vis; uint8_t data[KLOVRP_EV_MAX]; }
+    g_evq[KLOVRP_EVQ];
+static unsigned g_ev_head, g_ev_count;
+static uint64_t g_ev_polls;
+static pthread_mutex_t g_ev_mu = PTHREAD_MUTEX_INITIALIZER;
+// The buffer ovrp_PollEvent2 hands out through *eventData: valid until the next
+// successful poll, which is how long the real plugin's internal buffer lives.
+static uint8_t g_ev_cur[KLOVRP_EV_MAX];
+
+int kl_ovrp_push_event(int32_t type, const void *payload, size_t len) {
+    if (len > KLOVRP_EV_MAX || (len && !payload)) return -1;
+    int rc = -1;
+    pthread_mutex_lock(&g_ev_mu);
+    if (g_ev_count < KLOVRP_EVQ) {
+        unsigned i = (g_ev_head + g_ev_count) % KLOVRP_EVQ;
+        g_evq[i].type = type;
+        g_evq[i].len = (uint32_t)len;
+        g_evq[i].vis = g_ev_polls + 1;
+        if (len) memcpy(g_evq[i].data, payload, len);
+        g_ev_count++;
+        rc = 0;
+    }
+    pthread_mutex_unlock(&g_ev_mu);
+    return rc;
+}
+
+// Pops the oldest deliverable event into *type / out (KLOVRP_EV_MAX bytes) and
+// returns its length, or -1 when none is.
+static int klovrp_ev_pop(int32_t *type, uint8_t *out) {
+    int rc = -1;
+    pthread_mutex_lock(&g_ev_mu);
+    g_ev_polls++;
+    if (g_ev_count && g_evq[g_ev_head].vis <= g_ev_polls) {
+        *type = g_evq[g_ev_head].type;
+        rc = (int)g_evq[g_ev_head].len;
+        memcpy(out, g_evq[g_ev_head].data, (size_t)rc);
+        g_ev_head = (g_ev_head + 1) % KLOVRP_EVQ;
+        g_ev_count--;
+    }
+    pthread_mutex_unlock(&g_ev_mu);
+    return rc;
+}
+
 static uint64_t klovrp_PollEvent2(uint32_t *type, void **data) {
     ovrp_hit("ovrp_PollEvent2");
     kl_game_beat(0);
     if (!type || !data) return OVRP_FAIL_INVALID_PARAM;
-    return OVRP_FAIL_OPERATION;                    // the queue is empty
+    int32_t t = 0;
+    if (klovrp_ev_pop(&t, g_ev_cur) < 0) return OVRP_FAIL_OPERATION;   // empty
+    *type = (uint32_t)t;
+    *data = g_ev_cur;
+    return OVRP_SUCCESS;
 }
 
-// The v1 spelling takes the buffer by reference and fills a type field inside
-// it; same empty answer, and the same refusal for a NULL.
+// How many bytes of the guest's ovrpEventDataBuffer its OWN OVRPlugin writes in
+// ovrp_PollEvent, by plugin version (tools/ovrp_abi.py over nine builds; the
+// extent differs per build: 1.59 12, 1.81 4, 1.88-1.94 20, 1.98 4, 1.104 3996,
+// 1.110 52, 1.117 3996). The guest's managed side was compiled against that same
+// version, so writing more than this would run past what it reserved. A version
+// between two measured ones gets the smaller of its neighbours.
+static size_t klovrp_pollevent_cap(void) {
+    static const struct { int minor; size_t cap; } k[] = {
+        {59, 12}, {81, 4}, {88, 20}, {89, 20}, {94, 20}, {98, 4}, {104, 3996}, {110, 52}, {117, 3996},
+    };
+    static size_t cached;
+    if (cached) return cached;
+    int major = 0, minor = 0;
+    if (sscanf(klovrp_version(), "%d.%d", &major, &minor) != 2) minor = 117;
+    size_t cap = k[0].cap;
+    for (size_t i = 0; i < sizeof k / sizeof k[0]; i++) {
+        if (minor >= k[i].minor) cap = k[i].cap;              // floor entry
+        if (minor <= k[i].minor) {                            // ceiling entry
+            if (minor < k[i].minor && i > 0 && k[i].cap < cap) cap = k[i].cap;
+            break;
+        }
+    }
+    cached = cap;
+    fprintf(stderr, "  [ovrp] ovrp_PollEvent writes at most %zu bytes (guest OVRPlugin %s)\n",
+            cap, klovrp_version());
+    return cap;
+}
+
+// The v1 spelling takes the buffer by reference (ovrpEventDataBuffer: a 4-byte
+// type, then the payload) and fills it in - never past klovrp_pollevent_cap().
+// An event whose payload does not fit is delivered truncated (its type always
+// is); ovrp_PollEvent2 hands out the whole thing through its own pointer.
 static uint64_t klovrp_PollEvent(void *buf) {
     ovrp_hit("ovrp_PollEvent");
     kl_game_beat(0);
     if (!buf) return OVRP_FAIL_INVALID_PARAM;
-    return OVRP_FAIL_OPERATION;
+    uint8_t tmp[KLOVRP_EV_MAX];
+    int32_t t = 0;
+    int n = klovrp_ev_pop(&t, tmp);
+    if (n < 0) return OVRP_FAIL_OPERATION;
+    size_t cap = klovrp_pollevent_cap();
+    size_t room = cap > 4 ? cap - 4 : 0;
+    size_t put = (size_t)n < room ? (size_t)n : room;
+    memcpy(buf, &t, 4);
+    if (put) memcpy((uint8_t *)buf + 4, tmp, put);
+    if (put < (size_t)n) {
+        static int said;
+        if (!said++)
+            fprintf(stderr, "  [ovrp] ovrp_PollEvent: event %d payload %d bytes cut to %zu "
+                            "(guest buffer)\n", (int)t, n, put);
+    }
+    return OVRP_SUCCESS;
 }
 
 static uint64_t klovrp_GetTrackingOriginType(void) {
@@ -2385,7 +2489,7 @@ static int klovrp_eyelevel_zero(void) {
     if (on < 0) on = kl_env_on("KL_OVRP_EYELEVEL_ZERO", 1);
     return on;
 }
-static float klovrp_guest_origin_y(void) {
+float klovrp_guest_origin_y(void) {
     if (g_tracking_origin != 0 || !klovrp_eyelevel_zero()) return 0.0f;
     // No published head yet: the default head is already y = 0 under EyeLevel.
     if (!__atomic_load_n(&g_head_set, __ATOMIC_ACQUIRE)) return 0.0f;
@@ -3008,6 +3112,22 @@ static klovrp_pose klovrp_step_hand(int step, int hand) {
     // kl_ovrp_hand_motion is kl_openxr's and must keep the grip.
     klovrp_grip_to_touch(&p, hand);
     return p;
+}
+
+// ---- the batch seam (kl_ovrp_priv.h) ---------------------------------------
+void kl_ovrp_hit(const char *name) { ovrp_hit(name); }
+ovrpResult kl_ovrp_ok(const char *name) { return (ovrpResult)klovrp_ok(name); }
+ovrpResult kl_ovrp_unsupported(const char *name) { return (ovrpResult)klovrp_unsupported(name); }
+int kl_ovrp_is_initialized(void) { return g_ovrp_initialized != 0; }
+void kl_ovrp_guest_head(int step, kl_ovrp_pose7 *out) {
+    klovrp_pose h = klovrp_step_head(step);
+    out->px = h.px; out->py = h.py; out->pz = h.pz;
+    out->qx = h.qx; out->qy = h.qy; out->qz = h.qz; out->qw = h.qw;
+}
+void kl_ovrp_guest_hand(int step, int hand, kl_ovrp_pose7 *out) {
+    klovrp_pose h = klovrp_step_hand(step, hand ? 1 : 0);
+    out->px = h.px; out->py = h.py; out->pz = h.pz;
+    out->qx = h.qx; out->qy = h.qy; out->qz = h.qz; out->qw = h.qw;
 }
 
 // --- Timewarp bookkeeping ---------------------------------------------------
@@ -4738,14 +4858,13 @@ static uint64_t klovrp_WaitToBeginFrame(long frame_index) {
 // which a uint64 return would never set. Returning a three-float struct from
 // C makes Clang emit exactly the real plugin's `ldp s0, s1 / ldr s2 / ret`.
 // Zeros are also what the real plugin returns when no boundary exists.
-typedef struct { float x, y, z; } klovrp_vec3;
 static void klovrp_boundary_size(float *w, float *d);
-static klovrp_vec3 klovrp_GetBoundaryDimensions(void) {
+static ovrpVector3f klovrp_GetBoundaryDimensions(void) {
     ovrp_hit("ovrp_GetBoundaryDimensions");
-    if (!klovrp_boundary_on()) return (klovrp_vec3){0, 0, 0};
+    if (!klovrp_boundary_on()) return (ovrpVector3f){0, 0, 0};
     float w, d;
     klovrp_boundary_size(&w, &d);
-    return (klovrp_vec3){w, 0.0f, d};   // x = width, y = 0 (no height), z = depth
+    return (ovrpVector3f){w, 0.0f, d};   // x = width, y = 0 (no height), z = depth
 }
 
 // Controller masks (metadata OVRPlugin.Controller): LTouch=1, RTouch=2,
@@ -4847,7 +4966,8 @@ static uint32_t klovrp_raw_near(int hand, uint32_t t) {
 }
 
 static void fill_controller_state(int mask, void *out, int version) {
-    memset(out, 0, version >= 4 ? 0x60 : version == 2 ? 0x40 : 0x30);
+    // Sizes the real builds write: State 48, State2 64, State4 96, State5 100, State6 108.
+    memset(out, 0, version >= 6 ? 108 : version == 5 ? 100 : version >= 4 ? 0x60 : version == 2 ? 0x40 : 0x30);
     uint32_t m = (uint32_t)mask;
     if (m & OVRP_CTRL_ACTIVE) m |= OVRP_CTRL_LTOUCH | OVRP_CTRL_RTOUCH;
     uint32_t conn = m & (OVRP_CTRL_LTOUCH | OVRP_CTRL_RTOUCH);
@@ -8220,7 +8340,7 @@ static uint64_t klovrp_GetPerfMetricsFloat(int metric, float *out) {
 static uint64_t klovrp_GetAppLatencyTimings2(float *out) {
     ovrp_hit("ovrp_GetAppLatencyTimings2");
     if (!out) return OVRP_FAIL_INVALID_PARAM;
-    memset(out, 0, 5 * sizeof(float));
+    memset(out, 0, 20);                     // five floats; the real build writes exactly 20 bytes
     static int on = -1;
     if (on < 0) on = kl_env_on("KL_OVRP_LATENCY", 0);
     if (!on || !(g_lat_render_s > 0.0f)) return OVRP_FAIL_UNSUPPORTED;
@@ -8367,7 +8487,7 @@ static uint64_t klovrp_DestroyEyeTexture(int eye, int stage) {
     ovrp_hit("ovrp_DestroyEyeTexture");
     fprintf(stderr, "  [ovrp] DestroyEyeTexture(eye=%d stage=%d)\n", eye, stage);
     kl_glfb_release_eye_texture(eye, stage);
-    return OVRP_SUCCESS;
+    return OVRP_TRUE;                       // ovrpBool in every build read (1.117: BOOL(x0, x1))
 }
 
 // libunity reads the RETURNED pointer's +0x118/+0x11c first and early-outs
@@ -8384,8 +8504,9 @@ static uint64_t klovrp_GetAppPerfStats(void) {
 // composite depth, so both the return and the out-int say so.
 static uint64_t klovrp_GetDepthCompositingSupported(int *out) {
     ovrp_hit("ovrp_GetDepthCompositingSupported");
+    if (!out) return OVRP_FAIL_INVALID_PARAM;
     *out = 0;
-    return 0;
+    return OVRP_SUCCESS;                    // ovrpResult (1.117: RESULT{-1002,-1001,0})
 }
 
 // Eye tracking: the guest asks whether the runtime can hand it a per-eye gaze
@@ -8396,13 +8517,15 @@ static uint64_t klovrp_GetDepthCompositingSupported(int *out) {
 // ovrpBool* out and returns ovrpResult (0 = success), so *out=0 is FALSE.
 static uint64_t klovrp_GetEyeTrackingSupported(int *out) {
     ovrp_hit("ovrp_GetEyeTrackingSupported");
-    if (out) *out = 0;
-    return 0;
+    if (!out) return OVRP_FAIL_INVALID_PARAM;
+    *out = 0;
+    return OVRP_SUCCESS;
 }
 static uint64_t klovrp_GetEyeTrackingEnabled(int *out) {
     ovrp_hit("ovrp_GetEyeTrackingEnabled");
-    if (out) *out = 0;
-    return 0;
+    if (!out) return OVRP_FAIL_INVALID_PARAM;
+    *out = 0;
+    return OVRP_SUCCESS;
 }
 
 // Mixed-reality capture — the camera composite an Oculus device does for
@@ -8490,45 +8613,9 @@ static int32_t klovrp_GetDeviceExtensionsVk(const char **names, int *count) {
     return OVRP_SUCCESS;
 }
 
-// The hand-SKELETON family (BONELAB). Distinct from the node poses this file
-// already answers: this is the 64-bone finger rig, asked for once at startup.
-//
-//   0x12b3c0 <ovrp_GetSkeleton2>:
-//    mov w1, w0 / cmp w1, #3 / b.hi -> -1001     (skeletonType, 0..3)
-//     cbz x2 -> -1001                             (the out struct is required)
-//     ...no singleton -> -1002
-//
-// so it is `ovrpResult f(ovrpSkeletonType, ovrpSkeleton2 *)`.
-//
-// Refused, and deliberately without writing the out struct. Every other
-// out-parameter in this file is filled, but that rule cannot be followed here
-// honestly: `ovrpSkeleton2`
-// is a large struct whose layout is NOT available anywhere in this APK (no DWARF
-// for it, and the C# side is IL2CPP'd), so zeroing it would mean guessing a size
-// and memset-ing that many bytes of the caller's stack. A guessed size is a
-// stack smash; a refusal is a code path the caller already has.
-//
-// It is safe here because the caller CHECKS: OVRPlugin's C# wrapper is
-// `return ovrp_GetSkeleton2(t, out s) == Result.Success`, so a negative result
-// is a `false` return and the guest skips its skeleton setup. A guest that
-// ignores the result gets garbage bones rather than a crash; the fix then is to
-// find the layout, not to invent one.
-// The whole family answers the same way, so it is one function rather than one
-// per entry point. That normally does not hold — a numbered suffix marks an ABI
-// change, so `ovrp_Foo` and `ovrp_Foo2` must not be assumed to share a shape. It
-// is safe HERE and only here because this handler
-// reads no argument and writes no out-parameter: it returns a constant negative
-// whatever the calling convention is, so there is no shape to get wrong.
-//
-// Each name is still listed explicitly rather than matched by prefix, so a new
-// `ovrp_Hand*` in a future SDK lands on the fail-closed abort-by-name and gets
-// classified deliberately.
-static int32_t klovrp_hand_unsupported(void) { return OVRP_FAIL_UNSUPPORTED; }
-
-static int32_t klovrp_GetSkeleton2(int skeleton_type, void *out) {
-    if (skeleton_type < 0 || skeleton_type > 3 || !out) return OVRP_FAIL_INVALID_PARAM;
-    return OVRP_FAIL_UNSUPPORTED;
-}
+// The hand-skeleton / hand-state / hand-mesh family (ovrp_GetSkeleton, 2, 3,
+// ovrp_GetHandState, 2 and ovrp_GetMesh) lives in kl_ovrp_input.c, next to
+// ovrp_GetHandState3, so the bind pose and the bone rotations share one frame.
 
 static const char g_ovrp_handle[] = "klepton-ovrplugin";
 
@@ -8733,6 +8820,20 @@ static uint64_t klovrp_GetConnectedControllers(void) {
     ovrp_hit("ovrp_GetConnectedControllers");
     return 3;
 }
+// The ...2 forms are ovrpResult f(unsigned *out) (1.117: RESULT{-1002,-1001,0},
+// a 4-byte out through x0) - the mask goes through the pointer, 0 is success.
+static uint64_t klovrp_GetActiveController2(uint32_t *out) {
+    ovrp_hit("ovrp_GetActiveController2");
+    if (!out) return OVRP_FAIL_INVALID_PARAM;
+    *out = 3;
+    return OVRP_SUCCESS;
+}
+static uint64_t klovrp_GetConnectedControllers2(uint32_t *out) {
+    ovrp_hit("ovrp_GetConnectedControllers2");
+    if (!out) return OVRP_FAIL_INVALID_PARAM;
+    *out = 3;
+    return OVRP_SUCCESS;
+}
 // (ovrpStep, ovrpNode, ovrpBool*): the PSVR2 controllers are always in hand.
 static uint64_t klovrp_GetControllerIsInHand(int step, int node, int32_t *out) {
     ovrp_hit("ovrp_GetControllerIsInHand");
@@ -8798,9 +8899,14 @@ static uint64_t klovrp_GetSystemVSyncCount2(int32_t *out) {
     return OVRP_SUCCESS;
 }
 // Same clock as ovrp_GetPredictedDisplayTime (monotonic seconds).
-static double klovrp_GetTimeInSeconds(void) {
+// ovrpResult ovrp_GetTimeInSeconds(double *out) in every OVRPlugin build read
+// (1.59 .. 1.117, tools/ovrp_abi.py): -1001 on NULL, the time through x0, 0.
+// It is NOT a scalar double return.
+static uint64_t klovrp_GetTimeInSeconds(double *out) {
     ovrp_hit("ovrp_GetTimeInSeconds");
-    return klovrp_mono();
+    if (!out) return OVRP_FAIL_INVALID_PARAM;
+    *out = klovrp_mono();
+    return OVRP_SUCCESS;
 }
 
 // ---- poses ----
@@ -8822,6 +8928,7 @@ static uint64_t klovrp_GetTrackingTransformRawPose(float *pose) {
 static uint64_t klovrp_GetTrackingCalibratedOrigin2(float *pose) {
     ovrp_hit("ovrp_GetTrackingCalibratedOrigin2");
     if (!pose) return OVRP_FAIL_INVALID_PARAM;
+    memset(pose, 0, 28);                    // ovrpPosef, all nine builds write exactly 28
     klovrp_pose_identity(pose);
     return OVRP_SUCCESS;
 }
@@ -8829,8 +8936,9 @@ static uint64_t klovrp_GetTrackingCalibratedOrigin2(float *pose) {
 static uint64_t klovrp_GetHeadPoseModifier(float *q, float *t) {
     ovrp_hit("ovrp_GetHeadPoseModifier");
     if (!q || !t) return OVRP_FAIL_INVALID_PARAM;
-    q[0] = q[1] = q[2] = 0.0f; q[3] = 1.0f;
-    t[0] = t[1] = t[2] = 0.0f;
+    static const float ident[4] = { 0.0f, 0.0f, 0.0f, 1.0f };
+    memcpy(q, ident, 16);                   // the real build writes 16 + 12 bytes
+    memset(t, 0, 12);
     return OVRP_SUCCESS;
 }
 // Newer node-pose spellings, all the same 0x58-byte ovrpPoseStatef.
@@ -8940,15 +9048,6 @@ static const struct { const char *name; void *fn; } g_ovrp_impl[] = {
     {"UnityPluginLoad",   (void *)klovrp_UnityPluginLoad},
     {"UnityPluginUnload", (void *)klovrp_UnityPluginUnload},
     {"JNI_OnLoad",        (void *)klovrp_JNI_OnLoad},
-    {"ovrp_GetSkeleton2", (void *)klovrp_GetSkeleton2},
-    // ...and the rest of the hand-tracking surface, refused as a group. See
-    // klovrp_hand_unsupported for why one handler may serve numbered siblings
-    // here when it may not anywhere else in this file.
-    {"ovrp_GetSkeleton",  (void *)klovrp_hand_unsupported},
-    {"ovrp_GetSkeleton3", (void *)klovrp_hand_unsupported},
-    {"ovrp_GetHandState",  (void *)klovrp_hand_unsupported},
-    {"ovrp_GetHandState2", (void *)klovrp_hand_unsupported},
-    {"ovrp_GetMesh",  (void *)klovrp_hand_unsupported},
     {"ovrp_GetInstanceExtensionsVk", (void *)klovrp_GetInstanceExtensionsVk},
     {"ovrp_GetDeviceExtensionsVk",   (void *)klovrp_GetDeviceExtensionsVk},
     // The init state and everything that reads it. See klovrp_GetInitialized.
@@ -9136,8 +9235,8 @@ static const struct { const char *name; void *fn; } g_ovrp_impl[] = {
     {"ovrp_GetHmdColorDesc",   (void *)klovrp_GetHmdColorDesc},
     {"ovrp_GetActiveController", (void *)klovrp_GetActiveController},
     {"ovrp_GetConnectedControllers", (void *)klovrp_GetConnectedControllers},
-    {"ovrp_GetActiveController2", (void *)klovrp_GetActiveController},
-    {"ovrp_GetConnectedControllers2", (void *)klovrp_GetConnectedControllers},
+    {"ovrp_GetActiveController2", (void *)klovrp_GetActiveController2},
+    {"ovrp_GetConnectedControllers2", (void *)klovrp_GetConnectedControllers2},
     {"ovrp_GetControllerIsInHand", (void *)klovrp_GetControllerIsInHand},
     {"ovrp_GetHandNodePoseStateLatency", (void *)klovrp_GetHandNodePoseStateLatency},
     {"ovrp_IsLayerShapeSupported", (void *)klovrp_IsLayerShapeSupported},
@@ -9215,7 +9314,7 @@ static const char *const g_ovrp_result_ok[] = {
     // no-op (returns ignored by the guest).
     "ovrp_QplMarkerStart", "ovrp_QplMarkerEnd", "ovrp_QplMarkerPoint",
     "ovrp_QplMarkerPointCached", "ovrp_QplMarkerAnnotation",
-    "ovrp_QplCreateMarkerHandle", "ovrp_QplDestroyMarkerHandle",
+    "ovrp_QplDestroyMarkerHandle",
     "ovrp_QplSetConsent", "ovrp_QplMarkerAnnotationWithType",
     // Unified telemetry-consent flow (Meta's data-collection opt-in). UE5's
     // Meta XR plugin queries ovrp_GetUnifiedConsent at startup, before any
@@ -9281,19 +9380,16 @@ static const char *const g_ovrp_result_ok[] = {
     // Performance-level hints (CPU/GPU). Advisory on real hardware and there is
     // nothing to set here; answer success so the guest's tuning path completes.
     "ovrp_SetSuggestedCpuPerformanceLevel", "ovrp_SetSuggestedGpuPerformanceLevel",
-    "ovrp_GetSuggestedCpuPerformanceLevel", "ovrp_GetSuggestedGpuPerformanceLevel",
     // Eye-tracked foveation hint. No eye-tracked foveation here; accept the set
     // so the guest's foveation setup proceeds (a "supported" query left unfilled
     // reads as its pre-zeroed false, i.e. not supported).
     "ovrp_SetFoveationEyeTracked", "ovrp_GetFoveationEyeTracked",
     // HDR/local-dimming panel control; Vision Pro has no such knob, so
     // acknowledge the set as a successful no-op (wrath2 / UE4 VR renderer).
-    "ovrp_SetLocalDimming", "ovrp_GetLocalDimming",
-    // Called with an out-pointer (void**) it may write; libunity pre-zeroes
-    // the local and ignores the x0 return (0x9bb334-0x9bb414), and never
-    // dereferences whatever lands in the slot — so leaving it untouched and
-    // returning 0 stores NULL, which is the truthful "no native SDK here".
-    "ovrp_GetNativeSDKPointer2",
+    "ovrp_SetLocalDimming",
+    // ovrp_GetNativeSDKPointer2 (void **out) is served by kl_ovrp_misc.c, which
+    // writes NULL - the truthful "no native SDK here"; libunity pre-zeroes the
+    // local, ignores the x0 return (0x9bb334-0x9bb414) and never dereferences it.
     // The frame lifecycle (0x9bb808 dispatcher: BeginFrame, EndEye2 x2,
     // EndFrame) and the one-shot Update2 at the end of init (0x9bb52c) and
     // reconfigure (0x9bce3c). All have their return ignored by the guest and
@@ -9452,7 +9548,6 @@ static const char *const g_ovrp_bool_yes[] = {
     // ovrp_GetAppHasInputFocus, for a different reason: that one is ovrpResult +
     // out-param, see klovrp_GetAppHasInputFocus below.)
     // Agrees with ovrp_Media_Initialize's success above.
-    "ovrp_Media_GetInitialized",
     // The tracking-capability block, which OVRManager reads while it builds a
     // camera rig and SUPERHOT reaches during its main scene's init. Every one of
     // these is a bool in the real 1.59 plugin, by the two v1 wrapper shapes:
@@ -9513,39 +9608,21 @@ static const char *const g_ovrp_bool_no[] = {
     "ovrp_GetAppMonoscopic",
     // No occlusion mesh data exists on this host (bool return).
     "ovrp_GetEyeOcclusionMesh",
-    // No fixed-foveated/tiled multires rendering in our GL gateway.
-    "ovrp_GetTiledMultiResSupported",
-    // VisionQuestPro coverage: v1 bool predicates with no capability here.
-    "ovrp_GetAppHasSystemOverlayPresent", "ovrp_GetGPUUtilSupported",
+    // VisionQuestPro coverage: v1 bool predicates with no capability here. The
+    // ovrpResult-with-out-pointer capability predicates (face/body/environment
+    // depth/MRC/tiled multires/GPU util/boundary visible...) are served by
+    // kl_ovrp_misc.c, which WRITES their 0: the real builds do.
     "ovrp_IsCameraDeviceAvailable",
     "ovrp_GetSystemHeadphonesPresent", "ovrp_GetSystemPowerSavingMode",
     // ...and face/body/hand/environment-depth/MRC capability and state reads,
     // in either ABI shape (see the coverage block).
     "ovrp_GetHandTrackingEnabled",
-    "ovrp_GetFaceTrackingSupported",
-    "ovrp_GetFaceTrackingEnabled",
-    "ovrp_GetFaceTracking2Supported",
-    "ovrp_GetFaceTracking2Enabled",
-    "ovrp_GetFaceTrackingVisemesSupported",
-    "ovrp_GetFaceTrackingVisemesEnabled",
-    "ovrp_GetBodyTrackingSupported",
-    "ovrp_GetBodyTrackingEnabled",
     "ovrp_GetFullBodyTrackingSupported",
-    "ovrp_GetFullBodyTrackingEnabled",
-    "ovrp_GetEnvironmentDepthSupported",
-    "ovrp_GetEnvironmentDepthHandRemovalSupported",
     "ovrp_GetGPUUtilSupported2",
     "ovrp_GetAppHasSystemOverlayPresent2",
     "ovrp_GetControllerDrivenHandPoses",
     "ovrp_GetMultimodalHandsControllersSupported",
     "ovrp_GetSimultaneousHandsAndControllersEnabled",
-    "ovrp_GetTiledMultiResDynamic",
-    "ovrp_GetReorientHMDOnControllerRecenter",
-    "ovrp_GetBoundaryVisible2",
-    "ovrp_Media_IsMrcEnabled",
-    "ovrp_Media_IsMrcActivated",
-    "ovrp_Media_UseMrcDebugCamera",
-    "ovrp_GetExternalCameraCount",
 };
 
 static const char *const g_ovrp_result_unsupported[] = {
@@ -9640,12 +9717,63 @@ static void *klovrp_shared(const char *name) {
     return NULL;
 }
 
+// ---- tables registered by the batch files (kl_ovrp_priv.h) -----------------
+// Consulted after g_ovrp_impl and before the shared lists and the named stub.
+#define KL_OVRP_REG_MAX 32
+static struct { const kl_ovrp_entry *tab; size_t n; const char *const *refused; }
+    g_reg[KL_OVRP_REG_MAX];
+static unsigned g_nreg;
+static pthread_mutex_t g_reg_mu = PTHREAD_MUTEX_INITIALIZER;
+
+void kl_ovrp_register(const kl_ovrp_entry *tab, size_t n, const char *const *refused) {
+    pthread_mutex_lock(&g_reg_mu);
+    if (g_nreg < KL_OVRP_REG_MAX) {
+        g_reg[g_nreg].tab = tab;
+        g_reg[g_nreg].n = tab ? n : 0;
+        g_reg[g_nreg].refused = refused;
+        g_nreg++;
+    } else {
+        fprintf(stderr, "  [ovrp] kl_ovrp_register: table limit (%d) reached, table dropped\n",
+                KL_OVRP_REG_MAX);
+    }
+    pthread_mutex_unlock(&g_reg_mu);
+}
+
+// Runs every batch's register function exactly once, before the first lookup.
+// An explicit call (not constructors): libklepton.a is an archive and a member
+// nothing references is not linked.
+static pthread_once_t g_reg_once = PTHREAD_ONCE_INIT;
+static void klovrp_register_all_once(void) {
+    kl_ovrp_render_register();
+    kl_ovrp_input_register();
+    kl_ovrp_spatial_register();
+    kl_ovrp_misc_register();
+}
+static void klovrp_register_all(void) { pthread_once(&g_reg_once, klovrp_register_all_once); }
+
+// 2 = a registered function, 3 = a registered refusal, 0 = not registered.
+static int klovrp_reg_find(const char *name, void **fn) {
+    klovrp_register_all();
+    for (unsigned t = 0; t < g_nreg; t++) {
+        for (size_t i = 0; i < g_reg[t].n; i++)
+            if (g_reg[t].tab[i].name && strcmp(g_reg[t].tab[i].name, name) == 0) {
+                if (fn) *fn = g_reg[t].tab[i].fn;
+                return 2;
+            }
+        if (g_reg[t].refused)
+            for (const char *const *r = g_reg[t].refused; *r; r++)
+                if (strcmp(*r, name) == 0) return 3;
+    }
+    return 0;
+}
+
 // Static coverage of an ovrp_* name, with no side effect (no stub is made): 2 own implementation,
 // 1 shared "success / yes / no" answer, 3 shared "unsupported" answer, 0 only the named stub.
 int kl_ovrp_status(const char *name) {
     if (!name) return 0;
     for (size_t i = 0; i < sizeof g_ovrp_impl / sizeof g_ovrp_impl[0]; i++)
         if (g_ovrp_impl[i].name && strcmp(g_ovrp_impl[i].name, name) == 0) return 2;
+    { int r = klovrp_reg_find(name, NULL); if (r) return r; }
     for (size_t i = 0; i < sizeof g_ovrp_result_ok / sizeof g_ovrp_result_ok[0]; i++)
         if (g_ovrp_result_ok[i] && strcmp(g_ovrp_result_ok[i], name) == 0) return 1;
     for (size_t i = 0; i < sizeof g_ovrp_result_unsupported / sizeof g_ovrp_result_unsupported[0]; i++)
@@ -9678,6 +9806,12 @@ void *kl_ovrp_sym(const char *name) {
 static void *kl_ovrp_sym_inner(const char *name) {
     for (size_t i = 0; i < sizeof g_ovrp_impl / sizeof g_ovrp_impl[0]; i++)
         if (strcmp(g_ovrp_impl[i].name, name) == 0) return g_ovrp_impl[i].fn;
+    {
+        void *rfn = NULL;
+        int r = klovrp_reg_find(name, &rfn);
+        if (r == 2 && rfn) return rfn;
+        if (r == 3) return kl_named_stub(name, (void *)klovrp_unsupported);
+    }
     void *shared = klovrp_shared(name);
     if (shared) return shared;
     return kl_named_stub(name, (void *)klovrp_called);

@@ -410,6 +410,12 @@ struct KLSenseTune {
         ProcessInfo.processInfo.environment["KL_SENSE_VEL_FRAME"] != "world"
 }
 
+// kl_ovrp_set_hand_joints (kl_ovrp_input.c, declared in the bridging header): the 26
+// joints of one hand (7 floats each, px py pz qx qy qz qw, ARKit origin space — the
+// space `kl_ovrp_set_hand_motion` already speaks), a tracked bitmask (bit i = joint i,
+// bit 0 = wrist), the pinch strength of the five fingers (thumb..little) and the pinch
+// bits (1 << finger). A nil pose says the hand is not tracked.
+
 final class KleptonControllers {
     // 0 = left, 1 = right, matching kl_ovrp's hand indices (nodes 3 and 4).
     private var state: [KleptonHandState] = [KleptonHandState(), KleptonHandState()]
@@ -1651,6 +1657,70 @@ final class KleptonControllers {
         return t
     }
 
+    /// The 26 joints kl_ovrp_input.c turns into ovrp_GetHandState3, in the order it
+    /// expects: wrist, forearm, thumb (knuckle, intermediate base/tip, tip), then
+    /// metacarpal/knuckle/intermediate base/intermediate tip/tip for index,
+    /// middle, ring and little.
+    private static let handJointOrder: [HandSkeleton.JointName] = [
+        .wrist, .forearmArm,
+        .thumbKnuckle, .thumbIntermediateBase, .thumbIntermediateTip, .thumbTip,
+        .indexFingerMetacarpal, .indexFingerKnuckle, .indexFingerIntermediateBase,
+        .indexFingerIntermediateTip, .indexFingerTip,
+        .middleFingerMetacarpal, .middleFingerKnuckle, .middleFingerIntermediateBase,
+        .middleFingerIntermediateTip, .middleFingerTip,
+        .ringFingerMetacarpal, .ringFingerKnuckle, .ringFingerIntermediateBase,
+        .ringFingerIntermediateTip, .ringFingerTip,
+        .littleFingerMetacarpal, .littleFingerKnuckle, .littleFingerIntermediateBase,
+        .littleFingerIntermediateTip, .littleFingerTip,
+    ]
+    /// Index of each finger's tip in `handJointOrder`: thumb, index, middle, ring, little.
+    private static let handTipIndex = [5, 10, 15, 20, 25]
+
+    /// Hand the skeleton to the ovrp hand-state seam. `anchor` nil = this hand is
+    /// not tracked (a Sense controller has it, or nothing does). The index finger
+    /// reports the same strength / press the trigger was given, so a pinch is one
+    /// fact for OVRHand and for the controller path; the other fingers use the
+    /// same two-point distance calibration against the thumb.
+    private func publishHandJoints(_ hand: Int, anchor: HandAnchor?,
+                                   indexStrength: Float = 0, indexPinched: Bool = false) {
+        guard HandTrackingProvider.isSupported else { return }
+        guard let anchor, let sk = anchor.handSkeleton else {
+            kl_ovrp_set_hand_joints(Int32(hand), nil, 0, nil, 0)
+            return
+        }
+        let o = anchor.originFromAnchorTransform
+        var pose = [Float](repeating: 0, count: 26 * 7)
+        var pos = [SIMD3<Float>](repeating: .zero, count: 26)
+        var mask: UInt32 = 0
+        for (i, name) in Self.handJointOrder.enumerated() {
+            let j = sk.joint(name)
+            let m = o * j.anchorFromJointTransform
+            let c = m.columns.3, q = simd_quatf(m)
+            pos[i] = SIMD3<Float>(c.x, c.y, c.z)
+            pose[i * 7 + 0] = c.x; pose[i * 7 + 1] = c.y; pose[i * 7 + 2] = c.z
+            pose[i * 7 + 3] = q.imag.x; pose[i * 7 + 4] = q.imag.y
+            pose[i * 7 + 5] = q.imag.z; pose[i * 7 + 6] = q.real
+            if j.isTracked && (i != 0 || anchor.isTracked) { mask |= 1 << UInt32(i) }
+        }
+        var pinch = [Float](repeating: 0, count: 5)
+        var bits: UInt32 = 0
+        for f in 1...4 {
+            let d = simd_length(pos[Self.handTipIndex[f]] - pos[Self.handTipIndex[0]])
+            let tracked = (mask & (1 << UInt32(Self.handTipIndex[f]))) != 0
+                && (mask & (1 << UInt32(Self.handTipIndex[0]))) != 0
+            pinch[f] = tracked
+                ? max(0, min(1, (Self.pinchOpen - d) / (Self.pinchOpen - Self.pinchClosed))) : 0
+            if pinch[f] >= 0.9 { bits |= 1 << UInt32(f) }
+        }
+        pinch[1] = indexStrength
+        if indexPinched { bits |= 1 << 1 } else { bits &= ~(1 << 1) }
+        pose.withUnsafeBufferPointer { p in
+            pinch.withUnsafeBufferPointer { s in
+                kl_ovrp_set_hand_joints(Int32(hand), p.baseAddress, mask, s.baseAddress, bits)
+            }
+        }
+    }
+
     /// The distance that reads as a fully released trigger. KL_PINCH_OPEN.
     private static let pinchOpen: Float = envMetres("KL_PINCH_OPEN", 0.05)
     /// ...and the one that reads as fully pressed. KL_PINCH_CLOSED. Kept below
@@ -1817,6 +1887,7 @@ final class KleptonControllers {
             if let accPose {
                 st.position = accPose.0; st.orientation = accPose.1
                 st.linearVelocity = accPose.2; st.angularVelocity = accPose.3
+                publishHandJoints(hand, anchor: nil)
             } else if let anchor = (hand == 0 ? leftHand : rightHand) {
                 let (p, q) = gripPose(anchor, hand: hand)
                 st.position = p; st.orientation = q
@@ -1857,6 +1928,8 @@ final class KleptonControllers {
                 // with the bit.
                 st.indexTrigger = pressed ? 1 : t
                 pinchHeld[hand] = pressed
+                publishHandJoints(hand, anchor: anchor,
+                                  indexStrength: st.indexTrigger, indexPinched: pressed)
                 if pressed {
                     pinchFires[hand] += 1
                     let bit = hand == 0 ? OVRPRawButton.lIndexTrigger
@@ -1875,6 +1948,7 @@ final class KleptonControllers {
                 // the input push - pollButtons() had the trigger, the guest
                 // never saw it, and a menu gated on "press trigger" waited
                 // forever. Push the buttons; only the pose stays synthesised.
+                publishHandJoints(hand, anchor: nil)
                 if st.fromController {
                     kl_ovrp_set_controller_input(Int32(hand), st.buttons, st.touches,
                                                  st.indexTrigger, st.handTrigger,
