@@ -1,390 +1,139 @@
 # Bitácora — VisionQuestPro
 
-Historial completo: `git log -p bitacora.md` (compactada el 2026-10-18; detalle de cada paso en los commits
-«Integrar paso-aN» y en las ramas `paso-aN` de GitHub).
+Historial completo: `git log -p bitacora.md`. Este fichero es el estado vigente (compactado el 2026-10-19).
 
-## 2026-10-19 (noche, 4) — INTEGRACIÓN de la tanda con VPKEngine (RCAS fusionado con máscara UI, recorte de memoria también en GLES) — sin compilar Swift/.mm, sin probar en visor
-Árbol sin commit; el `.github/workflows` lo toca otro agente. Contrato con VPKEngine verificado: todo `vpvk_*` que usa este repo (dlsym/`dlsym(RTLD_DEFAULT)`) existe exportado en `config.h`/fuentes; los espejos `klvk_vpvk_taa_jitter/applied`, `kl_vulkan_taa_native_eye/frame` coinciden campo a campo con `vpvk_taa_jitter/applied/native_eye/native_frame`.
-- **Nuevo**: `kl_vulkan.c` `kl_vulkan_trim`: la parte de VPKEngine (`vpvk_trim_memory`, débil, nivel 2 si `critical`/`headroom`, 1 s de límite por nivel) ya NO sale si `!kl_vulkan_guest_active()`: sirve también a guests GLES sobre vpgles (misma dylib; `klvk_vpvk_resolve` usa `kl_gles_vk_handle()`). Los OpenXR images retirados solo se recortan con guest Vulkan.
-- **Nuevo**: RCAS fusionado con máscara UI. `kl_vulkan.c/.h`: `kl_vulkan_ui_mask_texture(eye,&w,&h,&slice)` (resuelve `vpvk_ui_mask_texture`, devuelve MTLTexture +1; stub NULL en la build sin MoltenVK). `kl_reproject.c`: el fragmento `kl_reproject_f` recibe `uiMask0/uiMask1` (texture 2/3, `texture2d_array`), `rcasFlags` bit 1 = hay máscara para esa vista; `c = mix(rcas, original, mask)` con el mismo uv del ojo (después del flip y la rejilla). `kl_reproject.h`: documenta el bit. `KleptonCompositor.swift`: `uiMaskView(eye:eyeTexture:)` (vista 2DArray de 1 capa de la máscara, slice = ojo en multiview), `uiMaskDummy` 1x1 enlazado donde no hay máscara (ambos pases que usan `kl_reproject_f`: ojo y capas de proyección), máscara descartada si su tamaño ≠ textura del ojo. Logs una vez: `[cp] RCAS fused: UI mask from VPKEngine in use…`, `no UI mask for eye N this frame…` (RCAS normal en todo el ojo), `UI mask WxH is not the eye texture's…`.
-- Límites: la máscara es la del último envío del guest, no del frame mostrado (UI ≤1 frame desfasada); guests ANGLE/sin VPKEngine → sin máscara (RCAS normal); ojo foveado con textura de otro tamaño → sin máscara. Frames resueltos por VPKTAA nativo no pasan por aquí (su RCAS ya usa la máscara).
-- Tanda completa en este repo (por área; ver `git status`): app `VQLaunch.swift` (ajustes/RCAS/lanzamiento); `klepton/runtime/gfx` (`kl_egl.c` sin abort por GL ausente + informe al cierre, `kl_gles.c` registro de símbolos sin resolver, `kl_vulkan.c` recorte de memoria/GPU perdida/diag, `kl_reproject*` RCAS fusionado); `guest/kl_ndk.c` + `jni/*` + `libc/*` + `xr/kl_ovrp*.c` + `kl_fault.c` (auditoría Android: símbolos zlib/ovrKeyValuePair, sensores, AInputQueue, UE4, Settings, ventana; ver sección «Auditoría Android»); `media/*` (hostvideo/mediandk/opensl); `visionos/Sources` (`KleptonCompositor`, `KleptonControllers` háptica, `KleptonTAA` anillo 5→4). Arreglos previos sin commit incluidos: AC GPU/flashes, aviso de memoria en hilo de juego (nativeLowMemory solo en el hilo del juego), máscara UI en MSAA, háptica 4097, MSAA tile, anillo de salida, ALooper wake, drenado de SurfaceTexture, EXTERNAL_OES/targets, diag GL; sus detalles están en las secciones de arriba y de «Lote 2026-10-19».
-- **Probado** (Linux host): `t_ovrp_input` ok, `spatial_test` OK, `pred_frame_offset_test` OK; `clang -fsyntax-only` (chk.sh) limpio en los .c modificados salvo los que necesitan cabeceras Darwin que el shim no tiene (`kl_fault.c`, `kl_jni.c`, `kl_bionic_extra4.c`, `kl_libc.c`, `kl_shim.c`, `kl_mediandk.c`, `kl_reproject.c`: faltan `simd/simd.h` y otras; con un stub de simd solo fallan las llamadas `simd_make_*`, nada de las ediciones). Avisos previos: formato `%llu` en `kl_egl.c`, indentación en `kl_ovrp.c:2938`. **NO probado**: todo Swift, el shader MSL (se compila en el visor al crear el pipeline: si falla se ve `[cp] composite pipeline failed`), `kl_vulkan_trim` con GLES, la máscara en pantalla.
-- Pendiente: compilar en CI/Mac; en visor con RCAS>0 y un guest vpgles/Vulkan con HUD: ver `[cp] RCAS fused: UI mask … in use` y que el texto no se afila; `[mem] trim (…): VPKEngine released N MiB` con un guest GLES; árbol `tools/` sin seguimiento (no es de esta tanda, revisar antes del commit).
+## 1. Estado actual (2026-10-19)
 
-## 2026-10-19 (noche, 3) — Anillo de salida de VPKTAA/RCAS: sin pico al cambiar de ojo, 5→4 slots (Swift sin compilar, sin probar en visor)
-- `klepton/visionos/Sources/KleptonTAA.swift`: `takeInlineSlot` suelta `inOuts/inBusy/inPins/inPublished` (y `inGen += 1`) ANTES de crear el anillo nuevo; ya esperaba a que no hubiera slots busy/pinned, así que no suelta nada que el compositor lea. Antes el viejo vivía durante la creación del nuevo (pico ~609 MB a 3840x2485). `ringSize` 5→4 (ahorra 76 MB a 2976x1912): con el semáforo de 2 en vuelo, al tomar slot hay ≤1 busy ajeno + el nuevo + el publicado + 1 pinned antiguo = 4; con 3 un pinned antiguo deja sin slot («no free output» en `inRawWhy`, frame sin resolver).
-- Pendiente en visor: log `[taa-inline] eye AxB -> CxD: output ring rebuilt`; vigilar `no free output` en el stats de 30 s (si sale, volver a 5).
+**Proyecto**: app visionOS que ejecuta juegos de Quest (APK + datos descomprimidos en `QUEST/Juegos`) sin Quest. Base Klepton (MIT, copia `ce74582` en `klepton/`): cada `.so` ARM64 se envuelve en un dylib firmado y se carga con `dlopen`; bionic, JNI, NDK, OVRPlugin y OpenXR son propios. Sin traducción de CPU. Gráficos: VPKEngine (`VPVulkan.framework`, Vulkan/SPIR-V → Metal; incluye `gpu/gles` = vpgles) y VPKTAA nativo. Solo offline.
 
-## 2026-10-19 (noche, 2) — «Nitidez (RCAS)» siempre activa en todos los modos de AA (sin compilar Swift/.mm/.c, sin probar en visor)
-- El RCAS ya estaba dentro del VPKTAA nativo; ahora es un pase independiente (VPKEngine) que corre con VPKTAA, con MSAA del juego y sin AA, en Vulkan y vpgles (ovrp y OpenXR), por el mismo gancho de fin de frame. Intensidad 0–100 %; 0 = sin pase.
-- `app/Sources/VQLaunch.swift`: `vpktaaSharpness` pasa a ser la «Nitidez (RCAS)» global (default 1.0 = lo de antes); `VQGameRCAS` (`vq.rcas.<key>`, nil = global); `KL_RCAS` + `VPVK_RCAS` + `c.rcas`; `KL_VPKTAA_SHARP` retirada. `VQLauncher.swift`: `VQRCASSlider` (global en Ajustes, por juego en «Ajustes del juego»); quitado el stepper «Nitidez VPKTAA». `Native/vq_config.h/.c`: campo `rcas` (al final) → `vpvk_config_set_rcas`. `VQConformance.swift`: RCAS 0.
-- `klepton/runtime/gfx/kl_vulkan.c/.h`: `kl_vulkan_rcas_on`, `kl_vulkan_hook_is_taa`; el gancho corre también si la puerta de VPKTAA está cerrada (frame «solo RCAS», `vpvk_taa_jitter.still`); `kl_vulkan_taa_native_frame.rcas_only` (al final). `KleptonTAA.swift`: `passEnabled`, frames RCAS-only sin profundidad/movimiento; log «RCAS activo (nitidez X, máscara UI sí/no, ruta …)».
-- Riesgos: ruta ANGLE/MoltenVK sin RCAS; con `KL_RCAS>0` el modo inline queda activo en todo juego Vulkan/vpgles (frame-end sin async); con MSAA del juego no hay máscara UI. Requiere el VPVulkan nuevo (campos añadidos al final de dos structs).
-- Pendiente: compilar en CI; en visor, ver `RCAS activo`, `vk.rcas active`, coste GPU (`vk.taa native gpu_ms`) en un juego MSAA.
+**Última build exitosa**: run CI 39310806744 en verde con Gate (commit b83ac15 sobre a8b07fc). IPA: release `visionos` del repo, asset `VisionQuestPro.ipa`
 
-## 2026-10-19 (noche) — Háptica global en los mandos Sense (sin compilar Swift, sin probar en visor)
-Causas (logs AC, AoT, Demeo, SuperHOT, Hellsplit): (1) Hellsplit/UE4 llama `ovrp_SetControllerHapticsAmplitudeEnvelope` ×1259 y estaba en `k_refused` (-1004); `SetControllerHaptics2` y `SetControllerLocalizedVibration` eran no-op aceptados; (2) en AC/AoT el primer `CHHapticEngine` de cada mano moría con `systemError` (-1, XPC `gamecontrollerd.haptics` 4097) ~10 ms tras `start()`, no se creaba el player avanzado y la mano quedaba en eventos discretos TODA la sesión; (3) `stoppedHandler` borraba el motor por índice de mano (el stop del motor sustituido, razón 5, borraba al nuevo); (4) ganancia fija 0.25 sobre amplitudes ya pequeñas (AC: picos 0.00-0.03 llegaban al actuador); (5) Demeo (OpenXR): 0 llamadas a `xrApplyHapticFeedback` en la sesión; SuperHOT: `SetControllerVibration` casi siempre amplitud 0 y `SetControllerHaptics` nunca llamado.
-Cambios:
-- `runtime/xr/kl_ovrp.c`: anillo 4096 (el invitado sigue viendo 256); `klovrp_hap_queue_floats` (remuestreo float→320 Hz, compartido); `SetControllerHapticsPcm` refactorizado sobre él; NUEVOS `ovrp_SetControllerHapticsAmplitudeEnvelope` (struct por valor x1 = {float Duration; uint Count} en orden comprobado en ejecución, x2 = float*; reemplaza lo que suene), `ovrp_SetControllerHaptics2` (mismo cuerpo que SetControllerHaptics, devuelve ovrpResult), `ovrp_SetControllerLocalizedVibration(mask, loc, freq, amp)`; frecuencia → nitidez (OVR 0..1 → 0.5..1.0; Hz → escala 160..320); `kl_ovrp_haptics_pull2` (+nitidez, log del primer pulso real por mano), `kl_ovrp_haptics_apply2`, `kl_ovrp_haptics_xr_envelope/_xr_pcm/_sample_rate`; `kl_ovrp_haptics_stop` también vacía el anillo.
-- `runtime/xr/kl_ovrp_input.c`: quitado `SetControllerHaptics2` (no-op) y la envolvente de `k_refused`. `kl_ovrp.h`: declaraciones.
-- `runtime/xr/kl_openxr.c`/`kl_openxr_ext.c`: `xrApplyHapticFeedback` sirve `XrHapticVibration` (frecuencia → nitidez), `XrHapticAmplitudeEnvelopeVibrationFB` y `XrHapticPcmVibrationFB`; `xrGetDeviceSampleRateFB` (320 Hz); extensiones `XR_FB_haptic_amplitude_envelope` y `XR_FB_haptic_pcm` anunciadas (+ fila en `g_ext_fns`).
-- `visionos/Sources/KleptonControllers.swift`: sección Haptics reescrita: buzón + cola serie `vq.haptics` (todo CoreHaptics fuera del hilo de render/invitado), reintento con backoff, motor calentado antes del primer pulso, comprobación de identidad en `stoppedHandler`, fallback a eventos discretos solo temporal, localidad probada (default, all, handle de la mano, handles; log de `supportedLocalities`; `KL_HAPTICS_LOCALITY`), intensidad+nitidez como parámetros dinámicos solo si cambian, ganancia 1.0 por defecto + suelo perceptible (`KL_HAPTICS_MIN` 0.03, `KL_HAPTICS_FLOOR` 0.15), log `FIRST REAL PULSE`.
-- `app/Sources/VQLaunch.swift`, `VQLauncher.swift`: ajuste «Intensidad de la vibración de los mandos» 0-200 % → `KL_HAPTICS_GAIN`.
-Verificado: `clang -fsyntax-only` de los .c tocados (solo el aviso previo de kl_ovrp.c:2932). NO verificado: Swift (a mano), nada en el visor.
-Pendiente: probar en visor; mirar `[cp] haptics: hand N engine up ... locality X, supported [...]`, `FIRST REAL PULSE`, `[ovrp] haptics: first real pulse`, `SetControllerHapticsAmplitudeEnvelope ... (struct order ...)`; si el orden sale `Count,Duration`, corregir la doc; si sigue sin notarse, probar `KL_HAPTICS_LOCALITY=all|handles` y `KL_HAPTICS_FLOOR`. `ovrp_SetControllerHapticsParametric`, `ovrp_GetControllerParametricProperties` y `ovrp_TriggerVibrationAction` siguen rechazadas (ningún log las llama).
+**Compila y pasa tests (CI)**: `-fsyntax-only` de todo `RUNTIME_SHIP` con SDK xros, tests host (VPKEngine `gpu/` cmake+ctest, `gpu/metal2` para xros, `pred_frame_offset_test`, `t_ovrp_input`, `spatial_test`, `t_ptw` con ASan/UBSan), `libklepton.a`, app Swift (BUILD SUCCEEDED).
+**NO probado en el visor: TODO el último lote** (sección 3): memoria/trim, RCAS fusionado + máscara UI, háptica, ALooper, vídeo (SurfaceTexture), sensores, AInputQueue, UE4/Settings, anillo TAA de 4 slots, tamaño de ojo guardado, GPU lost, `[cp] gpu`. Lo que sí se probó en visor es anterior a este lote.
 
-## 2026-10-19 — VPKTAA único = nativo de VPKEngine (sin compilar Swift/.mm/.c, sin probar en visor)
-- Quitado el toggle «VPKTAA nativo» y `vq.vpktaaNative` (se borra la clave guardada al cargar): `app/Sources/VQLaunch.swift`, `VQLauncher.swift`. Con VPKTAA permitido (modo VPKTAA o Automático sin MSAA) la app pone siempre `taa_native=1` y `VPVK_TAA_NATIVE=1`; si no, 0.
-- Eliminadas las rutas VPKTAA no nativas: `VPKTAACore.swift` borrado (queda `VPKTAAInput.swift` con las structs de entrada, sin jitter); `KleptonTAA.swift` sin cola async, anillo async, `submit/acquire`, `core.encode`, sondeo de jitter/lag/votos; `KleptonCompositor.swift` sin `taaWait` ni camino async (`prepareTAA` solo inline; sin gancho = sin TAA y `kl_ovrp_set_taa_active(0)`).
-- `gfx/kl_vulkan.c/.h`: el modo inline exige el nativo (`kl_vulkan_taa_native_on`); nuevo `kl_vulkan_taa_ui_mask_on` (símbolo `vpvk_taa_ui_mask_enabled`).
-- Log: `VPKTAA nativo activo (máscara UI: sí/no) — ojo WxH, P %, nitidez S` en el primer frame resuelto (`KleptonTAA.swift`).
-- Sin cobertura del nativo (quedan SIN TAA, no con el viejo): juegos GLES/ANGLE, MoltenVK, OpenXR (sin registro de frame `kl_ovrp_*`).
-- Pendiente: compilar en Mac/CI; probar en visor (AC Nexus, AoT); simplificar `kl_ovrp.c` (sondeo de jitter de frustum ya inerte); foveado propio con rate map (ver VPKEngine/bitacora.md).
+### Estado por juego (último problema conocido → qué se hizo)
+| Juego | Último problema | Hecho / pendiente |
+|---|---|---|
+| AC Nexus (Unity/Vulkan, Wwise) | Jetsam a ~6,5–8,2 GiB en la carga síncrona (pico de memoria gráfica sin atribuir); bajones; flashes/basura ~1 s en carga; `OVRInput connected=0x0` toda la sesión (no bloquea; pulsaciones llegan por otra vía); cuadrados rosas (causa sin identificar; `[magenta]` 2 pipelines del warmup de Unity no lo prueban); corte del inmersivo en ShaderWarmup (3392 shaders) | Audio arreglado (burst 1024 con Wwise vía `kl_find_image`); zero-init perezoso + ojo retenido; MSL reutilizado y corte cada 256 draws; límite de memoria 8192 MiB y avisos 65/80 %; caché de 512 archivos de PSO; quads en orden de envío (calibración de mandos visible). Verificar en visor |
+| AoT (Unity/Vulkan, IL2CPP) | Bajones: GPU al límite con MSAA x2 a 2976x1912 → visionOS fija 50 Hz (`HALF RATE`); rosa/1 s en tutoriales 2D; crash si `nativeLowMemory` se entrega fuera del hilo del juego (IL2CPP sin x18) | Aviso de memoria solo en el hilo del juego; `KL_CP_HALFRATE_RECOVER`; instrumentación `gpu.sec`/`[cp] gpu`. Verificar framerate |
+| Demeo (Unity OpenXR + GLES/vpgles) | Atascado en el vídeo de logos | Arreglos: hook OpenXR (`UnityOpenXR_HookGetInstanceProcAddr` pass-through; antes SIGKILL CODESIGNING por -1004), ruta de imagen vpgles en OpenXR, APIs por manifiesto + cierre limpio. Vídeo: SurfaceTexture real drenado en el hilo del juego + wake de ALooper arreglado. Riesgo: hilo del juego bloqueado esperando el primer frame de vídeo. En AR (passthrough/anclas/planos/profundidad ARKit): implementado, sin probar |
+| SuperHOT (Unity, vpgles) | Negro (`SetupEyeTexture2` solo ANGLE); `SetControllerVibration` casi siempre amplitud 0 | Rama vpgles `kl_gles_legacy_eye_texture` + `vpgles_wrap_image_as`; háptica global. Sin reprobar |
+| Hellsplit (UE4) | Ojos separados en cargas; háptica por `SetControllerHapticsAmplitudeEnvelope` (×1259) rechazada | `drop` de EndFrame4 sin capa de ojo tras haber tenido una (`ever_eye_layer`); envolvente implementada; sensores/Settings UE4. Sin reprobar |
+| TRIANGLE STRATEGY (UE4, Vulkan; primer juego GLES por manifiesto) | Deadlock en `klb_pthread_rwlock_wrlock`; hilo de juego bloqueado en carga tras destruir passthrough; SIGSEGV en slowLog (VPKEngine a316f28) | rwlocks propios (mutex+cond, mapa por dirección); `[snap] game thread silent` a 10/30 s para diagnosticar. Sin reprobar |
+| Batman | Sin entradas de problema; solo: `assets/vr_splash.png` 2048x435 (carátula) | Ninguno pendiente conocido |
+| Blade & Sorcery (B&S) | Solo: `vr_splash.png` 3840x2160 (carátula) | Ninguno pendiente conocido |
+| ITR2, Deadpool, DGH | Sin datos en la bitácora anterior | Sin estado; probar y registrar |
 
-## EMPEZAR AQUÍ — 2026-10-19: lote nocturno sin probar (build lanzada)
-Estado: cambios en el árbol de trabajo (25 ficheros, +1017/-48) sobre fc2f217; VPKEngine con cambios propios (11 ficheros, +770/-64). Nada verificado en el visor.
+## 2. Arquitectura y ficheros clave
 
-### Cambios (visionquestpro)
-- Orden de envío de quads: ya en 5cf8922 (`KleptonCompositor.swift`, `KL_OVERLAY_SUBMIT_ORDER` def. 1).
-- HUD en las ramas del loading skybox: `KleptonCompositor.swift`.
-- Fondo negro `drawBlackBackfill` cuando no hay ojo ni vídeo y no hay passthrough: `KleptonCompositor.swift`.
-- Ojo reasignado retenido hasta su primera escritura (pases/copias/clears); tope 3 s; la textura vieja no se libera antes de 4 s: `KleptonCompositor.swift`.
-- Logs de pausa/invalidación del LayerRenderer (`[cp] layer paused/invalidated`): `KleptonCompositor.swift`, `KleptonApp.swift`.
-- Procedencia ampliada (todos los adjuntos/resolve, dynamic rendering): `gfx/kl_vulkan.c`.
-- APIs gráficas por manifiesto (`android.hardware.vulkan.version`, `glEsVersion`); `-force-vulkan` solo si el juego trae Vulkan: `VQGames.swift`, `VQLaunch.swift`, `VQLauncher.swift` (aviso «APIs del juego»).
-- Cierre limpio del motor (UnityPlayer.kill / killProcess / System.exit vía JNI, mensaje en el launcher, cierre robusto del espacio): `jni/kl_jni_sysinfo.c`, `kl_jni.h`, `KleptonApp.swift`, `kl_app.c/h`.
-- Diagnóstico de bloqueos: `[snap] game thread silent` a 10/30 s (`diag/kl_sample.c/h`); registro de esperas por hilo `kl_wait.h` (`libc/kl_pthread.c`, `kl_libc.c`, `kl_shim.c`, `kl_va_handlers.c`, `kl_bionic_extra2.c`); peticiones Oculus pendientes (`xr/kl_ovrplat.c/h`, `kl_ovrp.c`, `kl_openxr.c`); `[gles] ruta:` y log EGL/GL (`gfx/kl_gles.c/h`, `kl_egl.c`).
-- Carátulas de tienda: ya en fc2f217.
+**Runtime Klepton** (`klepton/runtime/`, fuentes listadas en `klepton/Makefile` `RUNTIME_SHIP`/`RUNTIME_JNI` → `libklepton.a`; Xcode no lista fuentes sueltas):
+- `libc/`: bionic propio (`kl_libc.c` memoria/presión, `kl_pthread.c` rwlocks, `kl_shim.c` resolución de símbolos y `kl_shim_known`, `kl_bionic_extra*.c` ~800 funciones, `kl_bionic_extra4.c` zlib); `kl_wait.h` registro de esperas por hilo.
+- `kl_jni.c` + `jni/kl_jni_*.c`: JNI sintético (sysinfo, net/Settings, window, ue4, hostvideo, services, softinput, fmod, bridge).
+- `guest/`: NDK (`kl_ndk.c`: ALooper, sensores, AInputQueue, AHardwareBuffer) y drivers por motor: `kl_slink`, `kl_gles3jni`, `kl_native`, `kl_sdl2`, `kl_ue4`, `kl_jkxr`, `kl_driver`; `kl_exe.c` (guest ejecutable para CTS).
+- `xr/`: OVRPlugin `kl_ovrp*.c` (`_render`, `_input`, `_misc`, `_spatial`, thunks x8 en `kl_ovrp_sret2.S`, registro `kl_ovrp_register`/`kl_ovrp_priv.h`), OpenXR `kl_openxr*.c` (`_ext`, `_spatial`, `_vendor`, `kl_openxr_priv.h`), `kl_ovrplat.c` (OVRPlatform), `kl_spatial.c`, `kl_envdepth.c`.
+- `gfx/`: `kl_vulkan.c` (puente a VPVulkan/MoltenVK, trim, GPU lost, TAA/RCAS/máscara UI), `kl_egl.c`/`kl_gles.c` (EGL/GLES, ruta vpgles), `kl_reproject.c` (+`_ptw.c`; shader de composición con RCAS fusionado).
+- `media/` (mediandk, opensl, aaudio, camera), `diag/` (`kl_sample.c` snapshots), `kl_fault.c`.
 
-### Cambios (VPKEngine, /home/claude/vpkengine, sin commit)
-- Memoria nueva a cero perezosa (`vk.zeroinit`): `gpu/vulkan/src/entry.cpp`, `metal_backend.mm`.
-- MSL reutilizado con receta (registro 'F' + id del traductor; log `gpu.shader.msl cached=`): `recipes.cpp/h`, `pipelines.cpp`.
-- Corte entre encoders cada 256 draws (`VPVK_MAX_DRAWS_PER_CB`): `commands.cpp/h`.
-- `gpu.slowcb` si CB > 8 ms; cola Metal de 256 CB: `metal_backend.mm`.
-- Tests: `gpu/vulkan/tests/vk_tests.cpp`.
+**App Swift**: `app/Sources/` `VQLog`, `VQFolder`, `VQGames`, `VQPrepare`, `VQLaunch` (ajustes → variables `KL_*`/`VPVK_*`, identidad Quest 3), `VQLauncher`, `VQCover`, `VQApiScan`, `VQConformance*`; `app/Native/vq_apk.c`, `vq_config.c` (→ `vpvk_config_set_*`), `vq_scan.c`. Visor: `klepton/visionos/Sources/` `KleptonCompositor` (compositor, RCAS/uiMask, GPU lost, capas), `KleptonTAA` (VPKTAA nativo, anillo de salida), `KleptonControllers` (mandos + háptica CoreHaptics), `KleptonSpatial`/`KleptonEnvDepth` (ARKit), `KleptonApp`, `kl_app.c` (heartbeat `[hb]`). Lanzamiento por `VQLaunch`.
 
-### Causas medidas
-- Cuadrados rosas: capas OVROverlay copiadas de imágenes nunca escritas (memoria Metal reciclada; Android entrega ceros) → zero-init perezoso + ojo retenido.
-- Corte del inmersivo en AC: ShaderWarmup (~5 s retraduciendo 3392 shaders con receta + frame de 199-543 ms de GPU) → MSL reutilizado, corte cada 256 draws.
-- Demeo: `-force-vulkan` sin Vulkan en el build + kill no-op → SIGTRAP → APIs por manifiesto + cierre limpio.
-- TRIANGLE STRATEGY (primer juego GLES): hilo de juego de Unreal bloqueado en carga de nivel tras destruir el passthrough; causa por confirmar con `[snap]`. El cambio mixed→full funciona.
+**CI**: `.github/workflows/visionos.yml` (solo `[build]` en el commit o manual): VPVulkan (caché por hash de `vpkengine/gpu/**`) → MoltenVK 1.4.2 → `tools/ci/syntax-xros.sh` → `tools/ci/host-tests.sh` → `libklepton.a` → app (`xcodebuild`) → **Gate** (falla si syntax/tests fallaron; no hay IPA) → `scripts/ci-publish-log.sh` (log a rama `ci-logs`, fichero `visionos.txt`) → release `visionos`. Los pasos de syntax/tests no cortan el job para que la app informe también sus errores.
+**`klepton/tools/ovrp_abi.py`**: compara las firmas de `kl_ovrp*` con el desensamblado de `libOVRPlugin.so` real (9 versiones SDK 1.59–1.117, ref 1.117; lee también los `kl_ovrp*.S`). Resultado vigente: 36 graves → 2, ambos falsos positivos verificados (GetEyeFrustum devuelve HFA v0..v3; GetFloat devuelve float en s0, la herramienta los clasifica BOOL).
 
-### Qué mirar en el siguiente log
-`vk.zeroinit`; ausencia de capas magenta; `gpu.shader.msl cached=`; `gpu.slowcb`; `[cp] backfill`; `eye stage N … held back/published`; `[cp] layer paused/invalidated`; `[gles] ruta:`; `[snap] game thread silent`; «APIs del juego».
+**Datos de plataforma**: dylibs sin firmar en `QUEST/Cache/<j>/dylibs`, firmadas en `Library/Application Support/VisionQuestPro/Signed/<j>/`; logs en `QUEST/Registros/<fecha>-fin-<juego>`; centinela `Registros/sesion-en-curso.txt` + MetricKit; anclas en `QUEST/Partidas/<juego>/anclas.json`; inventario de APIs Meta en `QUEST/Cache/<juego>/meta-api.txt`.
 
-### Pendiente para la siguiente build
-- Pausa con la Corona. Hoy: background → LayerRenderer `.invalidated` en ~5 ms → `kl_app_guest_stop` → `_exit(0)`; guest de una sola ejecución; `ovrp_GetAppHasInputFocus` siempre 1.
-- Diseño: no parar el guest al invalidarse por Corona; foco perdido al juego (ovrp InputFocus/VrFocus, estados OpenXR, onPause/onResume por JNI); cortar envíos de GPU en pausa; launcher con «Reanudar» que reabre el espacio y reengancha un compositor nuevo a las texturas existentes.
-- Primer paso: experimento con `KL_EXIT_ON_BACKGROUND=0` y `guest_stop` condicionado para ver si el proceso sobrevive.
-- Otros: OVRInput `connected=0x0` en AC (no bloquea); regulador de GPU del guest; rosa/1 s en tutoriales 2D de AoT (debería ir con zero-init).
+**ABI OVRPlugin verificada (no revertir)**: x8/sret para GetNodePose/Velocity/Acceleration(2), GetTrackerPose, GetEyePose/..., GetTrackingCalibratedOrigin (28 B tipo Posef; velocidad/aceleración en Position, orientación identidad). GetEyeFrustum HFA4 {near,far,fovX,fovY}; GetControllerState3 = ovrpResult f(mask,out64); GetControllerState4/5/6 ponen a cero 96/100/108 B; GetTimeInSeconds = ovrpResult f(double*); GetCaps/GetStatus ovrpBool, GetCaps2/GetStatus2 con máscara por valor (bit0 = running, sin enum verificado); GetEyeLayerRecommendedResolution(out) un solo arg; `ovrp_PollEvent` acota la escritura por versión SDK (`klovrp_pollevent_cap`, 4..3996 B); `ovrp_Get*Ptr/Pointer` y nombres con ProcAddr/Hook devuelven 0, nunca -1004 (Unity lo usa como `xrGetInstanceProcAddr`); teclado (4 funciones 1.81-1.104) rechazado -1004; ovrKeyValuePair struct de 40 B por valor/x8.
 
-## 2026-10-18 (noche): primera prueba en el visor (AoT + AC) → 5 frentes; BUILD SUCCEEDED 3e7a30c (run 39156514064, VPKEngine c920e54), sin probar
-Logs: `…-fin-Attack_on_Titan…` y `…-fin-Assassins_Creed_Nexus_VR` (19:55-20:03). Hallazgos y cambios:
-1. **Audio AC roto** (514 «Voice Starvation», `[aaudio] burst 256`): `klaa_guest_wwise` (kl_aaudio.c) miraba
-   `access(<g_native_lib_dir>/libAkSoundEngine.so)`, pero en la app `tree/lib` nunca tiene `.so` (VQPrepare extrae a
-   `work/`, convierte a dylib y borra el ELF); antes lo tapaba `kl_is_ac_nexus`. Arreglo 861f148: `kl_find_image`
-   (registro del loader, kl_dl.c), solo se cachea el 1 → burst 1024 para cualquier guest con Wwise.
-2. **AC «pillado en el menú»** = aviso de UbiServices (esperado: `ovr_User_GetAccessToken` → error por
-   `KL_PLAT_TOKEN_ERROR`, 0 intentos de red) que no se puede cerrar porque **AC no ve mandos**: `[mprobe] OVRInput:
-   connected=0x0` toda la sesión (AoT `0x3`). AC: OVRPlugin 1.88, `ovrp_GetControllerState4` (mask 3 y 0xfffffff, nuestro
-   relleno da Connected=3); AoT: 1.89, `GetControllerState6`. Causa sin confirmar; sospecha: identidad Quest 3 (headset 11)
-   con OVRPlugin 1.88. Diagnóstico 861f148: `[ctrl]` primeras 24 llamadas por versión de GetControllerState*; logs de
-   `ovrp_GetVersion*/GetNativeSDKVersion*`; mprobe añade `active= loadedXRDevice= ovrpVersion=` (loadedXRDevice
-   probablemente `?`: suele ser campo, no propiedad).
-3. **Carga larga «de Ubisoft»**: no es red (0 DNS/connect); es el vídeo `Ubisoft-Logo-With-Sound.mp4` mientras AC carga
-   datos (19:55:36→19:56:35, memoria 1,7→4,9 GB).
-4. **Rosa global**: `[magenta] fragment module … (1,0,1,1)` en AC (2 pipelines, pase de ojo 4x) y AoT (4, 2x) = shader de
-   error de Unity. Hipótesis: `maxVertexOutputComponents/maxFragmentInputComponents` 124 < 128 (`interpolators32`).
-   VPKEngine c920e54: 128 con `VPVK_REPORT_GEOM=1` (juegos), `vk.caps` volcado, `vk.err what=varyings`. Ajuste nuevo
-   «Perfil Vulkan completo (experimental)» (`vq.vkFullProfile` → `VPVK_EXTRA_EXTENSIONS=1` en juegos) para A/B.
-5. **50 Hz pegado** (AoT 20:02:35→fin): tras picos de GPU del juego (63 ms) y ventanas con 6-9 `past deadline`, el sistema
-   presenta cada 20,02 ms con 0 retrasos (medio ritmo impuesto por visionOS; térmico «fair»). a707196 + revisión:
-   `[cp] minimumFrameRepeatCount N at start` / `changed A -> B (by the system)`; `KL_CP_HALFRATE_RECOVER` (def. 1):
-   6 ventanas con mediana 1,8-2,2 periodos y 0 retrasos → `minimumFrameRepeatCount = 0` (`[cp] HALF RATE …`) o
-   `HALF RATE held by the system` si ya era 0; fin `HALF RATE over after X s`; resumen al cerrar.
-6. Carátulas: ver «Pendiente conocido».
+## 3. Cambios del último lote (a8b07fc / b83ac15)
 
-### 2026-10-18 (noche, 2.º log AC, perfil Vulkan completo)
-- Audio AC OK (1 Voice Starvation, burst 1024). Pulsaciones llegan (`[input]` A/X/gatillos), `[ctrl] GetControllerState4 -> Connected=0x3`,
-  pero `OVRInput connected=0x0 active=0x0` (ovrpVersion 1.88.0; OVRManager OnDestroy al cambiar de escena).
-- Rosa sigue con perfil completo (vk.caps 1.3, 128, geom, int16, vertex stores) y sin `-force-vulkan` (usuario): NO son capacidades
-  ni el Vulkan forzado. Son objetos que en Quest son invisibles (no son mandos), visibles desde el arranque y pegados a las manos.
-- Regresión: panel de calibración de mandos de AC no aparece (salen sus botones); con los parches de AC sí. Causa probable: b609321
-  quitó la composición de quads en orden de envío (era comportamiento de Quest, no muleta). Restaurada para TODOS
-  (`KL_OVERLAY_SUBMIT_ORDER` def. 1, KleptonCompositor.swift). Efecto menor: el HUD de FPS hereda `overlayOrderState`.
-- Basura gráfica ~1 s en la carga: sin causa. Limpieza síncrona de capas descartada en revisión (stall en el hilo del juego;
-  el compositor ya limpia capas no escritas con `unwrittenLayerReady`).
-- Pendiente rosa: ¿salía con los parches de AC? Si no, bisecar los parches retirados (b495801: 2 etapas, pose fresca,
-  SpaceWarp spin, MSAA/ojo, overlay texl) con `KL_AC_NEXUS_PATCHES=1`.
+**Memoria**
+- Aviso de memoria baja DECIDIDO en segundo plano (`kl_mem_pressure_poll`, timer 100 ms) y ENTREGADO en el hilo del juego (`kl_mem_pressure_deliver()` en el pump de `kl_slink`(x2), `kl_gles3jni`, `kl_native`, `kl_sdl2`, `kl_ue4`, `kl_jkxr`, cada 10 ticks; `kl_driver_frame` ya lo hacía; `exchange` de `g_lowmem_pending` evita doble entrega): `guest/*.c`.
+- `kl_mem_total` = 8192 MiB (`KL_MEM_TOTAL_MB` revierte); avisos sobre el límite real (footprint+avail) al 65 % y crítico 80 %; histéresis (rearma <70 %): `libc/kl_libc.c`.
+- Trim propio `kl_vulkan_trim` (VPKEngine `vpvk_trim_memory`, nivel 2 si critical, 1 s por nivel) también con guests GLES sobre vpgles; retired OpenXR images solo con guest Vulkan: `gfx/kl_vulkan.c`.
+- Breakdown en `[hb]` (`kl_mem_breakdown`: ledger_tag_graphics/media/net/purg, fp_peak, lim_rem), `[hb] jump +N MiB` (>200 MiB/tick), `[hb] blocked`, `kl_mem_regions` por user_tag: `libc/kl_libc.c`, `visionos/Sources/kl_app.c`.
+- Anillo de salida de VPKTAA 5→4 slots y se suelta el anillo viejo antes de crear el nuevo: `KleptonTAA.swift`.
 
-### 2026-10-18 (noche, 3.er log AC) y carátulas
-- Con quads en orden de envío (5cf8922) vuelve la imagen de calibración de mandos y se entra al juego. `isHmdPresent=1`,
-  OVRManager vivo, `OVRInput connected=0x0` sigue (el juego lee mandos por otra vía; no bloquea).
-- `[magenta]` (f200a95 añade estado): 2 pipelines con writeMask 0xf, blend 0, depth test/write, op 6 → se crean en
-  `ShaderWarmupManager.WarmUpShaders` (Unity siempre calienta su shader de error); no prueba que sean los cuadrados.
-  Muchos cuadrados rosas en el 3.er log, uno sigue la mirada: candidato capa #5 Quad/head 512x512 a 0,5 m (fuente
-  «clear-only pass») ahora visible por el orden de envío. Siguiente: log con «capturas de diagnóstico».
-- Corrupción ~1 s + corte del inmersivo al iniciar: sin cierre de espacio en el log (lo hace visionOS; probable espera
-  del sistema por fotogramas tardíos en la carga). Sin investigar.
-- Carátulas: los APK NO traen la 16:9 (solo app_icon 48-192 px; `assets/vr_splash.png` = logo: AC/B&S 3840x2160, Batman
-  2048x435, AoT ninguno; sin android:banner). `VQCover.swift`: cadena carpeta del juego → `cover-store.*` (OculusDB
-  `oculusdb.rui2015.me/api/v1/search/<package>`, `imageLink` o imágenes 16:9 de la descripción; aspecto 1.6-1.95; ≤8 MB;
-  marcador `cover-store.none` `absent` sin reintento / `net` 7 días) → `cover-splash.*` (vr_splash 16:9) → `cover-apk.*`.
-  Ajuste «Descargar carátulas de la tienda de Meta» (`vq.storeCovers`, def. sí). Refresco por `vqCoverUpdated`. Sin
-  probar: OculusDB no verificado byte a byte (CDN no accesible desde aquí); log «Carátula de tienda: … guardada».
+**RCAS y compositor**
+- RCAS fusionado en `kl_reproject_f` (uniforms `rcas_con`/`rcasFlags`/rect; bit 1 = hay máscara UI; `c = mix(rcas, original, mask)`), `uiMask0/uiMask1` texture 2/3 (`texture2d_array`), `uiMaskDummy` 1x1 donde no hay: `gfx/kl_reproject.c/.h`, `KleptonCompositor.swift`; `kl_vulkan_ui_mask_texture` en `kl_vulkan.c`.
+- RCAS como pase independiente 0–100 % (global y por juego, `KL_RCAS`/`VPVK_RCAS`, 0 = sin pase) en todos los modos de AA: `VQLaunch.swift`, `vq_config.c`, `kl_vulkan.c` (`kl_vulkan_rcas_on`, frames `rcas_only`), `KleptonTAA.swift`.
+- Medición `[cp] gpu p50/p95/max` del compositor (completion handler); GPU lost → ojo en negro (`taaHide`) + cierre con aviso (`kl_vulkan_gpu_lost`, `kl_jni_request_quit`); tamaño de ojo final guardado (`vq.eyeSizeFinal`, clave = env BASE|SCALE|MAX) y empujado antes de arrancar el guest: `KleptonCompositor.swift`, `VQLaunch.swift`.
 
-### Pruebas pedidas con la build nueva
-- AoT y AC por defecto: audio de AC (sin Voice Starvation, burst 1024), `[magenta]` (¿desaparecen?), `vk.caps`,
-  `vk.err what=varyings`, líneas `[cp] HALF RATE`/`minimumFrameRepeatCount`.
-- AC con «Perfil Quest 3» apagado: ¿`connected=0x3`? Si sí → identidad Quest 3 + OVRPlugin < 1.89 (arreglo general).
-- Si sigue el rosa: repetir con «Perfil Vulkan completo».
-- Si el medio ritmo sigue con repeatCount 0 → regulador del juego (como AVP) para no provocar retrasos del compositor.
+**Háptica por mano**: motores CoreHaptics por mano en cola serie `vq.haptics` con reintento/backoff, watchdog 0,4 s, identidad en `stoppedHandler`; perfil autodetectado (`HapticProfile.detect`): `KleptonControllers.swift`. Anillo 4096, `SetControllerHapticsAmplitudeEnvelope/Haptics2/LocalizedVibration`, `XR_FB_haptic_amplitude_envelope`/`_pcm`: `xr/kl_ovrp.c`, `kl_ovrp_input.c`, `kl_openxr.c`, `kl_openxr_ext.c`.
 
-## 2026-10-18 (tarde): pasos 1-7 compilados — BUILD SUCCEEDED, IPA publicada
-- Run 39150059344 (merge 12090b2) falló solo en `kl_bionic_extra.c`: `lgamma_r`/`lgammaf_r` no declarados (math.h de
-  Darwin los esconde tras `_REENTRANT`; libSystem los exporta). Arreglo 210c12b: prototipos explícitos tras los includes.
-- 210c12b también: recetas `build/xros|xrsim/libklepton.a` del `klepton/Makefile` compilan todos los `.c` y fallan al
-  final (`rc=0 … || rc=1`) antes del `ar`; paso del runtime en `visionos.yml` no corta el job (`|| echo ::error::`) para
-  que `xcodebuild` saque también sus errores en la misma pasada. Sin `libklepton.a` el enlace falla → no hay release.
-- Run 39150906473 (210c12b): runtime + VPVulkan (con `taa_native_metal.mm`, gles) + app → BUILD SUCCEEDED; release
-  `visionos` actualizada. Avisos revisados, ninguno es bug: `kl_ovrp.c:2798` indentación (el `n++` va fuera del if a
-  propósito), `strchrnul` visionOS 2.4+ (target 26), `-Wcomma` en `vq_harvest.c`, sin usar en `gpu/gles/glsl`.
-- Siguiente: «Orden de pruebas en el visor» desde el punto 1 con la IPA de 210c12b; logs a `QUEST/Registros`.
-VPKEngine `main` = e6c3f3b.
+**ALooper / NDK** (`guest/kl_ndk.c`): wake interno (`addFd/removeFd`, byte 'i') distinto del `ALooper_wake` real (byte 'w'); `kl_looper_poll` con deadline (reconstruye el set y sigue esperando el resto del timeout; timeout 0 → TIMEOUT; solo 'w' devuelve `ALOOPER_POLL_WAKE`); poller de input único (`g_poller_mu`, `poller_started`, `detachLooper` hace join).
+**Vídeo**: SurfaceTexture/Surface reales drenados en el hilo del juego, `onFrameAvailable` desde el hilo del reader, `[vtrace]` (`KLM_VTRACE_MAX`): `jni/kl_jni_hostvideo.c`, `media/kl_mediandk.c`.
+**Sensores/Input/HWBuffer** (`kl_ndk.c`): acel/giro/gravedad/rotation vector derivados de la pose de cabeza (mundo ENU = (x,−z,y)); AInputQueue real + puente mandos Touch→gamepad; `AHardwareBuffer_{to,from}HardwareBuffer`, `send/recvHandleToUnixSocket`.
+**UE4/Settings** (`jni/kl_jni_ue4.c`, `kl_jni_net.c`, `kl_jni_window.c`, `kl_jni.c`): `nativeHandleSensorEvents([F[F[F[F)`, refresh rate vía ovrp, fuentes en `/data/data/<pkg>/cache/fonts`, clipboard (UIPasteboard), teclado virtual; tabla única Settings.Secure/Global/System; `device_name` "Meta Quest 3|2"; WindowMetrics; `hasSystemFeature` (audio, mic, sensores, vr.*, wifi, bluetooth).
+**Símbolos**: zlib (`get_crc_table`, `crc32_z`, `uncompress2`, `deflate*/inflate*`…) en `libc/kl_bionic_extra4.c`; `ovrKeyValuePair_make*` y `kl_ovrplat_owns/known` en `xr/kl_ovrplat.c`; `kl_shim_known` por familia (xr/SL/ovr/egl) en `libc/kl_shim.c`.
+**EGL/GLES sin abort**: GL ausente → stub que devuelve 0 + `[egl] absent GL function called, returning 0: NAME` y lista al cierre (`kl_egl_report_absent`); `kl_gles_report_unresolved` con `pthread_mutex_trylock` (apto para señal) y `g_miss_reported`: `gfx/kl_egl.c`, `kl_gles.c`.
+**CI**: Gate + `syntax-xros.sh` + `host-tests.sh` (gpu_host con `-k` para listar todos los errores): `visionos.yml`, `tools/ci/*`.
+**Arreglos de CI de macOS**: `lgamma_r`/`lgammaf_r` con prototipos explícitos (math.h de Darwin los oculta tras `_REENTRANT`); el paso del runtime no corta el job para que `xcodebuild` saque sus errores; recetas de `build/xros|xrsim/libklepton.a` compilan todo y fallan al final antes del `ar`.
 
-### Qué cambia por DEFECTO (sin tocar ajustes)
-- 100 % sin conexión para todos los juegos: `KL_NET_OFFLINE` def. 1 (kl_shim.c getaddrinfo/connect/sendto/sendmsg,
-  kl_jni_android.c ConnectivityManager); solo loopback (127.x, ::1, localhost) y AF_UNIX. `KL_PLAT_TOKEN_ERROR` def. 1
-  (ovr_User_GetAccessToken → error: AC no entra en UbiServices) y usuario Meta offline para todos (`klplat_user_default`=1).
-- Sin trato por juego: `kl_is_ac_nexus` eliminado; muletas AC borradas (`KL_NEXUS_FRAME_BUDGET`, `KL_GUEST_FRESH_POSE`,
-  2 etapas, ojo 3840, `KL_OVERLAY_SUBMIT_ORDER`); `KL_OVERLAY_TEXL` y 3 etapas para todos. Riesgo: memoria de AC (8,1 GB).
-- Identidad Quest 3 coherente con `KL_QUEST3` (lo pone la app): OVRPlugin headset 11 «Meta Quest 3»
-  (`KL_OVRP_QUEST3_ID` def. 1), OpenXR systemName «Meta Quest 3», JNI SDK 32. Mandos siguen como Touch de Quest 2.
-- Compositor: ritmo de panel encajado a 120/100/96/90 Hz (±6 %) (`KL_CP_PANEL_SNAP=0` lo quita, `KL_CP_PANEL_HZ` fuerza).
-- VPKEngine: perfil Adreno nuevo tras la puerta del CTS (`VPVK_EXTRA_EXTENSIONS=1`); juegos ven apiVersion 1.1 y
-  shaderInt16/shaderDrawParameters/sync2/dynamic rendering/timeline a 0 (perfil anterior al 16/10). Diagnóstico de
-  cuelgue: encoders >2048 draws partidos en trozos de 256 (`VPVK_HANG_SPLIT`), no si hay adjuntos memoryless;
-  límite de bucles anidados (traductor v13, recetas se retraducen solas).
-- Android: ~800 funciones nuevas de bionic/NDK (kl_bionic_extra*.c, kl_pthread.c, kl_android.c, mediandk, AAudio,
-  OpenSL, JNI kl_jni_sysinfo.c); escáner de APIs mira la tabla real; sensor: solo giroscopio de cabeza real.
-- Eye tracking: `ovrp_Start/StopEyeTracking` → Unsupported.
+## 4. Decisiones de diseño vigentes
 
-### Ajustes nuevos en la app (todos apagados por defecto)
-- «VPKTAA nativo» (`vq.vpktaaNative` → `VPVK_TAA_NATIVE`): pase TAA dentro de VPKEngine, jitter Halton propio por
-  viewport, Catmull-Rom, varianza YCoCg, desoclusión, RCAS; máscara de UI (R8 en slot 7, `VPVK_TAA_UI_MASK` def. 1):
-  la UI/2D dentro del ojo no recibe jitter ni historia. Log `vk.taa native gpu_ms`, `vk.taa uimask draws_3d= draws_ui=`.
-- «Shaders AOT (experimental)» (`vq.aot` → `VPVK_AOT=1`): compila todo en la preparación a MTLBinaryArchive; variantes
-  nuevas en segundo plano sin bloquear (`VP_HOLD_MS=0`). Log `gpu.pso.aot archived= hot= hot_ms_total=`.
-- «Caché de shaders en QUEST» (`vq.psoInQuest`): `QUEST/Cache/<j>/Pipelines`, sobrevive a reinstalar.
-- «OpenGL ES con VPKEngine (experimental)» (`vq.glesVPK` → `KL_GLES_VPK=1`, exige VPKEngine + VPVulkan): GLSL ES
-  propio → SPIR-V → traductor; capa GL/EGL en VPKEngine `gpu/gles` (vpgles_* en VPVulkan); puente `kl_gles.c`.
-- Por juego: resolución (`vq.resMode/resBase/resScale.<aaKey>` → `KL_OVRP_EYE_BASE/SCALE`) y anisótropo
-  (`vq.aniso.<aaKey>`: Global/Del juego/2-16x → `VPVK_FORCE_ANISO`).
+- Offline total: `KL_NET_OFFLINE`=1 (solo loopback y AF_UNIX), `KL_PLAT_TOKEN_ERROR`=1 (AC no entra en UbiServices; su aviso no se puede cerrar y es esperado), usuario Meta offline. Sin cuentas ni servicios.
+- Todo global, sin condiciones por juego (`kl_is_ac_nexus` y muletas de AC eliminados). Excepción: ajustes por juego del usuario (AA, resolución, anisótropo, RCAS).
+- VPKTAA es opcional y único = nativo de VPKEngine (Vulkan y vpgles, ovrp y OpenXR; sin cobertura en ANGLE/MoltenVK). El MSAA del juego se mantiene por defecto (modo Automático: VPKTAA solo si no hay MSAA detectado).
+- `nativeLowMemory` nunca fuera del hilo del juego: crash de AoT con IL2CPP en hilo no registrado (x18 shadow 0), un attach JNI no lo arregla. No se llama desde `kl_jni_drain_ui_tasks` (reentrante vía `executeMainThreadJobs`). Con el juego bloqueado solo recorta `kl_vulkan_trim`.
+- `ovrp_GetEyeLayerRecommendedResolution` devuelve -1004 sin capa de ojo viva (si no, Unity usa resolución dinámica con viewport reducido y deforma el 3D de AC).
+- GLES: ES 3.1, no 3.2.
+- Identidad Quest 3 coherente con `KL_QUEST3` (OVRPlugin headset 11, OpenXR systemName, JNI SDK 32); mandos como Touch de Quest 2. Eye tracking → Unsupported.
+- Háptica autodetectada por mando, sin ajuste de intensidad (clave `vq.hapticsGain` borrada).
+- Quads de capas en orden de envío (`KL_OVERLAY_SUBMIT_ORDER` def. 1): sin él no aparece el panel de calibración de AC.
+- Foveado de Quest siempre apagado; foveado propio opt-in (Apagado por defecto), M5 solo en M5; exige VPKTAA nativo, declina con MSAA.
+- ASW desactivable (por defecto activo, `KL_CP_ASW`/PTW solo por variable); ritmo de panel encajado a 120/100/96/90 Hz (`KL_CP_PANEL_SNAP=0`).
+- Valores mágicos: burst de audio 1024 con Wwise (256 da «Voice Starvation»); `kMaxArchiveFiles` 512 (AC genera 4101 PSO; con 64 ficheros evicta y recompila cada arranque); encoders >2048 draws partidos en trozos de 256 (`VPVK_MAX_DRAWS_PER_CB`); anillo TAA 4 (con 3 un pinned antiguo deja sin slot; si sale `no free output` volver a 5); máscara UI R8 en slot 7.
+- Datos de juegos (APK, logs, assets) nunca en el repo. Pruebas solo con juegos propios del usuario.
 
-### Puertas solo por variable (para probar a mano; candidatas a ajuste si funcionan)
-- `KL_CP_PTW=1` reproyección posicional con profundidad por píxel (malla 96², `KL_CP_PTW_GRID`, `_DILATE`, `_FAR`);
-  log `[cp] PTW gpu:`. Profundidad de ojo con `KL_VPKTAA=1` o `KL_CP_PTW=1`; MSAA resuelta (`KL_DEPTH_MS_RESOLVE` def. 1).
-- `KL_CP_ASW=1` (exige PTW; anulado por el ajuste «ASW desactivado», activo por defecto): extrapolación con MV de
-  SpaceWarp; signo fijo (`KL_CP_ASW_SIGN`), pendiente compartir el voto de signo de VPKTAA.
-- `KL_OVRP_PRED_FRAMEIDX=1` (predicción por frameIndex + extrapolación de pose), `KL_OVRP_LATENCY=1`
-  (GetAppLatencyTimings2), `KL_XR_STRICT_LAYERS=1` (solo lo enciende el CTS de OpenXR).
+## 5. Diagnóstico
 
-### Orden de pruebas en el visor (tras compilar)
-1. AoT y AC con todo por defecto: que nada empeore (offline, 3 etapas, identidad Quest 3, perfil Vulkan reducido).
-   AC: ¿sigue el cuelgue del warmup? Leer `gpu.hang draw …`, `chunks_done`, `gpu-hang-*.metal` en QUEST/Registros.
-   Si AC usa MSAA memoryless no se parte: repetir con MSAA desactivado.
-2. Vulkan CTS (perfil rápida) con `VPVK_EXTRA_EXTENSIONS=1`: grupos que validan lo tras la puerta —
-   int16 `spirv_assembly.*int16*`, `*16bit_storage*`, `draw.shader_draw_parameters.*`, vertex stores
-   `robustness.* binding_model.* memory_model.*`, `api.private_data.*`, `memory.requirements.*`, `*imageless*`,
-   `subgroups.size_control.*`, `synchronization2.*`, `dynamic_rendering.*`, `synchronization.timeline_semaphore.*`,
-   `ycbcr.*`, `api.info.*`, `api.image_format_properties`. Abrir la puerta a juegos por grupos limpios.
-3. VPKTAA nativo en AoT (sin MSAA): nitidez, `draws_ui`, ms GPU. Luego PTW y ASW.
-4. AOT + caché en QUEST: segunda partida sin `gpu.pso.hot`.
-5. OpenXR CTS 1.1.58. 6. Un juego GLES con el ajuste GLES. 7. dEQP-GLES (listas en `conformance/gles/caselists.py`;
-   falta compilar gles2/3/31 en `conformance.yml` y el runner EGL).
+Logs: `QUEST/Registros/` (también compartibles desde la app); línea 1 = hash de build. CI: `git fetch origin ci-logs` o API `repos/<owner>/VisionQuestPro/contents/visionos.txt?ref=ci-logs` (primero errores, luego las últimas 150 líneas); `gh run view --log` da 403.
 
-### Pendiente conocido
-- Rosa de AC: causa sin identificar (no son vertex stores). Comparar lo que Unity consulta con el perfil Adreno real y
-  `[prov] layer 3 … no write seen`. Falta vulkaninfo JSON real de Quest 3 (vulkan.gpuinfo.org, descarga manual).
-- Flags SpaceWarp y orden de LatencyTimings sin contrastar con `OVR_Plugin_Types.h` (no accesible): usar el
-  `libOVRPlugin.so` de un APK del usuario (desensamblar).
-- VPKEngine: salida de fragmento int/snorm y blits 1D sin auditar; ycbcr sin 10/16 bit ni formato externo
-  (AHardwareBuffer); no viable en Metal: variablePointers completo, LogicOp/PatchControlPoints dinámicos,
-  availability/visibility, BDA capture/replay, inline uniform update-after-bind. EDS × máscara de UI no combinan.
-- GLES: sin transform feedback, SSBO/imágenes/atómicos, geometry/tess, program binary; occlusion query = 1;
-  gl_PointCoord fijo; window surfaces planas sin conectar; GLboolean sin extensión garantizada (teórico);
-  `kl_gles_sym` NULL cae a la pasarela GL vieja (estados mezclados).
-- Android: AObb sin montaje real; AImage solo YUV_420_888; OpenSL sin efectos/3D/MIDI; posix_spawn/exec/SysV ENOSYS;
-  inotify sin IN_ACCESS/OPEN/CLOSE. Sin validar en Darwin: kl_bionic_extra2/4.c (campos internos de FILE), thunks `.S`.
-- VPKEngine (arreglado 498bc9f/e6c3f3b, `taa_native_metal.mm` sin compilar): fase de jitter solo si se codificó,
-  handler con `shared_ptr<Stats>`, `*WithCount` con min(n,1), requisitos de memoria sin handle nulo, uiMask bajo
-  submitMutex; EGL BAD_ACCESS y destrucción diferida de contexto/surface. Queda: hilo que muere sin soltar su contexto.
-- Carátulas: en el launcher solo salen los iconos; la carátula que trae cada juego de Quest no se muestra.
-  `VQCover.swift` busca: imagen en la carpeta del juego (cover/banner/poster o la mayor) → en el APK solo
-  `res/**/{app_banner,banner,tv_banner,app_icon,ic_launcher,icon,…}.{png,jpg,webp}` → cae al icono. No mira `assets/`,
-  OBB ni nombres ofuscados por aapt2 (`res/xx.png`). Pendiente: localizar en un APK real dónde va la carátula
-  (listar el zip y buscar imágenes anchas) y añadir esa ruta con prioridad sobre el icono; invalidar `cover-apk.*`
-  ya cacheados (hoy guardan el icono y tapan la carátula aunque se corrija la búsqueda).
-- Después de los pasos: SSAO propio en VPKEngine (media resolución, profundidad compartida con VPKTAA, toggle por
-  juego desactivado por defecto; origen: AoT no trae el SSAO de URP).
+| Etiqueta | Significado |
+|---|---|
+| `[cp] gpu p50/p95/max … (N cmdbufs, rcas X)` | Tiempo GPU del compositor; `gpu.sec` (p50/p95/max/over10) = lo mismo de VPKEngine por segundo |
+| `gpu.sec` / `gpu lost` | Si hay GPU lost: ojo negro y cierre con mensaje en el launcher |
+| `msaa_released` | Etiqueta de VPKEngine sobre el MSAA del juego liberado (memoria tile); si aparece `tile_rejected>0` en mem stats, el MSAA 4x no cabe |
+| `[mem] threshold`, `[mem] OS pressure`, `[mem] trim (…)` | Aviso 65/80 %, presión del SO, recorte (`VPKEngine released N MiB`) |
+| `[hb]`, `[hb] jump`, `[hb] blocked` | Heartbeat con breakdown de memoria; salto >200 MiB/tick; hilo bloqueado |
+| `[snap] game thread silent` | Hilo del juego sin actividad a 10/30 s (volcado de esperas por hilo, `kl_wait.h`) |
+| `[vtrace tid=…]` | Traza de vídeo/JNI: FindClass, llamadas Java sin emulación (`NO-OP game Java void`) |
+| `gles.diag` / `gles.warn` (VPKEngine), `[gles] ruta:` | Errores GL del guest (INVALID_ENUM first at…) y ruta elegida |
+| `[egl] absent GL function called, returning 0: NAME` | Función GL no resuelta; lista final al cierre |
+| `[cp] RCAS fused: UI mask … in use` / `no UI mask for eye N` / `UI mask WxH is not the eye texture's` | Estado de la máscara UI; si falla el MSL: `[cp] composite pipeline failed` |
+| `[taa-inline] eye AxB -> CxD: output ring rebuilt`, `no free output` | Anillo TAA |
+| `[cp] haptics: hand N engine up … locality X`, `FIRST REAL PULSE`, `[ovrp] haptics: first real pulse`, `SetControllerHapticsAmplitudeEnvelope … (struct order …)` | Háptica; si el orden sale `Count,Duration` corregir la doc; ajustes: `KL_HAPTICS_LOCALITY=all|handles`, `KL_HAPTICS_FLOOR`, `KL_HAPTICS_MIN` |
+| `[cp] HALF RATE …`, `minimumFrameRepeatCount` | Medio ritmo impuesto por el sistema / recuperación |
+| `[cp] layer paused/invalidated`, `[cp] backfill`, `eye stage N … held back/published`, `[zero] compositor leyó imagen pendiente` | Ciclo de capas/ojos |
+| `vk.zeroinit`, `gpu.shader.msl cached=`, `gpu.slowcb`, `gpu.hang`, `gpu.prewarm ar_hits/ar_misses`, `vk.taa native gpu_ms`, `vk.caps`, `vk.err` | VPKEngine |
+| `[magenta]`, `[prov] layer N … no write seen` | Shader de error de Unity (siempre calienta uno), procedencia de capas |
 
-## Conformidad (Vulkan CTS / OpenXR CTS como guest dentro de la app)
-- CI `conformance.yml` (Linux, manual o `[conformance]`): VK-GL-CTS `vulkan-cts-1.4.6.2`, `DEQP_ANDROID_EXE=ON`, parche
-  `conformance/vulkan/patch_deqp.py` (exporta `vq_exe_main`), listas `conformance/vulkan/caselists.py` (perfil
-  `rapida` ~36k casos, tandas de 400; `completa` con `VQ_CTS_FULL=1`) → release `conformance` (`VulkanCTS.apk`).
-  OpenXR CTS 1.1.58 → release `conformance-openxr`.
-- Klepton `KL_GUEST_EXE` (`runtime/guest/kl_exe.c`): main() en hilo guest por línea de `KL_EXE_ARGS_FILE`; recuperación
-  por caso con sigsetjmp, máx. `KL_EXE_MAX_RECOVERIES`=50.
-- App: `VQConformance.swift` (resultados en `QUEST/Partidas/<test>/cts/`), Ajustes > Conformidad. Args deqp:
-  `--quiet`, `--deqp-log-flush=enable`. OpenXR: `KL_INTENT_EXTRAS`; `prepareOpenXR` pone `KL_XR_STRICT_LAYERS=1`.
-- Última referencia: log 58, 6551 casos, 96,9 % de los soportados (antes del perfil 1.3).
+## 6. Pendientes y riesgos abiertos (por prioridad)
 
-## Resuelto (referencia; detalle en git)
-- 2026-10-15/16: temblor al girar (etapa publicada tras la GPU, `KL_OVRP_PUBLISH_AFTER_GPU`), clock_getres Linux,
-  AMediaDataSource, panel 50→100 Hz, una pose por frame, registros al cerrar (`QUEST/Registros/<fecha>-fin-<juego>`),
-  carátulas (`VQCover.swift`), `[prov]` procedencia de capas.
-- 2026-10-13 y anteriores: AA por juego, VPKTAA inline, SDK Quest offline (485 `ovrp_*`, OpenXR 1.1), Vulkan en Unity
-  con spoof Adreno 740, audio, mandos Sense (PS = botones Meta), foveado Quest siempre apagado.
+1. **Verificar en visor todo el lote** (sección 3). Mirar primero: framerate (bajones de AC y AoT: `[cp] gpu`, `gpu.sec`), flashes de AC, vídeo de Demeo (riesgo: hilo del juego bloqueado esperando el primer frame; `[vtrace]`), `[mem] trim` con guest GLES, `RCAS fused … in use` con HUD.
+2. Pico de memoria del driver en la carga de AC (~1,8 GB/s no contabilizado por Metal hasta ~8,19 GiB): sin atribuir. Con el log decidir recortes (etapas del ojo 3→2, historial TAA, prewarm sin owner); evaluar entitlement increased-memory-limit.
+3. Pausa con la Corona: hoy background → LayerRenderer `.invalidated` → `kl_app_guest_stop` → `_exit(0)`; `ovrp_GetAppHasInputFocus` siempre 1. Diseño: no parar el guest, foco perdido al juego (ovrp InputFocus/VrFocus, estados OpenXR, onPause/onResume JNI), cortar envíos GPU, «Reanudar». Primer paso: experimento con `KL_EXIT_ON_BACKGROUND=0`.
+4. Rosa de AC: no son capacidades Vulkan ni `-force-vulkan`; objetos invisibles en Quest, pegados a las manos. Candidato: capa #5 Quad/head 512x512 (clear-only). Bisecar con `[prov]`; falta vulkaninfo real de Quest 3.
+5. `onInputQueueCreated`: `kl_ndk_input_queue` sin llamador (`kl_nativeactivity.c`); conectarlo.
+6. Verificar la firma/orden de `nativeHandleSensorEvents` en UE4 (tilt, rate, gravity, accel=0).
+7. Callbacks de ALooper: se ignora su valor de retorno (¿desregistrar si 0?).
+8. Sensores: mezcla de pose en vivo con velocidad del frame fijado.
+9. Riesgos del TAA/RCAS: HDR saturate; lag de 1 frame de la máscara UI (es la del último envío del guest); anillo 4 (ver `no free output`); guests ANGLE/sin VPKEngine sin máscara; ojo foveado de otro tamaño sin máscara; EDS × máscara UI no combinan.
+10. Demeo en AR: política ARKit por manifiesto (escena solo con `USE_SCENE`, anclas con `USE_ANCHOR_API`); extensiones de escena/planos/profundidad se evalúan una vez en el primer enumerate y requieren ARKit autorizado; orientación del bind de manos y eventos discovery 104/105 sin verificar.
+11. Foveado propio sin probar en visor (M2/M5; reenviar tangentes con `vpvk_config_set_foveation_eyes`; mapa identidad 16384², coste fold/expand sin medir).
+12. OVRPlugin: flags SpaceWarp y orden de LatencyTimings sin contrastar (usar `libOVRPlugin.so` de un APK propio); fov de frustums v0 asumido en grados; `ovrp_SetControllerHapticsParametric`, `GetControllerParametricProperties`, `TriggerVibrationAction` rechazadas.
+13. Carátulas: los APK no traen la 16:9 (solo `app_icon` y `vr_splash`); `VQCover.swift` usa carpeta → OculusDB (`oculusdb.rui2015.me/api/v1/search/<package>`, no verificado byte a byte) → `vr_splash` → icono. Marcadores de caché v4.
+14. GLES (vpgles): sin transform feedback, SSBO/imágenes/atómicos, geometry/tess, program binary; occlusion query = 1; `gl_PointCoord` fijo; detección de MSAA solo en Vulkan; `kl_gles_sym` NULL cae a la pasarela vieja. `pollAADetection` limitado a Vulkan.
+15. Android: AObb sin montaje real; AImage solo YUV_420_888; OpenSL sin efectos/3D/MIDI; posix_spawn/exec/SysV ENOSYS; inotify sin IN_ACCESS/OPEN/CLOSE; sin acel. lineal ni magnetómetro; `kl_egl.c`/`kl_vulkan.c` necesitan consulta pura `*_known` para el escáner; sin validar en Darwin `kl_bionic_extra2/4.c` (campos de FILE) y thunks `.S`.
+16. VPKEngine: salida de fragmento int/snorm y blits 1D sin auditar; ycbcr sin 10/16 bit; no viable en Metal: variablePointers completo, LogicOp/PatchControlPoints dinámicos, availability/visibility, BDA capture/replay. Hilo que muere sin soltar su contexto GL.
+17. Conformidad: CI `conformance.yml` (Vulkan CTS 1.4.6.2 `rapida` ~36k casos, OpenXR CTS 1.1.58; releases `conformance`/`conformance-openxr`; app `VQConformance*`, resultados en `QUEST/Partidas/<test>/cts/`; `KL_GUEST_EXE`, `KL_EXE_MAX_RECOVERIES`=50). Referencia: 96,9 % de 6551 casos (antes del perfil 1.3). Falta: dEQP-GLES (gles2/3/31 en CI y runner EGL), grupos CTS tras `VPVK_EXTRA_EXTENSIONS=1`.
+18. Futuro: SSAO propio en VPKEngine (media resolución, toggle por juego, apagado). `PTW`/`ASW` por variable (`KL_CP_PTW`, `KL_CP_ASW`) pendientes de ajuste. Sin usar en `gpu/gles/glsl` y avisos de compilación revisados: ninguno es bug.
+19. Limpieza: `kl_ovrp.c` sondeo de jitter de frustum inerte; avisos de formato `%llu` en `kl_egl.c`.
 
-## Arquitectura (referencia)
-- Base Klepton (MIT, copia `ce74582` en `klepton/`, ver `THIRD-PARTY-NOTICES.md`): cada `.so` ARM64 se envuelve en un
-  dylib firmado y se carga con `dlopen`; bionic/JNI/OVRPlugin/OpenXR propios. Sin traducción de CPU. Fuentes del
-  runtime: `klepton/Makefile` (`RUNTIME_SHIP`, `RUNTIME_JNI`) → `libklepton.a`; Xcode no lista fuentes sueltas.
-- Gráficos: VPKEngine `VPVulkan.framework` (`scripts/build-vpvulkan.sh`, caché por hash de `vpkengine/gpu/**`; la CI
-  clona VPKEngine `main`), incluye `gpu/gles` (vpgles). Usa `gpu/metal2`.
-- Firma: dylibs sin firmar en `QUEST/Cache/<j>/dylibs`; firmadas en `Library/Application Support/VisionQuestPro/Signed/<j>/`.
-- App (`app/Sources/`): `VQLog`, `VQFolder`, `VQGames`, `VQPrepare`, `VQLaunch` (+ `VQSettings`, `VQGameRes`,
-  `VQGameAniso`), `VQLauncher`, `VQConformance*`, `VQApiScan`, `VQCover`; `app/Native/vq_apk.c`, `vq_config.c`, `vq_scan.c`.
-- CI `visionos.yml`: solo `[build]` o manual; release `visionos` (`VisionQuestPro.ipa`); log de CI en rama `ci-logs`
-  (`visionos.txt`; `gh run view --log-failed` da 403 desde aquí).
+## 7. Cómo compilar, probar y publicar
 
-## Fix crash general + carátulas
-- VPKEngine: fix de capturas colgadas en completion handlers Metal (crash de TRIANGLE y probablemente SIGBUS de AC). Auditado runtime C de 650083e (eye hold, kl_wait, ledger, rings, fb_map): sin escrituras fuera de rango.
-- `app/Sources/VQCover.swift`: imagen de carpeta solo si el nombre contiene cover/banner/poster/caratula; marcadores `<unix> <absent|net> v2` (reintento 3/7 días, antiguos ignorados); log por candidato; rechazo html/json/text; máx 16 MB; downscale >1920 px u >8 MB a JPEG 0.85; borra caché de otra extensión.
-- Pendiente: si AC sigue cayendo probar VPVK_MAX_DRAWS_PER_CB=0, VPVK_ZERO_NEW_IMAGES=0, KL_SNAP_GAME_STALL_S=0. Pausa con la corona en la siguiente build.
-
-## Lote 2026-10-19: memoria, rwlocks, carátulas, diagnóstico de cierres
-- Diagnóstico de los 3 cierres (build fc4492c): AC = jetsam a ~6.5 GB (aviso de memoria nunca saltaba); TRIANGLE = deadlock en `klb_pthread_rwlock_wrlock` (no crash); Demeo = muerte silenciosa a los 3 s tras cargar libUnityARFoundationMeta (sin fault ni presión de memoria; causa desconocida).
-- `klepton/runtime/libc/kl_libc.c`: `kl_mem_pressure_poll` avisa si avail<=384 MB o footprint>=80 % de 6144 MB; histéresis `g_lowmem_armed` (rearma <70 % y avail>=1.5×floor); logs `[mem] threshold …` y `[mem] OS pressure …`.
-- `klepton/runtime/libc/kl_pthread.c`: eliminado SYNC_TABLE; rwlocks por dirección (`g_rwl_map` 65536, tombstones), implementación propia mutex+cond (preferencia lectores bionic, kind 2 prefer-writer, EDEADLK/EBUSY/EPERM), destroy EBUSY si tomado; `kl_pthread_report` vuelca `-- rwlock holders --`.
-- `app/Sources/VQCover.swift`: ficha `/api/v1/id/<id>` (formato no verificado: el log lista sus claves; ajustar `detailImages` si difiere), candidatos apaisados primero, 401/403 de URL firmada no marca net, fallback a cuadrada, marcadores v3.
-- `app/Sources/VQLog.swift` (+VQLaunch/VQLauncher/VQConformanceView, KleptonApp.swift): centinela `Registros/sesion-en-curso.txt` (VQSession) y MetricKit `VQMetrics` volcando MXCrashDiagnostic al log.
-- Pendiente: verificar en visor AC (memoria), TRIANGLE (rwlock), Demeo (MetricKit/.ips); pausa con corona.
-
-## Fix Demeo: hook OpenXR de OVRPlugin
-- .ips 00:48:38 (Demeo): SIGKILL CODESIGNING, pc=x8=-1004 llamado desde libUnityOpenXR+0xef73c. `ovrp_UnityOpenXR_HookGetInstanceProcAddr` caía en `klovrp_called` (-1004) y Unity lo usaba como `xrGetInstanceProcAddr`.
-- `klepton/runtime/xr/kl_ovrp.c`: `klovrp_UnityOpenXR_HookGetInstanceProcAddr` pass-through del argumento (en `g_ovrp_impl`); `ovrp_UnityOpenXR_*` (SetClientVersion, On*Instance*/Session*/AppSpaceChange) y `ovrp_AllowVisibilityMask` → `g_ovrp_result_ok`; `klovrp_called` devuelve 0 (no -1004) si el nombre contiene ProcAddr/Hook o es `ovrp_Get*Ptr/Pointer`.
-- .ips 00:23:52 (TRIANGLE, build 650083e): SIGSEGV 0x34 en slowLog → ya corregido en VPKEngine a316f28.
-
-## Lote 2026-10-19 (2): inventario Meta API, memoria, cámara, zero-pending, carátulas, hash
-- Logs previos de Demeo eran de la build af9d6b7 (sin el pass-through); el arreglo de b4527ad sigue sin probar.
-- Inventario Meta API al abrir la app (todos los juegos de QUEST/Juegos, lee el APK): `app/Native/vq_scan.c` `vq_api_names`, `kl_ovrp_status` (kl_ovrp.c), `kl_openxr_status` (kl_openxr.c, `klxr_install` ahora con mutex y done=1 al final), `app/Sources/VQApiScan.swift` `inventory`/`inventoryAll`, `VQLauncher.refresh()`. Salida: `app.txt` "Meta API: …"/"Meta API global: …", `QUEST/Cache/<juego>/meta-api.txt`, `Documents/Registros/meta-api.txt` (compartible).
-- Memoria (AC jetsam a ~6.5 GB por presión del sistema, no por límite propio): timer dispatch 100 ms → `kl_mem_pressure_poll`; `proc_free_bytes` = min(headroom SO, budget−footprint); `kl_mem_breakdown` en `[hb]` largo (kl_app.c); `kl_jni_low_memory` entre local frame push/pop; rearmado si no hay nativeLowMemory registrado (`g_lowmem_untold`).
-- Cámara: `klepton/runtime/media/kl_camera.c/.h` (camera2ndk "sin cámaras"), enganchado en kl_shim.c y Makefile.
-- Compositor: `kl_vulkan_mtl_zero_pending` (kl_vulkan.c) + `skipZeroPending` en KleptonCompositor.swift (quads y equirect): pide clear y omite la capa ese frame; log `[zero] compositor leyó imagen pendiente`.
-- Carátulas (VQCover.swift): log de resultados de búsqueda, búsqueda de reserva por nombre con puntuación, marcador `soon` 12 h, todas las claves y URLs de la ficha al log, clave `img`, markerVersion v4.
-- Hash de build: `vqBuildCommit` en VQBuildInfo.swift (CI escribe GITHUB_SHA::7), primera línea del log.
-- Pendiente: entitlement increased-memory-limit y medir sobrecoste de memoria propio; Demeo en AR (anclas/planos vía ARKit según inventario); pausa con corona.
-
-## Medición de memoria y liberación de PSO
-- Estimación (sin medir): sobrecoste vs Quest ~1-2 GB = PSO/funciones nunca liberados (0.25-0.8 GB) + TAA/compositor/etapas del ojo (0.6-1.0 GB). ASTC nativo (sin descompresión), VkDeviceMemory sin duplicar. MSAA 4x del juego sigue activo en tile memory (riesgo si tile_rejected>0).
-- VPKEngine: liberación de PSO por refcount en vkDestroyPipeline + MTLFunction/MTLLibrary al morir su último PSO; `vpvk_mem_stats` (alloc, ws_max, tex_*, buf_*, pso/fn/lib, ar_*, tile_rejected, recipes_*).
-- `klepton/runtime/gfx/kl_vulkan.c/.h`: `kl_vulkan_mem_stats` (símbolo débil). `klepton/visionos/Sources/kl_app.c`: breakdown en todos los `[hb]`, `[hb] gpu` en el largo, `[hb] jump +N MiB` (>200 MiB/tick) y `[hb] blocked` (500 ms y luego cada 4 s).
-- Pendiente: con el log real decidir recortes (etapas del ojo 3→2, historial TAA, prewarm sin owner).
-
-## Firmas OVRPlugin corregidas contra el ABI real (9 versiones, ref 1.117.0)
-- Herramienta: `klepton/tools/ovrp_abi.py` (ahora lee todos los `kl_ovrp*.S` para los thunks x8). Resultado: 36 graves -> 2, ambos falsos positivos verificados en el desensamblado (GetEyeFrustum devuelve HFA v0..v3 y GetFloat devuelve float en s0; la herramienta los clasifica BOOL).
-- Nuevo `klepton/runtime/xr/kl_ovrp_sret2.S` (en RUNTIME_SHIP): thunks x8 de GetNodePose/Velocity/Acceleration (+2 con step,node), GetTrackerPose, GetEyePose/Velocity/Acceleration, GetTrackingCalibratedOrigin. Struct de 28 B tipo Posef; velocidad/aceleración van en Position con orientación identidad. `kl_ovrp_input.c`/`kl_ovrp_render.c` tienen los `klovrp_*_impl`; GetNodePose2/Velocity2/Acceleration2/PoseState2 salen de k_refused y se implementan.
-- `kl_ovrp_render.c`: Initialize3/4, GetLayerTexture, GetEyeFovLayerId/PremultipliedAlphaMode (out*), SetDepthCompositingInfo(int,float,float), CalculateEyeLayerDesc (5 int + out + float, via Desc2 con depth 10) ahora ovrpResult; GetCaps/GetStatus/SetCaps/SetFloat/ShowUI/SetAppIgnoreVrFocus ovrpBool; GetCaps2/GetStatus2 reciben máscara por valor; GetFloat devuelve float; GetHmdToEyeOffset2 escribe Vector3f (12 B); GetEyeFrustum HFA4 {near,far,fovX,fovY}; GetEyeLayerRecommendedResolution(out) un solo arg; GetRuntimeName(const char**); GetUnityInterfaces(void**); GetUserNeckEyeDistance2(Vector2f*).
-- `kl_ovrp_input.c`: GetNodeFrustum/GetTrackerFrustum HFA4; GetControllerState3 = ovrpResult f(mask, out64). Teclado (4 funciones 1.81-1.104) sigue rechazado -1004 (Result en el real).
-- `kl_ovrp_misc.c`: 25 predicados de capacidad (`Get*Supported/Enabled`, MRC, tiled multires, GPUUtil, ExternalCameraCount, Media_GetInitialized...) escriben su 0 en el out de x0 (salen de las listas compartidas de kl_ovrp.c); Telemetry/QplCreateMarkerHandle escriben handle 1; GetNativeSDKPointer2 escribe NULL.
-- `kl_ovrp.c`: GetTimeInSeconds = ovrpResult f(double*); GetBoundaryDimensions HFA ovrpVector3f; GetTiledMultiResLevel, GetDepthCompositingSupported, GetEyeTrackingSupported/Enabled -> ovrpResult; DestroyEyeTexture -> ovrpBool 1; GetActiveController2/GetConnectedControllers2 escriben la máscara por out; GetControllerState4/5/6 ponen a cero 96/100/108 B; GetAppLatencyTimings2 20 B; GetHeadPoseModifier 16+12 B; ovrp_PollEvent limita la escritura al tamaño que escribe el OVRPlugin de esa versión (`klovrp_pollevent_cap`, 4..3996 B según SDK).
-- Tests host: `t_ovrp_input` ok (con stubs de las entradas x8). `spatial_test` no enlaza ahora en host (kl_ovrp_spatial.c de otro agente usa kl_envdepth_* sin stub); no tocado.
-- Pendiente: probar en visor que ningún juego dependa del viejo GetCaps/GetStatus con out; GetCaps2/GetStatus2 devuelven máscara (bit0 = running) a falta de enum verificado; fov de los frustums v0 asumido en grados.
-
-## Revisión adversarial del lote ovrp/OpenXR/espacial
-- `KleptonCompositor.swift` runARKit: si `arSession.run` falla con los proveedores espaciales, reintenta sin ellos (`KleptonSpatial.dropProviders()`), para no perder head/hands/accesorios. `installThermalFeed` quita el observer previo antes de añadir otro.
-- `app/Sources/VQLaunch.swift`: la política de escena ya no se activa por `com.oculus.feature.PASSTHROUGH` (solo `USE_SCENE`); evita el permiso de world sensing y la reconstrucción de malla en juegos que solo usan passthrough.
-- `KleptonEnvDepth.swift`: refresco de malla recorta `gv` a lo copiado y descarta mallas con índices fuera de rango (antes: acceso fuera de límites si la malla crecía entre las dos llamadas).
-- `kl_envdepth.c`: contador `inflight`; `kl_envdepth_free` espera (máx. 0,5 s) a que termine el trabajo del compositor antes de liberar las MTLTexture.
-- `kl_openxr_spatial.c`: el recorrido de la cadena de `xrGetSystemProperties` queda acotado a 8 nodos.
-- Pendiente: las extensiones de escena/planos/profundidad se evalúan una sola vez (primer enumerate) y dependen de que ARKit ya esté autorizado; si no, no se anuncian. Probar en visor con un juego con `USE_SCENE`.
-
-## Lote Meta API completo (2026-10-19)
-- Plan y reparto: inventario (meta-api.txt) → 822 funciones reales (373 ovrp, 449 xr) en 6 lotes + profundidad de entorno + esqueleto de manos.
-- Infraestructura: `kl_ovrp_register` / `kl_ovrp_priv.h`; cola real de eventos `kl_ovrp_push_event` (PollEvent2; PollEvent acotado por versión SDK del guest, `klovrp_pollevent_cap`); `kl_openxr_priv.h`: `klxr_register_rows/refused/extension`, `klxr_push_event`, KLXR_TRAMPS 1024, pool de espacios 1024, `klxr_space_create_external`, `klxr_current_instance`, sysprops espaciales.
-- Lotes: `kl_ovrp_render.c` (141), `kl_ovrp_input.c` (manos ARKit, GetHandState/2/3 `(step,frame,hand,out)`, GetSkeleton/2/3, GetMesh procedural, boundary 3x3), `kl_ovrp_spatial.c` + `kl_spatial.c/.h` + `KleptonSpatial.swift` (anclas WorldAnchor + `QUEST/Partidas/<juego>/anclas.json`, planos, sala, malla, raycast CPU, scene capture), `kl_openxr_spatial.c` (XR_FB_spatial_entity*/scene/scene_capture/container, triangle_mesh, plane_detection, passthrough extra; anclas compartidas con ovrp), `kl_openxr_ext.c` (debug_utils, thermal_query + `kl_openxr_ext_set_thermal_state`), `kl_ovrp_misc.c` / `kl_openxr_vendor.c` (rechazos limpios, telemetría aceptada y descartada).
-- Profundidad de entorno: `kl_envdepth.c/.h` + `KleptonEnvDepth.swift` (rasteriza malla ARKit por ojo, D16 320x320x2, near 0.1 far 20), XR_META_environment_depth y ovrp_*EnvironmentDepth*.
-- ABI: `klepton/tools/ovrp_abi.py` (desensamblado de libOVRPlugin real, 9 versiones SDK 1.59–1.117, referencia 1.117). Graves 36 → 2 (falsos positivos documentados: GetEyeFrustum HFA, GetFloat float). Thunks x8 en `kl_ovrp_sret2.S`.
-- Política ARKit por manifiesto (VQLaunch): escena solo con USE_SCENE, anclas con USE_ANCHOR_API; puertas de extensiones `available || política`. runARKit reintenta sin proveedores espaciales si `run` falla.
-- Verificado: clang -fsyntax-only, tests host `t_ovrp_input`, `spatial_test`; tipos OpenXR contra openxr.h oficial. Sin compilar Swift ni probar en visor.
-- Pendiente: probar TRIANGLE/AC/AoT (cambios de respuesta: espaciales ya no -1004, GetTimeInSeconds Result+out, predicados escriben out), Demeo en AR, orientación del bind de manos, eventos discovery 104/105 sin verificar.
-
-## Log de antialiasing efectivo
-- `app/Sources/VQLaunch.swift`: línea "Antialiasing efectivo: <modo> — <motivo>" tras el log de Gráficos. El selector por juego (auto/VPKTAA/MSAA/off, `VQGameAA`) ya existía; "VPKTAA permitido=false" = modo auto + juego visto con MSAA (`vq.aaDetected.<key>`>1). Swift sin compilar.
-
-## Fixes tras pruebas de 61762c5
-- AC 3D deformado: `ovrp_GetEyeLayerRecommendedResolution` devolvía 2383x1912 con layer de 2976x1912 → resolución dinámica de Unity con viewport reducido y y≠0. Ahora -1004 sin layer de ojo vivo y tamaño real con layer (`kl_ovrp_active_eye_layer_size`, kl_ovrp.c). Log `[ovrp] GetEyeLayerRecommendedResolution -> WxH`.
-- Demeo negro: Unity OpenXR + GLES con vpgles no tenía ruta de imagen (klxr_mirror_eye_image exigía ANGLE). Ruta vpgles en kl_openxr.c (kl_gles_layer_texture, `klxr_publish_eye_gles`, quads, `kl_gles_frame_end`) + `kl_gles_texture_mtl` en kl_gles.c.
-- AoT bajones: no son regresiones; GPU al límite (pase MSAA x2 2976x1912x2) → visionOS fija 50 Hz; pico puntual coincide con compilación de PSO en worker + guardado de .metalar (sin confirmar). Instrumentación: `gpu.sec` (p50/p95/max/over10) y `[cp] HALF RATE held` con gaps y estado térmico.
-- AA: el selector por juego (Automático/VPKTAA/MSAA/Off) ya existía; en Automático con MSAA detectado se mantiene el MSAA. A2C → alpha test (discard <0.5, sin early fragment tests) al forzar 1x. Log "Antialiasing efectivo: …".
-- Pendiente: confirmar la causa del pico de AoT; valorar VPKTAA por defecto en juegos MSAA.
-
-## VPKTAA nativo también en vpgles (ovrp / OpenXR) y Vulkan+OpenXR (sin compilar)
-- Jitter y máscara UI: vpgles usa el Translator de VPVulkan, así que ya valen. Profundidad: el motor la toma del pase de ojo si el host no la da.
-- kl_vulkan.c: `kl_vulkan_taa_gles_frame_end` (gancho de fin de frame de vpgles), `kl_vulkan_taa_eye_bottom_up`, `kl_vulkan_eye_color_top_left`, color del ojo desde la tabla de kl_glfb (`kl_glfb_eye_mtl_live`).
-- kl_ovrp.c EndFrame4 (rama vpgles) y kl_openxr.c xrEndFrame llaman al gancho; en Vulkan+OpenXR el registro se archiva ANTES de `kl_vulkan_frame_done`.
-- KleptonTAA.swift: flipY por ojo, tangentes espejadas si la memoria es bottom-up, `color_base`, log con la ruta.
-- Pendiente/riesgos: `pollAADetection` sigue limitado a Vulkan (en vpgles no hay detección MSAA); pose por ojo de OpenXR usa `kl_ovrp_eye_local` (no la pose por vista del layer); formato de ojo no sRGB8 sin TAA; nada compilado en Mac.
-
-## VPKTAA nativo único en todas las rutas
-- Eliminados VPKTAACore.swift y rutas async/no nativas; toggle vq.vpktaaNative borrado. Modo VPKTAA (o Automático sin MSAA) ⇒ nativo.
-- Rutas cubiertas: Vulkan+ovrp, Vulkan+OpenXR, vpgles+ovrp (`kl_vulkan_taa_gles_frame_end` en EndFrame4), vpgles+OpenXR (xrEndFrame). Profundidad desde el registro de pase de ojo del Translator.
-- vpgles: ojos `top_left=0` (`kl_glfb_note_eye_mtl_texture_o`), bottom-up con tangentes espejadas. `drop_repeat` en `klovrp_end_frame_impl` solo con stages > 1.
-- Logs TRIANGLE: el guest de TRIANGLE es Vulkan (UE4), no vpgles.
-- Pendiente: foveado propio (MTLRasterizationRateMap por ojo en metal2, desdoblado en compositor, TAA físico↔lógico; M5 solo en hardware M5). Detección de MSAA solo en Vulkan. Verificar orientación vpgles en visor.
-
-## Foveado propio en la app (2026-10-19)
-- `VQLauncher.swift`: quitado «aún sin efecto con MoltenVK» (ahora: no con MoltenVK; necesita VPKTAA nativo y juego estéreo sin MSAA). Selector M5 sigue solo en M5 (`VQSettings.isM5`).
-- `app/Native/vq_config.c`: reenvía `vpvk_config_set_foveation_apply(modo != apagado)` (dlsym; ausente en VPVulkan antiguo). Por defecto el ajuste es Apagado = como antes. Foveado de VPKEngine sin probar en visor (ver VPKEngine/bitacora.md); `VPVK_FOVEATION=0` lo anula.
-- Pendiente: reenviar tangentes de ojo (`vpvk_config_set_foveation_eyes`) cuando el XR las dé; probar M2/M5 en visor.
-
-## Foveado propio (opt-in)
-- VPKEngine: MTLRasterizationRateMap por ojo en pases de ojo (registro TAA, 2 vistas, 1x), fold/expand con sombras físicas, `viewport_array_index` por vista, `vp_rrm [[buffer(28)]]` para FragCoord, UI a resolución completa (`fovUiSplit`). Interruptor `vpvk_config_set_foveation_apply` / `VPVK_FOVEATION`; la app lo activa si el modo de foveado ≠ Apagado (por defecto Apagado). Con foveado apagado: MSL y recetas idénticos.
-- Presets de PTVisionPro: M2 centro 60° periferia 10 %, M5 70°/15 %, centerUp −10°, fade 0.15 (tan(deg/2)/1.2). Perfil separable (cuadrado redondeado), no circular.
-- Requiere VPKTAA nativo; declina con MSAA, resolves, clears de área, formatos no soportados (log `gpu.fov decline reason=`). Logs `vk.fov plan`, `gpu.fov map`.
-- Riesgos: metal_backend.mm sin compilar/probar en visor; mapa identidad 16384²; sombras untracked entre frames; coste fold/expand sin medir.
-- Ideas de PTVisionPro no aplicadas: foveado de Compositor Services (isFoveationEnabled, VRR dinámica), resolutionScale por preset.
-
-## Lote 2026-10-19 tarde: SuperHOT, Hellsplit, Demeo vídeo, memoria AC, caché de shaders
-- SuperHOT negro: `klovrp_SetupEyeTexture2` solo ANGLE. Rama vpgles: `kl_gles_legacy_eye_texture` + `vpgles_wrap_image_as` (ata VkImage al nombre GL de Unity; multiview 2 capas, eye≠0 no-op). glsl/link.cpp `sameType` estructural para uniform blocks entre etapas.
-- Hellsplit ojos separados en cargas: EndFrame4 sin capa de ojo tras haber tenido una (`ever_eye_layer`) ⇒ `drop` (no se archiva record con viewport 0). Compositor `lastKnownViewport` por stage.
-- Demeo atascado en vídeo de logos: SurfaceTexture/Surface reales (kl_jni_hostvideo.c), `kl_ANativeWindow_fromSurface` → ventana del reader (kl_media_surface_*), NV12→RGBA, `updateTexImage` sube a EXTERNAL_OES (fallback 2D), `onFrameAvailable` desde el hilo del reader (listener pinned). Diag `gles.diag INVALID_ENUM first at`.
-- AC jetsam: no hay fuga propia (contadores planos); pico de memoria gráfica no contabilizada por Metal (~1,8 GB/s) en carga síncrona hasta ~8,19 GiB. `kl_mem_total` 8192 (`KL_MEM_TOTAL_MB` revierte), avisos sobre límite real foot+avail al 65 % y crítico 80 %; `kl_mem_breakdown` con ledger_tag_graphics/media/net/purg/fp_peak/lim_rem; `kl_mem_regions` por user_tag en jump/blocked; snapshot "mem jump".
-- Caché de shaders: 64 ficheros (2048 PSO) < 4101 de AC ⇒ evicción y recompilación cada arranque. kMaxArchiveFiles 512 + índice `.keys` por fichero (archive_index.h). Log `gpu.prewarm ar_hits/ar_misses/reason`.
-- Riesgos: campos task_vm_info sin compilar en Mac; RAM de 512 archivos; vpgles con EXTERNAL_OES.
-- Revisión háptica: watchdog en cola vq.haptics (0,4 s sin drain → nivel 0 y pausa players; evita vibración pegada al salir/pausar); XR_FB_haptic_pcm samplesConsumed = mínimo real entre manos.
-- Háptica automática: quitado el ajuste de intensidad (clave vq.hapticsGain borrada). `HapticProfile.detect` por productCategory/vendorName (Sense, DualSense, Joy-Con, Xbox, genérico) con ganancia, curva suelo+(1-suelo)·x^curva, rango frecuencia→sharpness y localidad automática. Log `[cp] haptics: mando … → perfil …`. Valores de perfil sin medir.
-
-## Auditoría Android: símbolos, sensores, input, UE4, Settings (2026-10-19)
-- Símbolos: `libc/kl_bionic_extra4.c` sirve `get_crc_table`, `zError`, `zlibCompileFlags`, `crc32_z/combine`, `adler32_z/combine`, `uncompress2`, `compress` y los `deflate*/inflate*` que faltaban (forward a libz de Darwin). `xr/kl_ovrplat.c`: `ovrKeyValuePair_makeString/Int/Double` reales (struct 40 B por valor/x8); `kl_ovrplat_owns` (prefijos `ovr_`, `ovrID`, `ovrKeyValuePair_`) usado por `kl_shim_lookup` tier 11 (antes ningún tier reclamaba ese prefijo). `guest/kl_ndk.c`: `AHardwareBuffer_{to,from}HardwareBuffer`, `send/recvHandleToUnixSocket` (ticket sobre el socket, mismo proceso).
-- `kl_shim_known` (libc/kl_shim.c): xr* vía `kl_openxr_status`==2, SL_* vía `kl_opensl_known` (nuevo, media/kl_opensl.c), ovr* vía `kl_ovrplat_known` (nuevo), egl* vía `kl_egl_lookup` (salvo `KL_GLES_VPK=1`). gl*/vk* siguen por familia (kl_egl_sym fabrica stubs; kl_vulkan_lookup inicializa MoltenVK): no hay consulta pura.
-- Sensores NDK (`guest/kl_ndk.c`): acelerómetro, giroscopio, gravedad, rotation vector y game rotation vector derivados de la pose de cabeza (`kl_ovrp_get_head_pose` + `kl_ovrp_head_motion`); `kl_ndk_motion_sample` compartido (kl_ndk.h). Mundo ENU = (x,−z,y) del espacio de tracking. status int8 de sensor_vec_t corregido (antes escribía un float en data[3]). Sin acel. lineal ni magnetómetro (sin fuente).
-- AInputQueue real (`kl_ndk_input_queue`, `kl_ndk_input_push_key/motion`, accesores AKeyEvent/AMotionEvent); al hacer `attachLooper` arranca un puente mandos Touch → gamepad (A/B/X/Y, sticks, gatillos, grips, start/select). Nadie llama aún a `onInputQueueCreated` (kl_nativeactivity.c, fuera de alcance).
-- UE4 (`jni/kl_jni_ue4.c`): EnableMotion/PushSensorEvents → `nativeHandleSensorEvents([F[F[F[F)` (tilt, gyro, gravedad, aceleración=0); refresh rate = `kl_ovrp_guest_display_frequency`/panel, Set vía `kl_ovrp_request_display_frequency`, lista vía `kl_ovrp_display_frequencies`; GetFontDirectory materializa la fuente embebida en `/data/data/<pkg>/cache/fonts` (symlinks Roboto/Droid) con fallback `/system/fonts/` (duplicado en kl_jni_services.c eliminado); GetAndroidId (= ANDROID_ID de Settings), GetAdvertisingId "", LaunchURL (offline, no abre), GetInputDeviceInfo null, ClipboardCopy/Paste (UIPasteboard por runtime objc), Show/HideVirtualKeyboardInput (cancela con `nativeVirtualKeyboardResult(false, texto)`).
-- Settings/Window (`kl_jni_net.c`, `kl_jni_window.c`, `kl_jni.c`): tabla única Settings.Secure/Global/System (getString/getInt/getLong/getFloat, 2 y 3 args; 2 args ausente → SettingNotFoundException); `device_name`/`bluetooth_name` = "Meta Quest 3|2" según `klj_is_quest3()`; constantes `Settings$Global.*`; `Configuration.fontWeightAdjustment`; `WindowManager.getMaximumWindowMetrics/getCurrentWindowMetrics` + `WindowMetrics.getBounds/getWindowInsets/getDensity` + `Rect.width/height` y campos Rect; `FMOD.getAssetManager` + `FMOD.init(Lcom.unity3d…;)V`; `hasSystemFeature` ahora sí para audio.output/microphone/sensor.accelerometer/gyroscope/vr.headtracking/vr.high_performance/wifi/bluetooth(_le) (+ firma con versión).
-- Verificado: `clang -fsyntax-only` (chk.sh) de kl_ndk.c, kl_jni_{ue4,net,window,fmod,services,softinput}.c, kl_opensl.c, kl_ovrplat.c; bloques `__APPLE__` de kl_jni_ue4.c con stubs objc/CF. Sin compilar en Mac: kl_shim.c, kl_bionic_extra4.c, kl_jni.c (dependen de cabeceras Darwin).
-- Pendiente: verificar en visor que UE4 acepta la firma `nativeHandleSensorEvents` y el orden tilt/rate/gravity/accel; que `onInputQueueCreated` se llame desde el driver NativeActivity; `kl_egl.c`/`kl_vulkan.c` necesitan una consulta pura `*_known` para el escáner; Vulkan Android: MoltenVK anuncia VK_GOOGLE_display_timing directamente, no hay stub propio en kl_vulkan.c (revisar si se quiere ocultar).
-
-## klepton/runtime/gfx: sin abort por funciones GL ausentes
-- `kl_egl.c`: una funcion GL sin resolver ya no llama a `abort()` (quitado `g_permissive`): devuelve 0 con un stub por nombre, registra una vez `[egl] absent GL function called, returning 0: NAME` y al terminar la sesion (`atexit` y `kl_egl_report`) lista las ausentes llamadas con su cuenta (`kl_egl_report_absent`).
-- `kl_gles.c`: `kl_gles_sym` registra cada nombre que vpgles no resuelve (una vez, lista sin duplicados) y `kl_gles_report_unresolved` lo vuelca al final.
-- Los stubs `klgl_GetProgram*` de `g_gl_impl` se mantienen solo para la ruta sin vpgles (KL_GLFB / driver nulo): con vpgles activo `kl_gles_sym` resuelve esos nombres antes y reflejan el programa real.
-
-## Revisión: aviso de memoria en todos los drivers, informe GLES sin lock, looper/poller NDK
-- `guest/kl_{slink(x2),gles3jni,native,sdl2,ue4,jkxr}.c`: en el pump (hilo UI/juego), tras `kl_jni_drain_ui_tasks()` se llama `kl_mem_pressure_deliver()` (cada 10 ticks). `kl_driver_frame` ya lo hacía; el `exchange` de `g_lowmem_pending` impide doble entrega. No se puso en `kl_jni_drain_ui_tasks` porque `UnityPlayer.executeMainThreadJobs` lo invoca desde dentro de `nativeRender` (sería reentrante).
-- Respaldo por tiempo desde el hilo que decide: NO implementado. `AttachCurrentThread` del runtime ya equivale a `kl_jni_env()` (+`kl_thread_init`), que el hilo libdispatch ya tenía en el crash; la causa era IL2CPP sin registrar el hilo (x18 shadow 0), que un attach JNI no arregla, y además correría código gestionado concurrente con el hilo del juego a mitad de una llamada. Se mantiene solo el recorte propio (`kl_vulkan_trim`) mientras el juego está bloqueado.
-- `gfx/kl_gles.c` `kl_gles_report_unresolved`: `pthread_mutex_trylock` (apto para contexto de señal vía `kl_egl_report`; si el lock está tomado omite la lista) y `g_miss_reported` evita repetirla con los atexit (se reimprime si crece la lista).
-- `guest/kl_ndk.c`: (a) un único poller de input: sin `pthread_detach`; `detachLooper` hace `pthread_join` (mutex `g_poller_mu`, flag `poller_started`), `attachLooper` solo crea si no hay uno. (b) wake interno (`addFd/removeFd`, byte 'i') distinto de `ALooper_wake` real (byte 'w'): `kl_looper_poll` reconstruye el set de fds y sigue esperando el timeout restante (deadline); con timeout 0 devuelve TIMEOUT; solo 'w' devuelve `ALOOPER_POLL_WAKE`.
-- Verificado en Linux: `clang -fsyntax-only` (flags de XROS_CFLAGS, sin SDK) de kl_ndk.c y los 6 drivers sin errores; kl_gles.c/kl_egl.c solo fallan por APIs Darwin ausentes (`clock_gettime_nsec_np`, `pthread_threadid_np`), no por los cambios; tests host de klepton (pred_frame_offset, t_ovrp_input, spatial_test, t_ptw) con gcc + ASan/UBSan: ok. Sin probar en visor: poll con wake interno, join del poller, entrega en pumps.
+- Build: el commit debe llevar `[build]` en el mensaje (o lanzar `visionos` a mano) → IPA en el release `visionos`. Solo una build completa tras revisar; no lanzar builds por cambios sueltos.
+- VPKEngine se clona de `main` en CI (sparse `runtime` + `gpu`): hay que pushear los cambios de VPKEngine ANTES de lanzar la build. La caché de VPVulkan se invalida por hash de `vpkengine/gpu/**`.
+- Local (sin Mac): `clang -fsyntax-only` con las flags de `XROS_CFLAGS` solo sirve para ficheros sin cabeceras Darwin; el resto se valida en CI (`syntax-xros.sh`, `host-tests.sh`). Swift/.mm solo se compilan en CI.
+- Tras un fallo: leer `visionos.txt` en `ci-logs` (ver sección 5).
+- Identidad de commits: `Claude <noreply@anthropic.com>`. Ningún dato personal en el repo.
+- Bitácora: actualizar tras cada función, bug o build.
