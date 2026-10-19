@@ -4796,7 +4796,7 @@ final class KleptonCompositor {
         defer { cmdLock.lock(); ptBusy[slot] = false; cmdLock.unlock() }
         let stride = MemoryLayout<MTLCounterResultTimestamp>.stride
         guard b.status == .completed,
-              let data = ptSets[slot].resolveCounterRange(0..<4), data.count >= 4 * stride else { return }
+              let data = try? ptSets[slot].resolveCounterRange(0..<4), data.count >= 4 * stride else { return }
         var ts: [UInt64] = []
         data.withUnsafeBytes { (raw: UnsafeRawBufferPointer) -> Void in
             for i in 0..<4 {
