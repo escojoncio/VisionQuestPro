@@ -4765,7 +4765,7 @@ final class KleptonCompositor {
         }
         ptSets = made
         ptBusy = [Bool](repeating: false, count: made.count)
-        dev.sampleTimestamps(&ptCalCPU, gpuTimestamp: &ptCalGPU)
+        (ptCalCPU, ptCalGPU) = dev.sampleTimestamps()
         ptCalTime = CFAbsoluteTimeGetCurrent()
         NSLog("[cp] per-pass GPU timing on: vertex/fragment stage-boundary timestamps of the composite pass")
         return true
@@ -4796,7 +4796,7 @@ final class KleptonCompositor {
         defer { cmdLock.lock(); ptBusy[slot] = false; cmdLock.unlock() }
         let stride = MemoryLayout<MTLCounterResultTimestamp>.stride
         guard b.status == .completed,
-              let data = ptSets[slot].resolveCounterRange(NSRange(location: 0, length: 4)), data.count >= 4 * stride else { return }
+              let data = ptSets[slot].resolveCounterRange(0..<4), data.count >= 4 * stride else { return }
         var ts: [UInt64] = []
         data.withUnsafeBytes { (raw: UnsafeRawBufferPointer) -> Void in
             for i in 0..<4 {
@@ -4808,8 +4808,7 @@ final class KleptonCompositor {
         cmdLock.lock()
         if ptNsPerTick == nil, CFAbsoluteTimeGetCurrent() - ptCalTime >= 1.0, let dev = queue?.device {
             // GPU ticks -> ns, from the CPU/GPU timestamp pair taken at start and now.
-            var cpu: MTLTimestamp = 0, gpu: MTLTimestamp = 0
-            dev.sampleTimestamps(&cpu, gpuTimestamp: &gpu)
+            let (cpu, gpu) = dev.sampleTimestamps()
             if gpu > ptCalGPU, cpu > ptCalCPU { ptNsPerTick = Double(cpu - ptCalCPU) / Double(gpu - ptCalGPU) }
         }
         let scale = ptNsPerTick
