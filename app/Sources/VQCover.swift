@@ -189,11 +189,11 @@ enum VQCover {
 /// kept as the store cover (VQCoverView centres it over a blur). Result file: cover-store.<ext>;
 /// marker cover-store.none = "<unix time> <absent|soon|net> v4"
 /// (absent: the store does not know the package or has no picture, retry after 3 days; soon: first miss, retry after 12 h
-/// (a second miss becomes absent); net: retry after 7 days; a marker
+/// (a second miss becomes absent); net: retry after 1 hour; a marker
 /// without the current version tag was written by older code and counts as missing).
 enum VQCoverStore {
     private static let host = "https://oculusdb.rui2015.me"
-    private static let retryAfter: TimeInterval = 7 * 24 * 3600
+    private static let retryAfter: TimeInterval = 3600   // net failure is transient: retry in 1 h (was 7 days, which hid Deadpool's cover)
     private static let retryAbsentAfter: TimeInterval = 3 * 24 * 3600
     private static let retryAfterSoon: TimeInterval = 12 * 3600
     private static let markerVersion = "v4"
