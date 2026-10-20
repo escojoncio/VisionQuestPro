@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <time.h>
 
 #include "klepton.h"
@@ -184,11 +185,18 @@ static void ue4_report_command_line(FILE *out) {
 // user runs on device, where an env var cannot be set. olar (UE5) quits during
 // PreInit with nothing in our capture; forcing its engine log out is the only
 // diagnostic. Remove from this list once its fatal is understood and fixed.
+static int ue4_has_ci(const char *h, const char *n) {
+    size_t m = strlen(n);
+    for (; *h; h++) if (strncasecmp(h, n, m) == 0) return 1;
+    return 0;
+}
 static int ue4_stdout_default(void) {
     static const char *on[] = { "olar", "wrath2", "twd2" };
     const char *t = kl_driver_target_name();
     if (t) for (unsigned i = 0; i < sizeof on / sizeof on[0]; i++)
         if (strcmp(t, on[i]) == 0) return 1;
+    // Deadpool / RE4: engine log (culture, language packs, RHI choice) into our log.
+    if (t && (ue4_has_ci(t, "deadpool") || ue4_has_ci(t, "resident"))) return 1;
     return 0;
 }
 
