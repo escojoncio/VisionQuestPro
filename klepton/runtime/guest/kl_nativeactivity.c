@@ -106,3 +106,16 @@ int kl_na_callbacks_registered(void) {
 kl_ANativeActivity *kl_na_activity(void) { return &g_act; }
 
 const kl_ANativeActivityCallbacks *kl_na_callbacks(void) { return &g_cbs; }
+
+// Android's low-memory notification for a NativeActivity guest (UE4): the framework calls
+// callbacks->onLowMemory on the UI thread, and this is the same call made by the same thread
+// (kl_ue4_pump, via kl_mem_pressure_deliver). Without it the pressure ladder had no receiver
+// for UE4 at all: the Unity nativeLowMemory is not registered there, so nothing was told.
+// GAME/UI THREAD ONLY. 1 if the guest installed the callback and was told.
+int kl_na_low_memory(void) {
+    if (!g_cbs.onLowMemory) return 0;
+    kl_jni_local_frame_push();
+    g_cbs.onLowMemory(&g_act);
+    kl_jni_local_frame_pop();
+    return 1;
+}

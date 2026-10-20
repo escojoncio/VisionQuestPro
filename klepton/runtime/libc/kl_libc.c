@@ -1266,6 +1266,7 @@ static _Atomic int g_lowmem_untold;   // last attempt found no nativeLowMemory r
 
 void kl_vulkan_trim(const char *why);   // kl_vulkan.c: destroyed OpenXR images, no grace
 void kl_vulkan_idle_drain(unsigned min_idle_ms, const char *why);   // kl_vulkan.c: graveyard of VPKEngine, if idle
+int kl_na_low_memory(void);   // guest/kl_nativeactivity.c: ANativeActivity.callbacks->onLowMemory
 
 // DECIDE vs DELIVER. nativeLowMemory is managed code (Unity -> IL2CPP), and IL2CPP only
 // tolerates it on the game thread, between frames: on a libdispatch worker the guest's x18
@@ -1303,11 +1304,14 @@ void kl_mem_pressure_deliver(void) {
     kl_jni_local_frame_push();
     int told = kl_jni_low_memory();
     kl_jni_local_frame_pop();
+    // Unity guests answer through nativeLowMemory; a NativeActivity guest (UE4) through
+    // ANativeActivity.callbacks->onLowMemory. Only one of them exists per guest.
+    if (!told) told = kl_na_low_memory();
     if (!told) {
         static _Atomic int said;
         if (atomic_fetch_add(&said, 1) == 0)
-            fprintf(stderr, "  [mem] pressure (%s) and the guest registered no "
-                            "nativeLowMemory — nothing to notify\n", why);
+            fprintf(stderr, "  [mem] pressure (%s) and the guest registered neither nativeLowMemory "
+                            "nor onLowMemory — nothing to notify\n", why);
         // Can fire before JNI_OnLoad / RegisterNatives: do not spend the episode on
         // nobody, retry on the next poll (the log line below is muted meanwhile).
         atomic_store(&g_lowmem_untold, 1);

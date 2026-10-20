@@ -105,4 +105,8 @@ kl_ANativeActivity *kl_na_activity(void);
 // Steam Link never used.
 const kl_ANativeActivityCallbacks *kl_na_callbacks(void);
 
+// Android's low-memory notification: callbacks->onLowMemory, if the guest installed it.
+// Game/UI thread only, between frames. 1 if the guest was told, 0 if the slot is empty.
+int kl_na_low_memory(void);
+
 #endif
