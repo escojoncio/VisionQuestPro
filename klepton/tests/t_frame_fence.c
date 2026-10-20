@@ -104,6 +104,7 @@ static int one_frame(uint64_t issued, double *waited, unsigned *infl, unsigned *
 }
 
 int main(void) {
+    setenv("KL_VK_FRAME_ASYNC", "1", 1);   // the pipelined path is opt-in; the test exercises it
     // 1. S = 3 stages, N = 2 (defaults): at most ONE frame submitted-and-incomplete when the frame end returns,
     //    and the serial never runs ahead of the GPU.
     reset_world(3);
@@ -185,7 +186,7 @@ int main(void) {
         assert(g_bad == 0);
     }
 
-    // 8. Mode switches: default on; KL_VK_FRAME_ASYNC=0 or an explicit KL_VK_FRAME_SYNC turn it off.
+    // 8. Mode: on here because main() set KL_VK_FRAME_ASYNC=1 (the default is off).
     assert(klvk_frame_pipelined_on() == 1);
 
     printf("t_frame_fence: ok\n");

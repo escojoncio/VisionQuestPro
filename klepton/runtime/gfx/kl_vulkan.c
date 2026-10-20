@@ -4647,14 +4647,15 @@ static void klvk_taa_next_jitter(unsigned eye_w, unsigned eye_h, int resolving, 
 
 // ---- pipelined frame end (see kl_vulkan_frame_done) ----
 // KL-TEST-BEGIN fence
-// 1 = the frame end does not wait for the GPU to finish THIS frame (default). KL_VK_FRAME_ASYNC=0 or an
-// explicit KL_VK_FRAME_SYNC (=1: wait for the whole queue, =0: do not wait at all, the old A/B) bring
-// the vkQueueWaitIdle behaviour back.
+// 1 = the frame end does not wait for the GPU to finish THIS frame. OFF by default (KL_VK_FRAME_ASYNC=1
+// turns it on): measured on Batman (GPU-bound) it gave no fps and ~10 % late compositor presents
+// (judder) plus ~6 ms more pose age. An explicit KL_VK_FRAME_SYNC (=1: wait for the whole queue,
+// =0: do not wait at all, the old A/B) also forces it off.
 static int klvk_frame_pipelined_on(void) {
     static int on = -1;
     if (on < 0) {
         const char *sy = getenv("KL_VK_FRAME_SYNC");
-        on = kl_env_on("KL_VK_FRAME_ASYNC", 1) && !(sy && *sy);
+        on = kl_env_on("KL_VK_FRAME_ASYNC", 0) && !(sy && *sy);
     }
     return on;
 }
