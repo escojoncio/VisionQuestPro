@@ -432,7 +432,7 @@ final class VQSettings: ObservableObject {
         c.force_single_sample = aa.mode == .vpktaa ? 1 : 0
         setenv("KL_FPS_HUD", showFps ? "1" : "0", 1)
         setenv("VPVK_FORCE_1X", c.force_single_sample != 0 ? "1" : "0", 1)
-        c.render_scale = Float(effScale)
+        c.render_scale = 1  // eye size comes only from the resolution slider (KL_OVRP_EYE_SCALE)
         c.asw_disabled = aswDisabled ? 1 : 0
         c.quest3_profile = quest3Profile ? 1 : 0
         _ = vq_gfx_config_apply(&c)
@@ -457,7 +457,7 @@ final class VQSettings: ObservableObject {
         setenv("VPVK_REPORT_GEOM", "1", 1)
         unsetenv("VPVK_TAA_JITTER")  // set to 0 by the conformance runs only (VQConformance.neutralGraphics)
         let detText = detected.map { "\($0)x" } ?? "no"
-        VQLog.log("Gráficos: foveado Quest siempre apagado; foveado propio \(foveation), AA: modo \(aa.mode.rawValue), MSAA override \(msaaOverride), detectado \(detText) (juego \(aaKey.isEmpty ? "?" : aaKey)\(aa.stored ? "" : ", por defecto")), VPKTAA nativo permitido \(vpktaa) \(Int(vpktaaPercent)) %, Nitidez (RCAS) \(Int(effRcas * 100)) % (\(VQGameRCAS.load(key: gameKey) == nil ? "global" : "del juego")), forzar 1x \(c.force_single_sample != 0), anisotrópico x\(anisoLevel), diagnóstico de rendimiento \(perfDiag), diagnóstico de ficheros \(fsDiag), escala \(effScale), ASW apagado \(aswDisabled), perfil Quest 3 \(quest3Profile), perfil Vulkan completo \(vkFullProfile), FPS en pantalla \(showFps)")
+        VQLog.log("Gráficos: foveado Quest siempre apagado; foveado propio \(foveation), AA: modo \(aa.mode.rawValue), MSAA override \(msaaOverride), detectado \(detText) (juego \(aaKey.isEmpty ? "?" : aaKey)\(aa.stored ? "" : ", por defecto")), VPKTAA nativo permitido \(vpktaa) \(Int(vpktaaPercent)) %, Nitidez (RCAS) \(Int(effRcas * 100)) % (\(VQGameRCAS.load(key: gameKey) == nil ? "global" : "del juego")), forzar 1x \(c.force_single_sample != 0), anisotrópico x\(anisoLevel), diagnóstico de rendimiento \(perfDiag), diagnóstico de ficheros \(fsDiag), resolución \(Int(effPct.rounded())) %, ASW apagado \(aswDisabled), perfil Quest 3 \(quest3Profile), perfil Vulkan completo \(vkFullProfile), FPS en pantalla \(showFps)")
         // Effective antialiasing and why (one line, so a log alone explains what the eye pass will be).
         let aaEffective: String
         let aaWhy: String
