@@ -1076,8 +1076,44 @@ static const char *klplat_AssetDetails_GetDownloadStatus(const void *a) {
 static const char *klplat_AssetDetails_GetIapStatus(const void *a) {
     plat_hit("ovr_AssetDetails_GetIapStatus"); (void)a; return "free";
 }
+// A language pack's Metadata is the version of the game it was uploaded for, and
+// Marvel's Deadpool VR only marks a pack Installed when it equals its own
+// UGameVersion::GetGameVersionString(false) (exact compare; otherwise the pack's
+// state stays NotInstalled and the language is greyed out). The string is asked of
+// the game itself, on the guest thread that is calling us. FString is returned
+// through x8 (non-trivial type), which a >16-byte struct reproduces in C.
+typedef struct { void *d; int32_t n, m; char pad[16]; } klplat_fstr;
+static const char *plat_game_version(void) {
+    static char ver[96];
+    static int state, tries;                             // state 1 = settled
+    static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
+    pthread_mutex_lock(&mu);
+    if (!state) {
+        klplat_fstr (*fn)(int) =
+            (klplat_fstr (*)(int))kl_guest_sym_global("_ZN12UGameVersion20GetGameVersionStringEb");
+        if (fn) {
+            klplat_fstr r = fn(0);
+            const uint16_t *w = (const uint16_t *)r.d;
+            ver[0] = 0;
+            if (w && r.n > 1 && r.n < (int32_t)sizeof ver) {
+                int i = 0;
+                for (; i < r.n - 1 && w[i] && w[i] < 128; i++) ver[i] = (char)w[i];
+                ver[i] = 0;
+                if (i != r.n - 1) ver[0] = 0;            // not plain ASCII: unusable
+            }
+            fprintf(stderr, "  [plat] game version string for language-pack metadata: \"%s\"\n", ver);
+            if (ver[0] || ++tries >= 3) state = 1;       // a few tries: config may not be ready yet
+        } else {
+            fprintf(stderr, "  [plat] no UGameVersion::GetGameVersionString: empty language-pack metadata\n");
+            state = 1;
+        }
+    }
+    pthread_mutex_unlock(&mu);
+    return ver;
+}
 static const char *klplat_AssetDetails_GetMetadata(const void *a) {
-    plat_hit("ovr_AssetDetails_GetMetadata"); (void)a; return "";
+    plat_hit("ovr_AssetDetails_GetMetadata");
+    return asset_is_lang((const klplat_asset *)a) ? plat_game_version() : "";
 }
 static uint64_t klplat_AssetDetails_GetLanguage(const klplat_asset *a) {
     plat_hit("ovr_AssetDetails_GetLanguage");
