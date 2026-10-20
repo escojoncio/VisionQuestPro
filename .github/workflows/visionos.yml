@@ -32,7 +32,6 @@ jobs:
         with:
           repository: ${{ github.repository_owner }}/VPKEngine
           path: vpkengine
-          ref: c06a96a1466a1bdbffd84cff0e88c04dcf05bbbe   # last green VPKEngine; f93d027 hangs gpu_vulkan.async_pipelines
           fetch-depth: 1
           sparse-checkout: |
             runtime
