@@ -31,7 +31,7 @@ klepton_tests() {
   run() { # name, then compile args
     local n=$1; shift
     echo "--- $n"
-    if clang $SAN "$@" -o "$T/$n" && perl -e 'alarm 240; exec @ARGV' "$T/$n"; then   # alarm: a hung test is named, not a 90-minute stall echo "ok: $n"; else echo "FAILED: klepton test $n"; rc=1; fi
+    if clang $SAN "$@" -o "$T/$n" && perl -e 'alarm 240; exec @ARGV' "$T/$n"; then echo "ok: $n"; else echo "FAILED: klepton test $n"; rc=1; fi
   }
   cd "$XR" || return 1
   run pred_frame_offset_test tests/pred_frame_offset_test.c -lm
