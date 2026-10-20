@@ -198,9 +198,8 @@ static void put_d(uint8_t *out, size_t off, double v) { memcpy(out + off, &v, 8)
 // estimated shoulder (the head, 17 cm to the side, 17 cm down, turned with the
 // head's yaw only) through it. That is what a Quest does and what keeps the ray
 // steady while the wrist rolls.
-static void hand_pointer(int hand, const float pinch_pt[3], float pose[7]) {
-    kl_ovrp_pose7 h;
-    kl_ovrp_guest_head(0, &h);
+static void hand_ray(int hand, const kl_ovrp_pose7 *hp, const float pinch_pt[3], float pose[7]) {
+    const kl_ovrp_pose7 h = *hp;
     float hq[4] = { h.qx, h.qy, h.qz, h.qw };
     float fwd[3], f0[3] = { 0.0f, 0.0f, -1.0f };
     q_rot(hq, f0, fwd);
@@ -224,6 +223,32 @@ static void hand_pointer(int hand, const float pinch_pt[3], float pose[7]) {
     }
     pose[0] = q[0]; pose[1] = q[1]; pose[2] = q[2]; pose[3] = q[3];
     pose[4] = pinch_pt[0]; pose[5] = pinch_pt[1]; pose[6] = pinch_pt[2];
+}
+
+static void hand_pointer(int hand, const float pinch_pt[3], float pose[7]) {
+    kl_ovrp_pose7 h;
+    kl_ovrp_guest_head(0, &h);
+    hand_ray(hand, &h, pinch_pt, pose);
+}
+
+// The same ray for kl_openxr's aim pose, in the display space kl_ovrp_hand_motion
+// and kl_ovrp_get_guest_head_pose speak (the joints are stored raw, in ARKit's
+// origin space; hand_fill subtracts the guest origin height only for the OVRPlugin
+// state). `head` is that display-space head pose (px py pz qx qy qz qw). 0 when this hand has no joints
+// (a Sense controller, or nothing tracked): the caller keeps its own aim then.
+int kl_ovrp_hand_aim_pose(int hand, const float head[7], float quat[4], float pos[3]) {
+    if ((unsigned)hand > 1 || !head) return 0;
+    hj_data d;
+    if (!hj_read(hand, &d) || !d.valid) return 0;
+    if (!(d.tracked & (1u << 5)) || !(d.tracked & (1u << 10))) return 0;   // thumb tip, index tip
+    float pp[3] = { (d.pose[5][0] + d.pose[10][0]) * 0.5f, (d.pose[5][1] + d.pose[10][1]) * 0.5f,
+                    (d.pose[5][2] + d.pose[10][2]) * 0.5f };
+    kl_ovrp_pose7 hp = { head[0], head[1], head[2], head[3], head[4], head[5], head[6] };
+    float ray[7];
+    hand_ray(hand, &hp, pp, ray);
+    if (quat) { quat[0] = ray[0]; quat[1] = ray[1]; quat[2] = ray[2]; quat[3] = ray[3]; }
+    if (pos)  { pos[0] = ray[4]; pos[1] = ray[5]; pos[2] = ray[6]; }
+    return 1;
 }
 
 // Fills the 512 bytes. Returns 1 when the hand is tracked.

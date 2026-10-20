@@ -26,7 +26,25 @@ int main(void) {
     float f[128]; memcpy(f, out, 512);
     assert(*(int *)out == 3 && fabsf(f[6] - 0.5f) < 1e-5f);             // tracked, y minus origin
     assert(*(int *)(out + 416) == 2 && fabsf(f[106] - 0.8f) < 1e-5f);   // index pinch
+    // OpenXR aim of a hand-tracked hand: from the shoulder (head 17 cm to the side, 17 cm
+    // down) through the pinch point, so a hand ahead and below the head points forward and
+    // down, the origin is the pinch point and nobody is hand-tracked without joints.
+    {
+        float head[7] = { 0, 1.6f, 0, 0, 0, 0, 1 }, q[4], pp[3], fwd[3], z[3] = { 0, 0, -1 };
+        float *tp = pose + 5 * 7, *ip = pose + 10 * 7;          // thumb tip, index tip
+        tp[0] = ip[0] = 0.25f; tp[1] = ip[1] = 1.1f; tp[2] = ip[2] = -0.3f;
+        kl_ovrp_set_hand_joints(1, pose, 0x3FFFFFF, pin, 2);
+        assert(kl_ovrp_hand_aim_pose(1, head, q, pp) == 1);
+        assert(fabsf(pp[0] - 0.25f) < 1e-5f && fabsf(pp[1] - 1.1f) < 1e-5f && fabsf(pp[2] + 0.3f) < 1e-5f);
+        q_rot(q, z, fwd);                                       // -Z of the aim = the ray
+        assert(fwd[2] < -0.5f && fwd[1] < -0.3f && fwd[1] > -0.9f);   // forward and down, not up
+        assert(fabsf(fwd[0] * fwd[0] + fwd[1] * fwd[1] + fwd[2] * fwd[2] - 1.0f) < 1e-4f);
+        assert(kl_ovrp_hand_aim_pose(0, head, q, pp) == 0);     // left: no joints published
+        kl_ovrp_set_hand_joints(1, pose, 0x3FFFFFF & ~(1u << 10), pin, 2);
+        assert(kl_ovrp_hand_aim_pose(1, head, q, pp) == 0);     // index tip untracked
+    }
     kl_ovrp_set_hand_joints(1, NULL, 0, NULL, 0);
+    assert(kl_ovrp_hand_aim_pose(1, (float[7]){ 0, 1.6f, 0, 0, 0, 0, 1 }, NULL, NULL) == 0);
     klovrp_GetHandState3(0, -1, 1, out);
     assert(*(int *)out == 0 && ((float *)out)[4] == 1.0f);               // untracked: identity
     assert(klovrp_GetHandState3(0, -1, 3, out) == KLOVRP_INVALID_PARAM);
