@@ -2488,6 +2488,30 @@ static const char *kl_guest_path_inner(const char *path, char *buf, size_t cap) 
             }
         }
     }
+    // UE4: a language/content pack probed as <...>/Content/Paks/<name>.lang|.pak
+    // that is not there but sits in the obb dir (where the platform delivers it on
+    // a headset). Marvel's Deadpool VR polls Paks/en.lang forever and its language
+    // selector offered only English. Only a MISSING path is redirected.
+    {
+        size_t pl = strlen(path);
+        if (pl > 5 && strstr(path, "/Content/Paks/") &&
+            (strcmp(path + pl - 5, ".lang") == 0 || strcmp(path + pl - 4, ".pak") == 0)) {
+            extern const char *kl_jni_obb_dir(void);
+            struct stat st;
+            const char *od = stat(path, &st) != 0 ? kl_jni_obb_dir() : NULL;
+            if (od && *od) {
+                char alt[1024];
+                int an = snprintf(alt, sizeof alt, "%s/%s", od, strrchr(path, '/') + 1);
+                if (an > 0 && (size_t)an < sizeof alt && stat(alt, &st) == 0) {
+                    static int said;
+                    if (said++ < 4)
+                        fprintf(stderr, "  [path] %s -> obb dir %s\n", path, alt);
+                    snprintf(buf, cap, "%s", alt);
+                    return buf;
+                }
+            }
+        }
+    }
     // NOTE: a former "/Source/portal2" -> "/Source/portal" alias was REMOVED. It
     // was meant to read the launcher's hardcoded portal2 paths through to the staged
     // portal folder, but it backfired: the HL2Q3VR launcher's GetSourceGameDirectory

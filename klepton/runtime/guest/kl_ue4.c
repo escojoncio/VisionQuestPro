@@ -739,7 +739,14 @@ static void kl_ue4_java_create(FILE *out) {
     // this is a name list rather than a probe — a wrong guess does not corrupt,
     // it faults loudly in klj_str exactly as TWD2 did, which names the fix.
     const char *ue4_tgt = kl_driver_target_name();
-    int is_425 = ue4_tgt && strcmp(ue4_tgt, "re4") == 0;
+    // The app names the target after the game folder ("Resident Evil 4"), not the
+    // host table key ("re4"), so the package is what identifies it there. Missing
+    // this shifted every string by one (handle 0x20 read as a String), left
+    // Build.MANUFACTURER unset and so IsStandaloneStereoOnlyDevice false, and the
+    // engine then fell to GLES ("does not support Vulkan").
+    const char *ue4_pkg = kl_jni_guest_package();
+    int is_425 = (ue4_tgt && strcmp(ue4_tgt, "re4") == 0) ||
+                 (ue4_pkg && strcmp(ue4_pkg, "com.Armature.VR4") == 0);
     if (is_425) {
         UE4_CALL(out, "nativeSetAndroidVersionInformation", ue4_fn_sssss,
                  jrel, jmake, jmodel, jbuild, jloc);

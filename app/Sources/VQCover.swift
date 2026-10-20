@@ -298,7 +298,18 @@ enum VQCoverStore {
                 let short = shortURL(candidate)
                 var data: Data
                 do {
-                    let (d, r) = try await session.data(from: candidate)   // follows redirects
+                    let (d, r): (Data, URLResponse)
+                    do { (d, r) = try await session.data(from: candidate) }   // follows redirects
+                    catch let e as URLError where (e.code == .cannotFindHost || e.code == .dnsLookupFailed) && (candidate.host ?? "").hasSuffix(".oculuscdn.com")
+                                                  && candidate.host != "scontent.oculuscdn.com" {
+                        // The store page quotes a regional edge host (scontent-fra5-2…) that may no longer
+                        // resolve; the same signed path is served by the generic host.
+                        var c = URLComponents(url: candidate, resolvingAgainstBaseURL: false)
+                        c?.host = "scontent.oculuscdn.com"
+                        guard let alt = c?.url else { throw e }
+                        VQLog.log("Carátula de tienda: \(short) no resuelve; se prueba scontent.oculuscdn.com")
+                        (d, r) = try await session.data(from: alt)
+                    }
                     let http = r as? HTTPURLResponse
                     let type = http?.value(forHTTPHeaderField: "Content-Type") ?? "?"
                     let size = VQCover.dimensions(d).map { "\($0.w)x\($0.h)" } ?? "sin dimensiones"
