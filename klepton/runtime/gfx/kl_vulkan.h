@@ -125,6 +125,10 @@ void *kl_vulkan_mtl_for_handle(unsigned long long h);
 int kl_vulkan_mtl_zero_pending(void *mtl);
 // 1 once the guest has rendered/copied into layer `layer_key`'s own image.
 int kl_vulkan_layer_written(int layer_key);
+// How many times the guest wrote to this layer's own images (render target, copy, blit) since the run started: a
+// monotonic counter, so two reads that differ say "content was written in between". Diagnosis (kl_ovrp.c per-layer
+// written / not-written census); 0 for an unknown layer or without a Vulkan guest.
+unsigned kl_vulkan_layer_write_events(int layer_key);
 void *kl_vulkan_layer_mtl_texture(int layer_key, int stage, int eye,
                                   int *w, int *h);
 
@@ -491,6 +495,8 @@ void *kl_vulkan_xr_image_mtl(unsigned long long image);
 
 // ...and its release (xrDestroySwapchain): destroyed after a short grace period.
 void kl_vulkan_xr_image_free(unsigned long long image);
+// Tell VPKEngine this swapchain image belongs to the eye (projection) layer (vpvk_mark_eye_image); no-op without it.
+void kl_vulkan_xr_image_mark_eye(unsigned long long image, int stage, int eye);
 
 // Memory pressure: frees every destroyed OpenXR swapchain image still in its grace period.
 void kl_vulkan_trim(const char *why);

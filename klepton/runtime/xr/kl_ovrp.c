@@ -2278,6 +2278,15 @@ float klovrp_measured_eye_height(void) {
     if (mm > 0) return (float)mm / 1000.0f;
     return klovrp_posture() == 1 ? 1.2f : 1.6f;
 }
+// Measured standing eye height, or 0 while nothing has measured it yet (no head
+// published and no KL_OVRP_EYE_HEIGHT). klovrp_measured_eye_height answers a
+// default in that case, which an OpenXR LOCAL space must not mistake for a
+// measurement.
+float kl_ovrp_measured_eye_height_or0(void) {
+    float ov = klovrp_eye_override();
+    if (ov > 0.0f) return ov;
+    return (float)__atomic_load_n(&g_eye_mm, __ATOMIC_ACQUIRE) / 1000.0f;
+}
 static void klovrp_eye_latch(float y, const char *why) {
     int old = __atomic_exchange_n(&g_eye_mm, (int)lrintf(y * 1000.0f), __ATOMIC_ACQ_REL);
     if (old > 0) {
@@ -4685,6 +4694,64 @@ static uint64_t klovrp_GetTrackingTransformRelativePose(float *out, int origin) 
 // +0x28 acceleration, +0x34 angular velocity, +0x40 angular acceleration.
 // Node 9 (Head) and the eyes/trackers report the frontend head pose; nodes
 // 3/4 (HandLeft/HandRight) report their own poses.
+// Diagnosis of the "combat does not finish" report: do the hand velocities the GAME receives look like a swing? Hand
+// nodes 3 (left) / 4 (right), measured on what ovrpPoseStatef holds when it is handed back (velocity +0x1c, angular
+// velocity +0x34). Per hand, every 0.5 s: the latest |v| / |av| and the peak of that window; one line per swing (|v|
+// above 1.5 m/s until it falls under 1.0), with its peak. Capped (KL_OVRP_VEL_DIAG=0 turns it off). Diagnosis only:
+// nothing here changes what the guest is told.
+static void klovrp_vel_diag(int node, int step, const float *f) {
+    if (node != 3 && node != 4) return;
+    static int on = -1;
+    if (on < 0) on = kl_env_on("KL_OVRP_VEL_DIAG", 1);
+    if (!on) return;
+    static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
+    static struct {
+        double t_print;            // monotonic seconds of the last window line
+        float  last_v, last_av;    // the latest published
+        float  peak_v, peak_av;    // this window
+        unsigned reads;            // reads in this window
+        int    in_swing; float swing_v, swing_av; double swing_t0;
+    } h[2];
+    static unsigned vel_lines, swing_lines, swings;
+    const float v  = sqrtf(f[7] * f[7] + f[8] * f[8] + f[9] * f[9]);
+    const float av = sqrtf(f[13] * f[13] + f[14] * f[14] + f[15] * f[15]);
+    if (!isfinite(v) || !isfinite(av)) return;
+    struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
+    const double now = (double)ts.tv_sec + (double)ts.tv_nsec * 1e-9;
+    const int i = node - 3;
+    pthread_mutex_lock(&mu);
+    if (h[i].t_print == 0.0) h[i].t_print = now;
+    h[i].last_v = v, h[i].last_av = av, h[i].reads++;
+    if (v > h[i].peak_v) h[i].peak_v = v;
+    if (av > h[i].peak_av) h[i].peak_av = av;
+    if (!h[i].in_swing && v > 1.5f) {
+        h[i].in_swing = 1, h[i].swing_v = v, h[i].swing_av = av, h[i].swing_t0 = now;
+    } else if (h[i].in_swing) {
+        if (v > h[i].swing_v) h[i].swing_v = v;
+        if (av > h[i].swing_av) h[i].swing_av = av;
+        if (v < 1.0f) {
+            h[i].in_swing = 0;
+            swings++;
+            if (swing_lines < 300) {
+                swing_lines++;
+                fprintf(stderr, "  [ctrl] vel swing #%u hand %c: peak |v|=%.2f m/s |av|=%.1f rad/s over %.0f ms (step %d)\n",
+                        swings, i ? 'R' : 'L', (double)h[i].swing_v, (double)h[i].swing_av,
+                        (now - h[i].swing_t0) * 1000.0, step);
+            }
+        }
+    }
+    if (now - h[i].t_print >= 0.5) {
+        if (vel_lines < 4000) {
+            vel_lines++;
+            fprintf(stderr, "  [ctrl] vel hand %c: |v|=%.2f m/s |av|=%.1f rad/s (published) peak0.5s |v|=%.2f |av|=%.1f reads=%u%s\n",
+                    i ? 'R' : 'L', (double)h[i].last_v, (double)h[i].last_av, (double)h[i].peak_v,
+                    (double)h[i].peak_av, h[i].reads, vel_lines == 4000 ? " (line cap reached)" : "");
+        }
+        h[i].t_print = now, h[i].peak_v = h[i].peak_av = 0.0f, h[i].reads = 0;
+    }
+    pthread_mutex_unlock(&mu);
+}
+
 uint64_t klovrp_GetNodePoseState_impl(int step, int node, void *out) {
     ovrp_hit("ovrp_GetNodePoseState");
     ovrp_log_arg("ovrp_GetNodePoseState", node, __builtin_return_address(0));
@@ -4851,6 +4918,7 @@ uint64_t klovrp_GetNodePoseState_impl(int step, int node, void *out) {
         }
         memcpy((char *)out + 0x50, &tm, sizeof tm);
     }
+    klovrp_vel_diag(node, step, (const float *)out);
     return OVRP_SUCCESS;
 }
 
@@ -5158,7 +5226,9 @@ static void fill_controller_state(int mask, void *out, int version) {
 // Without the env var the first 24 calls of EACH GetControllerState* version
 // (mask + Connected returned) are still logged, so one ordinary run shows what
 // every OVRPlugin generation was asked and answered.
+static uint32_t g_ctrl_conn = 0xffffffffu;   // the last ConnectedControllers handed to the game (menu diagnosis)
 static void ctrl_state_log(const char *name, int mask, void *out) {
+    __atomic_store_n(&g_ctrl_conn, ((const uint32_t *)out)[0], __ATOMIC_RELAXED);
     static int verbose = -1;
     if (verbose < 0) verbose = (int)kl_env_uint("KL_OVRP_VERBOSE", 0);
     static unsigned total;
@@ -7035,10 +7105,100 @@ static int klovrp_enq_owns_overlays(void) {
     return v && g_enq_frames_since < KLOVRP_ENQ_LIVE_FRAMES;
 }
 
+// The layer's blend factors, from the submit's OverrideBlendFactors / Src / Dst (+0xb0 / +0xb4 / +0xb8). Those bytes are
+// the blend triple ONLY in the headers that carry it; in the older ones +0xb0 is the quad's size (see klovrp_quad_size),
+// so nothing is read until that layout has been latched as +0xbc. Values outside ovrpBlendFactor 0..5 (DWARF of
+// libOculusXRPlugin: Zero, One, SrcAlpha, OneMinusSrcAlpha, DstAlpha, OneMinusDstAlpha) leave the default. Logged once
+// per layer. ovrp_EnqueueSubmitLayer2 (AC Nexus) has no such arguments: the plugin itself fills has_blend=0, 2, 3 there,
+// i.e. SrcAlpha / OneMinusSrcAlpha, which is the compositor's default.
+static void klovrp_overlay_blend(const ovrp_layer_submit *s, const struct klovrp_layer *l, int layer_id,
+                                 kl_ovrp_overlay *o) {
+    static unsigned said;   /* bit per layer slot, 32 layers max */
+    static int enabled = -1;
+    if (enabled < 0) enabled = kl_env_on("KL_OVRP_BLEND_FACTORS", 1);
+    if (!enabled || klovrp_quad_size_off != 0xbc) return;
+    if (!l || (unsigned)s->has_blend_factors > 1u) return;
+    if (s->has_blend_factors && (unsigned)s->src_blend_factor <= 5u && (unsigned)s->dst_blend_factor <= 5u) {
+        o->blend_on = 1, o->blend_src = s->src_blend_factor, o->blend_dst = s->dst_blend_factor;
+    }
+    unsigned bit = 1u << ((unsigned)layer_id & 31u);
+    if (said & bit) return;
+    said |= bit;
+    fprintf(stderr, "  [ovrp] layer %d blend: %s (has_blend_factors=%d src=%d dst=%d, submit flags %#x)\n", layer_id,
+            o->blend_on ? "the layer's factors" : "default SrcAlpha/OneMinusSrcAlpha", s->has_blend_factors,
+            s->src_blend_factor, s->dst_blend_factor, (unsigned)s->submit_flags);
+}
+
+// Diagnosis of "OVRInput.connected = 0x0 while ovrp answers Connected=0x3" and of input that dies around menus: when the
+// guest's non-eye layer count goes between zero and non-zero (a menu opening / closing) print which input entry points
+// were called since the previous transition (calls delta per name, families Controller / Connected / Active /
+// Hand / Haptics / InputFocus / VrFocus), the last ConnectedControllers handed to the game, and ask the managed side
+// what OVRInput says (kl_mprobe_note_menu). Capped at 80 transitions. Reads g_ovrp racily: counters only.
+void kl_mprobe_note_menu(int overlays_before, int overlays_after);   // diag/kl_mprobe.c
+static void klovrp_menu_transition(int before, int after) {
+    static unsigned seen[KL_OVRP_MAX], lines;
+    if (lines >= 80) return;
+    lines++;
+    char buf[900];
+    size_t o = 0;
+    unsigned nn = __atomic_load_n(&g_novrp, __ATOMIC_ACQUIRE);
+    if (nn > KL_OVRP_MAX) nn = KL_OVRP_MAX;
+    for (unsigned i = 0; i < nn && o + 80 < sizeof buf; i++) {
+        const char *nm = g_ovrp[i].name;
+        if (!nm) continue;
+        unsigned c = g_ovrp[i].calls, d = c - seen[i];
+        seen[i] = c;
+        if (!d) continue;
+        if (!(strstr(nm, "Controller") || strstr(nm, "Connected") || strstr(nm, "Active") || strstr(nm, "Hand") ||
+              strstr(nm, "Haptic") || strstr(nm, "Vibration") || strstr(nm, "InputFocus") || strstr(nm, "VrFocus")))
+            continue;
+        o += (size_t)snprintf(buf + o, sizeof buf - o, " %s x%u", nm + (strncmp(nm, "ovrp_", 5) == 0 ? 5 : 0), d);
+    }
+    fprintf(stderr, "  [ctrl] menu transition #%u: overlays %d -> %d, last Connected handed out=0x%x, input calls since the "
+                    "last transition:%s\n", lines, before, after, __atomic_load_n(&g_ctrl_conn, __ATOMIC_RELAXED),
+            o ? buf : " (none)");
+    kl_mprobe_note_menu(before, after);
+}
+
+// Per overlay layer, every 600 published frames: in how many of them the guest had written to the layer's own image since
+// the previous one, and in how many not (kl_vulkan_layer_write_events moved or not). Answers "is the panel's text
+// painted once and never again?" without a capture. Capped at 200 lines; layers beyond 16 are not counted.
+static void klovrp_overlay_content_stats(const kl_ovrp_overlay *v, int n) {
+    static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
+    static struct { int id; unsigned last, frames, with, without, tot_with, tot_without; } st[16];
+    static unsigned lines;
+    if (!v) return;
+    pthread_mutex_lock(&mu);
+    for (int i = 0; i < n; i++) {
+        int k = -1;
+        for (int j = 0; j < 16; j++) {
+            if (st[j].id == v[i].layer_id) { k = j; break; }
+            if (!st[j].id && k < 0) k = j;
+        }
+        if (k < 0) continue;
+        if (!st[k].id) st[k].id = v[i].layer_id, st[k].last = kl_vulkan_layer_write_events(v[i].layer_id);
+        unsigned ev = kl_vulkan_layer_write_events(v[i].layer_id);
+        if (ev != st[k].last) st[k].with++, st[k].tot_with++; else st[k].without++, st[k].tot_without++;
+        st[k].last = ev;
+        if (++st[k].frames >= 600) {
+            if (lines < 200) {
+                lines++;
+                fprintf(stderr, "  [prov] overlay layer %d: last 600 published frames: %u with content written to its "
+                                "image, %u without (run total %u / %u; own-image writes only, a layer drawn from the "
+                                "game's texL is not counted)\n", st[k].id, st[k].with, st[k].without, st[k].tot_with,
+                        st[k].tot_without);
+            }
+            st[k].frames = st[k].with = st[k].without = 0;
+        }
+    }
+    pthread_mutex_unlock(&mu);
+}
+
 static void klovrp_record_overlays(const void *layer_submits, int count) {
     const ovrp_layer_submit *const *list = layer_submits;
     kl_ovrp_overlay tmp[KLOVRP_MAX_LAYERS];
     int n = 0;
+    int menu_before = -1, menu_after = -1, committed = 0;
     for (int i = 0; list && i < count && n < KLOVRP_MAX_LAYERS; i++) {
         const ovrp_layer_submit *s = list[i];
         if (!s) continue;
@@ -7124,6 +7284,7 @@ static void klovrp_record_overlays(const void *layer_submits, int count) {
         // against. klovrp_quad_size tells them apart and latches; see it.
         if (o->shape == 0)
             klovrp_quad_size(s, o->size);
+        klovrp_overlay_blend(s, l, effective_id, o);
         // Back a GLES non-eye layer with something a compositor can sample.
         // The Vulkan half is already handled — o is read back through
         // kl_vulkan_layer_mtl_texture in encodeOverlays — but on GLES nothing
@@ -7170,11 +7331,15 @@ static void klovrp_record_overlays(const void *layer_submits, int count) {
         // Keep the fuller set we are already showing — this frame's drop is
         // transient. g_overlays is left untouched.
     } else {
+        if ((g_overlays.n > 0) != (n > 0)) menu_before = g_overlays.n, menu_after = n;
+        committed = 1;
         memcpy(g_overlays.v, tmp, sizeof tmp);
         g_overlays.n = n;
         last_take = rec_frame;
     }
     pthread_mutex_unlock(&g_frames.mu);
+    if (menu_before >= 0) klovrp_menu_transition(menu_before, menu_after);
+    if (committed) klovrp_overlay_content_stats(tmp, n);
 }
 
 // ...and the same list, filed by a guest that never speaks OVRPlugin. See
@@ -7210,9 +7375,12 @@ void kl_ovrp_overlays_external(const kl_ovrp_overlay *v, int n) {
         if (!quads) return;   // keep whatever is already published
     }
     pthread_mutex_lock(&g_frames.mu);
+    const int menu_before = g_overlays.n;
     if (n && v) memcpy(g_overlays.v, v, (size_t)n * sizeof *v);
     g_overlays.n = n;
     pthread_mutex_unlock(&g_frames.mu);
+    if ((menu_before > 0) != (n > 0)) klovrp_menu_transition(menu_before, n);
+    klovrp_overlay_content_stats(v, n);
 }
 
 // The projection layers of the current frame — see kl_ovrp.h. One storage, one

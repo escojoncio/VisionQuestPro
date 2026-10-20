@@ -58,6 +58,7 @@ void *kl_mediandk_buffer_pixels(const void *ahardwarebuffer);
 // take_rgba pulls the newest frame as RGBA8 (1 = new frame, 0 = none, -1 = unconvertible;
 // the buffer is reader-owned, valid until the next call); abandon = release().
 #include <stdint.h>
+#include <stddef.h>
 void *kl_media_surface_new(void (*on_frame)(void *), void *ctx);
 void  kl_media_surface_set_cb(void *reader, void (*on_frame)(void *), void *ctx);
 void *kl_media_surface_window(void *reader);
@@ -70,6 +71,10 @@ void  kl_media_surface_abandon(void *reader);
 // no emulation (and every FindClass) with its thread id, so a stalled surface creation names the call
 // the engine is stuck on. Capped (KLM_VTRACE_MAX lines) so a stall cannot flood the log.
 int kl_media_video_trace(void);
+
+// A module with its own video counters (the SurfaceTexture side, kl_jni_hostvideo.c) registers a
+// formatter; its text is appended to the codec's once-a-second `[media] vstat` line.
+void kl_media_vstat_register(size_t (*fn)(char *buf, size_t n));
 
 void kl_mediandk_report(FILE *f);
 

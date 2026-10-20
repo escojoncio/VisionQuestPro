@@ -83,6 +83,9 @@ struct kl_vtdec {
     int ring_head, ring_count;
 
     unsigned n_submitted, n_decoded, n_dropped, n_failed;
+    unsigned n_pulled;
+    int64_t  last_in_pts, last_dec_pts;
+    int      said_overflow;
     // Parameter-set bookkeeping. Separated because they answer different
     // questions: how often the host re-describes the stream (n_set_change),
     // how often that description is genuinely new (n_fmt_built), and how often
@@ -174,19 +177,28 @@ static void klvt_output(void *decompressionOutputRefCon, void *sourceFrameRefCon
     d->width  = (int)CVPixelBufferGetWidth(image);
     d->height = (int)CVPixelBufferGetHeight(image);
 
-    // A full ring means the guest is not pulling as fast as we decode. For live
-    // video the right answer is to drop the OLDEST — a late frame has no value
-    // — and to say so, because silent dropping reads as a decoder that is
-    // merely slow.
+    // A full ring is a failure of the caller's flow control, not a policy:
+    // kl_mediandk.c stops admitting input while (in VideoToolbox + ring + held by
+    // the guest) is at its cap, far below KLVT_RING, so nothing is ever dropped
+    // on the way to a guest that pulls slowly (a file played at 1x, decoded many
+    // times faster, used to lose the oldest 16 frames at a time: the pts jumped
+    // seconds ahead and the picture froze). The drop stays as the last resort —
+    // for a stream that is live, a late frame has no value — and it is loud.
     if (d->ring_count == KLVT_RING) {
         CVPixelBufferRelease(d->ring[d->ring_head].pb);
         d->ring_head = (d->ring_head + 1) % KLVT_RING;
         d->ring_count--;
         d->n_dropped++;
+        if (!d->said_overflow) {
+            d->said_overflow = 1;
+            fprintf(stderr, "  [vtdec] decoded-frame ring FULL: dropped the oldest frame "
+                            "(the caller admitted more input than it pulls output)\n");
+        }
     }
     int slot = (d->ring_head + d->ring_count) % KLVT_RING;
     d->ring[slot].pb = (CVPixelBufferRef)CFRetain(image);
     d->ring[slot].pts_us = (int64_t)(CMTimeGetSeconds(pts) * 1e6 + 0.5);
+    d->last_dec_pts = d->ring[slot].pts_us;
     d->ring_count++;
     pthread_mutex_unlock(&d->lock);
 }
@@ -399,6 +411,7 @@ kl_vtdec *kl_vtdec_create(const char *mime) {
     kl_vtdec *d = calloc(1, sizeof *d);
     if (!d) return NULL;
     d->codec = codec;
+    d->last_in_pts = d->last_dec_pts = INT64_MIN;
     pthread_mutex_init(&d->lock, NULL);
     klvt_open_dump(d);
     g_last = d;
@@ -554,16 +567,24 @@ int kl_vtdec_submit(kl_vtdec *d, const uint8_t *annexb, size_t len,
     CFRelease(bb);
     if (st != noErr) return -1;
 
+    // Counted BEFORE the call: the output callback runs on another thread and may
+    // report this frame decoded before DecodeFrame returns, and the flow snapshot
+    // (kl_vtdec_flow) must never see a frame come back that was not yet sent.
+    pthread_mutex_lock(&d->lock);
+    d->n_submitted++;
+    d->last_in_pts = pts_us;
+    pthread_mutex_unlock(&d->lock);
+
     VTDecodeInfoFlags info = 0;
     st = VTDecompressionSessionDecodeFrame(
         d->sess, sb, kVTDecodeFrame_EnableAsynchronousDecompression, NULL, &info);
     CFRelease(sb);
 
-    pthread_mutex_lock(&d->lock);
-    d->n_submitted++;
-    pthread_mutex_unlock(&d->lock);
-
     if (st != noErr) {
+        // No callback will come for a frame that was refused: take it back.
+        pthread_mutex_lock(&d->lock);
+        d->n_submitted--;
+        pthread_mutex_unlock(&d->lock);
         fprintf(stderr, "  [vtdec] decode submit failed: OSStatus %d\n", (int)st);
         return -1;
     }
@@ -580,6 +601,7 @@ CVPixelBufferRef kl_vtdec_pull(kl_vtdec *d, int64_t *pts_us_out) {
         d->ring[d->ring_head].pb = NULL;
         d->ring_head = (d->ring_head + 1) % KLVT_RING;
         d->ring_count--;
+        d->n_pulled++;
     }
     pthread_mutex_unlock(&d->lock);
     return pb;                  // the caller now owns the retain taken in klvt_output
@@ -620,6 +642,32 @@ void kl_vtdec_param_stats(const kl_vtdec *d, unsigned *built, unsigned *swapped,
     if (swapped)  *swapped  = d->n_fmt_swapped;
     if (sessions) *sessions = d->n_sess_created;
     pthread_mutex_unlock((pthread_mutex_t *)&d->lock);
+}
+
+void kl_vtdec_flow(const kl_vtdec *d, kl_vtdec_flow_t *f) {
+    if (!f) return;
+    memset(f, 0, sizeof *f);
+    f->last_in_pts = f->last_dec_pts = INT64_MIN;
+    if (!d) return;
+    pthread_mutex_lock((pthread_mutex_t *)&d->lock);
+    f->submitted = d->n_submitted; f->decoded = d->n_decoded;
+    f->failed = d->n_failed;       f->dropped = d->n_dropped;
+    f->pulled = d->n_pulled;
+    int in_vt = (int)d->n_submitted - (int)d->n_decoded - (int)d->n_failed;
+    f->in_vt = in_vt < 0 ? 0 : in_vt;
+    f->ring = d->ring_count;
+    f->progress = d->n_decoded + d->n_failed + d->n_pulled;
+    f->last_in_pts = d->last_in_pts;
+    f->last_dec_pts = d->last_dec_pts;
+    pthread_mutex_unlock((pthread_mutex_t *)&d->lock);
+}
+
+void kl_vtdec_finish(kl_vtdec *d) {
+    if (!d || !d->sess) return;
+    // FinishDelayedFrames only asks the decoder to EMIT what it holds back for reordering; the frames
+    // come out on VideoToolbox's own thread. Waiting is what makes "in the ring" true on return.
+    VTDecompressionSessionFinishDelayedFrames(d->sess);
+    VTDecompressionSessionWaitForAsynchronousFrames(d->sess);
 }
 
 void kl_vtdec_report(FILE *f) {

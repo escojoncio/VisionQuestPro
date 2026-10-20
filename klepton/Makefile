@@ -986,6 +986,15 @@ build/t_media_announce: tests/t_media_announce.c runtime/media/kl_mediandk.c
 mediaannounce: build/t_media_announce
 	@./build/t_media_announce
 
+# Input backpressure of the video codec (klm_bp_* cut out of kl_mediandk.c).
+build/t_media_backpressure: tests/t_media_backpressure.c runtime/media/kl_mediandk.c
+	@mkdir -p build/mediabp
+	awk '/KL-TEST-BEGIN backpressure/{p=1;next} /KL-TEST-END backpressure/{p=0} p' runtime/media/kl_mediandk.c > build/mediabp/backpressure.inc
+	$(CC) -g -fsanitize=address,undefined -Wall -Ibuild/mediabp -o $@ tests/t_media_backpressure.c
+.PHONY: mediabp
+mediabp: build/t_media_backpressure
+	@./build/t_media_backpressure
+
 # Eye size of the resolution slider (runtime/xr/kl_ovrp_eyesize.h): pure arithmetic.
 build/kl_ovrp_eyesize_test: runtime/xr/tests/kl_ovrp_eyesize_test.c runtime/xr/kl_ovrp_eyesize.h
 	@mkdir -p build

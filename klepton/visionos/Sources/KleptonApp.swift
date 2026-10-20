@@ -152,6 +152,7 @@ enum Lifecycle {
         VQModel.shared.endMessage = kl_app_quit_requested() != 0 ? String(cString: kl_app_quit_reason()) : nil
         VQLog.saveSessionEnd(VQLaunch.choice?.game.id, wait: !reopening)
         if reopening, let open = reopenLauncher {
+            flushEngineCaches(then: nil)   // the process stays: a later kill from the launcher must not lose the pipelines
             VQModel.shared.ended = true
             open(id: VQMainWindow.id)
             NSLog("[app] launcher window reopened")
@@ -161,14 +162,47 @@ enum Lifecycle {
         NSLog("[app] no window to return to — exiting")
         // exit() would run C++ static destructors (std::mutex globals) while guest threads still
         // run and lock them -> "mutex lock failed" abort. Save caches, flush logs, then _exit.
-        if let sym = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "vpvk_flush_caches") {
-            typealias Flush = @convention(c) () -> Void
-            unsafeBitCast(sym, to: Flush.self)()
-            NSLog("[app] VPKEngine caches flushed")
+        // The flush writes the pipeline archive to disk: not on the main thread. The exit follows it, from the same thread.
+        flushEngineCaches {
+            UserDefaults.standard.synchronize()
+            fflush(nil)
+            _exit(0)
         }
-        UserDefaults.standard.synchronize()
-        fflush(nil)
-        _exit(0)
+    }
+
+    /// VPKEngine no longer saves its pipeline archive on every compile: the final save is this call
+    /// (`vpvk_flush_caches`). Runs on a utility thread so the main thread never waits for the disk;
+    /// `then` (the process exit, when there is one) runs right after the flush on that thread.
+    /// Safe to call more than once and with the game running (the engine locks its own state).
+    static func flushEngineCaches(then: (@Sendable () -> Void)?) {
+        // `then` runs once: after the flush, or after 8 s if the flush hangs (the exit must always happen).
+        let once = FlushOnce(then)
+        DispatchQueue.global(qos: .utility).async {
+            if let sym = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "vpvk_flush_caches") {
+                typealias Flush = @convention(c) () -> Void
+                unsafeBitCast(sym, to: Flush.self)()
+                NSLog("[app] VPKEngine caches flushed")
+            } else {
+                NSLog("[app] VPKEngine caches: vpvk_flush_caches not found (no VPKEngine in this run)")
+            }
+            once.run()
+        }
+        if then != nil {
+            DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 8) {
+                NSLog("[app] VPKEngine cache flush timed out — exiting anyway")
+                once.run()
+            }
+        }
+    }
+
+    private final class FlushOnce: @unchecked Sendable {
+        private let lock = NSLock()
+        private var action: (@Sendable () -> Void)?
+        init(_ action: (@Sendable () -> Void)?) { self.action = action }
+        func run() {
+            lock.lock(); let a = action; action = nil; lock.unlock()
+            a?()
+        }
     }
 
     static func scenePhaseChanged(to phase: ScenePhase) {
@@ -192,6 +226,7 @@ enum Lifecycle {
         // If the space really is gone too, immersiveEnded() makes the exit decision.
         if immersiveOpen {
             NSLog("[app] backgrounded with the immersive space open — staying alive")
+            flushEngineCaches(then: nil)   // the system may still kill a backgrounded app: save the pipelines now
             return
         }
         guard klEnvOn("KL_EXIT_ON_BACKGROUND", default: true) else {
@@ -207,7 +242,7 @@ enum Lifecycle {
         // turn a clean exit into a watchdog kill with a truncated log.
         VQSession.end()   // deliberate exit, not a jetsam: no "unclean close" report next launch
         fflush(nil)
-        exit(0)
+        flushEngineCaches { exit(0) }
     }
 }
 

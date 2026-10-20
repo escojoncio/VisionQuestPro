@@ -1055,6 +1055,7 @@ enum {
     ED_T_IMAGE_BASE = 1000024002,       // XR_TYPE_SWAPCHAIN_IMAGE_OPENGL_ES_KHR
     ED_T_IMAGE_VULKAN = 1000025001,     // XR_TYPE_SWAPCHAIN_IMAGE_VULKAN_KHR (== VULKAN2)
     T_SYS_ENV_DEPTH = 1000291007,
+    T_SYS_PASSTHROUGH = 1000118000, T_SYS_PASSTHROUGH2 = 1000118006,
     ED_NOT_AVAILABLE = 1000291000,      // XR_ENVIRONMENT_DEPTH_NOT_AVAILABLE_META, a success code
     R_CALL_ORDER = -37,
 };
@@ -1219,6 +1220,14 @@ int kl_openxr_spatial_system_props(void *chain) {
         } else if (h->type == T_SYS_ENV_DEPTH) {   // XrSystemEnvironmentDepthPropertiesMETA {supportsEnvironmentDepth, supportsHandRemoval}
             XrBool32 *b = (XrBool32 *)((char *)h + 16);
             b[0] = b[1] = gate_envdepth();
+            n++;
+        } else if (h->type == T_SYS_PASSTHROUGH) {   // XrSystemPassthroughPropertiesFB {XrBool32 supportsPassthrough @16}
+            *(XrBool32 *)((char *)h + 16) = 1;
+            n++;
+        } else if (h->type == T_SYS_PASSTHROUGH2) {  // XrSystemPassthroughProperties2FB {XrPassthroughCapabilityFlagsFB capabilities @16}
+            // PASSTHROUGH_BIT (0x1) | COLOR_BIT (0x2): the room is visionOS's own colour camera
+            // image. No LAYER_DEPTH_BIT (0x4): passthrough depth is not supplied.
+            *(uint64_t *)((char *)h + 16) = 0x3ull;
             n++;
         } else if (h->type == T_SYS_PLANE_DETECTION) {   // XrSystemPlaneDetectionPropertiesEXT {XrFlags64 supportedFeatures @16}
             // PLANE_DETECTION | SEMANTIC_{CEILING,FLOOR,WALL,PLATFORM} | ORIENTATION

@@ -403,6 +403,12 @@ typedef struct {
     // out = c * scale + offset. 0 = none (the global fade may still apply).
     int   color_on;
     float color_scale[4], color_offset[4];
+    // The layer's own blend (ovrpLayerSubmit OverrideBlendFactors / Src / Dst, only in the headers that carry them and
+    // only read once kl_ovrp.c has latched that layout): blend_on = 1 -> blend_src / blend_dst are ovrpBlendFactor
+    // (0 Zero, 1 One, 2 SrcAlpha, 3 OneMinusSrcAlpha, 4 DstAlpha, 5 OneMinusDstAlpha) for the colour. 0 = the compositor's
+    // default (SrcAlpha, OneMinusSrcAlpha), which is also what ovrp_EnqueueSubmitLayer2 submits with.
+    // There is no "premultiplied" flag in OVRPlugin's layer flags or submit flags: premultiplied is One / OneMinusSrcAlpha.
+    int   blend_on, blend_src, blend_dst;
 } kl_ovrp_overlay;
 
 // How many non-eye layers the guest submitted with its most recent frame, and
@@ -778,6 +784,10 @@ int kl_ovrp_head_motion(float *vel, float *ang);
 // the guest asked for an eye-level tracking origin. This is the offset between
 // OpenXR's STAGE space (floor) and its LOCAL space (where the head started).
 float kl_ovrp_eye_height(void);
+// The measured eye height itself, 0 until the headset (or KL_OVRP_EYE_HEIGHT)
+// has provided one; independent of the guest's tracking origin. OpenXR's LOCAL
+// space origin is derived from it.
+float kl_ovrp_measured_eye_height_or0(void);
 // World Y of the OVRPlugin guest's tracking origin: the measured eye height
 // while it runs EyeLevel (its poses are served with y ~ 0 there), else 0 — and
 // 0 for a guest that never read an OVRPlugin node (OpenXR). Add it to any

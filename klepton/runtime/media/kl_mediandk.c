@@ -1016,6 +1016,27 @@ static unsigned g_life_in, g_life_out, g_life_rendered, g_life_published, g_life
 // reader existed at some point. Counters can legitimately all be zero, and that
 // is the single most interesting thing a report can say.
 static int g_ever_created;
+// Live readers, for the status line: the status thread must never touch a reader that
+// AImageReader_delete is freeing, so both go through this lock.
+#define KLM_RD_REG 8
+static pthread_mutex_t g_rd_mu = PTHREAD_MUTEX_INITIALIZER;
+static klm_reader *g_rd_reg[KLM_RD_REG];
+static void klm_rd_register(klm_reader *r) {
+    pthread_mutex_lock(&g_rd_mu);
+    for (int i = 0; i < KLM_RD_REG; i++) if (!g_rd_reg[i]) { g_rd_reg[i] = r; break; }
+    pthread_mutex_unlock(&g_rd_mu);
+}
+static void klm_rd_unregister(klm_reader *r) {
+    pthread_mutex_lock(&g_rd_mu);
+    for (int i = 0; i < KLM_RD_REG; i++) if (g_rd_reg[i] == r) g_rd_reg[i] = NULL;
+    pthread_mutex_unlock(&g_rd_mu);
+}
+// take_rgba totals (the per-call log was capped at 3 and said nothing afterwards).
+static unsigned g_tr_calls, g_tr_ok, g_tr_fail;
+static uint64_t g_tr_us_total;
+static unsigned g_tr_us_max;
+static size_t (*g_vstat_extra)(char *, size_t);
+void kl_media_vstat_register(size_t (*fn)(char *, size_t)) { g_vstat_extra = fn; }
 
 // Android delivers onImageAvailable on a thread that is NOT the one that
 // released the buffer, and that is load-bearing rather than incidental. This
@@ -1078,6 +1099,7 @@ static int klm_AImageReader_newWithUsage(int32_t w, int32_t h, int32_t format,
     }
     *out = r;
     g_reader = r;
+    klm_rd_register(r);
     fprintf(stderr, "  [media] AImageReader %dx%d format 0x%x usage 0x%llx, "
                     "%d images\n", w, h, format, (unsigned long long)usage,
             max_images);
@@ -1151,6 +1173,7 @@ static void klm_reader_free_xfer(klm_reader *r) {
 static void klm_AImageReader_delete(void *reader) {
     klm_reader *r = reader;
     if (!r || r->magic != KLM_READER_MAGIC) return;
+    klm_rd_unregister(r);
     pthread_mutex_lock(&r->lock);
     r->running = 0;
     pthread_cond_broadcast(&r->cv);
@@ -1404,10 +1427,16 @@ int kl_media_surface_take_rgba(void *reader, uint8_t **rgba, int *w, int *h, int
     }
     pthread_mutex_unlock(&r->lock);
     {   // first 3 calls and every failure (capped), never a line per frame
-        static unsigned ncall, nfail;
-        unsigned nth = ++ncall;
+        static unsigned nfail;
+        unsigned nth = __atomic_add_fetch(&g_tr_calls, 1, __ATOMIC_RELAXED);
         int bad = rc != 1;
-        if (nth <= 3 || (bad && nfail++ < 16))
+        int64_t dt = klm_now_us() - t0_us;
+        __atomic_add_fetch(bad ? &g_tr_fail : &g_tr_ok, 1, __ATOMIC_RELAXED);
+        __atomic_add_fetch(&g_tr_us_total, (uint64_t)dt, __ATOMIC_RELAXED);
+        if ((unsigned)dt > __atomic_load_n(&g_tr_us_max, __ATOMIC_RELAXED))
+            __atomic_store_n(&g_tr_us_max, (unsigned)dt, __ATOMIC_RELAXED);
+        // First call (it names the native format) and failures only; the rest is in vstat.
+        if (nth == 1 || (bad && nfail++ < 16))
             fprintf(stderr, "  [media] take_rgba #%u: '%c%c%c%c' %dx%d via %s (OSStatus %d), "
                             "xfer %.2f ms, total %.2f ms -> %s\n", nth,
                     klm_fcc_char(t_in >> 24), klm_fcc_char((t_in >> 16) & 255),
@@ -1420,6 +1449,30 @@ int kl_media_surface_take_rgba(void *reader, uint8_t **rgba, int *w, int *h, int
     if (pts_us) *pts_us = pts;
     return 1;
 }
+
+// ---------------------------------------------------------------------------
+// Input backpressure, the way MediaCodec has it: dequeueInputBuffer has no buffer for
+// the guest while too many frames are in flight (inside VideoToolbox, decoded and
+// waiting in the ring, or dequeued by the guest and not yet released). Without it a
+// guest that reads its file in under a second fills the decoded-frame ring of a
+// clip it plays at 1x, and the ring drops the oldest frames: the pts jumps seconds
+// ahead and the picture freezes.
+//   soft: normal limit (KL_MEDIA_INFLIGHT, default 8; 0 = no backpressure)
+//   hard: only reached after `forgive_us` without ANY progress, so a pipeline that
+//         is genuinely stuck (a decoder that wants more input than `soft` before it
+//         emits anything) degrades to the old flow instead of deadlocking. Always
+//         below the decoded-frame ring, so even then nothing is dropped.
+// KL-TEST-BEGIN backpressure
+// Time since `sig` last changed; `*sig`/`*since_us` are the caller's state.
+static int64_t klm_bp_stalled_us(uint64_t *sig, int64_t *since_us, uint64_t now_sig, int64_t now_us) {
+    if (*since_us == 0 || *sig != now_sig) { *sig = now_sig; *since_us = now_us; return 0; }
+    return now_us - *since_us;
+}
+static int klm_bp_admit(int in_flight, int soft, int hard, int64_t stalled_us, int64_t forgive_us) {
+    if (soft <= 0 || in_flight < soft) return 1;
+    return stalled_us >= forgive_us && in_flight < hard;
+}
+// KL-TEST-END backpressure
 
 // ---------------------------------------------------------------------------
 // AMediaCodec
@@ -1445,7 +1498,19 @@ typedef struct {
     // nothing to report. AMediaCodec_getOutputFormat reads these.
     int      out_w, out_h;
 
-    unsigned n_in, n_out, n_rendered;
+    unsigned n_in, n_out, n_rendered, n_released;
+
+    // Input backpressure state (see klm_bp_admit) and the once-a-second status thread.
+    int      bp_soft, bp_hard;
+    uint64_t bp_sig;
+    int64_t  bp_since_us;
+    unsigned bp_refused, bp_forgiven;
+    int      bp_said_forgive;
+    int64_t  born_us;
+    pthread_t vs_thr;
+    pthread_mutex_t vs_mu;
+    pthread_cond_t  vs_cv;
+    int      vs_run;
 
     // ByteBuffer mode: configured WITHOUT a surface (Unity's VideoPlayer for its
     // cutscenes: AoT). Android then hands the decoded frame out as a linear
@@ -1503,6 +1568,86 @@ int kl_media_video_trace(void) {
 static uint64_t klm_tid(void) { uint64_t t = 0; pthread_threadid_np(NULL, &t); return t; }
 
 
+// Frames in flight for the backpressure: inside VideoToolbox + decoded and waiting in the
+// ring + dequeued by the guest and not released (+ the one held behind a format change).
+// `progress` moves whenever a frame leaves VideoToolbox, is pulled, or is released.
+static int klm_inflight(klm_codec *c, uint64_t *progress, kl_vtdec_flow_t *fo) {
+    kl_vtdec_flow_t f;
+    kl_vtdec_flow(c->dec, &f);
+    pthread_mutex_lock(&c->lock);
+    int held = c->held_pb ? 1 : 0, slots = 0;
+    for (int i = 0; i < KLM_OUT_SLOTS; i++) if (c->out[i].in_use) slots++;
+    uint64_t prog = (uint64_t)f.progress + c->n_released;
+    pthread_mutex_unlock(&c->lock);
+    if (progress) *progress = prog;
+    if (fo) *fo = f;
+    return f.in_vt + f.ring + held + slots;
+}
+
+// `[media] vstat`, once a second while the codec exists: one line that answers where a
+// video stalled — what the guest queued/dequeued/released, where every frame is, what
+// backpressure did, what the reader and the GL upload saw, and the pts at each stage.
+static void klm_vstat_print(klm_codec *c) {
+    kl_vtdec_flow_t f;
+    uint64_t prog;
+    int inflight = klm_inflight(c, &prog, &f);
+    pthread_mutex_lock(&c->lock);
+    unsigned n_in = c->n_in, n_out = c->n_out, n_rel = c->n_released, n_rend = c->n_rendered;
+    unsigned refused = c->bp_refused, forgiven = c->bp_forgiven;
+    int held = c->held_pb ? 1 : 0, slots = 0;
+    for (int i = 0; i < KLM_OUT_SLOTS; i++) if (c->out[i].in_use) slots++;
+    int soft = c->bp_soft;
+    int64_t born = c->born_us;
+    pthread_mutex_unlock(&c->lock);
+    unsigned rq = 0, ra = 0, rd = 0; int rc = 0;
+    pthread_mutex_lock(&g_rd_mu);
+    for (int i = 0; i < KLM_RD_REG; i++) {
+        klm_reader *r = g_rd_reg[i];
+        if (!r) continue;
+        pthread_mutex_lock(&r->lock);
+        rq += r->n_queued; ra += r->n_acquired; rd += r->n_dropped; rc += r->count;
+        pthread_mutex_unlock(&r->lock);
+    }
+    pthread_mutex_unlock(&g_rd_mu);
+    unsigned tk = __atomic_load_n(&g_tr_calls, __ATOMIC_RELAXED);
+    unsigned tok = __atomic_load_n(&g_tr_ok, __ATOMIC_RELAXED);
+    char extra[256] = "";
+    if (g_vstat_extra) g_vstat_extra(extra, sizeof extra);
+    fprintf(stderr, "  [media] vstat t=%.1fs %s: n_in=%u n_out=%u n_rendered=%u n_released=%u"
+                    " | vtdec submitted=%u decoded=%u failed=%u dropped=%u in_vt=%d ring_count=%d"
+                    " | slots in_use=%d held_pb=%d | inflight=%d/%d refused=%u forgiven=%u"
+                    " | reader queued=%u acquired=%u dropped=%u depth=%d"
+                    " | take_rgba calls=%u ok=%u fail=%u avg=%.1fms max=%.1fms"
+                    " | %s | pts in=%lld decoded=%lld\n",
+            (double)(klm_now_us() - born) / 1e6, c->mime, n_in, n_out, n_rend, n_rel,
+            f.submitted, f.decoded, f.failed, f.dropped, f.in_vt, f.ring,
+            slots, held, inflight, soft, refused, forgiven,
+            rq, ra, rd, rc,
+            tk, tok, __atomic_load_n(&g_tr_fail, __ATOMIC_RELAXED),
+            tk ? (double)__atomic_load_n(&g_tr_us_total, __ATOMIC_RELAXED) / tk / 1000.0 : 0.0,
+            (double)__atomic_load_n(&g_tr_us_max, __ATOMIC_RELAXED) / 1000.0,
+            extra,
+            f.last_in_pts == INT64_MIN ? -1LL : (long long)f.last_in_pts,
+            f.last_dec_pts == INT64_MIN ? -1LL : (long long)f.last_dec_pts);
+}
+
+static void *klm_vstat_loop(void *arg) {
+    klm_codec *c = arg;       // host-only thread: no guest code, no kl_thread_init
+    pthread_mutex_lock(&c->vs_mu);
+    while (c->vs_run) {
+        struct timespec ts;
+        clock_gettime(CLOCK_REALTIME, &ts);
+        ts.tv_sec += 1;
+        pthread_cond_timedwait(&c->vs_cv, &c->vs_mu, &ts);
+        if (!c->vs_run) break;
+        pthread_mutex_unlock(&c->vs_mu);
+        klm_vstat_print(c);
+        pthread_mutex_lock(&c->vs_mu);
+    }
+    pthread_mutex_unlock(&c->vs_mu);
+    return NULL;
+}
+
 static void *klm_AMediaCodec_createDecoderByType(const char *mime) {
     fprintf(stderr, "  [media] tid=%llu AMediaCodec_createDecoderByType(\"%s\") enter\n",
             (unsigned long long)klm_tid(), mime ? mime : "(null)");
@@ -1529,6 +1674,14 @@ static void *klm_AMediaCodec_createDecoderByType(const char *mime) {
     }
     fprintf(stderr, "  [media] tid=%llu AMediaCodec_createDecoderByType(\"%s\") exit -> %p\n",
             (unsigned long long)klm_tid(), mime, (void *)c);
+    c->born_us = klm_now_us();
+    c->bp_soft = kl_env_int("KL_MEDIA_INFLIGHT", 8);
+    c->bp_hard = 12;                       // below the decoded-frame ring (16): see klm_bp_admit
+    if (c->bp_soft > c->bp_hard - 2) c->bp_soft = c->bp_hard - 2;
+    pthread_mutex_init(&c->vs_mu, NULL);
+    pthread_cond_init(&c->vs_cv, NULL);
+    c->vs_run = 1;
+    if (pthread_create(&c->vs_thr, NULL, klm_vstat_loop, c) != 0) c->vs_run = 0;
     g_codec = c;
     g_ever_created = 1;
     return c;
@@ -1630,6 +1783,14 @@ static int klm_AMediaCodec_delete(void *codec) {
     if (!c || c->magic != KLM_CODEC_MAGIC) return AMEDIA_ERROR_INVALID_PARAMETER;
     g_vtrace_open = 0;
     klm_codec_async_stop(c);
+    if (c->vs_run) {
+        klm_vstat_print(c);                // the last word on this codec, before it goes
+        pthread_mutex_lock(&c->vs_mu);
+        c->vs_run = 0;
+        pthread_cond_signal(&c->vs_cv);
+        pthread_mutex_unlock(&c->vs_mu);
+        pthread_join(c->vs_thr, NULL);
+    }
     pthread_mutex_lock(&c->lock);
     klm_codec_drop_outputs(c);
     for (int i = 0; i < KLM_IN_BUFFERS; i++) free(c->in[i].data);
@@ -1656,24 +1817,49 @@ static int klm_AMediaCodec_delete(void *codec) {
     return AMEDIA_OK;
 }
 
-// timeoutUs: negative means block indefinitely, 0 means poll. We always have a
-// buffer unless the guest has dequeued all eight without queueing any, so the
-// wait is a formality — but honouring it costs nothing and a guest that passes
-// -1 expecting to block must not get an instant refusal it reads as an error.
+// timeoutUs: negative means block indefinitely, 0 means poll. There is a buffer unless
+// the guest has dequeued all eight without queueing any, OR too many frames are in
+// flight (klm_bp_admit): then the answer is TRY_AGAIN_LATER, as MediaCodec's is while its
+// decoder is full. A negative timeout waits at most 5 s on backpressure so a guest that
+// blocks the very thread which must release the outputs cannot deadlock.
 static ssize_t klm_AMediaCodec_dequeueInputBuffer(void *codec, int64_t timeoutUs) {
     klm_codec *c = codec;
     if (!c || c->magic != KLM_CODEC_MAGIC) return AMEDIA_ERROR_INVALID_PARAMETER;
     int64_t waited = 0;
+    int counted = 0;
     for (;;) {
-        pthread_mutex_lock(&c->lock);
-        for (int i = 0; i < KLM_IN_BUFFERS; i++)
-            if (!c->in[i].in_use) {
-                c->in[i].in_use = 1;
-                pthread_mutex_unlock(&c->lock);
-                return i;
+        int admit = 1;
+        if (c->bp_soft > 0) {
+            uint64_t prog;
+            int inflight = klm_inflight(c, &prog, NULL);
+            pthread_mutex_lock(&c->lock);
+            int64_t stalled = klm_bp_stalled_us(&c->bp_sig, &c->bp_since_us, prog, klm_now_us());
+            admit = klm_bp_admit(inflight, c->bp_soft, c->bp_hard, stalled, 3000000);
+            if (admit && inflight >= c->bp_soft) {
+                c->bp_forgiven++;
+                if (!c->bp_said_forgive) {
+                    c->bp_said_forgive = 1;
+                    fprintf(stderr, "  [media] backpressure: no progress for %.1f s with %d frames in flight"
+                                    " — admitting input anyway (hard cap %d)\n",
+                            (double)stalled / 1e6, inflight, c->bp_hard);
+                }
             }
-        pthread_mutex_unlock(&c->lock);
-        if (timeoutUs == 0 || (timeoutUs > 0 && waited >= timeoutUs))
+            if (!admit && !counted) { c->bp_refused++; counted = 1; }
+            pthread_mutex_unlock(&c->lock);
+        }
+        if (admit) {
+            pthread_mutex_lock(&c->lock);
+            for (int i = 0; i < KLM_IN_BUFFERS; i++)
+                if (!c->in[i].in_use) {
+                    c->in[i].in_use = 1;
+                    pthread_mutex_unlock(&c->lock);
+                    return i;
+                }
+            pthread_mutex_unlock(&c->lock);
+        }
+        int64_t limit = timeoutUs;
+        if (!admit && timeoutUs < 0) limit = 5000000;
+        if (timeoutUs == 0 || (limit > 0 && waited >= limit))
             return AMEDIACODEC_INFO_TRY_AGAIN_LATER;
         usleep(1000);
         waited += 1000;
@@ -1812,6 +1998,8 @@ static int klm_AMediaCodec_queueInputBuffer(void *codec, size_t idx, off_t offse
         // The access unit riding with the flag (if any) is still decoded.
         if (size && kl_vtdec_submit(c->dec, p + offset, size, (int64_t)time_us) != 0)
             fprintf(stderr, "  [media] EOS access unit: submit failed\n");
+        // Every frame VideoToolbox still holds back for reordering belongs to the stream.
+        kl_vtdec_finish(c->dec);
         pthread_mutex_lock(&c->lock);
         c->eos_in = 1; c->eos_quiet_us = klm_now_us(); c->eos_sent = 0;
         pthread_mutex_unlock(&c->lock);
@@ -2065,7 +2253,11 @@ static ssize_t klm_AMediaCodec_dequeueOutputBuffer(void *codec,
         // is drained; hand out one empty buffer carrying the flag.
         pthread_mutex_lock(&c->lock);
         if (c->eos_in && !c->eos_sent && !c->held_pb) {
-            if (klm_now_us() - c->eos_quiet_us >= 150000) {
+            // Drained = nothing left inside VideoToolbox (or, failing that, 2 s of silence).
+            kl_vtdec_flow_t ef;
+            kl_vtdec_flow(c->dec, &ef);
+            int64_t quiet = klm_now_us() - c->eos_quiet_us;
+            if ((quiet >= 150000 && ef.in_vt == 0 && ef.ring == 0) || quiet >= 2000000) {
                 for (int i = 0; i < KLM_OUT_SLOTS; i++)
                     if (!c->out[i].in_use) {
                         c->out[i].in_use = 1;
@@ -2112,6 +2304,7 @@ static int klm_AMediaCodec_releaseOutputBuffer(void *codec, size_t idx, bool ren
     c->out[idx].in_use = 0;
     c->out[idx].pb = NULL;
     if (render) c->n_rendered++;
+    c->n_released++;
     pthread_mutex_unlock(&c->lock);
 
     if (render) KLM_FIRST(said_rel, "first releaseOutputBuffer(render=true)%s\n",
@@ -2162,6 +2355,9 @@ void kl_mediandk_report(FILE *f) {
     fprintf(f, "  reader: %u published, %u acquired, %u dropped as stale, %d held\n",
             published, acquired, g_reader ? g_reader->n_dropped : 0,
             g_reader ? g_reader->count : 0);
+    if (g_codec)
+        fprintf(f, "  input backpressure: cap %d (hard %d), %u refused, %u admitted after a stall\n",
+                g_codec->bp_soft, g_codec->bp_hard, g_codec->bp_refused, g_codec->bp_forgiven);
     kl_vtdec_report(f);
 }
 

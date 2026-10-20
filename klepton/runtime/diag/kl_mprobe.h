@@ -21,4 +21,8 @@
 // KL_PROBE_EVERY frames (default 120). No-op unless KL_PROBE_INPUT=1.
 void kl_mprobe_tick(unsigned frame);
 
+// kl_ovrp.c: the guest's non-eye layer count changed between zero and non-zero (a menu opened or closed). The next tick
+// logs what OVRInput.GetConnectedControllers / GetActiveController say (diagnosis only; any thread).
+void kl_mprobe_note_menu(int overlays_before, int overlays_after);
+
 #endif

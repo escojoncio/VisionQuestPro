@@ -89,6 +89,24 @@ void kl_vtdec_stats(const kl_vtdec *d, unsigned *submitted, unsigned *decoded,
 // stream whose resolution never changes should reach the end on ONE.
 void kl_vtdec_param_stats(const kl_vtdec *d, unsigned *built, unsigned *swapped,
                           unsigned *sessions);
+// Where every frame is right now, for the codec's backpressure and its once-a-second
+// status line. A consistent snapshot (one lock): `in_vt` frames were handed to
+// VideoToolbox and have not come back yet (decoded or failed), `ring` frames are
+// decoded and waiting to be pulled. `progress` only ever grows, with each frame
+// that comes out of VideoToolbox or is pulled by the guest, so "it did not move"
+// means the pipeline is stuck.
+typedef struct {
+    unsigned submitted, decoded, failed, dropped, pulled;
+    int      in_vt, ring;
+    unsigned progress;
+    int64_t  last_in_pts, last_dec_pts;   // INT64_MIN until the first one
+} kl_vtdec_flow_t;
+void kl_vtdec_flow(const kl_vtdec *d, kl_vtdec_flow_t *f);
+
+// The input is complete (END_OF_STREAM): have VideoToolbox emit every frame it
+// still holds back for reordering. Blocks until they are in the ring.
+void kl_vtdec_finish(kl_vtdec *d);
+
 void kl_vtdec_report(FILE *f);
 
 #endif

@@ -266,6 +266,12 @@ final class KleptonCompositor {
     /// The overlay pass — a guest's non-eye layers. nil when it failed to
     /// build, which is named at construction rather than per frame.
     private var overlayPipeline: MTLRenderPipelineState?
+    /// The overlay descriptor the default pipeline was built from, and the pipelines made from it for a layer that
+    /// states its own blend factors (OVRPlugin OverrideBlendFactors), keyed by (src << 3 | dst). `overlayBlendFailed`
+    /// keeps a failed build from being retried every frame. Render thread only, like `loggedOverlayDraw`.
+    private var overlayDescBase: MTLRenderPipelineDescriptor?
+    private var overlayBlendPipelines: [UInt8: MTLRenderPipelineState] = [:]
+    private var overlayBlendFailed: Set<UInt8> = []
     /// The equirect (360 panorama) overlay pipeline and its depth state.
     /// Drawn as a skybox behind the eye content: depth-tests .greaterEqual at
     /// the far plane and writes no depth, so real eye pixels stay in front and
@@ -1067,6 +1073,7 @@ final class KleptonCompositor {
             odesc.colorAttachments[0].destinationRGBBlendFactor = .oneMinusSourceAlpha
             odesc.colorAttachments[0].destinationAlphaBlendFactor = .oneMinusSourceAlpha
             overlayPipeline = try? device.makeRenderPipelineState(descriptor: odesc)
+            overlayDescBase = odesc.copy() as? MTLRenderPipelineDescriptor
             if overlayPipeline == nil {
                 NSLog("[cp] the overlay pipeline failed to build — a guest's non-eye "
                       + "layers will not be composited (on Unreal that is its whole UI)")
@@ -3311,6 +3318,51 @@ final class KleptonCompositor {
     private var loggedProjMiss = Set<Int>()
     private var lastProjShape = ""
 
+    /// ovrpBlendFactor (libOculusXRPlugin DWARF: Zero 0, One 1, SrcAlpha 2, OneMinusSrcAlpha 3, DstAlpha 4,
+    /// OneMinusDstAlpha 5) as Metal's. nil for anything else.
+    private static func metalBlendFactor(_ v: Int32) -> MTLBlendFactor? {
+        switch v {
+        case 0: return .zero
+        case 1: return .one
+        case 2: return .sourceAlpha
+        case 3: return .oneMinusSourceAlpha
+        case 4: return .destinationAlpha
+        case 5: return .oneMinusDestinationAlpha
+        default: return nil
+        }
+    }
+
+    /// The pipeline an overlay layer is drawn with and a word for the log. A layer that states blend factors
+    /// (`blend_on`: OVRPlugin's OverrideBlendFactors, e.g. One / OneMinusSrcAlpha for premultiplied alpha) gets a
+    /// pipeline with those RGB factors; the alpha factors stay as in the default (the display is composited
+    /// premultiplied). A layer that states none, factors outside 0...5, or the default pair (2, 3) uses `base`.
+    private func blendPipeline(for ov: kl_ovrp_overlay,
+                                base: MTLRenderPipelineState) -> (MTLRenderPipelineState, String) {
+        guard ov.blend_on != 0,
+              let src = Self.metalBlendFactor(ov.blend_src),
+              let dst = Self.metalBlendFactor(ov.blend_dst) else {
+            return (base, "default (src-alpha, 1-src-alpha)")
+        }
+        let name = "layer factors src=\(ov.blend_src) dst=\(ov.blend_dst)"
+        if ov.blend_src == 2 && ov.blend_dst == 3 { return (base, name + " (= default)") }
+        let key = UInt8(truncatingIfNeeded: ov.blend_src) << 3 | UInt8(truncatingIfNeeded: ov.blend_dst)
+        if let p = overlayBlendPipelines[key] { return (p, name) }
+        if overlayBlendFailed.contains(key) { return (base, name + " — pipeline failed, default used") }
+        guard let desc = overlayDescBase?.copy() as? MTLRenderPipelineDescriptor else {
+            overlayBlendFailed.insert(key)
+            return (base, name + " — no descriptor, default used")
+        }
+        desc.colorAttachments[0].sourceRGBBlendFactor = src
+        desc.colorAttachments[0].destinationRGBBlendFactor = dst
+        guard let p = try? device.makeRenderPipelineState(descriptor: desc) else {
+            overlayBlendFailed.insert(key)
+            NSLog("[cp] overlay pipeline for blend src=\(ov.blend_src) dst=\(ov.blend_dst) failed to build — default blend used")
+            return (base, name + " — pipeline failed, default used")
+        }
+        overlayBlendPipelines[key] = p
+        return (p, name)
+    }
+
     /// The layers that are NOT the eye, drawn on top of it in the same encoder.
     ///
     /// `ovrp_EndFrame4` is handed a list and every reader of it here used to walk
@@ -3502,7 +3554,8 @@ final class KleptonCompositor {
                 if writeDepth, let overlayOrderState { enc.setDepthStencilState(overlayOrderState) }
                 else if let depthPassState { enc.setDepthStencilState(depthPassState) }
             }
-            enc.setRenderPipelineState(pipe)
+            let (layerPipe, blendMode) = blendPipeline(for: ov, base: pipe)
+            enc.setRenderPipelineState(layerPipe)
             enc.setFragmentTexture(texture, index: 0)
             enc.setFragmentSamplerState(sampler, index: 0)
             uniforms.withUnsafeBytes { buf in
@@ -3522,7 +3575,8 @@ final class KleptonCompositor {
                       + "\(ov.pose.6))"
                       + (ov.head_locked != 0 ? ", HEAD-LOCKED" : "")
                       + ", flags 0x\(String(ov.flags, radix: 16)), from \(overlaySource[ov.layer_id] ?? "?")"
-                      + " \(texture.width)x\(texture.height) fmt \(texture.pixelFormat.rawValue)")
+                      + " \(texture.width)x\(texture.height) fmt \(texture.pixelFormat.rawValue)"
+                      + ", blend: \(blendMode)")
             }
         }
         if let hv, !hvDrawn {

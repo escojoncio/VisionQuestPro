@@ -143,7 +143,22 @@ static unsigned   g_dl_head, g_dl_n;
 static pthread_t  g_dl_drainer;      // the thread inside klhv_drain (valid while g_dl_draining)
 static int        g_dl_draining;
 
+// Counters for the codec's once-a-second `[media] vstat` line (kl_media_vstat_register):
+// frames announced by the reader, onFrameAvailable delivered to the guest, updateTexImage
+// calls, those that uploaded a frame, and the pts of the last upload.
+static unsigned g_hv_announced, g_hv_delivered, g_hv_updates, g_hv_uploaded;
+static long long g_hv_last_pts = -1;
+static size_t klhv_vstat_text(char *buf, size_t n) {
+    return (size_t)snprintf(buf, n, "gl updateTexImage=%u uploaded=%u onFrameAvailable announced=%u delivered=%u last_uploaded_pts=%lld",
+                            __atomic_load_n(&g_hv_updates, __ATOMIC_RELAXED),
+                            __atomic_load_n(&g_hv_uploaded, __ATOMIC_RELAXED),
+                            __atomic_load_n(&g_hv_announced, __ATOMIC_RELAXED),
+                            __atomic_load_n(&g_hv_delivered, __ATOMIC_RELAXED),
+                            __atomic_load_n(&g_hv_last_pts, __ATOMIC_RELAXED));
+}
+
 static void klhv_deliver_one(klhv_stex *t) {
+    __atomic_add_fetch(&g_hv_delivered, 1, __ATOMIC_RELAXED);
     pthread_mutex_lock(&g_lock);
     void *l = t->listener;
     pthread_mutex_unlock(&g_lock);
@@ -190,6 +205,7 @@ void klhv_drain(void) {
 static void klhv_on_frame(void *ctx) {
     klhv_stex *t = ctx;
     if (!t || t->released) return;
+    __atomic_add_fetch(&g_hv_announced, 1, __ATOMIC_RELAXED);
     pthread_mutex_lock(&g_dl_mu);
     if (t->pending < KLHV_PENDING_MAX) t->pending++;
     if (!t->queued && g_dl_n < KLHV_DL_MAX) {
@@ -205,6 +221,7 @@ static klj_val klhv_stex_init(void *env, void *clazz, const klj_val *a, int n) {
     int tex = 0;
     if (n > 0) tex = (int)(int32_t)a[0].j;
     KLJ_LOG_ONCE("new SurfaceTexture(%d) — real SurfaceTexture over a host AImageReader", tex);
+    kl_media_vstat_register(klhv_vstat_text);
     klhv_stex *t = calloc(1, sizeof *t);
     if (!t) return (klj_val){0};
     t->tex = tex; t->w = t->h = 1; t->target = GL_TEX_EXTERNAL_OES;
@@ -261,15 +278,16 @@ typedef void (*gl_geti_t)(uint32_t, int32_t *);
 typedef uint32_t (*gl_gete_t)(void);
 typedef void (*gl_texpi_t)(uint32_t, uint32_t, int32_t);
 typedef void (*gl_pixst_t)(uint32_t, int32_t);
+typedef void (*gl_deltex_t)(int32_t, const uint32_t *);
 
 static void klhv_gl_upload(klhv_stex *t, const uint8_t *px, int w, int h) {
     static gl_bind_t bind; static gl_teximg_t teximg; static gl_texsub_t texsub; static gl_geti_t geti;
-    static gl_gete_t gete; static gl_texpi_t texpi; static gl_pixst_t pixst; static int resolved;
+    static gl_gete_t gete; static gl_texpi_t texpi; static gl_pixst_t pixst; static gl_deltex_t deltex; static int resolved;
     if (!resolved) {
         bind   = kl_gles_sym("glBindTexture");   teximg = kl_gles_sym("glTexImage2D");
         texsub = kl_gles_sym("glTexSubImage2D"); geti   = kl_gles_sym("glGetIntegerv");
         gete   = kl_gles_sym("glGetError");      texpi  = kl_gles_sym("glTexParameteri");
-        pixst  = kl_gles_sym("glPixelStorei");
+        pixst  = kl_gles_sym("glPixelStorei");   deltex = kl_gles_sym("glDeleteTextures");
         if (bind && teximg && texsub) resolved = 1;
         else {
             KLJ_LOG_ONCE("SurfaceTexture.updateTexImage: vpgles GL entry points unavailable (KL_GLES_VPK off?) — frames not uploaded");
@@ -291,8 +309,28 @@ static void klhv_gl_upload(klhv_stex *t, const uint8_t *px, int w, int h) {
         if (err && tg == GL_TEX_EXTERNAL_OES) {
             fprintf(stderr, "  [video] SurfaceTexture upload to GL_TEXTURE_EXTERNAL_OES tex %d -> GL error 0x%x; "
                             "falling back to GL_TEXTURE_2D\n", t->tex, err);
+            // A GL name has ONE target for life. The failure may be the upload itself (the name is
+            // a genuine EXTERNAL_OES texture) or the bind (the guest already made it a 2D texture).
+            // Only the first needs the name released; deleting a 2D name the guest owns would drop
+            // its parameters, its unit/FBO bindings and the state Unity caches about it. So ask:
+            // bind it as 2D and see whether GL accepts.
             bind(tg, (uint32_t)prev);
+            int32_t prev2 = 0;
+            if (geti) geti(GL_TEX_BIND_2D, &prev2);
+            for (int k = 0; gete && k < 8 && gete(); k++) {}
+            bind(GL_TEX_2D, (uint32_t)t->tex);
+            uint32_t e2 = gete ? gete() : 0;
+            bind(GL_TEX_2D, (uint32_t)prev2);
+            if (e2) {
+                // EXTERNAL for life: release the name (the guest keeps the same number) so the 2D
+                // bind creates it afresh. Without glDeleteTextures there is no correct fallback.
+                if (!deltex) { fprintf(stderr, "  [video] no glDeleteTextures: no 2D fallback\n"); break; }
+                uint32_t nm = (uint32_t)t->tex;
+                deltex(1, &nm);
+                fprintf(stderr, "  [video] tex %d was EXTERNAL_OES: name released, recreated as 2D\n", t->tex);
+            }
             t->target = GL_TEX_2D; t->tex_w = t->tex_h = 0; t->params_set = 0;
+            prev = prev2;
             continue;
         }
         if (err) { fprintf(stderr, "  [video] SurfaceTexture upload tex %d -> GL error 0x%x\n", t->tex, err); }
@@ -316,12 +354,13 @@ static klj_val klhv_stex_update(void *e, void *self, const klj_val *a, int n) {
     klhv_stex *t = klhv_stex_of(self);
     if (!t || t->released || !t->reader) return (klj_val){0};
     uint8_t *px = NULL; int w = 0, h = 0; int64_t pts = 0;
+    __atomic_add_fetch(&g_hv_updates, 1, __ATOMIC_RELAXED);
     int rc = kl_media_surface_take_rgba(t->reader, &px, &w, &h, &pts);
     if (rc == 1) {
         t->ts_ns = pts * 1000;
         klhv_gl_upload(t, px, w, h);
-        static unsigned said;
-        if (said++ < 3) fprintf(stderr, "  [video] SurfaceTexture tex %d <- %dx%d frame (pts %lld us)\n", t->tex, w, h, (long long)pts);
+        __atomic_add_fetch(&g_hv_uploaded, 1, __ATOMIC_RELAXED);
+        __atomic_store_n(&g_hv_last_pts, (long long)pts, __ATOMIC_RELAXED);
     }
     return (klj_val){0};
 }

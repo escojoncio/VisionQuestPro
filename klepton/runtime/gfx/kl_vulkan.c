@@ -87,6 +87,7 @@ void *kl_vulkan_layer_mtl_texture(int k, int s, int e, int *w, int *h) {
 }
 void  kl_vulkan_layer_rekey(int old_key, int new_key) { (void)old_key; (void)new_key; }
 int   kl_vulkan_layer_written(int key) { (void)key; return 0; }
+unsigned kl_vulkan_layer_write_events(int key) { (void)key; return 0; }
 unsigned long long kl_vulkan_spacewarp_image(int s, int e, int k, unsigned w, unsigned h,
                                              int f, int l) {
     (void)s; (void)e; (void)k; (void)w; (void)h; (void)f; (void)l; return 0;
@@ -160,6 +161,7 @@ unsigned long long kl_vulkan_xr_image(unsigned w, unsigned h, unsigned l,
 }
 void *kl_vulkan_xr_image_mtl(unsigned long long img) { (void)img; return NULL; }
 void kl_vulkan_xr_image_free(unsigned long long img) { (void)img; }
+void kl_vulkan_xr_image_mark_eye(unsigned long long img, int stage, int eye) { (void)img; (void)stage; (void)eye; }
 void kl_vulkan_trim(const char *why) { (void)why; }
 size_t kl_vulkan_diag(int which, char *out, size_t cap) { (void)which; (void)out; (void)cap; return 0; }
 void kl_vulkan_idle_drain(unsigned min_idle_ms, const char *why) { (void)min_idle_ms; (void)why; }
@@ -1252,6 +1254,7 @@ static struct {
     unsigned      seq;                        // claim order, for recycling oldest
     klvk_img_slot s[KLVK_EYE_STAGES][2];
     volatile int  written;                    // the guest copied/rendered into it (see klvk_layer_mark_written)
+    volatile unsigned events;                 // every such write, counted (kl_vulkan_layer_write_events)
     VkImage       src;                        // the image the guest's first copy/blit read from
     uint32_t      src_w, src_h;
     VkFormat      src_fmt;
@@ -1672,6 +1675,7 @@ static void klvk_layer_mark_written_how(VkImage img, const char *how, VkImage sr
         if (!g_layer_img[i].key) continue;
         for (int st = 0; st < KLVK_EYE_STAGES; st++) for (int e = 0; e < 2; e++)
             if (g_layer_img[i].s[st][e].img == img) {
+                __atomic_fetch_add(&g_layer_img[i].events, 1u, __ATOMIC_RELAXED);
                 if (!g_layer_img[i].written) {
                     g_layer_img[i].written = 1;
                     VkFormat sf = 0; uint32_t sw = 0, sh = 0;
@@ -1686,6 +1690,12 @@ static void klvk_layer_mark_written_how(VkImage img, const char *how, VkImage sr
                 return;
             }
     }
+}
+unsigned kl_vulkan_layer_write_events(int key) {
+    if (!key) return 0;
+    for (int i = 0; i < KLVK_MAX_LAYERS; i++)
+        if (g_layer_img[i].key == key) return __atomic_load_n(&g_layer_img[i].events, __ATOMIC_RELAXED);
+    return 0;
 }
 int kl_vulkan_layer_written(int key) {
     if (!key) return 0;
@@ -1967,6 +1977,8 @@ void kl_vulkan_layer_rekey(int old_key, int new_key) {
     }
 }
 
+static void klvk_mark_eye_image(VkImage img, int stage, int eye);   // defined with g_vpvk
+
 unsigned long long kl_vulkan_layer_image(int layer_key, int stage, int eye,
                                          unsigned w, unsigned h, int srgb, int layers) {
     if (!kl_vulkan_guest_active()) return 0;
@@ -2098,6 +2110,9 @@ unsigned long long kl_vulkan_layer_image(int layer_key, int stage, int eye,
                        : (eye ? "eye 1 BLUE" : "eye 0 GREEN"));
     }
 
+    // The eye layer's image, redrawn every frame: VPKEngine's pipeline gate may drop draws only from passes that draw
+    // into one of these (vpvk_mark_eye_image); a panel / overlay layer's image is never marked.
+    if (is_eye) klvk_mark_eye_image(img, stage, eye);
     slot->img = img;
     slot->mem = mem;
     slot->w = w;
@@ -3335,6 +3350,12 @@ void *kl_vulkan_xr_image_mtl(unsigned long long image) {
     if (!kl_vulkan_guest_active() || !image) return NULL;
     return eye_mtl_texture(g_devs[0], (VkImage)(uintptr_t)image);
 }
+// An OpenXR swapchain image that backs the projection (eye) layer: the same mark kl_vulkan_layer_image gives the
+// OVRPlugin eye image. Quad / panel swapchains never come here.
+void kl_vulkan_xr_image_mark_eye(unsigned long long image, int stage, int eye) {
+    if (!kl_vulkan_guest_active() || !image) return;
+    klvk_mark_eye_image((VkImage)(uintptr_t)image, stage, eye);
+}
 
 // The Vulkan version range a session may be created against.
 //
@@ -3782,6 +3803,8 @@ static struct {
     // weak: VPKEngine's UI mask of the newest eye passes for hosts that composite the eye themselves
     // (vpvk/config.h vpvk_ui_mask_texture): id<MTLTexture> +1 retained, or NULL.
     void *(*ui_mask_texture)(int eye, int *w, int *h, int *slice);
+    // weak: VPKEngine's mark of the eye layer's VkImages (vpvk/config.h vpvk_mark_eye_image): 1 marked, 0 not.
+    int   (*mark_eye_image)(void *vk_image);
 } g_vpvk;
 static pthread_mutex_t g_vpvk_mu = PTHREAD_MUTEX_INITIALIZER;
 
@@ -3819,9 +3842,20 @@ static void klvk_vpvk_resolve(void) {
         g_vpvk.diag_line       = (size_t (*)(int, char *, size_t))dlsym(lib, "vpvk_diag_line");
         g_vpvk.diag_ranges     = (size_t (*)(int, void *, size_t))dlsym(lib, "vpvk_diag_ranges");
         g_vpvk.ui_mask_texture = (void *(*)(int, int *, int *, int *))dlsym(lib, "vpvk_ui_mask_texture");
+        g_vpvk.mark_eye_image  = (int (*)(void *))dlsym(lib, "vpvk_mark_eye_image");
         __atomic_store_n(&g_vpvk.resolved, 1, __ATOMIC_RELEASE);
     }
     pthread_mutex_unlock(&g_vpvk_mu);
+}
+
+// Tells VPKEngine this VkImage belongs to the eye layer. Under MoltenVK (no vpvk_*) it is a no-op. Logged for every
+// image (a handful per run): -1 means no export: the pipeline gate then treats every pass as hard (waits, never drops).
+static void klvk_mark_eye_image(VkImage img, int stage, int eye) {
+    klvk_vpvk_resolve();
+    int r = -1;
+    if (g_vpvk.mark_eye_image) r = g_vpvk.mark_eye_image((void *)(uintptr_t)img);
+    VKI("eye image %p stage %d eye %d: vpvk_mark_eye_image -> %d%s\n", (void *)img, stage, eye, r,
+        r < 0 ? " (VPKEngine without the export)" : "");
 }
 
 // ---- GPU lost / congested (VPKEngine) ----

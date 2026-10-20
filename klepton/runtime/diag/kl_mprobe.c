@@ -393,6 +393,33 @@ static void mprobe_resolve_offsets(void) {
     }
 }
 
+// Menu transitions (diagnosis of "OVRInput.connected = 0x0 while ovrp answers Connected=0x3"): kl_ovrp.c calls
+// kl_mprobe_note_menu when the guest's non-eye layer count goes 0 <-> >0 (a menu opening or closing); the next tick
+// then asks the managed side, outside the 120-frame cadence and without KL_PROBE_INPUT, what OVRInput.GetConnectedControllers /
+// GetActiveController say right now. Only the two static getters, after KL_PROBE_FROM (the game is up), at most 60 times.
+static unsigned g_menu_req, g_menu_from, g_menu_to;
+void kl_mprobe_note_menu(int overlays_before, int overlays_after) {
+    __atomic_store_n(&g_menu_from, (unsigned)overlays_before, __ATOMIC_RELAXED);
+    __atomic_store_n(&g_menu_to, (unsigned)overlays_after, __ATOMIC_RELAXED);
+    __atomic_fetch_add(&g_menu_req, 1, __ATOMIC_RELEASE);
+}
+static void probe_menu_connected(unsigned frame, unsigned from, unsigned to) {
+    static const MethodInfo *m_c, *m_a;
+    static int resolved;
+    if (!resolved) {
+        resolved = 1;
+        m_c = find_method("", "OVRInput", "GetConnectedControllers", 0);
+        m_a = find_method("", "OVRInput", "GetActiveController", 0);
+    }
+    Il2CppObject *c = m_c ? invoke(m_c, NULL, "OVRInput.GetConnectedControllers") : NULL;
+    Il2CppObject *a = m_a ? invoke(m_a, NULL, "OVRInput.GetActiveController") : NULL;
+    fprintf(stderr, "  [mprobe f%u] OVRInput at menu transition (overlays %u -> %u): connected=", frame, from, to);
+    if (c) fprintf(stderr, "0x%x", *(uint32_t *)il.object_unbox(c)); else fprintf(stderr, "?");
+    fprintf(stderr, " active=");
+    if (a) fprintf(stderr, "0x%x", *(uint32_t *)il.object_unbox(a)); else fprintf(stderr, "?");
+    fprintf(stderr, "\n");
+}
+
 void kl_mprobe_tick(unsigned frame) {
     // Independent of KL_PROBE_INPUT and of KL_PROBE_FROM: this one has to land
     // BEFORE the throw it exists to describe, and the throw here is on the
@@ -421,6 +448,20 @@ void kl_mprobe_tick(unsigned frame) {
         }
         if (frame >= xr_from && frame % xr_every == 0 && mprobe_init())
             probe_xr_display(frame);
+    }
+
+    {
+        static unsigned menu_done, menu_probes, menu_from_frame;
+        const unsigned req = __atomic_load_n(&g_menu_req, __ATOMIC_ACQUIRE);
+        if (req != menu_done) {
+            if (!menu_from_frame) menu_from_frame = kl_env_uint("KL_PROBE_FROM", 1200u);
+            if (frame >= menu_from_frame && menu_probes < 60 && mprobe_init()) {
+                menu_probes++;
+                probe_menu_connected(frame, __atomic_load_n(&g_menu_from, __ATOMIC_RELAXED),
+                                     __atomic_load_n(&g_menu_to, __ATOMIC_RELAXED));
+            }
+            if (frame >= menu_from_frame) menu_done = req;
+        }
     }
 
     static int on = -1;

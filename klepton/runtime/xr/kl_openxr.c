@@ -1916,6 +1916,7 @@ static XrResult klxr_CreateInstance_rt(const XrInstanceCreateInfo *info, void **
         if (strcmp(name, "XR_KHR_vulkan_enable") == 0)    g_instance.ext_vulkan = 1;
         if (strcmp(name, "XR_EXT_hand_tracking") == 0 ||
             strcmp(name, "XR_FB_render_model") == 0 ||
+            strcmp(name, "XR_FB_passthrough") == 0 ||
             strcmp(name, "XR_META_environment_depth") == 0 ||
             strncmp(name, "XR_FB_spatial_entity", 20) == 0 ||
             strcmp(name, "XR_FB_scene") == 0 ||
@@ -3408,6 +3409,83 @@ static void klxr_ctrl_trace(const XrPosef *p, int hand, int is_aim) {
     kl_ovrp_ctrl_trace(is_aim ? "openxr aim" : "openxr grip", hand, e, pos);
 }
 
+// Grip/aim error probe. The published hand pose is Apple's `.grip` (rendered)
+// with the frontend's Sense tune; this path then adds +grip_pitch to the grip and
+// +grip_pitch+aim_pitch to the aim (+37 / -37 by default, calibrated with Steam
+// Link), both about the SAME origin. Nothing measured how far that lands from
+// what a guest expects, so this prints, at 1 Hz per hand and kind, the published
+// pose, the pose handed to the guest, the signed pitch added (in the published
+// frame) and, on the aim line, the aim against the grip it came with. Default ON
+// for the first 60 s of the session (KL_XR_AIMGRIP_TRACE=0 off, ..._S=seconds);
+// diagnostic only, it changes no pose.
+static void klxr_pose_euler_deg(const XrQuaternionf *q, float e[3]) {
+    const float R = 57.29577951308232f;
+    float sx = 2.0f * (q->w * q->x + q->y * q->z), cx = 1.0f - 2.0f * (q->x * q->x + q->y * q->y);
+    float sy = 2.0f * (q->w * q->y - q->z * q->x);
+    float sz = 2.0f * (q->w * q->z + q->x * q->y), cz = 1.0f - 2.0f * (q->y * q->y + q->z * q->z);
+    if (sy > 1.0f) sy = 1.0f;
+    if (sy < -1.0f) sy = -1.0f;
+    e[0] = atan2f(sx, cx) * R; e[1] = asinf(sy) * R; e[2] = atan2f(sz, cz) * R;
+}
+// Angle of the rotation taking a to b, degrees.
+static float klxr_qangle_deg(XrQuaternionf a, XrQuaternionf b) {
+    XrQuaternionf r = klxr_qmul(klxr_qconj(a), b);
+    float v = sqrtf(r.x * r.x + r.y * r.y + r.z * r.z);
+    return 2.0f * atan2f(v, fabsf(r.w)) * 57.29577951308232f;
+}
+static void klxr_aimgrip_trace(const XrPosef *pre, const XrPosef *post, int hand, int is_aim) {
+    static int on = -1, window_s;
+    static int64_t t0;
+    static int64_t last[2][2];
+    if (on < 0) {
+        on = kl_env_on("KL_XR_AIMGRIP_TRACE", 1);
+        window_s = kl_env_int("KL_XR_AIMGRIP_TRACE_S", 60);
+    }
+    if (!on || (unsigned)hand > 1) return;
+    int64_t now = klxr_now();
+    int64_t z = 0;
+    __atomic_compare_exchange_n(&t0, &z, now, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE);
+    if (now - __atomic_load_n(&t0, __ATOMIC_ACQUIRE) > (int64_t)window_s * 1000000000ll) return;
+    int64_t prev = __atomic_load_n(&last[hand][is_aim ? 1 : 0], __ATOMIC_ACQUIRE);
+    if (prev && now - prev < 1000000000ll) return;
+    if (!__atomic_compare_exchange_n(&last[hand][is_aim ? 1 : 0], &prev, now, 0,
+                                     __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
+        return;
+    float ep[3], eo[3];
+    klxr_pose_euler_deg(&pre->orientation, ep);
+    klxr_pose_euler_deg(&post->orientation, eo);
+    // Pitch added in the published frame: rel = conj(pre) * post, about X.
+    XrQuaternionf rel = klxr_qmul(klxr_qconj(pre->orientation), post->orientation);
+    float added = 2.0f * atan2f(rel.x, rel.w) * 57.29577951308232f;
+    if (added > 180.0f) added -= 360.0f;
+    if (added < -180.0f) added += 360.0f;
+    float dp = sqrtf((post->position.x - pre->position.x) * (post->position.x - pre->position.x) +
+                     (post->position.y - pre->position.y) * (post->position.y - pre->position.y) +
+                     (post->position.z - pre->position.z) * (post->position.z - pre->position.z));
+    fprintf(stderr, "  [xr-ctrl] t=%.0fs hand %d %s: published euler %.1f %.1f %.1f pos %.3f %.3f %.3f"
+                    " | to guest euler %.1f %.1f %.1f pos %.3f %.3f %.3f"
+                    " | pitch added %+.1f deg, rot %.1f deg, pos moved %.1f mm",
+            (double)(now - t0) / 1e9, hand, is_aim ? "AIM " : "GRIP",
+            (double)ep[0], (double)ep[1], (double)ep[2],
+            (double)pre->position.x, (double)pre->position.y, (double)pre->position.z,
+            (double)eo[0], (double)eo[1], (double)eo[2],
+            (double)post->position.x, (double)post->position.y, (double)post->position.z,
+            (double)added, (double)klxr_qangle_deg(pre->orientation, post->orientation),
+            (double)dp * 1000.0);
+    if (is_aim) {
+        // The grip this aim travels with, computed from the same published pose.
+        XrPosef g = *pre;
+        klxr_pose_corrections(&g, 0, hand);
+        float sep = sqrtf((post->position.x - g.position.x) * (post->position.x - g.position.x) +
+                          (post->position.y - g.position.y) * (post->position.y - g.position.y) +
+                          (post->position.z - g.position.z) * (post->position.z - g.position.z));
+        fprintf(stderr, " | aim vs grip: rot %.1f deg, origin apart %.1f mm%s",
+                (double)klxr_qangle_deg(g.orientation, post->orientation),
+                (double)sep * 1000.0, sep < 1e-6f ? " (same origin)" : "");
+    }
+    fprintf(stderr, "\n");
+}
+
 // How far ahead a pose may be asked for, in nanoseconds.
 //
 // A tracker extrapolates, and past about 50 ms the extrapolation is no longer
@@ -3493,6 +3571,76 @@ static XrPosef klxr_head_predicted(XrPosef p, const klxr_head_delta *d) {
     return p;
 }
 
+// LOCAL's origin. OpenXR puts it where the head started — eye level — and the
+// tracking space here is floor-relative (head y ~ 1 m), so LOCAL is the tracking
+// space raised by the head's standing height. kl_ovrp_eye_height() is that height
+// only once an OVRPlugin guest chose a floor/stage origin; an OpenXR guest never
+// does, so it answered 0 and LOCAL collapsed onto STAGE (a head in LOCAL at
+// y ~ 1 m, hands a metre off from where the guest's rig expects them).
+//
+// The height is latched when first measured and again on a recenter (the
+// measured height changed: posture change or the host recenter). A change
+// publishes XrEventDataReferenceSpaceChangePending for LOCAL. Until a head has
+// been published there is nothing to measure and the origin is 0, which matches
+// the default head. KL_XR_LOCAL_LEGACY=1 restores LOCAL == STAGE.
+static int g_xr_local_mm;     // latched LOCAL origin height in mm; 0 = none yet
+static int g_xr_local_served0; // a LOCAL pose was answered with origin 0 before the first measurement
+
+static void klxr_local_changed(float from_y, float to_y) {
+    // XrEventDataReferenceSpaceChangePending, from byte 16 on (klxr_push_event
+    // writes type/next itself): session, referenceSpaceType, changeTime,
+    // poseValid, poseInPreviousSpace. The new origin in the previous one is the
+    // difference of the two heights.
+    struct {
+        void *session; int32_t type; int32_t pad; int64_t change_time;
+        uint32_t pose_valid; XrPosef pose;
+    } ev;
+    memset(&ev, 0, sizeof ev);
+    ev.session = &g_session;
+    ev.type = KLXR_REF_SPACE_LOCAL;
+    ev.change_time = klxr_now();
+    ev.pose_valid = 1;
+    ev.pose.orientation.w = 1.0f;
+    ev.pose.position.y = to_y - from_y;
+    klxr_push_event(40 /* XR_TYPE_EVENT_DATA_REFERENCE_SPACE_CHANGE_PENDING */,
+                    &ev, sizeof ev);
+    fprintf(stderr, "  [xr] LOCAL recentred: origin %.3f -> %.3f m (change pending posted)\n",
+            (double)from_y, (double)to_y);
+}
+
+static float klxr_local_origin_y(void) {
+    static int legacy = -1;
+    if (legacy < 0) legacy = kl_env_on("KL_XR_LOCAL_LEGACY", 0);
+    // A guest that drove the OVRPlugin tracking origin keeps that meaning.
+    if (legacy || kl_ovrp_tracking_origin() != 0) return kl_ovrp_eye_height();
+    float m = kl_ovrp_measured_eye_height_or0();
+    if (!(m > 0.3f && m < 2.5f)) {
+        int cur = __atomic_load_n(&g_xr_local_mm, __ATOMIC_ACQUIRE);
+        if (cur <= 0) __atomic_store_n(&g_xr_local_served0, 1, __ATOMIC_RELEASE);   // the guest saw origin 0
+        return (float)cur / 1000.0f;   // not measured yet (0), or keep the latch
+    }
+    int mm = (int)lrintf(m * 1000.0f);
+    int cur = __atomic_load_n(&g_xr_local_mm, __ATOMIC_ACQUIRE);
+    if (cur <= 0) {
+        int zero = 0;
+        if (__atomic_compare_exchange_n(&g_xr_local_mm, &zero, mm, 0,
+                                        __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
+        {
+            fprintf(stderr, "  [xr] LOCAL origin latched at head height %.3f m\n", (double)m);
+            // A pose in LOCAL was already answered with origin 0: the scene jumps by the height, so say it
+            // (the same event as a recenter). Nothing served yet = nothing moved = no event.
+            if (__atomic_exchange_n(&g_xr_local_served0, 0, __ATOMIC_ACQ_REL))
+                klxr_local_changed(0.0f, (float)mm / 1000.0f);
+        }
+        return (float)__atomic_load_n(&g_xr_local_mm, __ATOMIC_ACQUIRE) / 1000.0f;
+    }
+    if (abs(mm - cur) >= 10 &&
+        __atomic_compare_exchange_n(&g_xr_local_mm, &cur, mm, 0,
+                                    __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
+        klxr_local_changed((float)cur / 1000.0f, (float)mm / 1000.0f);
+    return (float)__atomic_load_n(&g_xr_local_mm, __ATOMIC_ACQUIRE) / 1000.0f;
+}
+
 // `motion_known` reports whether lin/ang are a measurement — a frontend that
 // publishes pose only has them derived (kl_ovrp), and the first sample after a
 // gap has no basis at all. That case must reach the guest as velocityFlags == 0
@@ -3528,7 +3676,7 @@ static XrPosef klxr_space_pose_ex(const klxr_space *sp, int *tracked,
         // published poses, and reported as a measurement only when it is one.
         if (motion_known) *motion_known = kl_ovrp_head_motion(lin, ang);
     } else if (sp->reference_type == KLXR_REF_SPACE_LOCAL) {
-        base.position.y = kl_ovrp_eye_height();
+        base.position.y = klxr_local_origin_y();
     } else if (sp->reference_type == KLXR_REF_SPACE_EXTERNAL) {
         // A spatial-entity space: the owner places it in the tracking space.
         float q[4] = {0, 0, 0, 1}, p[3] = {0, 0, 0};
@@ -3551,8 +3699,10 @@ static XrPosef klxr_space_pose_ex(const klxr_space *sp, int *tracked,
         if (!present) return base;
         base.position    = (XrVector3f){ pos[0], pos[1], pos[2] };
         base.orientation = (XrQuaternionf){ quat[0], quat[1], quat[2], quat[3] };
+        XrPosef published = base;
         klxr_pose_corrections(&base, is_aim, hand);
         klxr_ctrl_trace(&base, hand, is_aim);
+        klxr_aimgrip_trace(&published, &base, hand, is_aim);
         if (lin) memcpy(lin, v, sizeof v);
         if (ang) memcpy(ang, a, sizeof a);
         if (motion_known) *motion_known = kl_ovrp_hand_motion_known(hand);
@@ -5307,6 +5457,7 @@ static void klxr_publish_eye_vulkan(klxr_swapchain *sc, int eye, int slice) {
     for (int k = 0; k < sc->count; k++) {
         void *tex = kl_vulkan_xr_image_mtl(sc->vk_img[k]);
         if (!tex) continue;
+        kl_vulkan_xr_image_mark_eye(sc->vk_img[k], k, eye);   // colour image of the projection layer: redrawn every frame
         kl_glfb_note_eye_mtl_texture(eye, k, tex, slice,
                                      (int)sc->width, (int)sc->height);
         done++;
@@ -8820,16 +8971,17 @@ int kl_openxr_space_selftest(FILE *f) {
     klxr_space view  = klxr_st_space(KLXR_REF_SPACE_VIEW, 0, 0, 0);
     klxr_space stage = klxr_st_space(KLXR_REF_SPACE_STAGE, 0, 0, 0);
     klxr_space local = klxr_st_space(KLXR_REF_SPACE_LOCAL, 0, 0, 0);
-    float eh = kl_ovrp_eye_height();
     int ok = 1;
+    float eh = 0.0f;
+    __atomic_store_n(&g_xr_local_mm, 0, __ATOMIC_RELEASE);   // forget any earlier latch
+    const int legacy = kl_env_on("KL_XR_LOCAL_LEGACY", 0);
 
-    // Said out loud because it is 0 here and that makes one assertion below a
-    // weak one: kl_ovrp_eye_height answers 0 until a guest asks for a
-    // floor-level tracking origin through OVRPlugin, and an OpenXR guest never
-    // speaks OVRPlugin. So on this path LOCAL and STAGE genuinely coincide, and
-    // "LOCAL in STAGE" checks that they agree rather than that the height is
-    // right. A guest that separates them will separate them here too.
-    fprintf(f, "  standing eye height: %.3f m (LOCAL is STAGE raised by this)\n", eh);
+    // LOCAL is STAGE raised by the head's measured standing height (OpenXR puts
+    // LOCAL's origin at the head's starting position). It is read per head below,
+    // because the height is measured from the first published head and the
+    // origin head (y = 0) is not a measurement. KL_XR_LOCAL_LEGACY=1 keeps the
+    // old LOCAL == STAGE for a guest that was calibrated against it.
+    fprintf(f, "  LOCAL origin: %s\n", legacy ? "legacy (== STAGE)" : "head height, latched");
 
     // Two head poses, and the second is chosen so that a leak shows up as a
     // wildly different number rather than a slightly wrong one: away from the
@@ -8874,6 +9026,16 @@ int kl_openxr_space_selftest(FILE *f) {
 
         // LOCAL and STAGE are both fixed frames, so they differ by the standing
         // height and by nothing the head does.
+        eh = klxr_local_origin_y();
+        if (!legacy && heads[h].p[1] > 0.3f) {
+            // The head is published at y = 1.6: the origin must have latched to
+            // it, so the head sits at y ~ 0 in LOCAL.
+            ok &= klxr_st_ok(f, "LOCAL's origin is the measured head height", eh > 0.3f);
+            XrPosef head_in_local = klxr_pose_rel(klxr_space_pose(&local, NULL),
+                                                  klxr_space_pose(&view, NULL));
+            fprintf(f, "  head in LOCAL: y = %.3f m (origin %.3f)\n",
+                    (double)head_in_local.position.y, (double)eh);
+        }
         XrPosef local_in_stage = klxr_pose_rel(klxr_space_pose(&stage, NULL),
                                                klxr_space_pose(&local, NULL));
         ok &= klxr_st_pos(f, "LOCAL in STAGE is the standing height",

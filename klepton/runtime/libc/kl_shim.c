@@ -1915,8 +1915,18 @@ extern const char *kl_log_default_tag;
 static void kl_android_log_write(int p, const char *t, const char *m) {
     extern void kl_openxr_status_log(const char *, const char *);
     extern void kl_jni_note_log(int, const char *, const char *);
+    extern void kl_log_keyword_copy(int, const char *, const char *);
     if (!t && kl_log_default_tag) t = kl_log_default_tag;
+    kl_log_keyword_copy(p, t, m);   // run-state lines once more, tagged, whichever logger prints them
     if (kl_log_custom_logger) {          // the guest replaced liblog's logger: every write goes through it
+        // Its logger decides where the line goes and may print nothing of ours: INFO and above are copied to our
+        // log first, so a game that installs its own logger does not lose its E/W/I lines (capped, KL_LOG_CUSTOM_MAX; INFO gets a third of it).
+        // INFO has its own, smaller budget so a chatty engine cannot use up the room the W/E lines need.
+        static int n_custom, n_custom_info, cap_custom = -1;
+        if (cap_custom < 0) { const char *e = getenv("KL_LOG_CUSTOM_MAX"); cap_custom = e && *e ? atoi(e) : 3000; }
+        if (p >= 5 ? __atomic_fetch_add(&n_custom, 1, __ATOMIC_RELAXED) < cap_custom
+                   : p == 4 && __atomic_fetch_add(&n_custom_info, 1, __ATOMIC_RELAXED) < cap_custom / 3)
+            fprintf(stderr, "[%d/%s] %s\n", p, t ? t : "", m ? m : "");
         struct kl_android_log_message msg = { sizeof msg, 1 /* LOG_ID_MAIN */, p, t, NULL, 0, m };
         kl_log_custom_logger(&msg);
         return;

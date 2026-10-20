@@ -28,6 +28,11 @@ enum VQLog {
     static func start() {
         lock.lock(); defer { lock.unlock() }
         try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        sessionStart = Date()
+        // BEFORE the rotation below: a launch that plays no game would otherwise push the last
+        // game's app.txt out of app-anterior.txt (2026-10-20: AC's log vanished after two launches).
+        let archived = archivePreviousSession()
+        refreshSessionFiles()
         let previous = directory.appendingPathComponent("app-anterior.txt")
         try? FileManager.default.removeItem(at: previous)
         try? FileManager.default.moveItem(at: appLog, to: previous)
@@ -38,6 +43,10 @@ enum VQLog {
         let line = "VisionQuestPro \(info["CFBundleShortVersionString"] ?? "?") (\(info["CFBundleVersion"] ?? "?")) commit \(vqBuildCommit.isEmpty ? "local" : vqBuildCommit), "
             + "visionOS \(ProcessInfo.processInfo.operatingSystemVersionString)\n"
         handle?.write(Data(line.utf8))
+        if let archived = archived {
+            let stamp = ISO8601DateFormatter.string(from: Date(), timeZone: .current, formatOptions: [.withTime, .withColonSeparatorInTime])
+            handle?.write(Data("\(stamp) Registros: sesión anterior archivada en Registros/sesiones como \(archived)\n".utf8))
+        }
         // Read by kl_fault_set_crash_path (C) for the header of klepton-crash.log.
         setenv("KL_BUILD_COMMIT", vqBuildCommit.isEmpty ? "local" : vqBuildCommit, 1)
         refreshQuestAttachments(force: true)   // warm the cache off the main thread
@@ -50,14 +59,129 @@ enum VQLog {
         handle?.write(Data("\(stamp) \(message)\n".utf8))
     }
 
-    /// The logs that exist, for the share button.
-    static var shareable: [URL] {
+    /// The files of the CURRENT process (and the previous app log), whole: what saveToQuest copies.
+    private static var liveFiles: [URL] {
         [appLog, directory.appendingPathComponent("app-anterior.txt"), bootLog, crashLog,
          directory.appendingPathComponent("conformidad-vulkan.txt"),
          directory.appendingPathComponent("conformidad-detalle.txt"),
          directory.appendingPathComponent("meta-api.txt")]
             .filter { FileManager.default.fileExists(atPath: $0.path) }
             + captures + crashAttachments
+    }
+
+    /// The logs for the share button: the live files plus the last `shareSessions` games, each with
+    /// its own app log, guest log and crash report under a name that says date, game and commit
+    /// (Registros/sesiones/<fecha>_<juego>_<commit>__klepton-boot.log). Read by SwiftUI on every
+    /// render: everything here is a stat or a cached list, never a directory scan on the spot.
+    /// A live boot / crash log that is the previous game's is left out when its archived copy is in
+    /// the list (no duplicated multi-MB logs).
+    static var shareable: [URL] {
+        sessionsLock.lock(); let sessions = sessionFilesCache; sessionsLock.unlock()
+        let names = sessions.map { $0.lastPathComponent }
+        let live = liveFiles.filter { (u: URL) -> Bool in
+            guard u == bootLog || u == crashLog else { return true }
+            let suffix = "__" + u.lastPathComponent
+            guard names.contains(where: { $0.hasSuffix(suffix) }) else { return true }
+            let m = (try? FileManager.default.attributesOfItem(atPath: u.path))?[.modificationDate] as? Date
+            return m.map { $0 >= sessionStart } ?? true
+        }
+        return live + sessions
+    }
+
+    // MARK: archived sessions
+
+    /// One game = one process (the guest cannot run twice in one), so a session is what one
+    /// process wrote: app.txt, plus the boot / crash log if the game started in it.
+    private static let sessionsLock = NSLock()
+    nonisolated(unsafe) private static var sessionFilesCache: [URL] = []
+    nonisolated(unsafe) private static var sessionStart = Date.distantPast
+    nonisolated(unsafe) private static var previousSessionTag: String?
+    private static let keepSessions = 8
+    private static let shareSessions = 6
+    private static let headBytes = 2_000_000
+    private static let tailBytes = 4_000_000
+
+    static var sessionsDirectory: URL { directory.appendingPathComponent("sesiones", isDirectory: true) }
+
+    private static func sessionName(_ u: URL) -> String {
+        u.lastPathComponent.components(separatedBy: "__")[0]
+    }
+
+    /// Copies `src` to `dst`. A file over headBytes + tailBytes keeps its first headBytes and its last
+    /// tailBytes (cut at line ends) with a marker in between; the whole file stays where it was
+    /// and in QUEST/Registros (saveToQuest).
+    private static func copyTrimmed(_ src: URL, to dst: URL) -> Bool {
+        let fm = FileManager.default
+        try? fm.removeItem(at: dst)
+        let size = (try? fm.attributesOfItem(atPath: src.path))?[.size] as? UInt64 ?? 0
+        if size <= UInt64(headBytes + tailBytes) { return (try? fm.copyItem(at: src, to: dst)) != nil }
+        guard let h = try? FileHandle(forReadingFrom: src) else { return false }
+        defer { try? h.close() }
+        var head = h.readData(ofLength: headBytes)
+        if let nl = head.lastIndex(of: 10) { head = Data(head[head.startIndex...nl]) }
+        try? h.seek(toOffset: size - UInt64(tailBytes))
+        var tail = h.readDataToEndOfFile()
+        if let nl = tail.firstIndex(of: 10) { tail = Data(tail[tail.index(after: nl)...]) }
+        let marker = Data("\n[... recortado: \(size) bytes en total, aquí los primeros y los últimos; el registro completo está en QUEST/Registros ...]\n".utf8)
+        do { try (head + marker + tail).write(to: dst); return true } catch { return false }
+    }
+
+    /// At launch, BEFORE app.txt is rotated: if the previous process started a game, files its app
+    /// log (and the guest / crash log written after that process began) in Registros/sesiones/.
+    /// Cheap and synchronous on purpose (local sandbox, APFS clone or two small reads): the next
+    /// launch may be a Digital Crown press away. Returns the session name, or nil.
+    private static func archivePreviousSession() -> String? {
+        let fm = FileManager.default
+        guard let data = try? Data(contentsOf: appLog, options: .mappedIfSafe), !data.isEmpty,
+              let r = data.range(of: Data("Arranque: ".utf8)) else { return nil }
+        let rest = String(decoding: data[r.upperBound..<min(r.upperBound + 200, data.endIndex)], as: UTF8.self)
+        let id = rest.components(separatedBy: "\n")[0].components(separatedBy: " (")[0]
+        var game = ""
+        for c in id {
+            if c.isASCII && (c.isLetter || c.isNumber || c == "-") { game.append(c) }
+            else if !game.hasSuffix("_") { game.append("_") }
+        }
+        game = String(game.prefix(24))
+        while game.hasSuffix("_") { game.removeLast() }
+        if game.isEmpty { game = "juego" }
+        let first = String(decoding: data.prefix(300), as: UTF8.self).components(separatedBy: "\n")[0]
+        var commit = "local"
+        if let c = first.range(of: "commit ") {
+            let hash = String(first[c.upperBound...].prefix(while: { $0.isLetter || $0.isNumber }))
+            if !hash.isEmpty { commit = hash }
+        }
+        let attrs = try? fm.attributesOfItem(atPath: appLog.path)
+        let started = (attrs?[.creationDate] as? Date) ?? (attrs?[.modificationDate] as? Date) ?? Date()
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.dateFormat = "yyyy-MM-dd_HH-mm"
+        let name = "\(f.string(from: started))_\(game)_\(commit)"
+        do { try fm.createDirectory(at: sessionsDirectory, withIntermediateDirectories: true) } catch { return nil }
+        _ = copyTrimmed(appLog, to: sessionsDirectory.appendingPathComponent("\(name)__app.txt"))
+        for src in [bootLog, crashLog] {
+            // Written after this process began (the guest log is reopened "w" at each game launch);
+            // an older one belongs to an earlier session.
+            guard let m = (try? fm.attributesOfItem(atPath: src.path))?[.modificationDate] as? Date,
+                  m >= started.addingTimeInterval(-5) else { continue }
+            if copyTrimmed(src, to: sessionsDirectory.appendingPathComponent("\(name)__\(src.lastPathComponent)")),
+               src == bootLog { previousSessionTag = "\(game)_\(commit)" }
+        }
+        let files = (try? fm.contentsOfDirectory(at: sessionsDirectory, includingPropertiesForKeys: nil)) ?? []
+        let keep = Set(Set(files.map { sessionName($0) }).sorted(by: >).prefix(keepSessions))
+        for u in files where !keep.contains(sessionName(u)) { try? fm.removeItem(at: u) }
+        return name
+    }
+
+    /// Rebuilds the cached list of the last `shareSessions` archived sessions.
+    private static func refreshSessionFiles() {
+        let files = ((try? FileManager.default.contentsOfDirectory(at: sessionsDirectory, includingPropertiesForKeys: nil)) ?? [])
+            .filter { $0.lastPathComponent.contains("__") }
+        let newest = Set(Set(files.map { sessionName($0) }).sorted(by: >).prefix(shareSessions))
+        let picked = files.filter { newest.contains(sessionName($0)) }
+            .sorted { $0.lastPathComponent > $1.lastPathComponent }
+        sessionsLock.lock()
+        sessionFilesCache = picked
+        sessionsLock.unlock()
     }
 
     /// Crash / hang evidence the app can read: the MSL of the shaders of a GPU hang
@@ -142,7 +266,7 @@ enum VQLog {
         let bootDate = (try? fm.attributesOfItem(atPath: bootLog.path))?[.modificationDate] as? Date
         let crashDate = (try? fm.attributesOfItem(atPath: crashLog.path))?[.modificationDate] as? Date
         let staleCrash = bootDate != nil && crashDate != nil && crashDate! < bootDate!.addingTimeInterval(-60)
-        for src in shareable where !(staleCrash && src == crashLog) {
+        for src in liveFiles where !(staleCrash && src == crashLog) {
             let to = dest.appendingPathComponent(src.lastPathComponent)
             try? fm.removeItem(at: to)
             if (try? fm.copyItem(at: src, to: to)) != nil { copied += 1 }
@@ -240,7 +364,7 @@ enum VQLog {
                 previousSessionLock.unlock()
                 if launched { return }
             }
-            if saveToQuest("sesion-anterior") != nil {
+            if saveToQuest("sesion-anterior" + (previousSessionTag.map { "-" + $0 } ?? "")) != nil {
                 UserDefaults.standard.set(date.timeIntervalSince1970, forKey: savedDateKey)
                 return
             }

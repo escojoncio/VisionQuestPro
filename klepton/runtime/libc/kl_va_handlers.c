@@ -8,6 +8,7 @@
 #include <stdarg.h>
 #include <wchar.h>
 #include <string.h>
+#include <strings.h>
 #include <fcntl.h>
 #include <sys/ioctl.h>
 #include "kl_va.h"
@@ -147,8 +148,49 @@ void kl_hl2_force_create_rendertargets(void) {
     fprintf(stderr, "  [hl2rt] CreateRenderTargets returned (alloc_flag restored to %d)\n", saved_flag);
 }
 
+// Diagnosis of "the fight does not end / checkpoints reload": the game's own logcat lines that mention a run-state
+// word (checkpoint, respawn, death, die, fail, mission, tutorial, combat, matched case-insensitively at the start of a
+// word: "died", "failed", "combatant" count) are copied once more to our log as "[unity-kw] P/tag: text", so they can be
+// grepped on their own. Only INFO and above, or any priority of the Unity tag. Capped (KL_LOG_KW_MAX, default 1500;
+// 0 = off). Called from __android_log_print / __android_log_write; never changes what the guest sees.
+static int g_kw_cap = -1;
+static int g_kw_n;
+int kl_log_keyword_open(void) {
+    if (g_kw_cap < 0) {
+        const char *e = getenv("KL_LOG_KW_MAX");
+        g_kw_cap = e && *e ? atoi(e) : 1500;
+        if (g_kw_cap < 0) g_kw_cap = 0;
+    }
+    return __atomic_load_n(&g_kw_n, __ATOMIC_RELAXED) < g_kw_cap;
+}
+void kl_log_keyword_copy(int prio, const char *tag, const char *msg) {
+    if (!msg || !kl_log_keyword_open()) return;
+    if (prio < 4 && !(tag && strstr(tag, "Unity"))) return;
+    static const char *const kw[] = { "checkpoint", "respawn", "death", "die", "fail", "mission", "tutorial", "combat" };
+    int hit = 0;
+    for (const char *c = msg; *c && !hit; c++) {
+        if (c != msg && ((c[-1] >= '0' && c[-1] <= '9') || ((c[-1] | 0x20) >= 'a' && (c[-1] | 0x20) <= 'z'))) continue;
+        for (unsigned k = 0; k < sizeof kw / sizeof *kw; k++)
+            if (strncasecmp(c, kw[k], strlen(kw[k])) == 0) { hit = 1; break; }
+    }
+    if (!hit) return;
+    int n = __atomic_fetch_add(&g_kw_n, 1, __ATOMIC_RELAXED);
+    if (n >= g_kw_cap) return;
+    static const char lv[] = "??VDIWEF";
+    fprintf(stderr, "  [unity-kw] %c/%s: %.400s%s\n", (prio >= 0 && prio < 8) ? lv[prio] : '?', tag ? tag : "", msg,
+            n + 1 == g_kw_cap ? " (kw line cap reached)" : "");
+}
+
 int klh_android_log_print(int prio, const char *tag, const char *fmt, kl_va *va) {
     KL_MARSHAL(fmt, va, KL_VA_PRINTF);
+    if (kl_log_keyword_open() && (prio >= 4 || (tag && strstr(tag, "Unity")))) {   // a copy of the run-state lines (see kl_log_keyword_copy)
+        char kwtext[1024];
+        va_list kwcp;
+        va_copy(kwcp, _ap);
+        vsnprintf(kwtext, sizeof kwtext, fmt, kwcp);
+        va_end(kwcp);
+        kl_log_keyword_copy(prio, tag, kwtext);
+    }
     static const char lv[] = "??VDIWEF";
     fprintf(stderr, "%c/%s: ", (prio >= 0 && prio < 8) ? lv[prio] : '?', tag ? tag : "");
     // The OpenXR CTS's progress, for the compositor's HUD (kl_openxr_status_text).
