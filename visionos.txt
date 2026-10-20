@@ -1,4 +1,4 @@
-# visionos - 1c7b1fe8765639d05b035207ebde7d441d13f850 - 2026-10-20T15:58:47Z
+# visionos - 1c7b1fe8765639d05b035207ebde7d441d13f850 - 2026-10-20T16:19:42Z
 
 ## syntax.log:        2 lines
 ### errors
@@ -28,14 +28,14 @@ host-tests: -j3, work /Users/runner/work/VisionQuestPro/VisionQuestPro/build/hos
 -- Detecting OBJCXX compiler ABI info
 -- Detecting OBJCXX compiler ABI info - done
 -- Check for working OBJCXX compiler: /usr/bin/clang++ - skipped
--- Configuring done (7.6s)
+-- Configuring done (6.1s)
 -- Generating done (0.1s)
 -- Build files have been written to: /Users/runner/work/VisionQuestPro/VisionQuestPro/build/vpvulkan-build
 ninja: Entering directory `build/vpvulkan-build'
 [0/2] Re-checking globbed directories...
 [1/53] Building CXX object shader/ir/CMakeFiles/vpir.dir/src/ir.cpp.o
-[2/53] Building CXX object shader/ir/CMakeFiles/vpir.dir/src/builder.cpp.o
-[3/53] Building CXX object shader/ir/CMakeFiles/vpir.dir/src/print.cpp.o
+[2/53] Building CXX object shader/ir/CMakeFiles/vpir.dir/src/print.cpp.o
+[3/53] Building CXX object shader/ir/CMakeFiles/vpir.dir/src/builder.cpp.o
 [4/53] Building CXX object shader/ir/CMakeFiles/vpir.dir/src/parse.cpp.o
 [5/53] Building CXX object core/CMakeFiles/vpgpu_core.dir/src/resources.cpp.o
 [6/53] Building CXX object shader/ir/CMakeFiles/vpir.dir/src/verify.cpp.o
@@ -43,8 +43,8 @@ ninja: Entering directory `build/vpvulkan-build'
 [8/53] Building CXX object shader/ir/CMakeFiles/vpir.dir/src/optimize.cpp.o
 [9/53] Building CXX object core/CMakeFiles/vpgpu_core.dir/src/commands.cpp.o
 [10/53] Building CXX object core/CMakeFiles/vpgpu_core.dir/src/pipeline_cache.cpp.o
-[11/53] Building CXX object core/CMakeFiles/vpgpu_core.dir/src/frame_compiler.cpp.o
-[12/53] Building CXX object core/CMakeFiles/vpgpu_core.dir/src/diagnostics.cpp.o
+[11/53] Building CXX object core/CMakeFiles/vpgpu_core.dir/src/diagnostics.cpp.o
+[12/53] Building CXX object core/CMakeFiles/vpgpu_core.dir/src/frame_compiler.cpp.o
 [13/53] Building CXX object core/CMakeFiles/vpgpu_core.dir/src/device.cpp.o
 [14/53] Building CXX object core/CMakeFiles/vpgpu_core.dir/src/null_backend.cpp.o
 [15/53] Building CXX object gles/CMakeFiles/vpglsl.dir/glsl/types.cpp.o
@@ -104,8 +104,8 @@ ninja: Entering directory `build/vpvulkan-build'
 [37/53] Building OBJCXX object metal2/CMakeFiles/vpgpu_metal2.dir/src/metal_backend.mm.o
 [38/53] Linking CXX static library metal2/libvpgpu_metal2.a
 [39/53] Generating gen/vpktaa_native_msl.h
-[40/53] Building CXX object vulkan/CMakeFiles/VPVulkan.dir/src/physical_device.cpp.o
-[41/53] Building CXX object vulkan/CMakeFiles/VPVulkan.dir/src/config.cpp.o
+[40/53] Building CXX object vulkan/CMakeFiles/VPVulkan.dir/src/config.cpp.o
+[41/53] Building CXX object vulkan/CMakeFiles/VPVulkan.dir/src/physical_device.cpp.o
 [42/53] Building CXX object vulkan/CMakeFiles/VPVulkan.dir/src/commands.cpp.o
 [43/53] Building CXX object vulkan/CMakeFiles/VPVulkan.dir/src/precompile.cpp.o
 [44/53] Building CXX object vulkan/CMakeFiles/VPVulkan.dir/src/entry.cpp.o
@@ -121,7 +121,7 @@ ninja: Entering directory `build/vpvulkan-build'
     minos 26.0
 exported vk* symbols: 222
 total 5856
-drwxr-xr-x  4 runner  staff      128 Oct 20 15:18 .
-drwxr-xr-x  4 runner  staff      128 Oct 20 15:18 ..
--rw-r--r--  1 runner  staff      663 Oct 20 15:18 Info.plist
--rwxr-xr-x  1 runner  staff  2994128 Oct 20 15:18 VPVulkan
+drwxr-xr-x  4 runner  staff      128 Oct 20 16:00 .
+drwxr-xr-x  4 runner  staff      128 Oct 20 16:00 ..
+-rw-r--r--  1 runner  staff      663 Oct 20 16:00 Info.plist
+-rwxr-xr-x  1 runner  staff  2994128 Oct 20 16:00 VPVulkan
