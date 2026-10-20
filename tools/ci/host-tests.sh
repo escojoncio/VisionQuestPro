@@ -62,6 +62,9 @@ for g in gpu_host metal2_xros klepton_tests; do
   ( set -o pipefail; $g ) >"$WORK/$g.log" 2>&1 &
   eval "PID_$g=$!"
 done
+# Watchdog: a group still running after 7 min is hung (they take ~1.5 min). Kill it so its partial log is printed below.
+( sleep 420; for g in gpu_host metal2_xros klepton_tests; do eval "kill \$PID_$g 2>/dev/null"; done ) &
+WD=$!
 FAIL=0
 for g in gpu_host metal2_xros klepton_tests; do
   eval "wait \$PID_$g"; rc=$?
@@ -69,6 +72,7 @@ for g in gpu_host metal2_xros klepton_tests; do
   cat "$WORK/$g.log"
   if [ $rc -ne 0 ]; then echo "FAILED: $g"; FAIL=1; fi
 done
+kill $WD 2>/dev/null
 echo; echo "=================== summary"
 grep -hE 'tests passed|tests failed|^ok: |^FAILED' "$WORK"/*.log || true
 if [ $FAIL -ne 0 ]; then echo "host-tests: FAILED"; exit 1; fi
