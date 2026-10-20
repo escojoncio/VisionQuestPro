@@ -627,6 +627,26 @@ unsigned kl_x18_count(const void *code, size_t size) {
     return klx_survey(code, size, NULL, &ctr) + ctr;
 }
 
+// Byte offsets of the first and last site (x18 or CTR_EL0) in `code`, with the
+// same data-word filter as the count. 0 if there is none. klepton-ld sizes the
+// pool's reach against where the sites ARE, not against the whole .text.
+int kl_x18_site_span(const void *code, size_t size, size_t *first, size_t *last) {
+    const uint32_t *w = (const uint32_t *)code;
+    size_t n = size / 4;
+    int any = 0;
+    uint8_t *lit = klx_lit_map(w, n);
+    for (size_t i = 0; i < n; i++) {
+        klx_info in;
+        klx_decode(w[i], &in);
+        if (!in.nfields && !in.sysreg) continue;
+        if (klx_looks_like_data(w, n, i, lit)) continue;
+        if (!any) { *first = i * 4; any = 1; }
+        *last = i * 4;
+    }
+    free(lit);
+    return any;
+}
+
 // ---------- instruction encoders ----------
 static uint32_t enc_stp(unsigned t, unsigned t2, int off) {   // stp xT, xT2, [sp, #off]
     return 0xA9000000u | ((uint32_t)((off / 8) & 0x7f) << 15) | (t2 << 10) | (31u << 5) | t;

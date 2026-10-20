@@ -286,6 +286,7 @@ int main(int argc, char **argv) {
     // ...and the SPAN of the executable sections, because it is what decides
     // where the veneer pool can go. See the placement below.
     uint64_t text_lo = UINT64_MAX, text_hi = 0;
+    uint64_t site_lo = UINT64_MAX, site_hi = 0;   // where the sites ARE (reach is measured on these)
     for (int i = 0; i < eh->e_shnum; i++) {
         if (sh[i].sh_type != SHT_PROGBITS || !(sh[i].sh_flags & SHF_EXECINSTR)) continue;
         if (sh[i].sh_addr < text_lo) text_lo = sh[i].sh_addr;
@@ -297,9 +298,15 @@ int main(int argc, char **argv) {
             uint8_t *p = img + sh[i].sh_offset + (cva - sh[i].sh_addr);
             tls_rewrites += rewrite_tls(p, csz, cva, &tls_refused);
             x18_sites    += kl_x18_count(p, csz);
+            size_t sf, sl;
+            if (kl_x18_site_span(p, csz, &sf, &sl)) {
+                if (cva + sf < site_lo) site_lo = cva + sf;
+                if (cva + sl + 4 > site_hi) site_hi = cva + sl + 4;
+            }
         }
     }
     if (text_lo == UINT64_MAX) text_lo = text_hi = 0;
+    if (site_lo == UINT64_MAX) { site_lo = text_lo; site_hi = text_hi; }
 
     // ---- lay out the Mach-O ----
     // The veneer pool lives *before* the guest image, inside __TEXT, which is
@@ -424,17 +431,17 @@ int main(int argc, char **argv) {
     if (pool_cap) {
         // Below: the furthest site is the top of .text, reaching down to the
         // pool's first byte.
-        uint64_t down = (image_shift + text_hi) - HDR_RESERVE;
+        uint64_t down = (image_shift + site_hi) - HDR_RESERVE;
         // Above: the pool sits past the last segment, and the furthest site is
         // the BOTTOM of .text reaching up to the pool's last byte.
-        uint64_t up = align_up(last_end, PAGE) + pool_cap - (image_shift + text_lo);
+        uint64_t up = align_up(last_end, PAGE) + pool_cap - (image_shift + site_lo);
         if (down >= BR_REACH && up < BR_REACH) pool_high = 1;
         else if (down >= BR_REACH)
-            die("%s: .text spans %#llx..%#llx (%.1f MB) and no single veneer pool "
+            die("%s: x18 sites span %#llx..%#llx (%.1f MB) and no single veneer pool "
                 "is within `b`'s +/-128 MB of all of it — %.1f MB below, %.1f MB "
                 "above. The pool would have to be split per region.",
-                in, (unsigned long long)text_lo, (unsigned long long)text_hi,
-                (double)(text_hi - text_lo) / (1 << 20),
+                in, (unsigned long long)site_lo, (unsigned long long)site_hi,
+                (double)(site_hi - site_lo) / (1 << 20),
                 (double)down / (1 << 20), (double)up / (1 << 20));
     }
     if (pool_high) pool_va = align_up(last_end, PAGE);

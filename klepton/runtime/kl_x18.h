@@ -234,6 +234,7 @@ int kl_x18_is_data(const void *code, size_t size, size_t index);
 // — without emitting anything. klepton-ld sizes its pool with it, so it has to
 // be the total rather than the x18 half; the stats keep the two apart.
 unsigned kl_x18_count(const void *code, size_t size);
+int kl_x18_site_span(const void *code, size_t size, size_t *first, size_t *last);
 
 // What an offline translation did, recorded in the emitted image's
 // __TEXT,__klstat section. A translated library has no sites left to count at

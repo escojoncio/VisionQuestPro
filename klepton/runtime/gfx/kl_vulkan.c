@@ -519,8 +519,10 @@ static int ext_supported(const VkExtensionProperties *have, uint32_t nhave,
 // ---------------------------------------------------------------------------
 // Instance
 // ---------------------------------------------------------------------------
+static void klvk_who(const char *what, const void *ret);
 static VkResult klvk_EnumerateInstanceExtensionProperties(
         const char *layer, uint32_t *count, VkExtensionProperties *props) {
+    klvk_who("vkEnumerateInstanceExtensionProperties", __builtin_return_address(0));
     vk_init();
     if (!g_avail) return VK_ERROR_INITIALIZATION_FAILED;
     PFN_vkEnumerateInstanceExtensionProperties real =
@@ -7061,6 +7063,31 @@ static void klvk_spoof_props(VkPhysicalDeviceProperties *p) {
             "hardware check (KL_VK_SPOOF_ADRENO), driverVersion %#x\n", p->deviceName,
             p->vendorID, p->driverVersion); }
 }
+// One-shot dump of the identity and limits the guest is handed (post-spoof), to
+// see which startup gate it fails on after vkGetPhysicalDeviceProperties.
+static void klvk_log_props_once(const VkPhysicalDeviceProperties *p) {
+    static int said;
+    if (!p || said++) return;
+    const VkPhysicalDeviceLimits *l = &p->limits;
+    VKI("guest props: apiVersion %u.%u.%u driverVersion %#x vendorID %#x deviceID %#x deviceType %d\n",
+        VK_VERSION_MAJOR(p->apiVersion), VK_VERSION_MINOR(p->apiVersion),
+        VK_VERSION_PATCH(p->apiVersion), p->driverVersion, p->vendorID, p->deviceID,
+        (int)p->deviceType);
+    VKI("guest limits: maxImageDimension2D %u maxBoundDescriptorSets %u "
+        "maxPerStageDescriptorSamplers %u maxPerStageDescriptorUniformBuffers %u "
+        "maxPerStageDescriptorStorageBuffers %u maxPerStageDescriptorSampledImages %u "
+        "maxPushConstantsSize %u maxUniformBufferRange %u maxColorAttachments %u "
+        "maxVertexInputAttributes %u maxVertexInputBindings %u "
+        "framebufferColorSampleCounts %#x timestampPeriod %g\n",
+        l->maxImageDimension2D, l->maxBoundDescriptorSets,
+        l->maxPerStageDescriptorSamplers, l->maxPerStageDescriptorUniformBuffers,
+        l->maxPerStageDescriptorStorageBuffers, l->maxPerStageDescriptorSampledImages,
+        l->maxPushConstantsSize, l->maxUniformBufferRange, l->maxColorAttachments,
+        l->maxVertexInputAttributes, l->maxVertexInputBindings,
+        l->framebufferColorSampleCounts, (double)l->timestampPeriod);
+    VKI("guest pipelineCacheUUID %02x%02x%02x%02x\n", p->pipelineCacheUUID[0],
+        p->pipelineCacheUUID[1], p->pipelineCacheUUID[2], p->pipelineCacheUUID[3]);
+}
 static void VKAPI_CALL klvk_GetPhysicalDeviceProperties(
         VkPhysicalDevice pd, VkPhysicalDeviceProperties *props) {
     KLVK_WHO("vkGetPhysicalDeviceProperties");
@@ -7071,6 +7098,7 @@ static void VKAPI_CALL klvk_GetPhysicalDeviceProperties(
     pd = KLVK_PHYS_OR_SUB(pd, "GetPhysicalDeviceProperties");
     if (real) real(pd, props);
     klvk_spoof_props(props);
+    klvk_log_props_once(props);
 }
 static void VKAPI_CALL klvk_GetPhysicalDeviceProperties2(
         VkPhysicalDevice pd, VkPhysicalDeviceProperties2 *props) {
@@ -7093,6 +7121,7 @@ static void VKAPI_CALL klvk_GetPhysicalDeviceProperties2(
         if (v1) v1(pd, &props->properties);
     }
     klvk_spoof_props(&props->properties);
+    klvk_log_props_once(&props->properties);
 
     // Make the deviceLUID Unity reads here EQUAL the one ovrp_GetDisplayAdapterId2
     // handed it, so OculusXR's "which enumerated device is the VR GPU?" match
@@ -9448,6 +9477,17 @@ void *kl_vulkan_dlopen(const char *soname) {
 
 int kl_vulkan_is_handle(const void *h) { return h == KLVK_HANDLE; }
 
+// A vk* name dlsym cannot resolve on either side: logged once per name, so a
+// guest that does not null-check the result (and would jump to 0x0) is visible.
+static void klvk_note_null_sym(const char *name) {
+    static char *seen[64];
+    static int nseen;
+    for (int i = 0; i < nseen; i++)
+        if (!strcmp(seen[i], name)) return;
+    if (nseen < 64) seen[nseen++] = strdup(name);
+    VKI("guest dlsym('%s') -> NULL\n", name);
+}
+
 void *kl_vulkan_sym(const char *name) {
     vk_init();
     if (!name || !g_avail) return NULL;
@@ -9458,7 +9498,9 @@ void *kl_vulkan_sym(const char *name) {
     // MoltenVK exports the whole API statically, so a guest that resolves entry
     // points by dlsym rather than through vkGetInstanceProcAddr — which is legal
     // and which libSLZQuestNative does — gets a working pointer either way.
-    return mvk_sym(name);
+    void *r = mvk_sym(name);
+    if (!r && !strncmp(name, "vk", 2)) klvk_note_null_sym(name);
+    return r;
 }
 
 void *kl_vulkan_lookup(const char *name) {
