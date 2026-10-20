@@ -106,6 +106,7 @@ int kl_app_target_owns_frame_loop(void) {
 static char g_libdir[1024];
 static char g_assets[1024];
 static char g_files[1024];
+static char g_obb_base[1024];   // real userdata folder when g_files is a short alias (else empty)
 static char g_apk[1024];
 static char g_dylibs[1024];
 static char g_log[1024];
@@ -243,6 +244,32 @@ int kl_app_configure_game(const char *name, const char *tree, const char *apk,
     snprintf(g_assets, sizeof g_assets, "%s", s_assets);
     snprintf(g_apk,    sizeof g_apk,    "%s", s_apk);
     snprintf(g_files,  sizeof g_files,  "%s", files);
+    // UE4 builds "<files>/savegame%02d.sav" with an unbounded Sprintf into a stack
+    // buffer (Resident Evil 4's cCard::saveFileCheck: 152 TCHARs). The folder the
+    // user picked puts <files> at ~136 characters, so the terminator landed on the
+    // stack canary: "stack smashing detected" at the first save check. Hand the
+    // guest a SHORT symlink to the same folder instead. Verified (create+remove a
+    // file through it) before use; any failure keeps the real path.
+    if (kind == KL_GUEST_UE4 && strlen(files) > 96) {
+        char alias[1024], probe[1100];
+        snprintf(alias, sizeof alias, "%s/.f", container);
+        unlink(alias);
+        if (strlen(alias) + 1 < strlen(files) && symlink(files, alias) == 0) {
+            snprintf(probe, sizeof probe, "%s/.klprobe", alias);
+            int fd = open(probe, O_CREAT | O_WRONLY, 0644);
+            if (fd >= 0) {
+                close(fd); unlink(probe);
+                snprintf(g_files, sizeof g_files, "%s", alias);
+                snprintf(g_obb_base, sizeof g_obb_base, "%s", files);
+                fprintf(stderr, "  [klepton] userdata path %zu chars is too long for UE4's save-path "
+                                "buffers; the guest sees %s -> %s\n", strlen(files), alias, files);
+            } else {
+                unlink(alias);
+                fprintf(stderr, "  [klepton] short userdata alias unusable (%s); keeping the real path\n",
+                        strerror(errno));
+            }
+        }
+    }
     snprintf(g_log,    sizeof g_log,    "%s/klepton-boot.log", container);
     static char crash[1024];
     snprintf(crash, sizeof crash, "%s/klepton-crash.log", container);
@@ -339,6 +366,7 @@ static int configure_rest(const char *container) {
         kl_jni_set_assets_dir(g_assets);
         kl_jni_set_apk_path(g_apk);
         kl_jni_set_files_dir(g_files);
+        kl_jni_set_obb_base(g_obb_base);
         // The OBB layout is per-target and kl_jni must be TOLD it: on device
         // KL_TARGET is unset, so kl_jni's own fallback resolves the default
         // guest and hands a UE4 title the wrong OBB directory. g_target is the

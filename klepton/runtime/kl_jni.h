@@ -143,6 +143,7 @@ const char *kl_jni_assets_dir(void);
 // Application.persistentDataPath lands. Created on demand. Defaults to
 // kl_userdata_dir("beatsaber") if nothing sets it.
 void kl_jni_set_files_dir(const char *dir);
+void kl_jni_set_obb_base(const char *dir);   // real folder the obb is resolved against when files dir is a short alias
 // The per-guest userdata root: ~/Library/Application Support/Klepton/userdata/<guest>,
 // or KL_FILES_DIR if set. Keyed on the guest rather than the APK so that swapping
 // The guest's own versionCode / versionName, as read from the unpacked tree

@@ -2488,14 +2488,13 @@ static const char *kl_guest_path_inner(const char *path, char *buf, size_t cap) 
             }
         }
     }
-    // UE4: a language/content pack probed as <...>/Content/Paks/<name>.lang|.pak
+    // UE4: a language/content pack probed as <...>/Content/Paks/<name>.lang
     // that is not there but sits in the obb dir (where the platform delivers it on
     // a headset). Marvel's Deadpool VR polls Paks/en.lang forever and its language
     // selector offered only English. Only a MISSING path is redirected.
     {
         size_t pl = strlen(path);
-        if (pl > 5 && strstr(path, "/Content/Paks/") &&
-            (strcmp(path + pl - 5, ".lang") == 0 || strcmp(path + pl - 4, ".pak") == 0)) {
+        if (pl > 5 && strstr(path, "/Content/Paks/") && strcmp(path + pl - 5, ".lang") == 0) {
             extern const char *kl_jni_obb_dir(void);
             struct stat st;
             const char *od = stat(path, &st) != 0 ? kl_jni_obb_dir() : NULL;

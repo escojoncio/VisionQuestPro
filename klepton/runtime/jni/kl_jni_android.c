@@ -1566,6 +1566,12 @@ static char g_obb_rel[256];
 void kl_jni_set_obb_rel(const char *rel) {
     snprintf(g_obb_rel, sizeof g_obb_rel, "%s", rel && *rel ? rel : "");
 }
+// Base the obb is resolved against when the guest's files dir is a SHORT alias of
+// the real one (kl_app.c): the obb is "<files>/../../Juegos/...", and a guest that
+// collapses ".." textually would walk out of the alias's own parent, not the real
+// folder's. NULL = use the files dir.
+static const char *g_obb_base;
+void kl_jni_set_obb_base(const char *dir) { g_obb_base = dir && *dir ? klj_abspath(dir) : NULL; }
 const char *kl_jni_obb_dir(void) {
     static char path[1024];
     if (!*path) {
@@ -1581,7 +1587,7 @@ const char *kl_jni_obb_dir(void) {
             const kl_target *t = kl_target_resolve(NULL);
             rel = t && t->obb && *t->obb ? t->obb : "obb";
         }
-        snprintf(path, sizeof path, "%s/%s", kl_jni_files_dir(), rel);
+        snprintf(path, sizeof path, "%s/%s", g_obb_base ? g_obb_base : kl_jni_files_dir(), rel);
         klj_mkdir_p(path);
         klj_obb_descend_package(path, sizeof path);
         klj_obb_census(path);
