@@ -152,6 +152,7 @@ void       *klj_new_object_data(const char *class_name, void *data);
 void       *klj_own(void *obj, void (*destroy)(void *));
 const char *klj_str(void *s);
 klj_array  *klj_arr(void *a);
+void       *klj_arr_data(void *a, int need);   // NULL-safe buffer of >= need elements, else NULL (logged)
 void       *klj_new_array(char kind, const char *elem_cls, int len);
 klj_direct_buffer *klj_direct(void *buf);
 void       *klj_want(void *clazz, const char *name, const char *sig, char kind);

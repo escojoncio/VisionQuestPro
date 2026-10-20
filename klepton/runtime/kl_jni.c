@@ -1586,6 +1586,23 @@ static void klj_array_free(void *p) {
     return o ? o->data : NULL;
 }
 
+// NULL-safe element buffer for a native-side write: the data pointer when `a` is
+// an array object whose buffer exists and holds at least `need` elements, else
+// NULL (logged, capped at 20). Callers skip their write on NULL instead of
+// dereferencing klj_arr(x)->data of a NULL klj_arr.
+void *klj_arr_data(void *a, int need) {
+    static int logged;
+    klj_array *arr = klj_arr(a);
+    if (arr && arr->data && arr->len >= need) return arr->data;
+    if (logged < 20) {
+        logged++;
+        fprintf(stderr, "[jni] klj_arr_data: %s (obj %p, need %d, len %d)%s\n",
+                !arr ? "not an array" : !arr->data ? "array has no buffer" : "array too short",
+                a, need, arr ? arr->len : -1, logged == 20 ? " — further reports suppressed" : "");
+    }
+    return NULL;
+}
+
 static kl_jint klj_GetArrayLength(void *env, void *a) {
     (void)env;
     klj_array *arr = klj_arr(a);

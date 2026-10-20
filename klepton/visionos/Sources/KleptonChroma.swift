@@ -127,9 +127,16 @@ final class KleptonChroma: ObservableObject {
     /// The style the ImmersiveSpace selects — .full only when the target wants
     /// it AND the guest is not asking for passthrough. Changes live.
     var immersionStyle: any ImmersionStyle {
-        if immersionFull && !passthroughLive { return FullImmersionStyle.full }
+        let full = immersionFull && !passthroughLive
+        if lastStyleFull != full {
+            lastStyleFull = full
+            NSLog("[pt] immersion style requested: %@ (immersionFull %@, passthroughLive %@)",
+                  full ? ".full" : ".mixed", immersionFull ? "yes" : "no", passthroughLive ? "yes" : "no")
+        }
+        if full { return FullImmersionStyle.full }
         return MixedImmersionStyle.mixed
     }
+    private var lastStyleFull: Bool?
 
     private var ptTimer: Timer?
     private var ptSince = Date.distantPast

@@ -302,20 +302,11 @@ struct VQSettingsView: View {
                         Text(VQL("Siempre mixto", "Always mixed")).tag("on")
                     }
                     .pickerStyle(.segmented)
-                    Picker(VQL("Resolución base", "Base resolution"), selection: $settings.resolutionBase) {
-                        Text(VQL("Original", "Original")).tag("original")
-                        Text("Vision Pro").tag("compositor")
-                        Text(VQL("Nativa", "Native")).tag("native")
-                    }
-                    .pickerStyle(.segmented)
-                    Text(VQL("Nativa: densidad real de la pantalla del Vision Pro; la más pesada.", "Native: the Vision Pro panel's real density; the heaviest."))
-                        .font(.caption)
+                    VQResolutionSlider(value: $settings.resolutionPct)
                     Toggle(VQL("Mostrar FPS", "Show FPS"), isOn: $settings.showFps)
                     Text(VQL("Panel delante de ti con los fps del juego, los Hz del visor, la resolución de render y si VPKTAA está activo.",
                              "Panel in front of you with the game's fps, the headset's Hz, the render resolution and whether VPKTAA is on."))
                         .font(.caption)
-                    Stepper(VQL("Resolución de render: \(Int(settings.renderScale * 100)) %", "Render resolution: \(Int(settings.renderScale * 100)) %"),
-                            value: $settings.renderScale, in: 0.5...1.5, step: 0.05)
                     Picker(VQL("Filtrado anisotrópico", "Anisotropic filtering"), selection: $settings.anisoLevel) {
                         Text("Off").tag(0)
                         Text("x2").tag(2)
@@ -509,6 +500,30 @@ struct VQRCASSlider: View {
     }
 }
 
+/// «Resolución»: final per-eye size, 50...200 %. 100 % = the Quest 3's eye (2064x2208 px), 200 % = the Vision
+/// Pro panel's density. Whole percents: slider, and − / + buttons of 1 %.
+struct VQResolutionSlider: View {
+    @Binding var value: Double
+
+    var body: some View {
+        VStack(alignment: .leading) {
+            Text(VQL("Resolución: \(Int(value.rounded())) %", "Resolution: \(Int(value.rounded())) %"))
+            HStack(spacing: 10) {
+                Button { value = max(50, value.rounded() - 1) } label: { Image(systemName: "minus") }
+                    .buttonStyle(.bordered)
+                    .disabled(value <= 50)
+                Slider(value: $value, in: 50...200, step: 1)
+                Button { value = min(200, value.rounded() + 1) } label: { Image(systemName: "plus") }
+                    .buttonStyle(.bordered)
+                    .disabled(value >= 200)
+            }
+        }
+        Text(VQL("Tamaño final de la imagen de cada ojo, sea cual sea el escalado que pida el juego. 100 % = lo que da un Quest 3 (2064 × 2208 px por ojo, ≈ 4,6 Mpx); 200 % = la densidad de la pantalla del Vision Pro (≈ 11,7 Mpx). Lineal por eje entre ambos; por debajo de 100 % baja en proporción (50 % = mitad de ancho y de alto). Se aplica al lanzar el juego.",
+                 "Final size of each eye's image, whatever scaling the game asks for. 100 % = what a Quest 3 gives (2064 × 2208 px per eye, ≈ 4.6 Mpx); 200 % = the Vision Pro panel's density (≈ 11.7 Mpx). Linear per axis between the two; below 100 % it drops in proportion (50 % = half the width and height). Applied when the game launches."))
+            .font(.caption)
+    }
+}
+
 /// Per-game settings sheet (from the game card). Today: antialiasing. Saved at once
 /// (UserDefaults, by VQGame.aaKey); applied when the game launches.
 struct VQGameSettingsView: View {
@@ -568,14 +583,7 @@ struct VQGameSettingsView: View {
                 Section(VQL("Resolución", "Resolution")) {
                     Toggle(VQL("Usar la global", "Use the global one"), isOn: $res.useGlobal)
                     if !res.useGlobal {
-                        Picker(VQL("Resolución base", "Base resolution"), selection: $res.base) {
-                            Text(VQL("Original", "Original")).tag("original")
-                            Text("Vision Pro").tag("compositor")
-                            Text(VQL("Nativa", "Native")).tag("native")
-                        }
-                        .pickerStyle(.segmented)
-                        Stepper(VQL("Resolución de render: \(Int(res.scale * 100)) %", "Render resolution: \(Int(res.scale * 100)) %"),
-                                value: $res.scale, in: 0.5...1.5, step: 0.05)
+                        VQResolutionSlider(value: $res.pct)
                     }
                     Text(eyeResText).font(.caption)
                 }
@@ -603,7 +611,7 @@ struct VQGameSettingsView: View {
             }
             .onChange(of: res) { _, new in
                 new.save(key: game.aaKey)
-                VQLog.log("Ajustes del juego \(game.aaKey): resolución \(new.useGlobal ? "global" : "\(new.base) \(Int(new.scale * 100)) %")")
+                VQLog.log("Ajustes del juego \(game.aaKey): resolución \(new.useGlobal ? "global" : "\(Int(new.pct.rounded())) %")")
             }
             .onChange(of: rcas) { _, new in
                 VQGameRCAS.save(new, key: game.aaKey)
@@ -619,12 +627,10 @@ struct VQGameSettingsView: View {
 
     /// Per-eye resolution the choice gives (the global one when "Usar la global").
     private var eyeResText: String {
-        let base = res.useGlobal ? settings.resolutionBase : res.base
-        let scale = res.useGlobal ? settings.renderScale : res.scale
-        if let e = VQGameRes.approxEye(base: base, scale: scale) {
-            return VQL("≈ \(e.w) × \(e.h) px por ojo (\(Int(scale * 100)) %)", "≈ \(e.w) × \(e.h) px per eye (\(Int(scale * 100)) %)")
-        }
-        return VQL("Resolución por ojo según el visor al arrancar (\(Int(scale * 100)) %)", "Per-eye resolution follows the headset at launch (\(Int(scale * 100)) %)")
+        let pct = res.useGlobal ? settings.resolutionPct : res.pct
+        let e = VQGameRes.approxEye(pct: pct)
+        return VQL("\(Int(pct.rounded())) % ≈ \(e.w) × \(e.h) px por ojo (forma del Quest 3)",
+                   "\(Int(pct.rounded())) % ≈ \(e.w) × \(e.h) px per eye (Quest 3 shape)")
     }
 
     @ViewBuilder private var detectionRow: some View {

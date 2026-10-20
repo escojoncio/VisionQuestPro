@@ -16,6 +16,7 @@
 #include "klepton.h"
 #include "kl_ovrp.h"
 #include "kl_ovrp_priv.h"   // batch seam: registration, events, pose helpers
+#include "kl_ovrp_eyesize.h"   // the app's resolution slider: target size, desc compensation
 #include "../guest/kl_driver.h"
 #include "../guest/kl_slink.h"
 #include "../guest/kl_il2cpp.h"   // kl_il2cpp_method_at, for ovrp_log_chain
@@ -1532,6 +1533,17 @@ static int g_eye_h = (int)KL_OVRP_EYE_H;
 // final size (VQLaunch.swift computes it) BEFORE the guest starts so this never happens.
 static int g_eye_size_pushed;
 
+// KL_OVRP_EYE_BASE=quest3 (the app's resolution slider). Read where it is used, not cached: the
+// host pushes a saved size BEFORE the guest boots with the variables neutralised, then restores them.
+static int klovrp_eye_pct_mode(void) {
+    const char *b = getenv("KL_OVRP_EYE_BASE");
+    return b && !strcmp(b, "quest3");
+}
+// The widening the guest's plugin applies to the desc we hand out (its union of the two canted
+// cones), learned at SetupLayer from the last desc we gave (klovrp_fill_eye_desc). 1 = none/unknown.
+static int   g_fill_w, g_fill_h;
+static float g_widen_w = 1.0f, g_widen_h = 1.0f;
+
 void kl_ovrp_set_eye_texture_size(int w, int h) {
     // A degenerate size is a measurement that went wrong, and it would reach
     // Unity as a swapchain allocation. Keep the Quest default instead: the
@@ -1571,11 +1583,19 @@ void kl_ovrp_set_eye_texture_size(int w, int h) {
         if (native) fprintf(stderr, "  [ovrp] eye base native -> %dx%d per eye\n", w, h);
     }
     float scale = kl_env_float("KL_OVRP_EYE_SCALE", 1.0f);
-    if (scale > 0.05f && scale <= 4.0f) {
+    // KL_OVRP_EYE_BASE=quest3: the app's slider (kl_ovrp_eyesize.h). KL_OVRP_EYE_SCALE is the
+    // percentage / 100 and the result is the FINAL eye size: the Quest 3 pixel budget at 100 %,
+    // the Vision Pro panel's density at 200 %, at the display's aspect. The game's own scale
+    // is cancelled later, in klovrp_fill_eye_desc.
+    const int pct_mode = klovrp_eye_pct_mode();
+    int cap_dflt = (native || pct_mode) ? KLES_CAP_DFLT : 3072;
+    if (pct_mode) {
+        int tw = 0, th = 0;
+        if (kles_target_size((float)req_w / (float)req_h, scale * 100.0f, 0, &tw, &th)) { w = tw; h = th; }
+    } else if (scale > 0.05f && scale <= 4.0f) {
         w = (int)((float)w * scale + 0.5f);
         h = (int)((float)h * scale + 0.5f);
     }
-    int cap_dflt = native ? 4096 : 3072;
     int cap = kl_env_int("KL_OVRP_EYE_MAX", cap_dflt);
     if (cap > 0 && (w > cap || h > cap)) {
         // Preserve the aspect ratio: clamping the axes independently would
@@ -7361,10 +7381,28 @@ static void klovrp_fill_eye_desc(ovrp_layer_desc_eyefov *d, int layout,
     int w = 0, h = 0;
     kl_ovrp_eye_texture_size(&w, &h);
     if (!(texture_scale > 0.0f)) texture_scale = 1.0f;
-    w = (int)((float)w * texture_scale);
-    h = (int)((float)h * texture_scale);
-    if (w < 1) w = 1;
-    if (h < 1) h = 1;
+    if (klovrp_eye_pct_mode()) {
+        // The slider is the FINAL size: the game's scale above 1 (AC Nexus asks 1.3 once it has
+        // loaded) is cancelled instead of multiplied on top, and the widening its plugin
+        // applies after this desc is divided out (learned at SetupLayer).
+        int dw = 0, dh = 0;
+        kles_desc_size(w, h, texture_scale, g_widen_w, g_widen_h, &dw, &dh);
+        static int said_w, said_h;
+        if (texture_scale != 1.0f || g_widen_w != 1.0f || g_widen_h != 1.0f) {
+            if (dw != said_w || dh != said_h)
+                fprintf(stderr, "  [ovrp] eye desc %dx%d for a final %dx%d (game scale %.2f, "
+                                "plugin widening %.3fx%.3f)\n",
+                        dw, dh, w, h, (double)texture_scale, (double)g_widen_w, (double)g_widen_h);
+            said_w = dw; said_h = dh;
+        }
+        w = dw; h = dh;
+    } else {
+        w = (int)((float)w * texture_scale);
+        h = (int)((float)h * texture_scale);
+        if (w < 1) w = 1;
+        if (h < 1) h = 1;
+    }
+    g_fill_w = w; g_fill_h = h;
 
     memset(d, 0, sizeof *d);
     d->shape        = KLOVRP_SHAPE_EYEFOV;
@@ -7602,6 +7640,16 @@ static uint64_t klovrp_SetupLayer(void *device, const ovrp_layer_desc_eyefov *de
                 desc->texture_size.w, desc->texture_size.h,
                 g_eye_storage_w, g_eye_storage_h);
     int reused = l != NULL;
+    if (is_eye && klovrp_eye_pct_mode()) {
+        float ow = g_widen_w, oh = g_widen_h;
+        kles_learn_widen(g_fill_w, g_fill_h, desc->texture_size.w, desc->texture_size.h,
+                         &g_widen_w, &g_widen_h);
+        if (ow != g_widen_w || oh != g_widen_h)
+            fprintf(stderr, "  [ovrp] eye layer built at %dx%d from a %dx%d desc: plugin widening "
+                            "%.3fx%.3f (next eye descs are divided by it)\n",
+                    desc->texture_size.w, desc->texture_size.h, g_fill_w, g_fill_h,
+                    (double)g_widen_w, (double)g_widen_h);
+    }
     if (is_eye) {
         static int said;
         if (!g_eye_size_pushed && said++ < 4)

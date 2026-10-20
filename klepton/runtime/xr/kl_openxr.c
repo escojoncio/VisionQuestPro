@@ -47,6 +47,7 @@
 #include <ctype.h>
 #include "kl_jni.h"
 #include "kl_ovrp.h"
+#include "kl_ovrp_eyesize.h"   // the app's resolution slider (KL_OVRP_EYE_BASE=quest3)
 #include "kl_egl.h"
 #include "kl_glfb.h"
 #include "kl_env.h"
@@ -2040,6 +2041,17 @@ static XrResult klxr_GetSystemProperties(void *instance, XrSystemId system_id,
     return KLXR_SUCCESS;
 }
 
+// The app's resolution slider is the FINAL eye size. An OpenXR guest creates its swapchain at
+// recommendedImageRect x its own scale (Unity's eyeTextureResolutionScale), so the scale seen on
+// the last eye swapchain is divided out of the next recommendation (klxr_CreateSwapchain learns
+// it). The first swapchain of a run is built before anything is known and keeps the game's scale.
+static int   g_xr_rec_w, g_xr_rec_h;     // the last recommendation answered
+static float g_xr_game_scale = 1.0f;     // learned guest scale over it (>= 1)
+static int klxr_eye_pct_mode(void) {
+    const char *b = getenv("KL_OVRP_EYE_BASE");
+    return b && !strcmp(b, "quest3");
+}
+
 static XrResult klxr_EnumerateViewConfigurationViews(
         void *instance, XrSystemId system_id, int32_t view_config_type,
         uint32_t capacity, uint32_t *count_out, XrViewConfigurationView *views) {
@@ -2058,12 +2070,17 @@ static XrResult klxr_EnumerateViewConfigurationViews(
     int ew = 0, eh = 0;
     kl_ovrp_eye_texture_size(&ew, &eh);
     if (ew <= 0 || eh <= 0) { ew = 2290; eh = 2400; }   // the Quest 2 default
+    int rw = ew, rh = eh;                                // what is recommended; ew/eh stay the target
+    if (klxr_eye_pct_mode()) {
+        kles_xr_recommended(ew, eh, g_xr_game_scale, &rw, &rh);
+        g_xr_rec_w = rw; g_xr_rec_h = rh;
+    }
 
     for (uint32_t i = 0; i < 2; i++) {
         klxr_log_chain("xrEnumerateViewConfigurationViews", views[i].next);
         views[i].type = XR_TYPE_VIEW_CONFIGURATION_VIEW;
-        views[i].recommendedImageRectWidth  = (uint32_t)ew;
-        views[i].recommendedImageRectHeight = (uint32_t)eh;
+        views[i].recommendedImageRectWidth  = (uint32_t)rw;
+        views[i].recommendedImageRectHeight = (uint32_t)rh;
         views[i].maxImageRectWidth  = (uint32_t)ew * 2;
         views[i].maxImageRectHeight = (uint32_t)eh * 2;
         // One sample recommended: the guest resolves into the eye texture
@@ -2072,7 +2089,7 @@ static XrResult klxr_EnumerateViewConfigurationViews(
         views[i].recommendedSwapchainSampleCount = 1;
         views[i].maxSwapchainSampleCount = 4;
     }
-    fprintf(stderr, "  [xr] view configuration: 2 views, recommended %dx%d each\n", ew, eh);
+    fprintf(stderr, "  [xr] view configuration: 2 views, recommended %dx%d each\n", rw, rh);
     return KLXR_SUCCESS;
 }
 
@@ -5109,6 +5126,18 @@ static XrResult klxr_CreateSwapchain(void *session, const XrSwapchainCreateInfo 
                     info->arraySize, t);
             KLXR_RET(KLXR_ERROR_FEATURE_UNSUPPORTED);
         }
+    }
+
+    // Resolution slider: remember the guest's own scale over what we recommended (an eye-shaped
+    // swapchain only: same factor on both axes), so the next recommendation cancels it.
+    if (klxr_eye_pct_mode()) {
+        float was = g_xr_game_scale;
+        g_xr_game_scale = kles_learn_xr_scale(g_xr_rec_w, g_xr_rec_h, (int)info->width,
+                                              (int)info->height, g_xr_game_scale);
+        if (g_xr_game_scale != was)
+            fprintf(stderr, "  [xr] swapchain %ux%u is %.3fx the recommended %dx%d: the next "
+                            "recommendation is divided by it\n",
+                    info->width, info->height, (double)g_xr_game_scale, g_xr_rec_w, g_xr_rec_h);
     }
 
     klxr_swapchain *sc = NULL;

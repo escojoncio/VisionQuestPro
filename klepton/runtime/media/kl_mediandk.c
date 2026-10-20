@@ -1455,6 +1455,10 @@ typedef struct {
     int      cpu_fmt;           // 21 = YUV420SemiPlanar (NV12), 19 = YUV420Planar (I420)
     int      cpu_full_range;    // the decoded frame's range (color-range key)
     int      fmt_w, fmt_h;      // size the last INFO_OUTPUT_FORMAT_CHANGED announced
+    // Surface mode: width/height/rotation-degrees of the format AMediaCodec_configure
+    // received (0 = absent). Android announces INFO_OUTPUT_FORMAT_CHANGED before the
+    // first buffer in surface mode too; fmt_w/fmt_h above track that announcement.
+    int      cfg_w, cfg_h, cfg_rot;
     int      cpu_stride, cpu_slice;
     size_t   cpu_bytes;         // bytes of one frame at that layout
     void    *held_pb;           // frame dequeued behind an OUTPUT_FORMAT_CHANGED
@@ -1550,6 +1554,15 @@ static int klm_AMediaCodec_configure(void *codec, const void *format,
     // the two objects back up.
     klm_reader *r = kl_ndk_window_owner(window);
     c->surface = r;
+    {
+        int32_t cw = 0, ch = 0, cr = 0;
+        klm_AMediaFormat_getInt32((void *)format, g_key_width, &cw);
+        klm_AMediaFormat_getInt32((void *)format, g_key_height, &ch);
+        klm_AMediaFormat_getInt32((void *)format, g_key_rotation, &cr);
+        c->cfg_w = cw > 0 ? cw : 0; c->cfg_h = ch > 0 ? ch : 0; c->cfg_rot = cr;
+        c->fmt_w = c->fmt_h = 0;                      // re-configure: announce again
+        if (r && c->cfg_w && c->cfg_h) kl_media_surface_set_size(r, c->cfg_w, c->cfg_h);
+    }
     // No surface at all: ByteBuffer output, as on Android. KL_MEDIA_CPU_OUT=0
     // restores the old behaviour (NULL output buffers, frames dropped).
     c->bytebuf = !window && kl_env_on("KL_MEDIA_CPU_OUT", 1);
@@ -1580,6 +1593,11 @@ static int klm_AMediaCodec_stop(void *codec) {
     klm_codec *c = codec;
     if (!c || c->magic != KLM_CODEC_MAGIC) return AMEDIA_ERROR_INVALID_PARAMETER;
     c->started = 0;
+    // A frame held behind an INFO_OUTPUT_FORMAT_CHANGED belongs to the stream that just
+    // stopped: dropped here so a re-configure + start cannot deliver it as the first frame.
+    pthread_mutex_lock(&c->lock);
+    if (c->held_pb) { CVPixelBufferRelease((CVPixelBufferRef)c->held_pb); c->held_pb = NULL; }
+    pthread_mutex_unlock(&c->lock);
     return AMEDIA_OK;
 }
 
@@ -1729,8 +1747,25 @@ static void *klm_AMediaCodec_getOutputFormat(void *codec) {
         klm_AMediaFormat_setInt32(f, g_key_width,  w);
         klm_AMediaFormat_setInt32(f, g_key_height, h);
     }
-    // Surface mode: not the stride — the frames never pass through a linear
-    // buffer (see getOutputBuffer), so there is no row pitch to report.
+    // Surface mode: the size the codec announced (INFO_OUTPUT_FORMAT_CHANGED),
+    // crop box, rotation and COLOR_FormatSurface. No stride / slice-height: the
+    // frames never pass through a linear buffer (see getOutputBuffer), so there
+    // is no row pitch to report.
+    if (!c->bytebuf) {
+        pthread_mutex_lock(&c->lock);
+        int fw = c->fmt_w, fh = c->fmt_h, rot = c->cfg_rot;
+        pthread_mutex_unlock(&c->lock);
+        if (fw && fh) {
+            klm_AMediaFormat_setInt32(f, g_key_width,  fw);
+            klm_AMediaFormat_setInt32(f, g_key_height, fh);
+            klm_AMediaFormat_setInt32(f, "crop-left", 0);
+            klm_AMediaFormat_setInt32(f, "crop-top", 0);
+            klm_AMediaFormat_setInt32(f, "crop-right", fw - 1);
+            klm_AMediaFormat_setInt32(f, "crop-bottom", fh - 1);
+            klm_AMediaFormat_setInt32(f, g_key_rotation, rot);
+            klm_AMediaFormat_setInt32(f, g_key_color_format, 0x7F000789);  // COLOR_FormatSurface
+        }
+    }
     // ByteBuffer mode: the layout of the CPU copy, as a Qualcomm decoder
     // reports it (color-format, stride, slice-height, crop, range).
     if (c->bytebuf) {
@@ -1799,6 +1834,15 @@ static int klm_AMediaCodec_queueInputBuffer(void *codec, size_t idx, off_t offse
 // compressed layouts) goes through a VTPixelTransferSession to '420v' first.
 
 static int klm_even(int v) { return (v + 1) & ~1; }
+
+// KL-TEST-BEGIN announce
+// Whether a frame of w x h needs an INFO_OUTPUT_FORMAT_CHANGED first; records it.
+static int klm_fmt_announce(int *fmt_w, int *fmt_h, int w, int h) {
+    if (w <= 0 || h <= 0 || (w == *fmt_w && h == *fmt_h)) return 0;
+    *fmt_w = w; *fmt_h = h;
+    return 1;
+}
+// KL-TEST-END announce
 
 static int klm_pb_is_nv12(CVPixelBufferRef pb) {
     OSType t = CVPixelBufferGetPixelFormatType(pb);
@@ -1912,14 +1956,34 @@ static size_t klm_cpu_copy(klm_codec *c, CVPixelBufferRef src, int slot) {
 // guest INFO_OUTPUT_FORMAT_CHANGED first, as Android does before the first
 // ByteBuffer frame. The next dequeue hands the held frame out.
 static int klm_cpu_announce(klm_codec *c, CVPixelBufferRef pb, int64_t pts) {
+    if (!c->bytebuf) {
+        // Surface mode: announce the decoded size before the first frame, as
+        // Android always does (Unity sizes its texture from this; without it the
+        // first frame hits "Texture must have width greater than 0").
+        int sw = (int)CVPixelBufferGetWidth(pb), sh = (int)CVPixelBufferGetHeight(pb);
+        if (sw <= 0 || sh <= 0) { sw = c->cfg_w; sh = c->cfg_h; }
+        pthread_mutex_lock(&c->lock);
+        if (!klm_fmt_announce(&c->fmt_w, &c->fmt_h, sw, sh)) { pthread_mutex_unlock(&c->lock); return 0; }
+        if (c->held_pb) CVPixelBufferRelease((CVPixelBufferRef)c->held_pb);
+        c->held_pb = (void *)pb; c->held_pts = pts;
+        c->out_w = sw; c->out_h = sh;
+        c->n_fmt_changed++;
+        unsigned n = c->n_fmt_changed;
+        klm_reader *r = c->surface;
+        pthread_mutex_unlock(&c->lock);
+        if (r) kl_media_surface_set_size(r, sw, sh);
+        if (n <= 4)
+            fprintf(stderr, "  [media] surface codec: INFO_OUTPUT_FORMAT_CHANGED -> %dx%d "
+                            "(before the first frame)\n", sw, sh);
+        return 1;
+    }
     int w = klm_even((int)CVPixelBufferGetWidth(pb));
     int h = klm_even((int)CVPixelBufferGetHeight(pb));
     pthread_mutex_lock(&c->lock);
-    if (w == c->fmt_w && h == c->fmt_h) { pthread_mutex_unlock(&c->lock); return 0; }
+    if (!klm_fmt_announce(&c->fmt_w, &c->fmt_h, w, h)) { pthread_mutex_unlock(&c->lock); return 0; }
     if (c->held_pb) CVPixelBufferRelease((CVPixelBufferRef)c->held_pb);
     c->held_pb = (void *)pb;           // takes the caller's reference
     c->held_pts = pts;
-    c->fmt_w = w; c->fmt_h = h;
     c->out_w = (int)CVPixelBufferGetWidth(pb);
     c->out_h = (int)CVPixelBufferGetHeight(pb);
     c->cpu_stride = w;
@@ -1945,16 +2009,14 @@ static ssize_t klm_AMediaCodec_dequeueOutputBuffer(void *codec,
     for (;;) {
         int64_t pts = 0;
         CVPixelBufferRef pb = NULL;
-        if (c->bytebuf) {
-            pthread_mutex_lock(&c->lock);
-            pb = (CVPixelBufferRef)c->held_pb;
-            pts = c->held_pts;
-            c->held_pb = NULL;
-            pthread_mutex_unlock(&c->lock);
-        }
+        pthread_mutex_lock(&c->lock);
+        pb = (CVPixelBufferRef)c->held_pb;
+        pts = c->held_pts;
+        c->held_pb = NULL;
+        pthread_mutex_unlock(&c->lock);
         if (!pb) pb = kl_vtdec_pull(c->dec, &pts);
         if (pb && c->eos_in) { pthread_mutex_lock(&c->lock); c->eos_quiet_us = klm_now_us(); pthread_mutex_unlock(&c->lock); }
-        if (pb && c->bytebuf && klm_cpu_announce(c, pb, pts))
+        if (pb && klm_cpu_announce(c, pb, pts))
             return AMEDIACODEC_INFO_OUTPUT_FORMAT_CHANGED;   // pb is held, not lost
         if (pb) {
             pthread_mutex_lock(&c->lock);
@@ -1993,11 +2055,9 @@ static ssize_t klm_AMediaCodec_dequeueOutputBuffer(void *codec,
             // Every slot outstanding: the guest is not releasing. Put it back
             // rather than dropping it, and tell the guest to come back.
             pthread_mutex_unlock(&c->lock);
-            if (c->bytebuf) {
-                pthread_mutex_lock(&c->lock);
-                if (!c->held_pb) { c->held_pb = (void *)pb; c->held_pts = pts; pb = NULL; }
-                pthread_mutex_unlock(&c->lock);
-            }
+            pthread_mutex_lock(&c->lock);
+            if (!c->held_pb) { c->held_pb = (void *)pb; c->held_pts = pts; pb = NULL; }
+            pthread_mutex_unlock(&c->lock);
             if (pb) CVPixelBufferRelease(pb);
             return AMEDIACODEC_INFO_TRY_AGAIN_LATER;
         }

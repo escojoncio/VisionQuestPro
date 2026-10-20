@@ -150,8 +150,8 @@ static klj_val klj_Display_getSupportedModes(void *env, void *self, const klj_va
     static void *modes;     // one mode; its rate is read live by Mode.getRefreshRate
     if (!modes) {
         modes = klj_new_array('L', "android/view/Display$Mode", 1);
-        void **slot = klj_arr(modes)->data;
-        slot[0] = klj_new_object_data("android/view/Display$Mode", NULL);
+        void **slot = klj_arr_data(modes, 1);
+        if (slot) slot[0] = klj_new_object_data("android/view/Display$Mode", NULL);
     }
     return (klj_val){.l = modes};
 }

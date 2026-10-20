@@ -79,8 +79,8 @@ static klj_val klj_TMF_init(void *env, void *self, const klj_val *a, int n) {
 static klj_val klj_TMF_getTrustManagers(void *env, void *self, const klj_val *a, int n) {
     (void)env; (void)self; (void)a; (void)n;
     void *arr = klj_new_array('L', "javax/net/ssl/TrustManager", 1);
-    ((void **)klj_arr(arr)->data)[0] =
-        klj_new_object_data("javax/net/ssl/X509TrustManager", NULL);
+    void **tm = klj_arr_data(arr, 1);
+    if (tm) tm[0] = klj_new_object_data("javax/net/ssl/X509TrustManager", NULL);
     return (klj_val){.l = arr};
 }
 
@@ -91,8 +91,8 @@ static klj_val klj_X509TM_getAcceptedIssuers(void *env, void *self, const klj_va
     (void)env; (void)self; (void)a; (void)n;
     int   count = kl_cacert_count();
     void *arr   = klj_new_array('L', "java/security/cert/X509Certificate", count);
-    void **slot = klj_arr(arr)->data;
-    for (int i = 0; i < count; i++)
+    void **slot = count > 0 ? klj_arr_data(arr, count) : NULL;
+    for (int i = 0; slot && i < count; i++)
         slot[i] = klj_new_object_data("java/security/cert/X509Certificate",
                                       (void *)(intptr_t)(i + 1));
     KLJ_LOG("X509TrustManager.getAcceptedIssuers() -> %d anchor(s)", count);
@@ -113,7 +113,8 @@ static klj_val klj_X509Cert_getEncoded(void *env, void *self, const klj_val *a, 
     if (!der)
         KLJ_LOG("X509Certificate.getEncoded(): no anchor %d — returning empty", i);
     void *out = klj_new_array('B', NULL, (int)len);
-    if (der && len) memcpy(klj_arr(out)->data, der, len);
+    void *dst = der && len ? klj_arr_data(out, (int)len) : NULL;
+    if (dst) memcpy(dst, der, len);
     return (klj_val){.l = out};
 }
 
@@ -275,7 +276,8 @@ static klj_val klj_EOS_LibraryLoader_load(void *env, void *self, const klj_val *
 // GET_DEVICES_INPUTS=1) stay empty: the microphone is off.
 static klj_val klj_int_array1(int v) {
     void *arr = klj_new_array('I', NULL, 1);
-    ((int32_t *)klj_arr(arr)->data)[0] = v;
+    int32_t *d = klj_arr_data(arr, 1);
+    if (d) d[0] = v;
     return (klj_val){.l = arr};
 }
 static klj_val klj_ADI_id(void *e, void *s, const klj_val *a, int n)    { (void)e;(void)s;(void)a;(void)n; return (klj_val){.j = 1}; }
@@ -295,7 +297,8 @@ static klj_val klj_AudioManager_getDevices(void *env, void *self, const klj_val 
     int flags = n > 0 ? (int)(int32_t)a[0].j : 2;
     int outputs = (flags & 2) != 0;              // GET_DEVICES_OUTPUTS
     void *arr = klj_new_array('L', "android/media/AudioDeviceInfo", outputs ? 1 : 0);
-    if (outputs) ((void **)klj_arr(arr)->data)[0] = kl_jni_new_object("android/media/AudioDeviceInfo");
+    void **dev = outputs ? klj_arr_data(arr, 1) : NULL;
+    if (dev) dev[0] = kl_jni_new_object("android/media/AudioDeviceInfo");
     KLJ_LOG("AudioManager.getDevices(flags=%d) -> %s", flags,
             outputs ? "1 output: built-in speaker, 48000 Hz, 2 ch" : "empty (no inputs)");
     return (klj_val){.l = arr};

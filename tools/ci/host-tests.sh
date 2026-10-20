@@ -35,6 +35,7 @@ klepton_tests() {
   }
   cd "$XR" || return 1
   run pred_frame_offset_test tests/pred_frame_offset_test.c -lm
+  run kl_ovrp_eyesize_test -I. tests/kl_ovrp_eyesize_test.c -lm
   run t_ovrp_input -I.. -I../.. tests/t_ovrp_input.c -lm
   run spatial_test -I.. -I../jni -I../libc -I../gfx -I. -I../media -I../guest -I../diag \
       tests/spatial_test.c kl_spatial.c kl_ovrp_spatial.c -lm -lpthread
@@ -46,6 +47,8 @@ klepton_tests() {
   run t_memdiag -I"$T/memdiag" tests/t_memdiag.c -lpthread
   awk '/^static int klj_decode_args\(/,/^}/{print} /^static int klj_decode_args_a\(/,/^}/{print}' runtime/kl_jni.c > "$T/memdiag/jni_decoders.inc"
   run t_jni_sig -I"$T/memdiag" tests/t_jni_sig.c
+  awk '/KL-TEST-BEGIN announce/{p=1;next} /KL-TEST-END announce/{p=0} p' runtime/media/kl_mediandk.c > "$T/memdiag/announce.inc"
+  run t_media_announce -I"$T/memdiag" tests/t_media_announce.c
   mkdir -p "$T/fence"
   awk '/KL-TEST-BEGIN fence/{p=1;next} /KL-TEST-END fence/{p=0} p' runtime/gfx/kl_vulkan.c > "$T/fence/fence_blocks.inc"
   run t_frame_fence -Wno-unused-function -I"$T/fence" -I"$VPK/gpu/vulkan/third_party/vulkan-headers/include" tests/t_frame_fence.c -lpthread

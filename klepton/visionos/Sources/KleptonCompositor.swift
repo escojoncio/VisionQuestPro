@@ -1519,6 +1519,9 @@ final class KleptonCompositor {
     func startRenderLoop() {
         let t = Thread { self.renderLoop() }
         t.name = "Klepton Compositor"
+        // Highest QoS: while the guest and the shader compiler saturate every core (loading) this
+        // thread must still wake at the input deadline, or the present goes out late.
+        t.qualityOfService = .userInteractive
         // The guest blocks — Baselib futexes, IL2CPP's GC suspending the world —
         // and this thread now calls into it, so it must not be the main thread.
         t.start()
@@ -1906,6 +1909,7 @@ final class KleptonCompositor {
         if let timing {
             LayerRenderer.Clock().wait(until: timing.optimalInputTime)
         }
+        let tFrameA = CFAbsoluteTimeGetCurrent()   // after the deadline wait: the work below is ours
         // NOT `defer { frame.endSubmission() }`. Compositor Services treats
         // ending a submission that never presented a drawable as a client bug
         // and aborts the process:
@@ -1974,6 +1978,7 @@ final class KleptonCompositor {
         // maxRenderQuality = 1.0 provokes, so the two changes belong together;
         // queryDrawable() is deprecated in 26 in favour of this for the same
         // reason, and ALVR loops over the array likewise.
+        let tFrameB = CFAbsoluteTimeGetCurrent()   // poses, env depth and guest publish done
         let drawables = frame.queryDrawables()
         guard !drawables.isEmpty else { bailNoDrawable += 1; return 0 }
         guard let cmd = queue?.makeCommandBuffer(), pipeline != nil, sampler != nil else {
@@ -2319,6 +2324,7 @@ final class KleptonCompositor {
             drawable.encodePresent(commandBuffer: cmd)
         }
 
+        let tFrameC = CFAbsoluteTimeGetCurrent()   // drawables acquired and every pass encoded
         // The one thing worth saying out loud about the decoupling: how long
         // the guest took to put anything in a drawable. Under the old inline
         // shape this could not be measured, because the loop did not run until
@@ -2367,6 +2373,19 @@ final class KleptonCompositor {
         }
         noteCadence(presentation: presentation, drawable: main,
                     guestSerial: haveRendered ? UInt64(rendered.serial) : 0)
+        // A frame whose own work (after the input-deadline wait) took over 8 ms: where the time went.
+        // Capped; the loop is the one thing that must not be late or visionOS shows the room.
+        let tFrameD = CFAbsoluteTimeGetCurrent()
+        if tFrameD - tFrameA > 0.008, slowFrameLogs < 40 {
+            slowFrameLogs += 1
+            let msTotal: Double = (tFrameD - tFrameA) * 1000.0
+            let msPoses: Double = (tFrameB - tFrameA) * 1000.0
+            let msEncode: Double = (tFrameC - tFrameB) * 1000.0
+            let msCommit: Double = (tFrameD - tFrameC) * 1000.0
+            NSLog(String(format: "[cp] slow frame: %.1f ms after the input deadline (poses+publish %.1f, "
+                                 + "drawables+encode %.1f, commit %.1f), guest serial %llu, stale %ld",
+                         msTotal, msPoses, msEncode, msCommit, UInt64(frameValue), staleInARow))
+        }
         frame.endSubmission()      // only here — see startSubmission above
         return encoded > 0 ? 1 : 0
     }
@@ -2869,19 +2888,28 @@ final class KleptonCompositor {
         // files no list, which is every guest but Steam Link and every run
         // under KL_XR_LAYERS=0, and those take the eye pass unchanged.
         let nproj = projLayerCount
-        // Nothing of the guest's eye will be drawn this frame and no passthrough: without
-        // this the pass is a black clear with depth 0, which visionOS reads as "nothing
-        // there" and fills with the room. Quest/OpenXR never shows the room without
-        // passthrough, so lay down an opaque black plane at a finite far depth first.
-        if nproj == 0, visible == 0, kl_passthrough_active() == 0 {
+        // No passthrough requested by the guest (a plain VR title such as AC Nexus): lay down the
+        // opaque black plane at a finite far depth on EVERY frame, not only when nothing of the
+        // guest's eye will be drawn. The pass clears depth to 0 (reverse-Z infinity), which
+        // visionOS reads as "nothing there" and fills with the room wherever the eye quad, a
+        // projection layer or the UI does not reach (head turn on a late frame, a crop smaller
+        // than the field of view, an eye-size change). Quest/OpenXR never shows the room without
+        // passthrough. The plane sits at reverse-Z 0.0001 (1000 m), behind the eye quad and the
+        // layers (KL_REPROJECT_DEPTH 500 m = 0.0002, depth test .greater), so it never hides them.
+        // A guest that asks for passthrough (kl_passthrough_active) keeps the old behaviour.
+        if kl_passthrough_active() == 0 {
             drawBlackBackfill(enc, viewIndices: viewIndices, drawable: drawable,
                               layered: layered, originFromHead: originFromHead)
-            let why = staleHide ? "guest frozen"
-                : taaHide ? "taa hidden"
-                : completeStage < 0 ? "no complete stage"
-                : kl_ovrp_eye_layer_live() == 0 ? "eye layer not live"
-                : !haveEyes ? "no eye texture" : "views not visible"
-            noteBackfill(why)
+            if nproj == 0, visible == 0 {
+                let why = staleHide ? "guest frozen"
+                    : taaHide ? "taa hidden"
+                    : completeStage < 0 ? "no complete stage"
+                    : kl_ovrp_eye_layer_live() == 0 ? "eye layer not live"
+                    : !haveEyes ? "no eye texture" : "views not visible"
+                noteBackfill(why)
+            } else {
+                noteBackfill(nil)
+            }
         } else {
             noteBackfill(nil)
         }
@@ -4043,6 +4071,7 @@ final class KleptonCompositor {
     private var blackBackfillTex: MTLTexture?
     private var backfillReason: String?
     private var backfillLogs = 0
+    private var slowFrameLogs = 0
 
     /// Log (capped) when the black far-plane backfill starts, changes reason, or stops.
     private func noteBackfill(_ reason: String?) {

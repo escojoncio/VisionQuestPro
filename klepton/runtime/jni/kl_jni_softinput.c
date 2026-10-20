@@ -599,11 +599,11 @@ static klj_val klj_WebView_createWebMessageChannel(void *env, void *self, const 
     klj_webdoc *d = klj_webdoc_of(self);
     void *ports = klj_new_array('L', "android/webkit/WebMessagePort", 2);
     klj_as_object(ports)->pinned = 1;
-    klj_array *arr = klj_arr(ports);
-    for (int i = 0; i < 2; i++) {
+    void **pdata = klj_arr_data(ports, 2);
+    for (int i = 0; pdata && i < 2; i++) {
         void *p = klj_new_object_data("android/webkit/WebMessagePort", d);
         klj_as_object(p)->pinned = 1;
-        ((void **)arr->data)[i] = p;
+        pdata[i] = p;
     }
     KLJ_LOG("WebView.createWebMessageChannel(%s) — two ports",
             d && d->url ? d->url : "(no document)");

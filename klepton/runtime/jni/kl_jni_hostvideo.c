@@ -152,7 +152,8 @@ static void klhv_deliver_one(klhv_stex *t) {
     if (!l) return;
     klj_PushLocalFrame(NULL, 0);
     void *args = klj_new_array('L', "java/lang/Object", 1);
-    ((void **)klj_arr(args)->data)[0] = t->self;
+    void **argv = klj_arr_data(args, 1);
+    if (argv) argv[0] = t->self;
     klj_proxy_invoke(l, STEX_LISTENER, "onFrameAvailable", "(Landroid/graphics/SurfaceTexture;)V", args);
     klj_PopLocalFrame(NULL, NULL);
 }

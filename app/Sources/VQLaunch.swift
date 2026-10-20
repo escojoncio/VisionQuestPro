@@ -122,10 +122,10 @@ final class VQSettings: ObservableObject {
     @Published var perfDiag: Bool { didSet { save() } }
     /// "Diagnóstico de ficheros": every guest file operation and its result in the log (KL_TRACE_FS=1).
     @Published var fsDiag: Bool { didSet { save() } }
-    @Published var renderScale: Double { didSet { save() } }    // 0.5...1.5
-    // Resolution base: false = the game's original (Quest 3 budget), true = Vision Pro's request.
-    /// "original" (Quest 3 budget) | "compositor" (visionOS drawable) | "native" (AVP panel density, heaviest).
-    @Published var resolutionBase: String { didSet { save() } }
+    /// «Resolución»: the FINAL per-eye size, 50...200 in whole percent. 100 = what the game gets on a
+    /// Quest 3 (2064x2208 px); 200 = the Vision Pro panel's density; linear per axis in between
+    /// (KL_OVRP_EYE_BASE=quest3, kl_ovrp_eyesize.h). Per game it can be overridden (VQGameRes).
+    @Published var resolutionPct: Double { didSet { save() } }
     /// Head-locked FPS counter in the compositor (KL_FPS_HUD).
     @Published var showFps: Bool { didSet { save() } }
     @Published var aswDisabled: Bool { didSet { save() } }
@@ -181,11 +181,13 @@ final class VQSettings: ObservableObject {
             ?? ((d.object(forKey: "vq.aniso16") as? Bool) == false ? 0 : 16)
         perfDiag = d.object(forKey: "vq.perfDiag") as? Bool ?? false
         fsDiag = d.object(forKey: "vq.fsDiag") as? Bool ?? false
-        renderScale = d.object(forKey: "vq.renderScale") as? Double ?? 1
-        if let rb = d.string(forKey: "vq.resBase"), ["original", "compositor", "native"].contains(rb) {
-            resolutionBase = rb
+        // Older builds stored a base ("original" | "compositor" | "native") and a scale instead.
+        if let p = d.object(forKey: "vq.resPct") as? Double, p >= 50, p <= 200 {
+            resolutionPct = p.rounded()
         } else {
-            resolutionBase = (d.object(forKey: "vq.resAVP") as? Bool ?? false) ? "compositor" : "original"
+            let rb = d.string(forKey: "vq.resBase")
+                ?? ((d.object(forKey: "vq.resAVP") as? Bool ?? false) ? "compositor" : "original")
+            resolutionPct = VQGameRes.migratedPct(base: rb, scale: d.object(forKey: "vq.renderScale") as? Double ?? 1)
         }
         showFps = d.object(forKey: "vq.showFps") as? Bool ?? false
         aswDisabled = d.object(forKey: "vq.aswOff") as? Bool ?? true
@@ -240,8 +242,7 @@ final class VQSettings: ObservableObject {
         d.set(anisoLevel, forKey: "vq.anisoLevel")
         d.set(perfDiag, forKey: "vq.perfDiag")
         d.set(fsDiag, forKey: "vq.fsDiag")
-        d.set(renderScale, forKey: "vq.renderScale")
-        d.set(resolutionBase, forKey: "vq.resBase")
+        d.set(resolutionPct, forKey: "vq.resPct")
         d.set(showFps, forKey: "vq.showFps")
         d.set(aswDisabled, forKey: "vq.aswOff")
         d.set(quest3Profile, forKey: "vq.quest3v2")
@@ -345,11 +346,12 @@ final class VQSettings: ObservableObject {
         // Per game (VQGameRes) when the game fixes its own, else the global ones.
         let gameKey = game?.aaKey ?? ""
         let res = VQGameRes.load(key: gameKey)
-        let effScale = res.useGlobal ? renderScale : res.scale
-        let effBase = res.useGlobal ? resolutionBase : res.base
-        setenv("KL_OVRP_EYE_SCALE", String(format: "%.2f", effScale), 1)
-        setenv("KL_OVRP_EYE_BASE", effBase, 1)
-        VQLog.log("Gráficos: resolución base \(effBase), escala \(Int(effScale * 100)) % (\(res.useGlobal ? "global" : "del juego"))")
+        // The slider is the final eye size: KL_OVRP_EYE_BASE=quest3 + KL_OVRP_EYE_SCALE = percent / 100
+        // (kl_ovrp_eyesize.h: 100 = Quest 3, 200 = Vision Pro density; the game's own scale is compensated).
+        let effPct = res.useGlobal ? resolutionPct : res.pct
+        setenv("KL_OVRP_EYE_SCALE", String(format: "%.2f", effPct / 100), 1)
+        setenv("KL_OVRP_EYE_BASE", "quest3", 1)
+        VQLog.log("Gráficos: resolución de ojo \(Int(effPct.rounded())) % (\(res.useGlobal ? "global" : "del juego"))")
         // Final eye size from the last run with these settings, pushed BEFORE the guest boots so its
         // first eye layer is built at it (the compositor's first drawable arrives after the guest has
         // started). The compositor pushes the display's request later; the same result changes nothing.
@@ -529,21 +531,24 @@ struct VQGameAA: Equatable {
     }
 }
 
-/// Resolution chosen per game: when `useGlobal` is false, `base` ("original"|"compositor"|"native")
-/// and `scale` (0.5...1.5) replace the global ones (KL_OVRP_EYE_BASE / KL_OVRP_EYE_SCALE).
-/// Saved by game key: vq.resMode.<key> ("game"; absent = global), vq.resBase.<key>, vq.resScale.<key>.
+/// Resolution chosen per game: when `useGlobal` is false, `pct` (50...200, see VQSettings.resolutionPct)
+/// replaces the global one. Saved by game key: vq.resMode.<key> ("game"; absent = global), vq.resPct.<key>.
 struct VQGameRes: Equatable {
     var useGlobal = true
-    var base = "original"
-    var scale = 1.0
+    var pct = 100.0
 
     static func load(key: String) -> VQGameRes {
         let d = UserDefaults.standard
         var r = VQGameRes()
         guard !key.isEmpty, d.string(forKey: "vq.resMode." + key) == "game" else { return r }
         r.useGlobal = false
-        if let b = d.string(forKey: "vq.resBase." + key), ["original", "compositor", "native"].contains(b) { r.base = b }
-        if let s = d.object(forKey: "vq.resScale." + key) as? Double, s >= 0.5, s <= 1.5 { r.scale = s }
+        if let p = d.object(forKey: "vq.resPct." + key) as? Double, p >= 50, p <= 200 {
+            r.pct = p.rounded()
+        } else {
+            // Older builds saved a base and a scale per game.
+            r.pct = migratedPct(base: d.string(forKey: "vq.resBase." + key) ?? "original",
+                                scale: d.object(forKey: "vq.resScale." + key) as? Double ?? 1)
+        }
         return r
     }
 
@@ -551,30 +556,34 @@ struct VQGameRes: Equatable {
         guard !key.isEmpty else { return }
         let d = UserDefaults.standard
         if useGlobal { d.removeObject(forKey: "vq.resMode." + key) } else { d.set("game", forKey: "vq.resMode." + key) }
-        d.set(base, forKey: "vq.resBase." + key)
-        d.set(scale, forKey: "vq.resScale." + key)
+        d.set(pct, forKey: "vq.resPct." + key)
     }
 
-    /// Per-eye pixels as kl_ovrp_set_eye_texture_size computes them for "original"/"native"
-    /// (same area, scale and cap; aspect of the Quest 3 eye). nil for "compositor": it follows
-    /// the visor's own request, known only when the game runs.
-    static func approxEye(base: String, scale: Double) -> (w: Int, h: Int)? {
-        let area: Double
-        let cap: Double
+    /// The percentage closest to an older base + scale: original x scale -> scale in %, the visionOS
+    /// drawable ("compositor") -> 150, the panel density ("native") -> 200.
+    static func migratedPct(base: String, scale: Double) -> Double {
         switch base {
-        case "original": area = 2064.0 * 2208.0; cap = 3072
-        case "native": area = 3660.0 * 3200.0; cap = 4096
-        default: return nil
+        case "native": return 200
+        case "compositor": return 150
+        default: return min(max((scale * 100).rounded(), 50), 200)
         }
-        let aspect = 2064.0 / 2208.0
-        let h0 = (area / aspect).squareRoot().rounded()
-        var h = (h0 * scale).rounded()
-        var w = ((h0 * aspect).rounded() * scale).rounded()
-        if w > cap || h > cap {
-            let k = cap / max(w, h)
-            w = (w * k).rounded(); h = (h * k).rounded()
-        }
-        return (Int(w), Int(h))
+    }
+
+    /// Per-axis factor over the Quest 3 eye for a percentage: p/100 up to 100, then linear to the
+    /// Vision Pro panel's density at 200. Mirrors kles_pct_factor (kl_ovrp_eyesize.h); keep in sync.
+    static func factor(pct: Double) -> Double {
+        let p = min(max(pct, 50), 200)
+        if p <= 100 { return p / 100 }
+        let avp = (3660.0 * 3200.0 / (2064.0 * 2208.0)).squareRoot()
+        return 1 + (p - 100) / 100 * (avp - 1)
+    }
+
+    /// Per-eye pixels with the Quest 3's shape (2064x2208 at 100 %). The runtime keeps the same pixel
+    /// count but gives it the shape of the headset's field of view (square pixels), so the real
+    /// width x height differ; the pixel count is the same.
+    static func approxEye(pct: Double) -> (w: Int, h: Int) {
+        let f = factor(pct: pct)
+        return (Int((2064.0 * f).rounded()), Int((2208.0 * f).rounded()))
     }
 }
 

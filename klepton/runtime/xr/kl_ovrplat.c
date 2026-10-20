@@ -138,9 +138,17 @@ static int plat_is_iap_catalog(const char *name) {
 // WRITE side — ovr_IAP_ConsumePurchase / ovr_IAP_LaunchCheckoutFlow and the
 // AssetFile delivery calls — all of which stay in plat_is_drm and keep aborting.
 // So the honest failure is carved out and the grant-shaped calls are not.
+//
+// The whole ovr_IAP_GetViewerPurchases* family gets this treatment (plain,
+// DeltaAsync, DurableCache — Demeo asks for the durable cache on reaching its
+// menu): every member is the same read-only "what do I own" question and the
+// same honest failure answers all of them. GetNextPurchaseArrayPage walks the
+// PurchaseArray of a request that never completed, so it fails the same way.
+// Consume / LaunchCheckoutFlow are WRITE calls and keep aborting.
 static int plat_is_iap_owned_query(const char *name) {
-    return strcmp(name, "ovr_IAP_GetViewerPurchases") == 0 ||
-           strcmp(name, "ovr_IAP_GetViewerPurchasesDeltaAsync") == 0;
+    return strncmp(name, "ovr_IAP_GetViewerPurchases",
+                   sizeof "ovr_IAP_GetViewerPurchases" - 1) == 0 ||
+           strcmp(name, "ovr_IAP_GetNextPurchaseArrayPage") == 0;
 }
 
 // "What is the status of this asset file?" — the asset-file twin of the owned
@@ -1340,6 +1348,7 @@ static const char *const g_plat_request[] = {
     "ovr_IAP_GetProductsBySKU", "ovr_IAP_GetNextProductArrayPage",
     // Owned-inventory query: honest failure, grants nothing (see plat_is_iap_owned_query).
     "ovr_IAP_GetViewerPurchases", "ovr_IAP_GetViewerPurchasesDeltaAsync",
+    "ovr_IAP_GetViewerPurchasesDurableCache", "ovr_IAP_GetNextPurchaseArrayPage",
     // Asset-file status: now answered from disk in g_plat_impl (plat_is_asset_local).
     "ovr_RichPresence_Clear", "ovr_RichPresence_Set",
     "ovr_RichPresence_SetDestination", "ovr_RichPresence_SetIsJoinable",

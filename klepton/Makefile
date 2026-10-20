@@ -977,6 +977,23 @@ build/t_jni_sig: tests/t_jni_sig.c runtime/kl_jni.c
 jnisig: build/t_jni_sig
 	@./build/t_jni_sig
 
+# INFO_OUTPUT_FORMAT_CHANGED sequencing in surface mode (klm_fmt_announce cut out of kl_mediandk.c).
+build/t_media_announce: tests/t_media_announce.c runtime/media/kl_mediandk.c
+	@mkdir -p build/mediaannounce
+	awk '/KL-TEST-BEGIN announce/{p=1;next} /KL-TEST-END announce/{p=0} p' runtime/media/kl_mediandk.c > build/mediaannounce/announce.inc
+	$(CC) -g -fsanitize=address,undefined -Wall -Ibuild/mediaannounce -o $@ tests/t_media_announce.c
+.PHONY: mediaannounce
+mediaannounce: build/t_media_announce
+	@./build/t_media_announce
+
+# Eye size of the resolution slider (runtime/xr/kl_ovrp_eyesize.h): pure arithmetic.
+build/kl_ovrp_eyesize_test: runtime/xr/tests/kl_ovrp_eyesize_test.c runtime/xr/kl_ovrp_eyesize.h
+	@mkdir -p build
+	$(CC) -g -fsanitize=address,undefined -Wall -Iruntime/xr -o $@ runtime/xr/tests/kl_ovrp_eyesize_test.c -lm
+.PHONY: eyesize
+eyesize: build/kl_ovrp_eyesize_test
+	@./build/kl_ovrp_eyesize_test
+
 # The haptics seam's model, with no guest and no headset: the three
 # OVRPlugin entry points AS THE GUEST RESOLVES THEM (through kl_ovrp_sym, so
 # the struct returns go through the real sret thunk), the queue behind them,
