@@ -568,15 +568,17 @@ ssize_t klb___read_chk(int fd, void *buf, size_t n, size_t cap) {
 // viewer's extra threads and signals make likely, and it is not this.
 static ssize_t klb_pread_full(int fd, void *buf, size_t n, off_t off) {
     int handled; ssize_t vr = kl_obbmap_pread(fd, buf, n, off, &handled);
-    if (handled) return vr;   // an OBB read-through fd — served from the archive
+    if (handled) { if (vr > 0) kl_fstat_read(fd, (size_t)vr); return vr; }   // an OBB read-through fd — served from the archive
     size_t done = 0;
     while (done < n) {
         ssize_t r = pread(fd, (char *)buf + done, n - done, off + (off_t)done);
         if (r > 0) { done += (size_t)r; continue; }
         if (r == 0) break;                       // EOF: a short read is the truth
         if (errno == EINTR) continue;
+        if (done) kl_fstat_read(fd, done);
         return done ? (ssize_t)done : -1;        // report the bytes that did move
     }
+    if (done) kl_fstat_read(fd, done);
     return (ssize_t)done;
 }
 

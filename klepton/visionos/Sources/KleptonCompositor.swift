@@ -545,6 +545,14 @@ final class KleptonCompositor {
     private var cadenceMax = 0.0
     private var cadenceRepeats = 0      // gaps of 1.5 periods or more
     private var missedDeadline = 0
+    // Slack of the cadence window: renderingDeadline minus the time after commit (seconds; negative =
+    // past the deadline), and the guest frames (serial advance) seen in it. Logging only.
+    private var slackMin = Double.infinity
+    private var slackSum = 0.0
+    private var slackN = 0
+    private var guestSerialLast: UInt64 = 0
+    private var guestFramesWin: UInt64 = 0
+    private var slackLine: String? = nil
     // Consecutive liveness reports whose mean gap disagrees with the latched
     // display period by more than 10%. See cadenceSummary().
     private var cadenceDisagreed = 0
@@ -1699,6 +1707,7 @@ final class KleptonCompositor {
                       + (fenceBacklogSkips > 0 ? " fence-skips \(fenceBacklogSkips)" : "")
                       + (noFence ? " (NOFENCE)" : ""))
                 NSLog("[cp] \(cadenceSummary())")
+                if let sl = slackLine { NSLog("[cp] \(sl)") }
                 NSLog("[cp] \(stageSummary())")
                 // The headset's thermal state (nominal / fair / serious / critical): logged on every
                 // change and every 30 s, so a slowdown can be told apart from thermal throttling.
@@ -2356,7 +2365,8 @@ final class KleptonCompositor {
             NSLog("[cp] trace f\(startupTrace) fence=\(glFence) layers=\(projLayerCount) "
                   + "enc=\(encoded) cmd=\(cmdCommitted)/\(dn)")
         }
-        noteCadence(presentation: presentation, drawable: main)
+        noteCadence(presentation: presentation, drawable: main,
+                    guestSerial: haveRendered ? UInt64(rendered.serial) : 0)
         frame.endSubmission()      // only here — see startSubmission above
         return encoded > 0 ? 1 : 0
     }
@@ -4277,7 +4287,8 @@ final class KleptonCompositor {
     /// is the point — staleness is reprojection's job and it does it every
     /// period. A repeat is the case reprojection cannot reach.
     private func noteCadence(presentation: TimeInterval,
-                             drawable: LayerRenderer.Drawable) {
+                             drawable: LayerRenderer.Drawable,
+                             guestSerial: UInt64) {
         // The deadline for THIS frame, against the same clock it is expressed
         // in. Checked after commit, so it measures the encode we just did.
         let now = LayerRenderer.Clock.Instant.epoch
@@ -4285,6 +4296,14 @@ final class KleptonCompositor {
         let deadline = LayerRenderer.Clock.Instant.epoch
             .duration(to: drawable.frameTiming.renderingDeadline).timeInterval
         if now > deadline { missedDeadline += 1 }
+        let slack = deadline - now
+        slackMin = min(slackMin, slack)
+        slackSum += slack
+        slackN += 1
+        if guestSerial > guestSerialLast {
+            if guestSerialLast != 0 { guestFramesWin += guestSerial - guestSerialLast }
+            guestSerialLast = guestSerial
+        }
 
         defer { lastPresentation = presentation }
         guard lastPresentation > 0 else { return }
@@ -4319,7 +4338,13 @@ final class KleptonCompositor {
     /// Reported there rather than on a sample count of its own so that "the
     /// cadence line is missing" can only ever mean "no frames were presented".
     private func cadenceSummary() -> String {
+        slackLine = nil
         guard cadenceN > 0 else { return "cadence n/a (no presents yet)" }
+        if slackN > 0 {
+            let fpsGuest = cadenceSum > 0 ? Double(guestFramesWin) / cadenceSum : 0
+            slackLine = String(format: "slack min/mean %.2f/%.2f ms fps_guest %.1f",
+                               slackMin * 1000, slackSum / Double(slackN) * 1000, fpsGuest)
+        }
         let meanS = cadenceSum / Double(cadenceN)
         let periods = displayPeriod > 0 ? meanS / displayPeriod : 0
         // Median gap in periods, only for windows that are being held (mean >= 1.5 periods):
@@ -4457,6 +4482,7 @@ final class KleptonCompositor {
         cadenceGaps.removeAll(keepingCapacity: true)
         cadenceN = 0; cadenceSum = 0; cadenceMax = 0; cadenceMin = .infinity; cadenceShort = 0
         cadenceRepeats = 0; missedDeadline = 0
+        slackMin = .infinity; slackSum = 0; slackN = 0; guestFramesWin = 0
         anchorWalkedBack = 0; anchorHeld = 0; anchorUnknown = 0
         return out
     }

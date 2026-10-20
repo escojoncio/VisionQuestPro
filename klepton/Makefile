@@ -967,6 +967,16 @@ build/t_ptw: tests/t_ptw.c runtime/gfx/kl_reproject_ptw.c runtime/gfx/kl_reproje
 ptw: build/t_ptw
 	@./build/t_ptw
 
+# JNI signature decoders (arrays are always references). The two functions are cut out of kl_jni.c
+# so the test runs the shipping code; plain C, Linux.
+build/t_jni_sig: tests/t_jni_sig.c runtime/kl_jni.c
+	@mkdir -p build/jnisig
+	awk '/^static int klj_decode_args\(/,/^}/{print} /^static int klj_decode_args_a\(/,/^}/{print}' runtime/kl_jni.c > build/jnisig/jni_decoders.inc
+	$(CC) -g -fsanitize=address,undefined -Ibuild/jnisig -o $@ tests/t_jni_sig.c
+.PHONY: jnisig
+jnisig: build/t_jni_sig
+	@./build/t_jni_sig
+
 # The haptics seam's model, with no guest and no headset: the three
 # OVRPlugin entry points AS THE GUEST RESOLVES THEM (through kl_ovrp_sym, so
 # the struct returns go through the real sret thunk), the queue behind them,
@@ -1233,3 +1243,14 @@ build/t_trace: tests/t_trace.c $(RUNTIME) $(RUNTIME_HDRS)
 .PHONY: trace
 trace: build/t_trace
 	@./build/t_trace
+
+# Memory-jump diagnostics (rate trigger, range lookup, per-file statistics, entitlement parsing). The blocks are cut out of
+# kl_libc.c / kl_app.c by their KL-TEST markers so the test runs the shipping code; plain C, Linux or macOS.
+build/t_memdiag: tests/t_memdiag.c runtime/libc/kl_libc.c visionos/Sources/kl_app.c
+	@mkdir -p build/memdiag
+	awk '/KL-TEST-BEGIN (rate|range|fstat)/{p=1;next} /KL-TEST-END (rate|range|fstat)/{p=0} p' runtime/libc/kl_libc.c > build/memdiag/libc_blocks.inc
+	awk '/KL-TEST-BEGIN ent/{p=1;next} /KL-TEST-END ent/{p=0} p' visionos/Sources/kl_app.c > build/memdiag/app_blocks.inc
+	$(CC) -g -fsanitize=address,undefined -Wall -Ibuild/memdiag -o $@ tests/t_memdiag.c -lpthread
+.PHONY: memdiag
+memdiag: build/t_memdiag
+	@./build/t_memdiag

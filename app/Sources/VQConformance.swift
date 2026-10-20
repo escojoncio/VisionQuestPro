@@ -36,7 +36,7 @@ enum VQConformance {
         setenv("KL_STATUS_HUD", "1", 1)
         // Spec per-layer xrEndFrame validation (kl_openxr.c); games keep the lax path.
         setenv("KL_XR_STRICT_LAYERS", "1", 1)
-        setenv("VPVK_EXTRA_EXTENSIONS", "1", 1); unsetenv("VPVK_REPORT_GEOM")
+        setenv("VPVK_EXTRA_EXTENSIONS", "1", 1); unsetenv("VPVK_REPORT_GEOM"); setenv("VPVK_ASYNC_PIPELINES", "0", 1)
         neutralGraphics()
         VQLog.log("Conformidad OpenXR: plugin Vulkan2, sin tests interactivos; progreso en el HUD; resultado en el registro del juego y en openxr_cts.xml")
     }
@@ -156,7 +156,7 @@ enum VQConformance {
         setenv("VPVK_DEVICE_LOST_STRICT", "1", 1)
         // Extensions VPKEngine advertises only to the conformance run until it has validated them
         // (timeline semaphores, synchronization2, dynamic rendering, copy_commands2, multi_draw…).
-        setenv("VPVK_EXTRA_EXTENSIONS", "1", 1); unsetenv("VPVK_REPORT_GEOM")
+        setenv("VPVK_EXTRA_EXTENSIONS", "1", 1); unsetenv("VPVK_REPORT_GEOM"); setenv("VPVK_ASYNC_PIPELINES", "0", 1)
         neutralGraphics()
 
         VQLog.log("Conformidad: \(batches.count) tandas, \(totalCases) casos (perfil \(profile)); hechos \(done), "

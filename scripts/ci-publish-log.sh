@@ -13,6 +13,10 @@ OUT=$(mktemp -d)
     [[ -f "$LOG" ]] || continue
     echo
     echo "## $(basename "$LOG"): $(wc -l < "$LOG") lines"
+    if [[ "$LOG" == *-api.txt ]]; then   # informational dump: whole file, no error/tail filter
+      head -n 1500 "$LOG"
+      continue
+    fi
     echo "### errors"
     grep -n -E -B2 -A6 "error:|Error |ERROR:|FAILED|fatal error|undefined symbol|ld: |CMake Error|\*\* BUILD FAILED" "$LOG" | head -1500
     echo "### end"

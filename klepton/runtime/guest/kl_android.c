@@ -273,7 +273,7 @@ static int             g_ch_active;        // callbacks outstanding anywhere
 static void kla_ch_key(void) { pthread_key_create(&g_ch_key, NULL); }
 
 static double kla_display_hz(void) {
-    float hz = kl_ovrp_display_frequency();
+    float hz = kl_ovrp_guest_display_frequency();
     return (hz >= 30.0f && hz <= 240.0f) ? (double)hz : 72.0;
 }
 

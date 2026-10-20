@@ -448,6 +448,8 @@ final class VQSettings: ObservableObject {
         unsetenv("VPVK_DEVICE_LOST_STRICT")
         // «Perfil Vulkan completo»; the conformance runs set it again either way (VQConformance).
         if vkFullProfile { setenv("VPVK_EXTRA_EXTENSIONS", "1", 1) } else { unsetenv("VPVK_EXTRA_EXTENSIONS") }
+        // Async pipelines stay on with the full profile (only an explicit 0 turns them off); the conformance runs set 0 (VQConformance).
+        unsetenv("VPVK_ASYNC_PIPELINES")
         // Games: report geometry/tessellation like Adreno so Unity keeps subshaders that need
         // them (AC Nexus's magenta UI). The CTS unsets it (VQConformance).
         setenv("VPVK_REPORT_GEOM", "1", 1)

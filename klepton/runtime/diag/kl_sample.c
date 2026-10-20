@@ -868,3 +868,160 @@ void kl_game_beat(int src) {
         if (pthread_create(&th, NULL, game_watch_main, NULL) == 0) pthread_detach(th);
     }
 }
+
+// ---------------------------------------------------------------------------
+// Hot threads (memory-jump diagnostics). The AC Nexus wall has one thread working while the game thread sits in
+// a futex, and nothing says which: host threads (Metal, libdispatch workers, the texture streamer) are not
+// registered anywhere. kl_sample_threads_baseline (called about once a second by the heartbeat) remembers each
+// Mach thread's cumulative CPU; kl_sample_hot_threads at the jump prints every thread with its name, cumulative
+// CPU and the CPU since the baseline, and the stack of the 3 most active, each frame as image+offset. Threads
+// are not suspended (a torn read costs one frame, as in the snapshots above); self is skipped.
+// ---------------------------------------------------------------------------
+#define KL_HT_MAX 256
+typedef struct { mach_port_t act; uint64_t cpu_us; } kl_ht_snap;
+static kl_ht_snap g_ht_prev[KL_HT_MAX];
+static unsigned g_ht_nprev;
+static uint64_t g_ht_prev_ns;
+static pthread_mutex_t g_ht_mu = PTHREAD_MUTEX_INITIALIZER;
+
+static uint64_t ht_cpu_us(thread_act_t act, int *run_state) {
+    thread_basic_info_data_t bi;
+    mach_msg_type_number_t bn = THREAD_BASIC_INFO_COUNT;
+    if (thread_info(act, THREAD_BASIC_INFO, (thread_info_t)&bi, &bn) != KERN_SUCCESS) {
+        if (run_state) *run_state = -1;
+        return 0;
+    }
+    if (run_state) *run_state = bi.run_state;
+    return ((uint64_t)bi.user_time.seconds + (uint64_t)bi.system_time.seconds) * 1000000ull +
+           (uint64_t)bi.user_time.microseconds + (uint64_t)bi.system_time.microseconds;
+}
+
+void kl_sample_threads_baseline(void) {
+    if (pthread_mutex_trylock(&g_ht_mu) != 0) return;
+    thread_act_array_t list;
+    mach_msg_type_number_t nlist = 0;
+    if (task_threads(mach_task_self(), &list, &nlist) == KERN_SUCCESS) {
+        unsigned n = 0;
+        for (mach_msg_type_number_t i = 0; i < nlist && n < KL_HT_MAX; i++) {
+            g_ht_prev[n].act = list[i];
+            g_ht_prev[n].cpu_us = ht_cpu_us(list[i], NULL);
+            n++;
+        }
+        g_ht_nprev = n;
+        g_ht_prev_ns = mono_ns();
+        for (mach_msg_type_number_t i = 0; i < nlist; i++) mach_port_deallocate(mach_task_self(), list[i]);
+        vm_deallocate(mach_task_self(), (vm_address_t)list, nlist * sizeof list[0]);
+    }
+    pthread_mutex_unlock(&g_ht_mu);
+}
+
+// "image+0xoff" for any pc: a guest image, else the host image dladdr finds (basename), with the symbol if known.
+static const char *ht_pc_label(const void *pc, char *buf, size_t cap) {
+    size_t off = 0;
+    const char *img = kl_addr_image(pc, &off);
+    if (img) {
+        snprintf(buf, cap, "%s+0x%zx", img, off);
+        return buf;
+    }
+    Dl_info di;
+    if (dladdr(pc, &di) && di.dli_fname && di.dli_fbase) {
+        const char *base = strrchr(di.dli_fname, '/');
+        base = base ? base + 1 : di.dli_fname;
+        if (di.dli_sname)
+            snprintf(buf, cap, "%s+0x%tx (%s)", base, (const char *)pc - (const char *)di.dli_fbase, di.dli_sname);
+        else
+            snprintf(buf, cap, "%s+0x%tx", base, (const char *)pc - (const char *)di.dli_fbase);
+        return buf;
+    }
+    snprintf(buf, cap, "%p", pc);
+    return buf;
+}
+
+void kl_sample_hot_threads(FILE *out, const char *why) {
+    if (!out) return;
+    thread_act_array_t list;
+    mach_msg_type_number_t nlist = 0;
+    if (task_threads(mach_task_self(), &list, &nlist) != KERN_SUCCESS) return;
+    mach_port_t self = mach_thread_self();
+    typedef struct { mach_port_t act; uint64_t cpu_us, delta_us; int state; char name[40]; } row;
+    row rows[KL_HT_MAX];
+    unsigned nrows = 0;
+    pthread_mutex_lock(&g_ht_mu);
+    const uint64_t now = mono_ns();
+    const uint64_t elapsed_ms = g_ht_prev_ns ? (now - g_ht_prev_ns) / 1000000ull : 0;
+    for (mach_msg_type_number_t i = 0; i < nlist && nrows < KL_HT_MAX; i++) {
+        row *r = &rows[nrows++];
+        r->act = list[i];
+        r->cpu_us = ht_cpu_us(list[i], &r->state);
+        r->delta_us = r->cpu_us;                      // a thread born since the baseline: all of it
+        for (unsigned k = 0; k < g_ht_nprev; k++)
+            if (g_ht_prev[k].act == r->act) {
+                r->delta_us = r->cpu_us >= g_ht_prev[k].cpu_us ? r->cpu_us - g_ht_prev[k].cpu_us : 0;
+                break;
+            }
+        r->name[0] = 0;
+        pthread_t pt = pthread_from_mach_thread_np(r->act);
+        if (pt) pthread_getname_np(pt, r->name, sizeof r->name);
+    }
+    pthread_mutex_unlock(&g_ht_mu);
+    fprintf(out, "[hb] threads (%s): %u threads, CPU since the last baseline (%llu ms ago)\n", why ? why : "?",
+            nrows, (unsigned long long)elapsed_ms);
+    // Most active first; zero-delta threads are listed only as a count.
+    unsigned order[KL_HT_MAX];
+    for (unsigned i = 0; i < nrows; i++) order[i] = i;
+    for (unsigned a = 1; a < nrows; a++) {            // insertion sort by delta, descending
+        unsigned v = order[a];
+        int b = (int)a - 1;
+        while (b >= 0 && rows[order[b]].delta_us < rows[v].delta_us) { order[b + 1] = order[b]; b--; }
+        order[b + 1] = v;
+    }
+    unsigned idle = 0, shown = 0;
+    for (unsigned a = 0; a < nrows; a++) {
+        const row *r = &rows[order[a]];
+        if (!r->delta_us && shown >= 12) { idle++; continue; }
+        if (shown >= 40) { idle++; continue; }
+        shown++;
+        fprintf(out, "[hb]   thread %#x%s%s%s cpu=%.1fms +%.1fms%s%s\n", r->act, r->name[0] ? " \"" : "", r->name,
+                r->name[0] ? "\"" : "", (double)r->cpu_us / 1000.0, (double)r->delta_us / 1000.0,
+                r->act == self ? " (heartbeat)" : "", r->act == g_main_act ? " (pump)" : "");
+    }
+    if (idle) fprintf(out, "[hb]   +%u more threads with no CPU since the baseline\n", idle);
+    // Stacks of the 3 most active (never our own).
+    unsigned done = 0;
+    for (unsigned a = 0; a < nrows && done < 3; a++) {
+        const row *r = &rows[order[a]];
+        if (!r->delta_us || r->act == self) continue;
+        done++;
+        arm_thread_state64_t ts;
+        mach_msg_type_number_t cnt = ARM_THREAD_STATE64_COUNT;
+        if (thread_get_state(r->act, ARM_THREAD_STATE64, (thread_state_t)&ts, &cnt) != KERN_SUCCESS) {
+            fprintf(out, "[hb]   stack of %#x: thread state unavailable\n", r->act);
+            continue;
+        }
+        void *frames[14];
+        unsigned nf = 0;
+        frames[nf++] = (void *)((uint64_t)ts.__pc & 0x0000ffffffffffffULL);
+        uint64_t lr = (uint64_t)ts.__lr & 0x0000ffffffffffffULL;
+        if (lr) frames[nf++] = (void *)lr;
+        uint64_t fp = (uint64_t)ts.__fp;
+        while (fp && nf < 14 && !(fp & 7)) {
+            uint64_t pair[2];
+            vm_size_t got = 0;
+            if (vm_read_overwrite(mach_task_self(), fp, sizeof pair, (vm_address_t)pair, &got) != KERN_SUCCESS ||
+                got != sizeof pair) break;
+            if (!pair[1] || pair[0] <= fp) break;
+            frames[nf++] = (void *)(pair[1] & 0x0000ffffffffffffULL);
+            fp = pair[0];
+        }
+        fprintf(out, "[hb]   stack of %#x%s%s%s (+%.1fms):\n", r->act, r->name[0] ? " \"" : "", r->name,
+                r->name[0] ? "\"" : "", (double)r->delta_us / 1000.0);
+        for (unsigned f = 0; f < nf; f++) {
+            char b[200];
+            fprintf(out, "[hb]     #%-2u %s\n", f, ht_pc_label(frames[f], b, sizeof b));
+        }
+    }
+    for (mach_msg_type_number_t i = 0; i < nlist; i++) mach_port_deallocate(mach_task_self(), list[i]);
+    vm_deallocate(mach_task_self(), (vm_address_t)list, nlist * sizeof list[0]);
+    mach_port_deallocate(mach_task_self(), self);
+    fflush(out);
+}

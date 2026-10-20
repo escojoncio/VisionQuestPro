@@ -209,6 +209,17 @@ static void klj_forget_writes(void *obj);
 
  klj_object *klj_as_object(void *p) {
     klj_object *o = p;
+    // A float/garbage register read as a handle ("klj_arr+0x4" crash): never dereference a
+    // pointer that cannot be one. Capped log, one line per distinct caller-ish value is overkill.
+    if ((uintptr_t)p < 0x10000) {
+        static int s_small;
+        if (p && s_small < 20) {
+            s_small++;
+            KLJ_LOG("klj_as_object: handle %p is not a pointer (caller %p), treated as NULL",
+                    p, __builtin_return_address(0));
+        }
+        return NULL;
+    }
     return (o && o->magic == KLJ_OBJ_MAGIC) ? o : NULL;
 }
 
@@ -1001,7 +1012,14 @@ static int klj_decode_args(const char *sig, kl_va *va, klj_val *argv) {
     int argc = 0;
     for (const char *p = sig + 1; *p && *p != ')'; ) {
         if (argc == KLJ_MAX_ARGS) return -1;
-        while (*p == '[') p++;                       // arrays are references
+        if (*p == '[') {                             // an array is ALWAYS a reference, whatever its element type
+            while (*p == '[') p++;
+            if (*p == 'L') { while (*p && *p != ';') p++; if (*p == ';') p++; }
+            else if (*p && *p != ')') p++;
+            else return -1;
+            argv[argc++].l = (void *)(uintptr_t)kl_va_gp(va);
+            continue;
+        }
         switch (*p) {
         case 'L':                                     // fully-qualified object
             while (*p && *p != ';') p++;
@@ -1045,7 +1063,15 @@ static int klj_decode_args_a(const char *sig, const klj_jvalue *args, klj_val *a
         // something to read. Rejecting it outright turned every zero-argument
         // A-call into "cannot decode signature".
         if (argc == KLJ_MAX_ARGS || !args) return -1;
-        while (*p == '[') p++;                       // arrays are references
+        if (*p == '[') {                             // an array is ALWAYS a reference (jvalue.l), never 32-bit
+            while (*p == '[') p++;
+            if (*p == 'L') { while (*p && *p != ';') p++; if (*p == ';') p++; }
+            else if (*p && *p != ')') p++;
+            else return -1;
+            argv[argc].l = args[argc].l;
+            argc++;
+            continue;
+        }
         switch (*p) {
         case 'L':
             while (*p && *p != ';') p++;

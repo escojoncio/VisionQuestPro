@@ -60,6 +60,7 @@ final class VQModel: ObservableObject {
             // started quickly: QUEST/Registros then held 10 s of the new run instead of the old
             // one (2026-10-15). Guarded by the boot log's date, so it never copies twice.
             VQLog.savePreviousSessionToQuest()
+            VQLog.archiveStaleCrashLogs()
             do {
                 let prepared = try VQPrepare.prepare(game) { fraction, text in
                     Task { @MainActor in

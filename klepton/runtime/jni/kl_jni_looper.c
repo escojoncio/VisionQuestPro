@@ -668,7 +668,7 @@ static void *klj_frame_clock_main(void *arg) {
     (void)arg;
     kl_jni_env();                     // per-thread env + kl_thread_init
     while (g_frame_clock_running) {
-        double hz = kl_ovrp_display_frequency();
+        double hz = kl_ovrp_guest_display_frequency();
         if (!(hz >= 30.0 && hz <= 240.0)) hz = 72.0;
         struct timespec d = { 0, (long)(1e9 / hz) };
         nanosleep(&d, NULL);

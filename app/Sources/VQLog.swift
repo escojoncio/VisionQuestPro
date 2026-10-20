@@ -38,6 +38,8 @@ enum VQLog {
         let line = "VisionQuestPro \(info["CFBundleShortVersionString"] ?? "?") (\(info["CFBundleVersion"] ?? "?")) commit \(vqBuildCommit.isEmpty ? "local" : vqBuildCommit), "
             + "visionOS \(ProcessInfo.processInfo.operatingSystemVersionString)\n"
         handle?.write(Data(line.utf8))
+        // Read by kl_fault_set_crash_path (C) for the header of klepton-crash.log.
+        setenv("KL_BUILD_COMMIT", vqBuildCommit.isEmpty ? "local" : vqBuildCommit, 1)
         refreshQuestAttachments(force: true)   // warm the cache off the main thread
     }
 
@@ -150,6 +152,40 @@ enum VQLog {
         for stale in old.dropFirst(12) { try? fm.removeItem(at: stale) }
         log("Registros: \(copied) fichero(s) copiados a QUEST/Registros/\(dest.lastPathComponent)")
         return dest
+    }
+
+    /// Moves every klepton-crash*.log left from earlier sessions (Documents and QUEST/Registros) to
+    /// an `anteriores/` subfolder, named with the date, so the shareable logs only carry the crash
+    /// report of the session about to start (a "klepton-crash (4).log" from another build and game
+    /// misled a diagnosis). Call AFTER savePreviousSessionToQuest(), which files the old report with
+    /// its own session. Keeps the newest 10 per folder.
+    static func archiveStaleCrashLogs() {
+        let fm = FileManager.default
+        var dirs = [fm.urls(for: .documentDirectory, in: .userDomainMask)[0]]
+        if let quest = VQFolder.shared.url {
+            dirs.append(quest.appendingPathComponent("Registros", isDirectory: true))
+        }
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.dateFormat = "yyyy-MM-dd_HH-mm-ss"
+        let stamp = f.string(from: Date())
+        var moved = 0
+        for dir in dirs {
+            let stale = ((try? fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil)) ?? [])
+                .filter { $0.lastPathComponent.hasPrefix("klepton-crash") && $0.pathExtension == "log" }
+            if stale.isEmpty { continue }
+            let dest = dir.appendingPathComponent("anteriores", isDirectory: true)
+            try? fm.createDirectory(at: dest, withIntermediateDirectories: true)
+            for src in stale {
+                let name = src.deletingPathExtension().lastPathComponent
+                let to = dest.appendingPathComponent("\(stamp)-\(name).log")
+                if (try? fm.moveItem(at: src, to: to)) != nil { moved += 1 }
+            }
+            let kept = ((try? fm.contentsOfDirectory(at: dest, includingPropertiesForKeys: nil)) ?? [])
+                .sorted { $0.lastPathComponent > $1.lastPathComponent }
+            for old in kept.dropFirst(10) { try? fm.removeItem(at: old) }
+        }
+        if moved > 0 { log("Registros: \(moved) klepton-crash*.log de sesiones anteriores movidos a anteriores/") }
     }
 
     nonisolated(unsafe) private static var gameLaunched = false

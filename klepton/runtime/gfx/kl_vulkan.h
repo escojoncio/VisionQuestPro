@@ -250,6 +250,15 @@ void kl_vulkan_capture_layers(void);
 // on the GPU (kl_vulkan_taa_frame_complete), never past a frame not complete.
 void kl_vulkan_frame_done(int stage);
 unsigned long long kl_vulkan_frame_serial(void);
+// PIPELINED frame end (default; KL_VK_FRAME_ASYNC=0 / KL_VK_FRAME_SYNC bring the queue wait back):
+// kl_vulkan_frame_done no longer waits for the GPU to finish the frame it ends, only for the frame
+// before it, so the picture of that frame may still be in flight when it returns. The serial then
+// advances at GPU completion (any thread polling kl_vulkan_frame_serial notices it). This returns,
+// ONCE per frame_done and on the thread that called it, the serial the caller must see reached before
+// it tells a compositor the frame's stage holds a finished picture: 0 = it already does (or the frame
+// end waited). Consume it right after kl_vulkan_frame_done; a stale value is harmless (it is only ever
+// compared with the serial).
+unsigned long long kl_vulkan_frame_pending_serial(void);
 
 // ---------------------------------------------------------------------------
 // VPKTAA INLINE — the resolve runs at the guest's frame end, on VPKEngine's own
@@ -485,5 +494,12 @@ void kl_vulkan_xr_image_free(unsigned long long image);
 
 // Memory pressure: frees every destroyed OpenXR swapchain image still in its grace period.
 void kl_vulkan_trim(const char *why);
+// Heartbeat diagnostics, aggregated (see kl_vulkan.c): which 0 = guest image creations + Vulkan-layer call counters,
+// 1 = VPKEngine backend counters. Writes one line, returns its length; 0 = nothing since the last call. Any thread.
+size_t kl_vulkan_diag(int which, char *out, size_t cap);
+// Releases what the guest destroyed and VPKEngine still holds (graveyard) when no frame is in flight and none was
+// submitted for min_idle_ms. Never blocks; any thread. Logs a line when it freed something.
+void kl_vulkan_idle_drain(unsigned min_idle_ms, const char *why);
+size_t kl_vulkan_diag_ranges(int kind, uint64_t (*out)[2], size_t max);   // 0 = VkDeviceMemory host windows, 1 = VPKEngine buffer contents; {addr, size} sorted
 
 #endif

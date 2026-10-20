@@ -106,6 +106,7 @@ void kl_vulkan_eye_depth_tag(int s, unsigned long long t) { (void)s; (void)t; }
 void  kl_vulkan_capture_eyes(unsigned f, int s) { (void)f; (void)s; }
 void  kl_vulkan_frame_done(int s) { (void)s; }
 unsigned long long kl_vulkan_frame_serial(void) { return 0; }
+unsigned long long kl_vulkan_frame_pending_serial(void) { return 0; }
 // VPKTAA inline: never active without a Vulkan driver.
 int   kl_vulkan_taa_inline(void) { return 0; }
 void  kl_vulkan_set_taa_hook(kl_vulkan_taa_hook_fn fn, void *u) { (void)fn; (void)u; }
@@ -160,6 +161,9 @@ unsigned long long kl_vulkan_xr_image(unsigned w, unsigned h, unsigned l,
 void *kl_vulkan_xr_image_mtl(unsigned long long img) { (void)img; return NULL; }
 void kl_vulkan_xr_image_free(unsigned long long img) { (void)img; }
 void kl_vulkan_trim(const char *why) { (void)why; }
+size_t kl_vulkan_diag(int which, char *out, size_t cap) { (void)which; (void)out; (void)cap; return 0; }
+void kl_vulkan_idle_drain(unsigned min_idle_ms, const char *why) { (void)min_idle_ms; (void)why; }
+size_t kl_vulkan_diag_ranges(int kind, uint64_t (*out)[2], size_t max) { (void)kind; (void)out; (void)max; return 0; }
 
 #else  /* MoltenVK headers present */
 
@@ -359,6 +363,7 @@ typedef struct {
     PFN_vkCreateFence                 CreateFence;
     PFN_vkDestroyFence                DestroyFence;
     PFN_vkWaitForFences               WaitForFences;
+    PFN_vkGetFenceStatus              GetFenceStatus;
     PFN_vkResetFences                 ResetFences;
     PFN_vkDeviceWaitIdle              DeviceWaitIdle;
     PFN_vkQueueWaitIdle               QueueWaitIdle;
@@ -646,7 +651,7 @@ static void dev_resolve(klvk_device *d) {
     R(CreateCommandPool); R(DestroyCommandPool); R(AllocateCommandBuffers);
     R(BeginCommandBuffer); R(EndCommandBuffer); R(ResetCommandBuffer);
     R(CmdPipelineBarrier); R(CmdCopyImageToBuffer); R(CmdClearColorImage); R(QueueSubmit);
-    R(CreateFence); R(DestroyFence); R(WaitForFences); R(ResetFences);
+    R(CreateFence); R(DestroyFence); R(WaitForFences); R(ResetFences); R(GetFenceStatus);
     R(DeviceWaitIdle); R(QueueWaitIdle);
 #undef R
 }
@@ -3507,16 +3512,71 @@ static uint64_t g_frame_serial;
 // g_frame_issued (frames that reached kl_vulkan_frame_done) is declared above
 // klvk_ed_frame_done, which files it with the eye depth.
 
-unsigned long long kl_vulkan_frame_serial(void) {
-    return __atomic_load_n(&g_frame_serial, __ATOMIC_ACQUIRE);
-}
-
+// KL-TEST-BEGIN fence (extracted by tools/ci/host-tests.sh into klepton/tests/t_frame_fence.c)
 static void klvk_serial_advance(uint64_t to) {
     uint64_t cur = __atomic_load_n(&g_frame_serial, __ATOMIC_ACQUIRE);
     while (cur < to &&
            !__atomic_compare_exchange_n(&g_frame_serial, &cur, to, 1,
                                         __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) { }
 }
+
+// ---- pipelined frame end: a ring of fences (see kl_vulkan_frame_done) ----
+// Each frame end submits an EMPTY vkQueueSubmit with one of these fences on the guest's queue.
+// VPVulkan signals it when every frame submitted before it has completed on the GPU (Fence::frames,
+// vkGetFenceStatus -> waitFrames), i.e. at the completion of the frame's last real command buffer,
+// and the serial advances to the frame's number from there. The guest thread waits only for the frame
+// N-1 back (klvk_frame_fence); anybody may poll (kl_vulkan_frame_serial, from the compositor), but
+// only the guest thread resets and recycles a fence.
+#define KLVK_FE_RING 4
+static pthread_mutex_t g_fe_mu = PTHREAD_MUTEX_INITIALIZER;
+static struct { VkFence f; uint64_t serial; double t_sub; int done; } g_fe[KLVK_FE_RING];
+static unsigned g_fe_head, g_fe_n;       // FIFO of submitted fences (g_fe_mu)
+static int      g_fe_wait_idx = -1;      // entry the guest thread is blocked on: pollers leave it alone
+static VkDevice g_fe_dev;                // the device the fences belong to
+static int      g_fe_active;             // atomic hint: entries may be pending (pollers skip the lock at 0)
+static double   g_fe_lat_sum, g_fe_lat_max; static unsigned g_fe_lat_n;   // submit -> completion seen (g_fe_mu)
+static __thread uint64_t t_pub_serial;   // see kl_vulkan_frame_pending_serial
+static unsigned g_native_n;              // native (VPKEngine) command buffers requested, ever (atomic)
+static unsigned g_fe_native_seen;        // ...as of the last fenced frame end (guest thread)
+static int      g_fe_cfg_n = -1;         // KL_VK_FRAME_INFLIGHT, read once
+static void klvk_gpu_mark_lost(const char *why);
+
+// Marks every submitted fence the GPU has finished, oldest first, and advances the serial for each.
+// g_fe_mu held. 1 = the device is lost.
+static int klvk_fe_scan_locked(klvk_device *d) {
+    for (unsigned k = 0; k < g_fe_n; k++) {
+        unsigned i = (g_fe_head + k) % KLVK_FE_RING;
+        if (g_fe[i].done) continue;
+        if ((int)i == g_fe_wait_idx) break;
+        VkResult r = d->GetFenceStatus(d->dev, g_fe[i].f);
+        if (r != VK_SUCCESS) return r == VK_ERROR_DEVICE_LOST;
+        g_fe[i].done = 1;
+        double ms = (klvk_now_s() - g_fe[i].t_sub) * 1000.0;
+        g_fe_lat_sum += ms; g_fe_lat_n++;
+        if (ms > g_fe_lat_max) g_fe_lat_max = ms;
+        klvk_serial_advance(g_fe[i].serial);
+    }
+    return 0;
+}
+
+unsigned long long kl_vulkan_frame_serial(void) {
+    // The compositor reads this every frame: it is also what notices a frame finishing while the
+    // guest is busy recording the next one (or loading and ending no frames at all).
+    if (__atomic_load_n(&g_fe_active, __ATOMIC_ACQUIRE) && pthread_mutex_trylock(&g_fe_mu) == 0) {
+        klvk_device *d = g_devs[0];
+        int lost = d && d->GetFenceStatus && d->dev == g_fe_dev && klvk_fe_scan_locked(d);
+        pthread_mutex_unlock(&g_fe_mu);
+        if (lost) klvk_gpu_mark_lost("vkGetFenceStatus at frame end");
+    }
+    return __atomic_load_n(&g_frame_serial, __ATOMIC_ACQUIRE);
+}
+
+unsigned long long kl_vulkan_frame_pending_serial(void) {
+    uint64_t v = t_pub_serial;
+    t_pub_serial = 0;
+    return v;
+}
+// KL-TEST-END fence
 
 void kl_vulkan_taa_frame_complete(unsigned long long vk_serial) {
     // Never past what was issued: a stray value cannot run the serial ahead.
@@ -3711,6 +3771,14 @@ static struct {
     // (PSO / MTLLibrary not used recently, idle staging, inactive rings), returns bytes freed
     // and a short "what=MiB ..." summary in `out`. level 1 = warning, 2 = critical.
     size_t (*trim_memory)(int level, char *out, size_t cap);
+    // weak: VPKEngine drains what the guest destroyed and the backend holds until a frame reuses a slot, when no
+    // frame is in flight and none was submitted for min_idle_ms (never blocks; vpvk/config.h vpvk_idle_drain).
+    size_t (*idle_drain)(unsigned min_idle_ms, char *out, size_t cap);
+    // weak: VPKEngine's call counters as "dt=<ms> key=<delta> ..." (vpvk/config.h vpvk_diag_line; 0 = layer, 1 = backend).
+    size_t (*diag_line)(int which, char *out, size_t cap);
+    // weak: VPKEngine memory ownership ranges (vpvk/config.h vpvk_diag_ranges): {addr, size} pairs, kind 0 host-visible
+    // VkDeviceMemory, 1 VPKEngine's own CPU-visible buffers.
+    size_t (*diag_ranges)(int kind, void *out, size_t max);
     // weak: VPKEngine's UI mask of the newest eye passes for hosts that composite the eye themselves
     // (vpvk/config.h vpvk_ui_mask_texture): id<MTLTexture> +1 retained, or NULL.
     void *(*ui_mask_texture)(int eye, int *w, int *h, int *slice);
@@ -3747,6 +3815,9 @@ static void klvk_vpvk_resolve(void) {
         g_vpvk.gpu_last_splits = (unsigned (*)(void))dlsym(lib, "vpvk_gpu_last_frame_chunks");
         g_vpvk.gpu_lost        = (int (*)(void))dlsym(lib, "vpvk_gpu_lost");
         g_vpvk.trim_memory     = (size_t (*)(int, char *, size_t))dlsym(lib, "vpvk_trim_memory");
+        g_vpvk.idle_drain      = (size_t (*)(unsigned, char *, size_t))dlsym(lib, "vpvk_idle_drain");
+        g_vpvk.diag_line       = (size_t (*)(int, char *, size_t))dlsym(lib, "vpvk_diag_line");
+        g_vpvk.diag_ranges     = (size_t (*)(int, void *, size_t))dlsym(lib, "vpvk_diag_ranges");
         g_vpvk.ui_mask_texture = (void *(*)(int, int *, int *, int *))dlsym(lib, "vpvk_ui_mask_texture");
         __atomic_store_n(&g_vpvk.resolved, 1, __ATOMIC_RELEASE);
     }
@@ -3923,6 +3994,7 @@ void kl_vulkan_set_taa_hook(kl_vulkan_taa_hook_fn fn, void *user) {
 int kl_vulkan_native_submit(void (*fn)(void *mtl_cmdbuf, void *user), void *user) {
     klvk_vpvk_resolve();
     if (!fn || !g_vpvk.native_submit) return 0;
+    __atomic_add_fetch(&g_native_n, 1, __ATOMIC_ACQ_REL);   // a fence does not cover it (klvk_frame_fence)
     int r = g_vpvk.native_submit(fn, user);
     if (!r) {
         static unsigned said;
@@ -3940,6 +4012,109 @@ size_t kl_vulkan_mem_stats(char *out, size_t cap) {
     if (!out || cap < 640) return 0;   // vpvk_mem_stats needs >= 640 bytes
     klvk_vpvk_resolve();
     return g_vpvk.mem_stats ? g_vpvk.mem_stats(out, cap) : 0;
+}
+
+
+// ---- vkCreateImage aggregate (heartbeat diagnostics) ----
+// One entry per distinct (format, size, mips, layers) in the window since the last flush; anything that does
+// not fit the table is only counted. Mutex: image creation comes from several guest threads, the flush from
+// the heartbeat thread; both are short.
+typedef struct { uint32_t fmt, w, h, mips, layers, n; } klvk_imgkey;
+#define KLVK_IA_KEYS 24
+static pthread_mutex_t g_ia_mu = PTHREAD_MUTEX_INITIALIZER;
+static klvk_imgkey g_ia_keys[KLVK_IA_KEYS];
+static unsigned g_ia_nkeys;
+static uint64_t g_ia_n, g_ia_px, g_ia_fail, g_ia_over;
+
+static void klvk_imgagg_note(const VkImageCreateInfo *ci, VkResult r) {
+    if (!ci) return;
+    uint32_t layers = ci->arrayLayers ? ci->arrayLayers : 1;
+    uint32_t depth = ci->extent.depth ? ci->extent.depth : 1;
+    pthread_mutex_lock(&g_ia_mu);
+    g_ia_n++;
+    g_ia_px += (uint64_t)ci->extent.width * ci->extent.height * depth * layers;
+    if (r != VK_SUCCESS) g_ia_fail++;
+    unsigned i = 0;
+    for (; i < g_ia_nkeys; i++) {
+        klvk_imgkey *k = &g_ia_keys[i];
+        if (k->fmt == (uint32_t)ci->format && k->w == ci->extent.width && k->h == ci->extent.height &&
+            k->mips == ci->mipLevels && k->layers == layers) { k->n++; break; }
+    }
+    if (i == g_ia_nkeys) {
+        if (g_ia_nkeys < KLVK_IA_KEYS)
+            g_ia_keys[g_ia_nkeys++] = (klvk_imgkey){ (uint32_t)ci->format, ci->extent.width, ci->extent.height,
+                                                     ci->mipLevels, layers, 1 };
+        else g_ia_over++;
+    }
+    pthread_mutex_unlock(&g_ia_mu);
+}
+
+// Heartbeat diagnostics, one call per `which`, every 250 ms (50 ms after a jump). Returns the length written, 0
+// when nothing happened since the previous call. 0: the guest's image creations (count, texels, the 4 most
+// frequent shapes) and VPVulkan's Vulkan-layer counters (vkAllocate/FreeMemory by memory type with bytes,
+// Create/Destroy/Bind Buffer and Image, Map/Unmap/Flush with bytes). 1: VPKEngine's backend counters
+// (newBuffer / noCopy, textures, views, command buffers, encoders, residency, graveyard). Any thread.
+size_t kl_vulkan_diag(int which, char *out, size_t cap) {
+    if (!out || cap < 64) return 0;
+    out[0] = 0;
+    size_t w = 0;
+    klvk_vpvk_resolve();
+    if (which == 0) {
+        pthread_mutex_lock(&g_ia_mu);
+        if (g_ia_n) {
+            w += (size_t)snprintf(out + w, cap - w, "img n=%llu px=%llu fail=%llu",
+                                  (unsigned long long)g_ia_n, (unsigned long long)g_ia_px,
+                                  (unsigned long long)g_ia_fail);
+            for (int top = 0; top < 4 && w + 64 < cap; top++) {
+                int best = -1;
+                for (unsigned i = 0; i < g_ia_nkeys; i++)
+                    if (g_ia_keys[i].n && (best < 0 || g_ia_keys[i].n > g_ia_keys[best].n)) best = (int)i;
+                if (best < 0) break;
+                klvk_imgkey *k = &g_ia_keys[best];
+                w += (size_t)snprintf(out + w, cap - w, " [f%u %ux%u m%u l%u]x%u", k->fmt, k->w, k->h, k->mips,
+                                      k->layers, k->n);
+                k->n = 0;
+            }
+            if (g_ia_over && w + 24 < cap)
+                w += (size_t)snprintf(out + w, cap - w, " +%llu other", (unsigned long long)g_ia_over);
+            g_ia_n = g_ia_px = g_ia_fail = g_ia_over = 0;
+            g_ia_nkeys = 0;
+        }
+        pthread_mutex_unlock(&g_ia_mu);
+    }
+    if (g_vpvk.diag_line && w + 64 < cap) {
+        char tmp[1536];
+        tmp[0] = 0;
+        if (g_vpvk.diag_line(which, tmp, sizeof tmp) && tmp[0])
+            w += (size_t)snprintf(out + w, cap - w, "%s%s", w ? " | vk " : (which ? "mtl " : "vk "), tmp);
+    }
+    out[w < cap ? w : cap - 1] = 0;
+    return w < cap ? w : cap - 1;
+}
+
+// Idle drain of VPKEngine's graveyard (see vpvk_idle_drain): the poll timer calls it; no frame for min_idle_ms and
+// nothing in flight -> the destroyed textures / buffers / pipelines it was holding are released. Rate limited in
+// the caller; a busy device just answers 0. One line per release, capped.
+void kl_vulkan_idle_drain(unsigned min_idle_ms, const char *why) {
+    klvk_vpvk_resolve();
+    if (!g_vpvk.idle_drain) return;
+    char out[192];
+    out[0] = 0;
+    size_t freed = g_vpvk.idle_drain(min_idle_ms, out, sizeof out);
+    static int said;
+    if (freed && said < 48) {
+        said++;
+        VKI("[mem] idle drain (%s): VPKEngine released %zu MiB (%s)\n", why ? why : "?", freed >> 20, out);
+    }
+}
+
+// Memory ownership for the heartbeat's region dump (vpvk_diag_ranges): {address, size} pairs, sorted by address.
+// kind 0 = the live host-visible VkDeviceMemory allocations, 1 = the CPU-visible buffers VPKEngine allocated itself.
+// `out` is an array of max {uint64_t, uint64_t} (the layout of vpvk_range on LP64). Returns the total count (may exceed
+// max), 0 without VPVulkan / an older VPKEngine. Any thread.
+size_t kl_vulkan_diag_ranges(int kind, uint64_t (*out)[2], size_t max) {
+    klvk_vpvk_resolve();
+    return g_vpvk.diag_ranges ? g_vpvk.diag_ranges(kind, (void *)out, max) : 0;
 }
 
 int kl_vulkan_taa_native_on(void) {
@@ -3998,7 +4173,9 @@ static void *klvk_ed_ms_resolve(klvk_device *d, VkImage img, int key, int rev) {
     klvk_vpvk_resolve();
     if (!g_vpvk.depth_resolve_encode || !g_vpvk.native_submit) return NULL;
     klvk_msres r = { eye_mtl_texture(d, img), rev, key, NULL };
-    if (!r.src || !g_vpvk.native_submit(klvk_msres_cb, &r)) return NULL;
+    if (!r.src) return NULL;
+    __atomic_add_fetch(&g_native_n, 1, __ATOMIC_ACQ_REL);   // a fence does not cover it (klvk_frame_fence)
+    if (!g_vpvk.native_submit(klvk_msres_cb, &r)) return NULL;
     static unsigned said;
     if (said < 2) {
         said++;
@@ -4386,6 +4563,9 @@ void kl_vulkan_trim(const char *why) {
             size_t freed_b = g_vpvk.trim_memory(level, out, sizeof out);
             VKI("[mem] trim (%s): VPKEngine released %zu MiB (%s)\n", why ? why : "?",
                 freed_b >> 20, out[0] ? out : "-");
+            // What the guest destroyed and VPKEngine still pins until a frame reuses a slot (a load without
+            // frames never reaches that): released now if nothing is in flight (150 ms without a frame).
+            kl_vulkan_idle_drain(150, why);
         }
     } else {
         static int said;
@@ -4465,48 +4645,177 @@ static void klvk_taa_next_jitter(unsigned eye_w, unsigned eye_h, int resolving, 
     last = j.enabled;
 }
 
-// ---- async frame end (see kl_vulkan_frame_done) ----
-static int klvk_frame_async_on(void) {
+// ---- pipelined frame end (see kl_vulkan_frame_done) ----
+// KL-TEST-BEGIN fence
+// 1 = the frame end does not wait for the GPU to finish THIS frame (default). KL_VK_FRAME_ASYNC=0 or an
+// explicit KL_VK_FRAME_SYNC (=1: wait for the whole queue, =0: do not wait at all, the old A/B) bring
+// the vkQueueWaitIdle behaviour back.
+static int klvk_frame_pipelined_on(void) {
     static int on = -1;
-    // OFF by default since 2026-10-15 (14): AC Nexus, during ShaderWarmupManager, left 589
-    // native submits stuck (gpu.err native_stuck, head waiting on its event), the game stalled
-    // ~1.2 s per frame and VPKEngine's completion path then aborted on "mutex lock failed:
-    // Invalid argument" (MetalBackend::Impl::err from the encodeNative block). AoT ran fine.
-    if (on < 0) on = kl_env_on("KL_VK_FRAME_ASYNC", 0);
+    if (on < 0) {
+        const char *sy = getenv("KL_VK_FRAME_SYNC");
+        on = kl_env_on("KL_VK_FRAME_ASYNC", 1) && !(sy && *sy);
+    }
     return on;
 }
-static void klvk_serial_advance(uint64_t to);
-#ifdef __APPLE__
-static _Atomic unsigned g_async_inflight;
-static void klvk_frame_async_encode(void *mtl_cmdbuf, void *user) {
-    uint64_t v = (uint64_t)(uintptr_t)user;
-    if (!mtl_cmdbuf) return;
-    atomic_fetch_add(&g_async_inflight, 1);
-    void (^done)(void *) = ^(void *cb) {
-        (void)cb;
-        klvk_serial_advance(v);
-        atomic_fetch_sub(&g_async_inflight, 1);
-    };
-    ((void (*)(void *, SEL, void (^)(void *)))objc_msgSend)(
-        mtl_cmdbuf, sel_registerName("addCompletedHandler:"), done);
-}
-#endif
-// 1 when the completion is armed. Bounded: past 3 frames in flight the caller waits as before,
-// so a GPU that falls behind cannot let the guest run arbitrarily far ahead.
-static int klvk_frame_async(uint64_t issued) {
-#ifdef __APPLE__
-    if (atomic_load(&g_async_inflight) >= 3) return 0;
-    if (!kl_vulkan_native_submit(klvk_frame_async_encode, (void *)(uintptr_t)issued)) return 0;
-    static int said;
-    if (!said++) VKI("frame end: ASYNC (no vkQueueWaitIdle; the serial advances when the frame's "
-                     "GPU work completes; KL_VK_FRAME_ASYNC=1)\n");
-    return 1;
-#else
-    (void)issued; return 0;
-#endif
+
+// Frames the guest may have submitted and not seen complete when the frame end returns (N-1 for N
+// frames in flight: with N = 2 the CPU records frame j+1 while the GPU runs frame j). KL_VK_FRAME_INFLIGHT
+// = N, default 2, at most 3. Also capped by the eye swapchain: the guest writes stage (j+1) % S, the
+// compositor may be reading the newest PUBLISHED one (j - F), so F + 1 must not be a multiple of S ->
+// F <= S - 2. With S = 3 that is 1; with S <= 2 it is 0 (the frame end waits for its own frame, through
+// the fence).
+static unsigned klvk_frame_fmax(void) {
+    if (g_fe_cfg_n < 0) {
+        g_fe_cfg_n = kl_env_int("KL_VK_FRAME_INFLIGHT", 2);
+        if (g_fe_cfg_n < 1) g_fe_cfg_n = 1;
+        if (g_fe_cfg_n > 3) g_fe_cfg_n = 3;
+    }
+    const int n = g_fe_cfg_n;
+    int stages = 0;
+    for (int st = 0; st < KLVK_EYE_STAGES; st++) if (g_eye[st][0].img) stages++;
+    int cap = stages - 2;
+    int f = n - 1 < cap ? n - 1 : cap;
+    return f < 0 ? 0 : (unsigned)f;
 }
 
+// Waits for the oldest not-yet-done fence (guest thread only). 0 = the device is lost.
+static int klvk_fe_wait_oldest(klvk_device *d, double *waited_s) {
+    pthread_mutex_lock(&g_fe_mu);
+    unsigned k = 0;
+    while (k < g_fe_n && g_fe[(g_fe_head + k) % KLVK_FE_RING].done) k++;
+    if (k == g_fe_n) { pthread_mutex_unlock(&g_fe_mu); return 1; }
+    unsigned i = (g_fe_head + k) % KLVK_FE_RING;
+    g_fe_wait_idx = (int)i;
+    VkFence f = g_fe[i].f;
+    pthread_mutex_unlock(&g_fe_mu);
+    double t0 = klvk_now_s();
+    VkResult r;
+    unsigned spins = 0;
+    for (;;) {
+        r = d->WaitForFences(d->dev, 1, &f, VK_TRUE, 1000000000ull);
+        if (r != VK_TIMEOUT) break;
+        if (klvk_gpu_poll_lost()) { r = VK_ERROR_DEVICE_LOST; break; }
+        if (++spins == 5) VKI("[frame-end] fence of frame %llu still not signaled after 5 s (gpu backlog %u ms)\n",
+                              (unsigned long long)g_fe[i].serial,
+                              g_vpvk.gpu_backlog_ms ? g_vpvk.gpu_backlog_ms() : 0);
+    }
+    *waited_s += klvk_now_s() - t0;
+    klvk_slow_wait_note("fence wait (frame end)", t0);
+    pthread_mutex_lock(&g_fe_mu);
+    g_fe_wait_idx = -1;
+    if (r == VK_SUCCESS) {
+        g_fe[i].done = 1;
+        double ms = (klvk_now_s() - g_fe[i].t_sub) * 1000.0;
+        g_fe_lat_sum += ms; g_fe_lat_n++;
+        if (ms > g_fe_lat_max) g_fe_lat_max = ms;
+        klvk_serial_advance(g_fe[i].serial);
+    }
+    pthread_mutex_unlock(&g_fe_mu);
+    if (r == VK_ERROR_DEVICE_LOST) { klvk_gpu_mark_lost("vkWaitForFences at frame end"); return 0; }
+    return r == VK_SUCCESS;
+}
+
+// Resets and releases the finished fences at the head (guest thread only; a poller never resets). Returns 1 if lost.
+static int klvk_fe_recycle(klvk_device *d) {
+    pthread_mutex_lock(&g_fe_mu);
+    int lost = klvk_fe_scan_locked(d);
+    while (g_fe_n && g_fe[g_fe_head].done) {
+        d->ResetFences(d->dev, 1, &g_fe[g_fe_head].f);
+        g_fe[g_fe_head].done = 0;
+        g_fe_head = (g_fe_head + 1) % KLVK_FE_RING; g_fe_n--;
+    }
+    pthread_mutex_unlock(&g_fe_mu);
+    return lost;
+}
+
+// 1 = the frame end is handled: `issued` is fenced, the serial reaches it when the GPU has finished the
+// frame, and at most klvk_frame_fmax() earlier-or-equal frames are still running. 0 = the caller waits as
+// before (no fence available, native command buffers in the picture, submit failed, device lost).
+static int klvk_frame_fence(klvk_device *d, uint64_t issued, double *waited_s, unsigned *inflight, unsigned *fmax_out) {
+    if (!d || !d->queue || !d->CreateFence || !d->GetFenceStatus || !d->WaitForFences || !d->ResetFences) return 0;
+    static int broken;
+    if (broken) return 0;
+    // Native command buffers (VPKEngine's own queue work: the MSAA depth resolve, a VPKTAA resolve) are not
+    // covered by a Vulkan fence — vkQueueWaitIdle waits for them, a fence does not. Any since the last
+    // fenced frame: this one is waited for in full.
+    unsigned nat = __atomic_load_n(&g_native_n, __ATOMIC_ACQUIRE);
+    if (nat != g_fe_native_seen) { g_fe_native_seen = nat; return 0; }
+    if (g_fe_dev != d->dev) {              // first use (or a new device: the old fences are gone with it)
+        pthread_mutex_lock(&g_fe_mu);
+        g_fe_head = g_fe_n = 0; g_fe_wait_idx = -1;
+        __atomic_store_n(&g_fe_active, 0, __ATOMIC_RELEASE);
+        for (unsigned i = 0; i < KLVK_FE_RING; i++) {
+            VkFenceCreateInfo fi = { .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO };
+            g_fe[i].f = VK_NULL_HANDLE; g_fe[i].done = 0;
+            if (d->CreateFence(d->dev, &fi, NULL, &g_fe[i].f) != VK_SUCCESS) { broken = 1; break; }
+        }
+        g_fe_dev = d->dev;
+        pthread_mutex_unlock(&g_fe_mu);
+        if (broken) { VKI("[frame-end] could not create the frame fences — the frame end waits for the queue\n"); return 0; }
+    }
+    unsigned fmax = klvk_frame_fmax();
+    *fmax_out = fmax;
+    if (klvk_fe_recycle(d)) { klvk_gpu_mark_lost("vkGetFenceStatus at frame end"); return 0; }
+    while (g_fe_n >= KLVK_FE_RING) {         // cannot happen with fmax <= 2; never overrun the ring
+        if (!klvk_fe_wait_oldest(d, waited_s)) return 0;
+        if (klvk_fe_recycle(d)) return 0;
+    }
+    // The marker: an empty submit with the fence, ordered after everything the guest has submitted.
+    unsigned slot = (g_fe_head + g_fe_n) % KLVK_FE_RING;
+    VkResult r = klvk_qsubmit(d, d->queue, 0, NULL, g_fe[slot].f);
+    if (r != VK_SUCCESS) {
+        static int said;
+        if (!said++) VKI("[frame-end] fence submit answered %d — the frame end waits for the queue\n", (int)r);
+        if (r == VK_ERROR_DEVICE_LOST) klvk_gpu_mark_lost("vkQueueSubmit (frame fence)");
+        return 0;
+    }
+    pthread_mutex_lock(&g_fe_mu);
+    g_fe[slot].serial = issued; g_fe[slot].t_sub = klvk_now_s(); g_fe[slot].done = 0;
+    g_fe_n++;
+    __atomic_store_n(&g_fe_active, 1, __ATOMIC_RELEASE);
+    int lost = klvk_fe_scan_locked(d);
+    pthread_mutex_unlock(&g_fe_mu);
+    if (lost) { klvk_gpu_mark_lost("vkGetFenceStatus at frame end"); return 0; }
+    // Past the allowance: wait for the oldest frames only (the one N-1 back), never for this one unless fmax = 0.
+    for (;;) {
+        unsigned live = 0;
+        pthread_mutex_lock(&g_fe_mu);
+        for (unsigned k = 0; k < g_fe_n; k++) if (!g_fe[(g_fe_head + k) % KLVK_FE_RING].done) live++;
+        pthread_mutex_unlock(&g_fe_mu);
+        *inflight = live;
+        if (live <= fmax) break;
+        if (!klvk_fe_wait_oldest(d, waited_s)) return 1;   // lost: nothing more to wait for (the caller sees it)
+    }
+    static int said;
+    if (!said++) VKI("frame end: PIPELINED (no vkQueueWaitIdle; at most %u frame(s) submitted and not complete, "
+                     "the serial advances at GPU completion; KL_VK_FRAME_INFLIGHT, KL_VK_FRAME_ASYNC=0 for the old wait)\n", fmax);
+    return 1;
+}
+
+// One line per ~600 frames: how the frame end behaved. mode: "pipelined" / "sync".
+static void klvk_frame_end_note(const char *mode, double waited_s, unsigned inflight, unsigned fmax, unsigned fallbacks_now) {
+    static struct { unsigned n, fb, infl_max; double wait_sum, wait_max, infl_sum; } a;
+    a.n++; a.fb += fallbacks_now;
+    a.wait_sum += waited_s; if (waited_s > a.wait_max) a.wait_max = waited_s;
+    a.infl_sum += inflight; if (inflight > a.infl_max) a.infl_max = inflight;
+    if (a.n < 600) return;
+    double lat_sum, lat_max; unsigned lat_n;
+    pthread_mutex_lock(&g_fe_mu);
+    lat_sum = g_fe_lat_sum; lat_max = g_fe_lat_max; lat_n = g_fe_lat_n;
+    g_fe_lat_sum = g_fe_lat_max = 0; g_fe_lat_n = 0;
+    pthread_mutex_unlock(&g_fe_mu);
+    VKI("[frame-end] mode=%s allowance=%u frame(s) in flight after the end (KL_VK_FRAME_INFLIGHT), %u frames: in flight "
+        "mean %.2f max %u, waited mean %.2f ms max %.2f ms, submit->completion mean %.2f ms max %.2f ms "
+        "(%u seen; observed when polled, up to one frame late), %u frames waited for the queue (native work / no fence)\n",
+        mode, fmax, a.n, a.infl_sum / a.n, a.infl_max, a.wait_sum * 1000.0 / a.n, a.wait_max * 1000.0,
+        lat_n ? lat_sum / lat_n : 0.0, lat_max, lat_n, a.fb);
+    memset(&a, 0, sizeof a);
+}
+// KL-TEST-END fence
+
 void kl_vulkan_frame_done(int stage) {
+    t_pub_serial = 0;
     if (!kl_vulkan_guest_active()) return;
     // Device lost: the frame is not complete and never will be — no record, no serial, no jitter.
     if (klvk_gpu_poll_lost()) return;
@@ -4617,24 +4926,34 @@ void kl_vulkan_frame_done(int stage) {
         klvk_slow_wait_note("QueueWaitIdle (resolved frame, NOWAIT=0)", tw0);
         klvk_serial_advance(issued);
     }
-    // ASYNC frame end (default, KL_VK_FRAME_ASYNC=1): instead of vkQueueWaitIdle — which
-    // blocked Unity's render thread until the GPU had finished EVERY frame, so CPU and GPU never
-    // overlapped (AoT 50–75 fps with ~7 ms of GPU work, 2026-10-15) — submit an empty command
-    // buffer on VPKEngine's queue (ordered after the frame, the same door the VPKTAA resolve
-    // uses) and advance the serial from its completion handler. The compositor still only ever
-    // shows a frame whose GPU work is complete; the guest simply keeps going meanwhile.
-    // Not with VPKTAA inline (that path files its own records), and not for the capture runs.
-    if (!committed && !taa_inline && klvk_frame_async_on() && !cap_dir() &&
-        klvk_frame_async(issued)) {
-        committed = 2;   // handled: neither the wait below nor an immediate advance
+    // PIPELINED frame end (default; KL_VK_FRAME_ASYNC=0 or KL_VK_FRAME_SYNC bring the wait back): instead of
+    // vkQueueWaitIdle — which blocked the guest's render thread until the GPU had finished EVERY frame, so
+    // CPU and GPU never overlapped (Batman: 9-19 ms per frame, 20-25 % of the fps) — fence the frame with an
+    // empty submit and wait only for the frame before it (klvk_frame_fence). The serial advances when the
+    // GPU completes the frame, and the caller must not publish the stage to the compositor before then
+    // (kl_vulkan_frame_pending_serial). Not for a frame the VPKTAA/RCAS hook is to resolve (it files its own
+    // records and its own completion), and not for the capture runs.
+    double fe_wait = 0.0;
+    unsigned fe_infl = 0, fe_fmax = 0, fe_fb = 0;
+    const char *fe_mode = committed ? "resolved" : "sync";
+    int piped = 0;
+    if (!committed && !(taa_inline && mine) && klvk_frame_pipelined_on() && !cap_dir()) {
+        piped = klvk_frame_fence(d, issued, &fe_wait, &fe_infl, &fe_fmax);
+        if (piped) {
+            fe_mode = "pipelined";
+            if (kl_vulkan_gpu_lost()) return;      // not complete, never will be: no record, no serial
+            // The picture is complete only once the serial reaches this frame.
+            if (kl_vulkan_frame_serial() < issued) t_pub_serial = issued;
+        } else fe_fb = 1;
     }
-    if (!committed) {
+    if (!committed && !piped) {
+        double tw0 = klvk_now_s();
         if (kl_env_on("KL_VK_FRAME_SYNC", 1) && d && d->queue) {
-            double tw0 = klvk_now_s();
             VkResult r = d->QueueWaitIdle ? d->QueueWaitIdle(d->queue)
                        : d->DeviceWaitIdle ? d->DeviceWaitIdle(d->dev)
                                            : VK_SUCCESS;
             klvk_slow_wait_note("QueueWaitIdle (frame end)", tw0);
+            fe_wait = klvk_now_s() - tw0;
             if (r != VK_SUCCESS) {
                 static int said;
                 if (!said++)
@@ -4650,6 +4969,7 @@ void kl_vulkan_frame_done(int stage) {
             __atomic_store_n(&g_taa_raw_record, rec_serial, __ATOMIC_RELEASE);
         klvk_serial_advance(issued);
     }
+    klvk_frame_end_note(fe_mode, fe_wait, fe_infl, fe_fmax, fe_fb);
     // ...and the next frame's jitter. Jitter only stays on while frames are
     // actually resolved: a jittered picture nobody resolves is pure shimmer
     // (failed resolve, AA gate closed, unsupported eye format...).
@@ -5336,9 +5656,13 @@ static VkResult VKAPI_CALL klvk_CreateImage(VkDevice dev, const VkImageCreateInf
         fprintf(stderr, "[TRACE] [thr] createRT %#llx %ux%u fmt %d usage %#x tid=%u\n",
             (unsigned long long)(uintptr_t)(out?*out:0), ci->extent.width, ci->extent.height,
             (int)ci->format, ci->usage, klvk_tid());
-    static int logged;
-    if (logged < 4096 && (r != VK_SUCCESS || (ci && ci->mipLevels > 1) || logged < 64)) {
-        logged++;
+    // Every vkCreateImage is counted in the 250 ms aggregate the heartbeat prints (klvk_imgagg_note): the old
+    // per-call line (mips > 1 only, 4096 cap) said nothing about a burst of single-mip images. Only failures
+    // keep a line of their own.
+    klvk_imgagg_note(ci, r);
+    static int fail_logged;
+    if (r != VK_SUCCESS && fail_logged < 64) {
+        fail_logged++;
         VKI("vkCreateImage: -> %#llx result %d type %d format %d %ux%u mips %u layers %u "
             "usage %#x flags %#x\n",
             (unsigned long long)(uintptr_t)(out ? *out : 0), (int)r,
@@ -7021,6 +7345,26 @@ static VkResult VKAPI_CALL klvk_QueueWaitIdle(VkQueue q) {
         real = (PFN_vkQueueWaitIdle)real_gdpa(g_devs[0]->dev, "vkQueueWaitIdle");
     if (!real && real_gipa) real = (PFN_vkQueueWaitIdle)real_gipa(g_instance, "vkQueueWaitIdle");
     return real ? klvk_lost("vkQueueWaitIdle", real(q)) : VK_ERROR_INITIALIZATION_FAILED;
+}
+// The frame-end fences (g_fe) belong to the guest's device: stop the compositor's poll (kl_vulkan_frame_serial) from
+// touching them BEFORE the device goes away, then wait for the GPU and destroy them (a pending fence must not be
+// destroyed). Without this the poll would call vkGetFenceStatus on a freed device.
+static void VKAPI_CALL klvk_DestroyDevice(VkDevice dev, const VkAllocationCallbacks *ac) {
+    static PFN_vkDestroyDevice real;
+    if (!real && real_gdpa) real = (PFN_vkDestroyDevice)real_gdpa(dev, "vkDestroyDevice");
+    VkFence fs[KLVK_FE_RING];
+    unsigned nf = 0;
+    pthread_mutex_lock(&g_fe_mu);
+    if (g_fe_dev == dev) {
+        for (unsigned i = 0; i < KLVK_FE_RING; i++) if (g_fe[i].f) { fs[nf++] = g_fe[i].f; g_fe[i].f = VK_NULL_HANDLE; }
+        g_fe_dev = NULL; g_fe_n = g_fe_head = 0; g_fe_wait_idx = -1;
+        __atomic_store_n(&g_fe_active, 0, __ATOMIC_RELEASE);
+    }
+    pthread_mutex_unlock(&g_fe_mu);
+    klvk_device *d = nf ? dev_find(dev) : NULL;
+    if (d && d->DeviceWaitIdle) d->DeviceWaitIdle(dev);
+    for (unsigned i = 0; d && d->DestroyFence && i < nf; i++) d->DestroyFence(dev, fs[i], NULL);
+    if (real) real(dev, ac);
 }
 
 // KL_TRACE: which thread submits guest work. Compared with [thr] createRT this
@@ -8920,7 +9264,7 @@ static const entry g_ours[] = {
     E(AcquireNextImageKHR), E(QueuePresentKHR),
     E(AllocateMemory), E(BindImageMemory),
     E(QueueSubmit),
-    E(WaitForFences), E(GetFenceStatus), E(DeviceWaitIdle), E(QueueWaitIdle),
+    E(WaitForFences), E(GetFenceStatus), E(DeviceWaitIdle), E(QueueWaitIdle), E(DestroyDevice),
     E(GetPhysicalDeviceProperties),
     E(GetPhysicalDeviceProperties2),
     E(GetPhysicalDeviceQueueFamilyProperties),

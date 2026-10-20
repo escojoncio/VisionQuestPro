@@ -34,4 +34,10 @@ void kl_sample_snapshot(FILE *out, const char *why);
 // Oculus platform requests and the EGL/GL call log.
 void kl_sample_snapshot_all(FILE *out, const char *why);
 
+// Memory-jump diagnostics: cumulative CPU per Mach thread. _baseline is cheap and meant to run about once a second;
+// _hot_threads prints every thread with its name, CPU and CPU since the last baseline, plus the stacks (image+offset)
+// of the 3 most active ones. Not suspending anything; safe on any thread.
+void kl_sample_threads_baseline(void);
+void kl_sample_hot_threads(FILE *out, const char *why);
+
 #endif

@@ -6049,7 +6049,7 @@ static XrResult klxr_WaitFrame(void *session, const XrFrameWaitInfo *info,
     // it from — so a headset that reports 120 Hz is described as 120 Hz to
     // either guest. The predicted display time is one period out: this frame is
     // being drawn now and shown next.
-    float hz = kl_ovrp_display_frequency();
+    float hz = kl_ovrp_guest_display_frequency();   // effective: granted guest rate, else panel
     if (!(hz > 0)) hz = 72.0f;
     int64_t period = (int64_t)(1e9 / hz);
 

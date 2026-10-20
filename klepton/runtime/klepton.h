@@ -150,6 +150,8 @@ const char *kl_addr_image(const void *addr, size_t *offset);
 // nothing without the base: subtract it to match a disassembly of the .so, to
 // set a breakpoint on a guest function, or to read a sampling profile.
 void kl_dl_report_images(FILE *f);
+// A small synthetic /proc/self/maps (one r-xp line per principal guest image) for guest unwinders; see kl_dl.c.
+size_t kl_dl_maps_text(char *buf, size_t cap);
 
 
 // Rewrite a guest file path into the synthetic /proc and /sys tree when we serve
@@ -191,7 +193,18 @@ void kl_mem_report(void);
 uint64_t kl_mem_budget_bytes(void);
 uint64_t kl_mem_available_bytes(void);
 void kl_mem_breakdown(char *buf, size_t n);   // heap/internal/compressed/file + ledger tags, for [hb]
-int  kl_mem_regions(char *buf, size_t n);     // resident bytes by VM user_tag, top 8; 0 if rate-limited (2 s)
+int  kl_mem_regions(char *buf, size_t n);     // resident bytes by VM user_tag, top 8; 0 if rate-limited (2 s) or the map is past KL_MEM_REGIONS_MAX
+// Memory-jump diagnostics (kl_libc.c), called from the [hb] heartbeat: who owns the IOAccelerator regions (count, size
+// histogram, share mode, the 8 largest, how many lie inside host-visible VkDeviceMemory / VPKEngine buffers); the
+// compressor / free memory from host_statistics64; per-file read statistics (open/pread/close/mmap hooks, aggregated).
+int  kl_mem_ledger(uint64_t out[4]);          // footprint, graphics ledger, compressed, internal (bytes), one task_info
+void kl_mem_ioaccel_dump(FILE *out, const char *why);
+int  kl_mem_vmstat(char *buf, size_t n);
+void kl_fstat_open(const char *path, int fd);
+void kl_fstat_read(int fd, size_t n);
+void kl_fstat_mmap(int fd, size_t len);
+void kl_fstat_close(int fd);
+void kl_fstat_dump(FILE *out, const char *why);
 
 // The futex emulation (kl_libc.c). _dump prints every futex word that has
 // waiters (or was woken recently) with its value, waiter count, the waiters'

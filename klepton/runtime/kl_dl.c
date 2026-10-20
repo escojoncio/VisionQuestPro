@@ -460,6 +460,48 @@ void kl_dl_report_images(FILE *f) {
     }
 }
 
+// A small, synthetic /proc/self/maps: one r-xp line per principal guest image (the 12 largest), in address order.
+// Wwise's unwinder (and a few crash handlers) open /proc/self/maps to find the image around a pc; with no file
+// every call failed (580 per AC Nexus session) and the unwinder gave up. The real map of this process is
+// tens of thousands of lines of host memory that means nothing to the guest, so it is NOT produced: the
+// unwinder only needs "which image is this address in". Returns the length (always NUL-terminated).
+size_t kl_dl_maps_text(char *buf, size_t cap) {
+    if (!buf || !cap) return 0;
+    buf[0] = 0;
+    int n = g_nimgs;
+    int pick[12], np = 0;
+    unsigned char used[KL_MAX_IMAGES];
+    memset(used, 0, sizeof used);
+    for (int k = 0; k < 12 && k < n; k++) {
+        int best = -1;
+        for (int i = 0; i < n && i < KL_MAX_IMAGES; i++) {
+            if (used[i] || !kl_base(g_imgs[i].img)) continue;
+            if (best < 0 || kl_span(g_imgs[i].img) > kl_span(g_imgs[best].img)) best = i;
+        }
+        if (best < 0) break;
+        used[best] = 1;
+        pick[np++] = best;
+    }
+    for (int a = 1; a < np; a++) {              // by address (insertion sort of <= 12)
+        int v = pick[a], b = a - 1;
+        while (b >= 0 && (uintptr_t)kl_base(g_imgs[pick[b]].img) > (uintptr_t)kl_base(g_imgs[v].img)) {
+            pick[b + 1] = pick[b];
+            b--;
+        }
+        pick[b + 1] = v;
+    }
+    size_t w = 0;
+    for (int a = 0; a < np && w + 160 < cap; a++) {
+        const entry *e = &g_imgs[pick[a]];
+        uintptr_t lo = (uintptr_t)kl_base(e->img);
+        w += (size_t)snprintf(buf + w, cap - w, "%012lx-%012lx r-xp 00000000 00:00 0                          "
+                              "/data/app/klepton/lib/arm64/%s\n",
+                              (unsigned long)lo, (unsigned long)(lo + kl_span(e->img)), e->soname);
+        if (w >= cap) { w = cap - 1; break; }   // snprintf reports the untruncated length
+    }
+    return w;
+}
+
 // Would klb_dlopen() succeed for `path`? This is the question anything answering
 // an existence check on the guest's behalf has to ask, and it is strictly wider
 // than kl_can_load(): a library can be loadable two ways, and only one of them

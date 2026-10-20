@@ -3184,6 +3184,11 @@ static struct {
     uint64_t            serial;         // frames begun
     int                 last_complete;  // stage of the last completed frame, -1 = none
     int                 deferred_complete; // filed, GPU not done yet (Vulkan EndFrame4), -1 = none
+    // Pipelined frame end (kl_vulkan_frame_pending_serial): frames whose GPU work is still running when
+    // EndFrame returns. FIFO, published by klovrp_pub_poll once kl_vulkan_frame_serial() reaches them.
+    int                 pubq_stage[4];
+    uint64_t            pubq_serial[4];
+    unsigned            pubq_n;
     uint64_t            refiled_shown;  // a frame filed onto the stage being shown
     pthread_mutex_t     mu;
 } g_frames = { .last_complete = -1, .deferred_complete = -1, .last_named = -1,
@@ -3428,14 +3433,64 @@ static void klovrp_record_overlays(const void *layer_submits, int count);
 // slice, i.e. eyes that do not line up. Now the stage is published only after the wait.
 static __thread int t_defer_complete;
 static __thread int t_skip_eye_file;   // set by EndFrame4 around klovrp_end_frame_impl
-static void klovrp_publish_deferred(void) {
+// A stage filed and waiting for the GPU (deferred_complete, or in the publish queue): the frame is
+// "filed" for the depth tag and the VPKTAA stage search even though the compositor does not see it yet.
+static int klovrp_stage_pending_locked(int st) {
+    if (st == g_frames.deferred_complete) return 1;
+    for (unsigned i = 0; i < g_frames.pubq_n; i++) if (g_frames.pubq_stage[i] == st) return 1;
+    return 0;
+}
+static void klovrp_publish_stage_locked(int st) {
+    g_frames.r[st].complete = 1;
+    g_frames.last_complete = st;
+}
+// Publishes the queued stages the GPU has finished (oldest first). Any thread: the compositor calls it
+// through the getters below, because with the pipelined frame end nothing on the guest side may run
+// between the GPU finishing a frame and the compositor wanting it.
+static void klovrp_pub_poll(void) {
+    uint64_t done = kl_vulkan_frame_serial();       // before g_frames.mu: it takes kl_vulkan's own lock
     pthread_mutex_lock(&g_frames.mu);
-    if (g_frames.deferred_complete >= 0) {
-        g_frames.r[g_frames.deferred_complete].complete = 1;
-        g_frames.last_complete = g_frames.deferred_complete;
-        g_frames.deferred_complete = -1;
+    unsigned k = 0;
+    while (k < g_frames.pubq_n && g_frames.pubq_serial[k] <= done) { klovrp_publish_stage_locked(g_frames.pubq_stage[k]); k++; }
+    if (k) {
+        for (unsigned i = k; i < g_frames.pubq_n; i++) {
+            g_frames.pubq_stage[i - k] = g_frames.pubq_stage[i];
+            g_frames.pubq_serial[i - k] = g_frames.pubq_serial[i];
+        }
+        g_frames.pubq_n -= k;
     }
     pthread_mutex_unlock(&g_frames.mu);
+}
+// Publishes the filed stage now, or queues it behind the serial the frame end said it needs (0 = done).
+static void klovrp_publish_or_queue_locked(int st, uint64_t need, uint64_t done) {
+    if (!need || need <= done) {
+        // This frame is the newest and complete, so every queued one is older and complete: publish them first,
+        // or the next poll would publish an older stage AFTER this one (last_complete going backwards).
+        for (unsigned i = 0; i < g_frames.pubq_n; i++) klovrp_publish_stage_locked(g_frames.pubq_stage[i]);
+        g_frames.pubq_n = 0;
+        klovrp_publish_stage_locked(st);
+        return;
+    }
+    if (g_frames.pubq_n == 4) {                      // cannot happen (<= 2 frames in flight): never lose one
+        klovrp_publish_stage_locked(g_frames.pubq_stage[0]);
+        for (unsigned i = 1; i < 4; i++) { g_frames.pubq_stage[i - 1] = g_frames.pubq_stage[i]; g_frames.pubq_serial[i - 1] = g_frames.pubq_serial[i]; }
+        g_frames.pubq_n--;
+    }
+    g_frames.pubq_stage[g_frames.pubq_n] = st;
+    g_frames.pubq_serial[g_frames.pubq_n] = need;
+    g_frames.pubq_n++;
+}
+static void klovrp_publish_deferred(void) {
+    uint64_t need = kl_vulkan_frame_pending_serial();   // 0 unless the frame end left the GPU still working
+    uint64_t done = need ? kl_vulkan_frame_serial() : 0;
+    pthread_mutex_lock(&g_frames.mu);
+    if (g_frames.deferred_complete >= 0) {
+        int st = g_frames.deferred_complete;
+        g_frames.deferred_complete = -1;
+        klovrp_publish_or_queue_locked(st, need, done);
+    }
+    pthread_mutex_unlock(&g_frames.mu);
+    klovrp_pub_poll();
 }
 
 // EndFrame(F): the record takes the LAST Render sample filed for frame F (see
@@ -3827,7 +3882,7 @@ static uint64_t klovrp_EndFrame4(int guest_frame_index, const void *layer_submit
             pthread_mutex_lock(&g_frames.mu);
             for (int st = 0; pend_serial && st < KLOVRP_MAX_STAGES && filed < 0; st++)
                 if (g_frames.r[st].serial == pend_serial &&
-                    (g_frames.r[st].complete || st == g_frames.deferred_complete)) filed = st;
+                    (g_frames.r[st].complete || klovrp_stage_pending_locked(st))) filed = st;
             pthread_mutex_unlock(&g_frames.mu);
             kl_vulkan_taa_frame_record(filed, filed >= 0 ? pend_serial : 0);
         }
@@ -3863,7 +3918,7 @@ static uint64_t klovrp_EndFrame4(int guest_frame_index, const void *layer_submit
             pthread_mutex_lock(&g_frames.mu);
             for (int st = 0; pend_serial && st < KLOVRP_MAX_STAGES && !tag; st++)
                 if (g_frames.r[st].serial == pend_serial &&
-                    (g_frames.r[st].complete || st == g_frames.deferred_complete)) tag = pend_serial;
+                    (g_frames.r[st].complete || klovrp_stage_pending_locked(st))) tag = pend_serial;
             pthread_mutex_unlock(&g_frames.mu);
             kl_vulkan_eye_depth_tag(named < 0 ? 0 : named, tag);
         }
@@ -3876,7 +3931,7 @@ static uint64_t klovrp_EndFrame4(int guest_frame_index, const void *layer_submit
         pthread_mutex_lock(&g_frames.mu);
         for (int st = 0; pend_serial && st < KLOVRP_MAX_STAGES && filed < 0; st++)
             if (g_frames.r[st].serial == pend_serial &&
-                (g_frames.r[st].complete || st == g_frames.deferred_complete)) filed = st;
+                (g_frames.r[st].complete || klovrp_stage_pending_locked(st))) filed = st;
         pthread_mutex_unlock(&g_frames.mu);
         // vpgles does not feed kl_glfb's draw observation (binds == 0, observed < 0): the stage
         // is the one the eye layer's submit named (else the counter), and `complete` is set when
@@ -3899,6 +3954,7 @@ static uint64_t klovrp_EndFrame4(int guest_frame_index, const void *layer_submit
 
 int kl_ovrp_stage_render_pose(int stage, kl_ovrp_render_pose *out) {
     if ((unsigned)stage >= KLOVRP_MAX_STAGES || !out) return 0;
+    klovrp_pub_poll();
     pthread_mutex_lock(&g_frames.mu);
     int have = g_frames.r[stage].serial != 0;
     if (have) *out = g_frames.r[stage];
@@ -3923,6 +3979,7 @@ void kl_ovrp_association_stats(uint64_t *dropped, uint64_t *multi,
 }
 
 int kl_ovrp_last_complete_stage(void) {
+    klovrp_pub_poll();
     pthread_mutex_lock(&g_frames.mu);
     int s = g_frames.last_complete;
     pthread_mutex_unlock(&g_frames.mu);
@@ -3988,6 +4045,9 @@ void kl_ovrp_frame_end_external(int stage, const float *pose7, const float *tan8
                     stage, kl_ovrp_stage_count());
         }
     }
+    // Pipelined Vulkan frame end: the frame's GPU work may still be running (0 = it is done).
+    uint64_t need = kl_vulkan_frame_pending_serial();
+    uint64_t done = need ? kl_vulkan_frame_serial() : 0;
     pthread_mutex_lock(&g_frames.mu);
     if (g_frames.serial) {
     // The guest's own statement of what it drew, where it has one. See the
@@ -4036,7 +4096,8 @@ void kl_ovrp_frame_end_external(int stage, const float *pose7, const float *tan8
         g_frames.pending.stage = stage;
         g_frames.pending.complete = 1;
         g_frames.r[stage] = g_frames.pending;
-        g_frames.last_complete = stage;
+        if (need && need > done) g_frames.r[stage].complete = 0;   // published when the GPU has finished it
+        klovrp_publish_or_queue_locked(stage, need, done);
         g_frames.filed[stage]++;
     }
     pthread_mutex_unlock(&g_frames.mu);

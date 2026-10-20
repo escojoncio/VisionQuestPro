@@ -124,6 +124,31 @@ jobs:
           (cd build/ipa && zip -qry ../VisionQuestPro.ipa Payload)
           ls -la build/VisionQuestPro.ipa
 
+      - name: Public API of CompositorServices (frame rate; informational, never fails the build)
+        continue-on-error: true
+        run: |
+          {
+            SDK=$(xcrun --sdk xros --show-sdk-path 2>&1) || true
+            echo "sdk: $SDK"
+            for FW in CompositorServices RealityKit SwiftUI; do
+              DIR="$SDK/System/Library/Frameworks/$FW.framework"
+              echo; echo "=== $FW.framework ==="
+              FILES=$(find "$DIR" -name '*.swiftinterface' ! -name '*.private.swiftinterface' 2>/dev/null | grep -i -E 'xros|visionos' | head -n 4) || true
+              [ -n "$FILES" ] || echo "(no .swiftinterface found)"
+              for F in $FILES; do
+                echo; echo "--- $F ($(wc -l < "$F") lines)"
+                grep -n -i -E 'frame ?rate|refresh|FrameRepeat|preferred|Hz|cadence|frameInterval' "$F" | head -n 300 || true
+                if [ "$FW" = CompositorServices ]; then
+                  echo; echo "--- LayerRenderer.Configuration (block)"
+                  awk '/struct Configuration|class Configuration|protocol CompositorLayerConfiguration/{p=1} p{print NR": "$0; n++} n>160{exit}' "$F" || true
+                fi
+              done
+            done
+            echo; echo "=== headers (CompositorServices) ==="
+            grep -rn -i -E 'frame ?rate|refresh|FrameRepeat|preferred|cadence|frameInterval' "$SDK/System/Library/Frameworks/CompositorServices.framework/Headers" 2>/dev/null | head -n 100 || true
+          } > compositor-api.txt 2>&1 || true
+          wc -l compositor-api.txt || true
+
       - name: Gate (no tests or syntax errors, or no IPA)
         run: |
           if [ -f build/ci-failed ]; then
@@ -134,7 +159,7 @@ jobs:
 
       - name: Publish the logs (branch ci-logs, visionos.txt)
         if: always()
-        run: bash scripts/ci-publish-log.sh visionos syntax.log tests.log vpvulkan.log runtime.log app.log
+        run: bash scripts/ci-publish-log.sh visionos syntax.log tests.log vpvulkan.log runtime.log app.log compositor-api.txt
 
       - name: Publish the app as a release
         if: success() && github.ref == 'refs/heads/main'

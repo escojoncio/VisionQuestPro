@@ -1265,6 +1265,7 @@ static _Atomic uint64_t g_lowmem_fired;
 static _Atomic int g_lowmem_untold;   // last attempt found no nativeLowMemory registered yet
 
 void kl_vulkan_trim(const char *why);   // kl_vulkan.c: destroyed OpenXR images, no grace
+void kl_vulkan_idle_drain(unsigned min_idle_ms, const char *why);   // kl_vulkan.c: graveyard of VPKEngine, if idle
 
 // DECIDE vs DELIVER. nativeLowMemory is managed code (Unity -> IL2CPP), and IL2CPP only
 // tolerates it on the game thread, between frames: on a libdispatch worker the guest's x18
@@ -1322,6 +1323,92 @@ void kl_mem_pressure_deliver(void) {
             (unsigned long long)(kl_mem_total() >> 20), (unsigned long long)n);
 }
 
+// Rate-based pressure. The thresholds below only see a level; the AC Nexus wall is a SLOPE: +2.3 GB of graphics
+// memory in ~4 s (1.4 GB/s) climbing from 5.3 GB, so the 65 % warning arrives with ~2 s to the jetsam line and
+// whatever the trim frees has no time to matter. Every ~100 ms the footprint slope is measured over the last
+// 300-600 ms; when headroom / slope < KL_LOWMEM_RATE_S (6 s; 0 = off) and the slope is at least
+// KL_LOWMEM_RATE_MIN_MB (128 MiB/s) the host-side trim runs at once (kl_vulkan_trim: retired OpenXR images,
+// VPKEngine's vpvk_trim_memory, its graveyard drain), and the guest gets its nativeLowMemory once per episode
+// (re-armed when the slope falls under half the minimum). The same timer drains VPKEngine's graveyard every
+// KL_IDLE_DRAIN_MS (500; 0 = off) after that long without a frame: a long load submits none, and the textures
+// and buffers the guest destroys meanwhile would stay pinned until the next one.
+/* KL-TEST-BEGIN rate */
+// Seconds until `avail` bytes of headroom are gone at the footprint's slope between two samples `dt_ns` apart;
+// *slope = bytes per second. -1 when the footprint did not rise (or no time passed), 1e9 for a zero slope.
+static double kl_rate_ttl(uint64_t old_used, uint64_t used, uint64_t dt_ns, uint64_t avail, uint64_t *slope) {
+    *slope = 0;
+    if (!dt_ns || used <= old_used) return -1.0;
+    *slope = (uint64_t)((double)(used - old_used) * 1e9 / (double)dt_ns);
+    return *slope ? (double)avail / (double)*slope : 1e9;
+}
+/* KL-TEST-END rate */
+
+static void kl_mem_rate_poll(void) {
+    static _Atomic uint64_t last_ns;
+    static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    uint64_t now = (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
+    uint64_t prev = atomic_load(&last_ns);
+    if (prev && now - prev < 90000000ull) return;
+    if (!atomic_compare_exchange_strong(&last_ns, &prev, now)) return;
+    if (pthread_mutex_trylock(&mu) != 0) return;
+
+    static uint64_t drain_ns, trig_ns, quiet_since;
+    static int armed = 1;
+    static unsigned said;
+    enum { RING = 8 };
+    static struct { uint64_t ns, used; } ring[RING];
+    static unsigned head, count;
+
+    uint64_t used = kl_mem_footprint();
+    uint64_t avail = kl_proc_available();
+    ring[head % RING].ns = now;
+    ring[head % RING].used = used;
+    head++;
+    if (count < RING) count++;
+
+    const int idle_ms = kl_env_int("KL_IDLE_DRAIN_MS", 500);
+    if (idle_ms > 0 && now - drain_ns >= 500000000ull) {
+        drain_ns = now;
+        kl_vulkan_idle_drain((unsigned)idle_ms, "idle");
+    }
+
+    const int rate_s = kl_env_int("KL_LOWMEM_RATE_S", 6);
+    if (rate_s > 0 && used && avail) {
+        const uint64_t min_slope = (uint64_t)kl_env_int("KL_LOWMEM_RATE_MIN_MB", 128) << 20;
+        // The newest sample that is at least 300 ms older than this one (up to the ring's reach).
+        uint64_t old_ns = 0, old_used = 0;
+        for (unsigned k = 1; k < count; k++) {
+            unsigned i = (head - 1 - k) % RING;
+            if (now - ring[i].ns >= 300000000ull) { old_ns = ring[i].ns; old_used = ring[i].used; break; }
+        }
+        uint64_t slope = 0;
+        const double ttl = old_ns ? kl_rate_ttl(old_used, used, now - old_ns, avail, &slope) : -1.0;
+        if (ttl >= 0 && slope >= min_slope && ttl < (double)rate_s) {
+            quiet_since = 0;
+            if (now - trig_ns >= 2000000000ull) {
+                trig_ns = now;
+                if (said < 24) {
+                    said++;
+                    fprintf(stderr, "  [mem] rate trigger: footprint +%llu MiB/s over %llu ms, OS headroom %llu MiB "
+                                    "-> %.1f s left (footprint %llu MiB)\n",
+                            (unsigned long long)(slope >> 20), (unsigned long long)((now - old_ns) / 1000000ull),
+                            (unsigned long long)(avail >> 20), ttl, (unsigned long long)(used >> 20));
+                }
+                if (armed) { armed = 0; kl_mem_pressure_fire("footprint rate"); }
+                else kl_vulkan_trim("footprint rate");
+            }
+        } else if (slope < min_slope / 2) {   // not rising fast (or falling): re-arm after a quiet second
+            if (!quiet_since) quiet_since = now;
+            else if (!armed && now - quiet_since > 1000000000ull) armed = 1;
+        } else {
+            quiet_since = 0;
+        }
+    }
+    pthread_mutex_unlock(&mu);
+}
+
 // The kill line: phys_footprint + os_proc_available_memory() is constant (~8190 MiB on a
 // Vision Pro) whatever the footprint does, so it is the real limit of this process. The
 // guest-visible total (kl_mem_total) is deliberately a Quest-like 8 GB; pressure is judged
@@ -1341,6 +1428,7 @@ static uint64_t kl_mem_real_limit(uint64_t used, uint64_t avail) {
 // allocator counter sees, so from 80 % (6.5 GB) there are under 1 s left; the warning at
 // 65 % (5.3 GB) gives UnloadUnusedAssets a few seconds of room.
 void kl_mem_pressure_poll(void) {
+    kl_mem_rate_poll();   // slope trigger + idle graveyard drain: own switches, independent of KL_LOWMEM_AT
     int at = kl_env_int("KL_LOWMEM_AT", 65);
     if (at <= 0) return;
     int clear = kl_env_int("KL_LOWMEM_CLEAR", 55);
@@ -1483,6 +1571,23 @@ void kl_mem_breakdown(char *buf, size_t n) {
                  (unsigned long long)((uint64_t)ti.phys_footprint >> 20));
 }
 
+// The four numbers of the compact [hbm] line, one task_info call: phys_footprint, graphics ledger (footprint part),
+// compressed, internal (dirty anonymous). out[1] stays 0 when the kernel's task_vm_info is too old to carry the ledger.
+int kl_mem_ledger(uint64_t out[4]) {
+    out[0] = out[1] = out[2] = out[3] = 0;
+    task_vm_info_data_t ti;
+    memset(&ti, 0, sizeof ti);
+    mach_msg_type_number_t cnt = TASK_VM_INFO_COUNT;
+    if (task_info(mach_task_self(), TASK_VM_INFO, (task_info_t)&ti, &cnt) != KERN_SUCCESS) return 0;
+    out[0] = (uint64_t)ti.phys_footprint;
+    out[2] = (uint64_t)ti.compressed;
+    out[3] = (uint64_t)ti.internal;
+    if (cnt * sizeof(natural_t) >= __builtin_offsetof(task_vm_info_data_t, ledger_tag_graphics_footprint) +
+                                       sizeof ti.ledger_tag_graphics_footprint)
+        out[1] = (uint64_t)ti.ledger_tag_graphics_footprint;
+    return 1;
+}
+
 // Region map by user_tag, for the jump/blocked samples: sums RESIDENT bytes per VM_MEMORY_*
 // tag over every region of the address space (vm_region_recurse_64, descending into
 // submaps), top 8. IOAccelerator / IOSurface / IOKit-tagged residency is the part of the
@@ -1580,15 +1685,21 @@ static const char *kl_vm_tag_name(unsigned t) {
     }
 }
 
+// The walk costs time proportional to the region count: a process with 40k regions (the AC Nexus wall: 39k
+// small IOAccelerator allocations in 4 s) spent hundreds of ms in it, on the heartbeat thread, at the worst
+// moment. Past KL_MEM_REGIONS_MAX (10000) regions it stops, says so, and does not walk again for 30 s;
+// kl_mem_ioaccel_dump is the one-off walk that is meant for that case.
 int kl_mem_regions(char *buf, size_t n) {
     if (!buf || !n) return 0;
     buf[0] = 0;
     static _Atomic uint64_t last_ns;
+    static _Atomic int last_cut;
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     uint64_t now = (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
     uint64_t prev = atomic_load(&last_ns);
-    if (prev && now - prev < 2000000000ull) return 0;
+    uint64_t gap = atomic_load(&last_cut) ? 30000000000ull : 2000000000ull;
+    if (prev && now - prev < gap) return 0;
     if (!atomic_compare_exchange_strong(&last_ns, &prev, now)) return 0;
 
     uint64_t res[256], virt[256];
@@ -1600,7 +1711,10 @@ int kl_mem_regions(char *buf, size_t n) {
     natural_t depth = 0;
     unsigned nreg = 0;
     uint64_t total_res = 0;
-    while (nreg < 400000) {
+    const unsigned max_regions = (unsigned)kl_env_int("KL_MEM_REGIONS_MAX", 10000);
+    int cut = 0;
+    for (;;) {
+        if (nreg >= max_regions) { cut = 1; break; }
         vm_size_t size = 0;
         vm_region_submap_info_data_64_t info;
         mach_msg_type_number_t icnt = VM_REGION_SUBMAP_INFO_COUNT_64;
@@ -1615,6 +1729,12 @@ int kl_mem_regions(char *buf, size_t n) {
         total_res += r;
         nreg++;
         addr += size;
+    }
+    atomic_store(&last_cut, cut);
+    if (cut) {
+        // Partial sums over the lowest addresses would mislead: say only that the map is big.
+        snprintf(buf, n, "regions>=%u (walk cut at KL_MEM_REGIONS_MAX, not summed)", nreg);
+        return 1;
     }
     int w = snprintf(buf, n, "regions=%u resident=%lluM:", nreg, (unsigned long long)(total_res >> 20));
     for (int k = 0; k < 8 && w > 0 && (size_t)w < n; k++) {
@@ -1632,6 +1752,281 @@ int kl_mem_regions(char *buf, size_t n) {
     return 1;
 }
 
+// ---------- memory-jump diagnostics (one-off dumps, called from the [hb] heartbeat thread) ----------
+//
+// The AC Nexus wall: in ~4 s the "graphics" ledger rises 2.3 GB, all of it as ~39k small IOAccelerator
+// regions that MTLDevice.currentAllocatedSize does not show, with no API call in the log. These dumps
+// name the owner: region count / size histogram / share mode, the biggest ones, and how many fall inside
+// the host-visible VkDeviceMemory allocations and the CPU-visible buffers VPKEngine allocated itself.
+
+size_t kl_vulkan_diag_ranges(int kind, uint64_t (*out)[2], size_t max);   // kl_vulkan.c: {addr, size} pairs, sorted
+
+/* KL-TEST-BEGIN range */
+// How many of `n` sorted, non-overlapping {start, len} ranges overlap [a, a + len)? 1 or 0.
+static int kl_range_hit(uint64_t (*r)[2], size_t n, uint64_t a, uint64_t len) {
+    size_t lo = 0, hi = n;                      // first range that starts at or after the region's end
+    while (lo < hi) {
+        size_t mid = (lo + hi) / 2;
+        if (r[mid][0] < a + len) lo = mid + 1; else hi = mid;
+    }
+    return lo > 0 && r[lo - 1][0] + r[lo - 1][1] > a;
+}
+/* KL-TEST-END range */
+
+void kl_mem_ioaccel_dump(FILE *out, const char *why) {
+#ifdef VM_MEMORY_IOACCELERATOR
+    if (!out) return;
+    enum { MAXR = 8192, NB = 12, MAXREG = 300000 };
+    uint64_t (*vk)[2] = calloc(MAXR, sizeof *vk);
+    uint64_t (*mb)[2] = calloc(MAXR, sizeof *mb);
+    size_t nvk = 0, nmb = 0, tvk = 0, tmb = 0;
+    if (vk && mb) {
+        tvk = kl_vulkan_diag_ranges(0, vk, MAXR);
+        tmb = kl_vulkan_diag_ranges(1, mb, MAXR);
+        nvk = tvk < MAXR ? tvk : MAXR;
+        nmb = tmb < MAXR ? tmb : MAXR;
+    }
+    uint64_t vk_bytes = 0, mb_bytes = 0;
+    for (size_t i = 0; i < nvk; i++) vk_bytes += vk[i][1];
+    for (size_t i = 0; i < nmb; i++) mb_bytes += mb[i][1];
+
+    vm_size_t page = 0;
+    if (host_page_size(mach_host_self(), &page) != KERN_SUCCESS || !page) page = 16384;
+    struct timespec t0;
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+    uint64_t hist_n[NB] = {0}, hist_res[NB] = {0};
+    uint64_t sm_n[9] = {0}, sm_res[9] = {0};
+    struct { uint64_t addr, size, res; unsigned sm; } top[8];
+    memset(top, 0, sizeof top);
+    uint64_t total_n = 0, total_res = 0, total_virt = 0, zero_res = 0;
+    uint64_t in_vk_n = 0, in_vk_res = 0, in_mb_n = 0, in_mb_res = 0, in_any_n = 0, in_any_res = 0;
+    unsigned walked = 0;
+    int cut = 0;
+    vm_address_t addr = 0;
+    natural_t depth = 0;
+    for (;;) {
+        if (walked >= MAXREG) { cut = 1; break; }
+        if ((walked & 1023) == 1023) {
+            struct timespec t1;
+            clock_gettime(CLOCK_MONOTONIC, &t1);
+            if ((t1.tv_sec - t0.tv_sec) * 1000 + (t1.tv_nsec - t0.tv_nsec) / 1000000 > 1500) { cut = 2; break; }
+        }
+        vm_size_t size = 0;
+        vm_region_submap_info_data_64_t info;
+        mach_msg_type_number_t icnt = VM_REGION_SUBMAP_INFO_COUNT_64;
+        kern_return_t kr = vm_region_recurse_64(mach_task_self(), &addr, &size, &depth,
+                                                (vm_region_recurse_info_t)&info, &icnt);
+        if (kr != KERN_SUCCESS) break;
+        if (info.is_submap) { depth++; continue; }
+        walked++;
+        if ((info.user_tag & 0xff) == VM_MEMORY_IOACCELERATOR) {
+            uint64_t res = (uint64_t)info.pages_resident * page;
+            total_n++;
+            total_res += res;
+            total_virt += size;
+            if (!res) zero_res++;
+            int b = 0;
+            for (uint64_t lim = 16384; b < NB - 1 && (uint64_t)size > lim; lim <<= 1) b++;
+            hist_n[b]++;
+            hist_res[b] += res;
+            unsigned sm = info.share_mode < 9 ? info.share_mode : 0;
+            sm_n[sm]++;
+            sm_res[sm] += res;
+            const int hv = nvk && kl_range_hit(vk, nvk, (uint64_t)addr, size);
+            const int hm = nmb && kl_range_hit(mb, nmb, (uint64_t)addr, size);
+            if (hv) { in_vk_n++; in_vk_res += res; }
+            if (hm) { in_mb_n++; in_mb_res += res; }
+            if (hv || hm) { in_any_n++; in_any_res += res; }   // a region in both lists counts once as owned
+            int slot = -1;                              // keep the 8 largest by virtual size
+            for (int k = 0; k < 8; k++)
+                if (!top[k].size) { slot = k; break; }
+                else if (slot < 0 || top[k].size < top[slot].size) slot = k;
+            if (slot >= 0 && (uint64_t)size > top[slot].size) {
+                top[slot].addr = (uint64_t)addr; top[slot].size = size; top[slot].res = res; top[slot].sm = sm;
+            }
+        }
+        addr += size;
+    }
+    struct timespec t2;
+    clock_gettime(CLOCK_MONOTONIC, &t2);
+    long took_ms = (long)((t2.tv_sec - t0.tv_sec) * 1000 + (t2.tv_nsec - t0.tv_nsec) / 1000000);
+    fprintf(out, "[hb] ioaccel (%s): regions=%llu resident=%lluM virtual=%lluM zero_resident=%llu "
+                 "walked=%u%s took=%ldms\n",
+            why ? why : "?", (unsigned long long)total_n, (unsigned long long)(total_res >> 20),
+            (unsigned long long)(total_virt >> 20), (unsigned long long)zero_res, walked,
+            cut == 1 ? " (cut: region cap)" : cut == 2 ? " (cut: 1.5 s)" : "", took_ms);
+    fprintf(out, "[hb] ioaccel sizes:");
+    static const char *const bn[NB] = { "<=16K", "<=32K", "<=64K", "<=128K", "<=256K", "<=512K", "<=1M", "<=2M",
+                                        "<=4M", "<=8M", "<=16M", ">16M" };
+    for (int b = 0; b < NB; b++)
+        if (hist_n[b])
+            fprintf(out, " %s:%llu/%lluK", bn[b], (unsigned long long)hist_n[b], (unsigned long long)(hist_res[b] >> 10));
+    static const char *const smn[9] = { "?", "COW", "PRIVATE", "EMPTY", "SHARED", "TRUESHARED", "PRIV_ALIAS",
+                                        "SHARED_ALIAS", "LARGE_PAGE" };
+    fprintf(out, "\n[hb] ioaccel share_mode:");
+    for (int k = 0; k < 9; k++)
+        if (sm_n[k]) fprintf(out, " %s:%llu/%lluM", smn[k], (unsigned long long)sm_n[k], (unsigned long long)(sm_res[k] >> 20));
+    fprintf(out, "\n[hb] ioaccel top:");
+    for (int a = 0; a < 8; a++) {                       // largest first
+        int best = -1;
+        for (int k = 0; k < 8; k++) if (top[k].size && (best < 0 || top[k].size > top[best].size)) best = k;
+        if (best < 0) break;
+        fprintf(out, " %#llx+%lluK(res %lluK,%s)", (unsigned long long)top[best].addr,
+                (unsigned long long)(top[best].size >> 10), (unsigned long long)(top[best].res >> 10), smn[top[best].sm]);
+        top[best].size = 0;
+    }
+    fprintf(out, "\n[hb] ioaccel owner: in_vkmem=%llu regions/%lluM res (%zu host-visible allocations, %lluM%s) "
+                 "in_vpkbuf=%llu regions/%lluM res (%zu buffers, %lluM%s) neither=%llu regions/%lluM res\n",
+            (unsigned long long)in_vk_n, (unsigned long long)(in_vk_res >> 20), tvk, (unsigned long long)(vk_bytes >> 20),
+            tvk > nvk ? " truncated" : "", (unsigned long long)in_mb_n, (unsigned long long)(in_mb_res >> 20), tmb,
+            (unsigned long long)(mb_bytes >> 20), tmb > nmb ? " truncated" : "",
+            (unsigned long long)(total_n - in_any_n), (unsigned long long)((total_res - in_any_res) >> 20));
+    fflush(out);
+    free(vk);
+    free(mb);
+#else
+    (void)out; (void)why;
+#endif
+}
+
+// host_statistics64: the compressor and free memory at the jump. One line, 0 on failure.
+int kl_mem_vmstat(char *buf, size_t n) {
+    if (!buf || !n) return 0;
+    buf[0] = 0;
+    static mach_port_t host;                      // mach_host_self() adds a send right per call: take it once
+    if (!host) host = mach_host_self();
+    vm_size_t page = 0;
+    if (host_page_size(host, &page) != KERN_SUCCESS || !page) page = 16384;
+    vm_statistics64_data_t vs;
+    memset(&vs, 0, sizeof vs);
+    mach_msg_type_number_t cnt = HOST_VM_INFO64_COUNT;
+    if (host_statistics64(host, HOST_VM_INFO64, (host_info64_t)&vs, &cnt) != KERN_SUCCESS) return 0;
+#define KL_PG(f) ((unsigned long long)((uint64_t)vs.f * page) >> 20)
+    snprintf(buf, n, "free=%lluM active=%lluM inactive=%lluM wired=%lluM speculative=%lluM purgeable=%lluM "
+                     "compressor=%lluM stored_in_compressor=%lluM compressions=%llu decompressions=%llu "
+                     "swapins=%llu swapouts=%llu",
+             KL_PG(free_count), KL_PG(active_count), KL_PG(inactive_count), KL_PG(wire_count),
+             KL_PG(speculative_count), KL_PG(purgeable_count), KL_PG(compressor_page_count),
+             KL_PG(total_uncompressed_pages_in_compressor),
+             (unsigned long long)vs.compressions, (unsigned long long)vs.decompressions,
+             (unsigned long long)vs.swapins, (unsigned long long)vs.swapouts);
+#undef KL_PG
+    return 1;
+}
+
+// ---------- per-file read statistics (aggregated, never one line per call) ----------
+// open() registers the file (size from fstat); pread and close add what was read; mmap adds the mapped bytes.
+// A sequential read() is only known at close: the file position stands in for it. The table is bounded
+// (KL_FS_ENTRIES distinct paths, then "other"), updates are lock-free once a file is registered.
+/* KL-TEST-BEGIN fstat */
+#define KL_FS_ENTRIES 384
+#define KL_FS_MAXFD 4096
+typedef struct {
+    char path[168];
+    uint64_t size;
+    _Atomic uint64_t opens, bytes_read, mmap_bytes, mmaps;
+} kl_fsent;
+static kl_fsent g_fs_ent[KL_FS_ENTRIES];
+static _Atomic unsigned g_fs_nent;
+static _Atomic int16_t g_fs_fd[KL_FS_MAXFD];      // fd -> entry + 1 (0 = untracked)
+static _Atomic uint64_t g_fs_fd_pread[KL_FS_MAXFD];
+static _Atomic uint64_t g_fs_other_opens;
+static pthread_mutex_t g_fs_mu = PTHREAD_MUTEX_INITIALIZER;
+
+void kl_fstat_open(const char *path, int fd) {
+    if (!path || fd < 0 || fd >= KL_FS_MAXFD) return;
+    struct stat st;
+    if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode)) { atomic_store(&g_fs_fd[fd], 0); return; }
+    int idx = -1;
+    pthread_mutex_lock(&g_fs_mu);
+    unsigned n = atomic_load(&g_fs_nent);
+    for (unsigned i = 0; i < n; i++)
+        if (strncmp(g_fs_ent[i].path, path, sizeof g_fs_ent[i].path - 1) == 0) { idx = (int)i; break; }
+    if (idx < 0 && n < KL_FS_ENTRIES) {
+        snprintf(g_fs_ent[n].path, sizeof g_fs_ent[n].path, "%s", path);
+        g_fs_ent[n].size = (uint64_t)st.st_size;
+        idx = (int)n;
+        atomic_store(&g_fs_nent, n + 1);
+    }
+    pthread_mutex_unlock(&g_fs_mu);
+    if (idx < 0) { atomic_fetch_add(&g_fs_other_opens, 1); atomic_store(&g_fs_fd[fd], 0); return; }
+    atomic_fetch_add(&g_fs_ent[idx].opens, 1);
+    atomic_store(&g_fs_fd_pread[fd], 0);
+    atomic_store(&g_fs_fd[fd], (int16_t)(idx + 1));
+}
+
+void kl_fstat_read(int fd, size_t n) {          // positional read of n bytes (pread)
+    if (fd < 0 || fd >= KL_FS_MAXFD || !n) return;
+    if (atomic_load(&g_fs_fd[fd])) atomic_fetch_add(&g_fs_fd_pread[fd], (uint64_t)n);
+}
+
+void kl_fstat_mmap(int fd, size_t len) {
+    if (fd < 0 || fd >= KL_FS_MAXFD) return;
+    int e = atomic_load(&g_fs_fd[fd]);
+    if (!e) return;
+    atomic_fetch_add(&g_fs_ent[e - 1].mmap_bytes, (uint64_t)len);
+    atomic_fetch_add(&g_fs_ent[e - 1].mmaps, 1);
+}
+
+void kl_fstat_close(int fd) {                   // before the real close
+    if (fd < 0 || fd >= KL_FS_MAXFD) return;
+    int e = atomic_exchange(&g_fs_fd[fd], 0);
+    if (!e) return;
+    uint64_t r = atomic_exchange(&g_fs_fd_pread[fd], 0);
+    if (!kl_obbmap_is_vfd(fd)) {
+        off_t pos = lseek(fd, 0, SEEK_CUR);
+        if (pos > 0) r += (uint64_t)pos;
+    }
+    atomic_fetch_add(&g_fs_ent[e - 1].bytes_read, r);
+}
+
+// Totals and the files that moved the most bytes (read + mapped), still-open files included. At most `top`
+// file lines + 1 total line; `why` labels the dump ("jump", "final").
+void kl_fstat_dump(FILE *out, const char *why) {
+    if (!out) return;
+    unsigned n = atomic_load(&g_fs_nent);
+    if (n > KL_FS_ENTRIES) n = KL_FS_ENTRIES;
+    uint64_t live_read[KL_FS_ENTRIES];
+    memset(live_read, 0, sizeof live_read);
+    for (int fd = 0; fd < KL_FS_MAXFD; fd++) {  // reads not folded in yet by a close
+        int e = atomic_load(&g_fs_fd[fd]);
+        if (!e || (unsigned)e > n) continue;
+        uint64_t r = atomic_load(&g_fs_fd_pread[fd]);
+        if (!kl_obbmap_is_vfd(fd)) { off_t pos = lseek(fd, 0, SEEK_CUR); if (pos > 0) r += (uint64_t)pos; }
+        live_read[e - 1] += r;
+    }
+    uint64_t tot_read = 0, tot_map = 0, tot_size = 0, tot_open = 0;
+    unsigned mapped_files = 0;
+    uint64_t score[KL_FS_ENTRIES];
+    for (unsigned i = 0; i < n; i++) {
+        uint64_t rd = atomic_load(&g_fs_ent[i].bytes_read) + live_read[i];
+        uint64_t mp = atomic_load(&g_fs_ent[i].mmap_bytes);
+        tot_read += rd; tot_map += mp; tot_size += g_fs_ent[i].size;
+        tot_open += atomic_load(&g_fs_ent[i].opens);
+        if (mp) mapped_files++;
+        score[i] = rd + mp;
+    }
+    fprintf(out, "[files] %s: %u files, %llu opens (+%llu opens of files past the table), size %lluM, read %lluM, "
+                 "mmap'd %lluM in %u files\n",
+            why ? why : "?", n, (unsigned long long)tot_open, (unsigned long long)atomic_load(&g_fs_other_opens),
+            (unsigned long long)(tot_size >> 20), (unsigned long long)(tot_read >> 20),
+            (unsigned long long)(tot_map >> 20), mapped_files);
+    for (int k = 0; k < 12; k++) {
+        int best = -1;
+        for (unsigned i = 0; i < n; i++) if (score[i] && (best < 0 || score[i] > score[best])) best = (int)i;
+        if (best < 0) break;
+        const char *base = strrchr(g_fs_ent[best].path, '/');
+        fprintf(out, "[files]   %s size=%lluK opens=%llu read=%lluK mmap=%lluK(x%llu)\n", base ? base + 1 : g_fs_ent[best].path,
+                (unsigned long long)(g_fs_ent[best].size >> 10), (unsigned long long)atomic_load(&g_fs_ent[best].opens),
+                (unsigned long long)((atomic_load(&g_fs_ent[best].bytes_read) + live_read[best]) >> 10),
+                (unsigned long long)(atomic_load(&g_fs_ent[best].mmap_bytes) >> 10),
+                (unsigned long long)atomic_load(&g_fs_ent[best].mmaps));
+        score[best] = 0;
+    }
+    fflush(out);
+}
+/* KL-TEST-END fstat */
+
 void kl_mem_report(void) {
     uint64_t total = kl_mem_total(), used = kl_mem_footprint();
     fprintf(stderr, "  memory: %llu MiB footprint (peak %llu) of a %llu MiB budget, "
@@ -1640,6 +2035,7 @@ void kl_mem_report(void) {
             (unsigned long long)(atomic_load(&g_mem_peak) >> 20),
             (unsigned long long)(total >> 20),
             (unsigned long long)atomic_load(&g_lowmem_fired));
+    kl_fstat_dump(stderr, "final");
 }
 
 uint64_t kl_mem_budget_bytes(void)    { return kl_mem_total(); }
@@ -1691,6 +2087,28 @@ static void proc_refresh_mem(void) {
              (unsigned long long)(used / 1024), (unsigned long long)(used / 1024),
              (unsigned long long)(used / 1024));
     proc_put("/proc/self/status", buf);
+}
+
+// /proc/self/maps: the principal guest images only (kl_dl_maps_text), rewritten when the set of images changes.
+// Written to a temp name and renamed over the file, so a reader never sees a half-written map.
+static void proc_refresh_maps(void) {
+    static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
+    static char last[4096];
+    char text[4096];
+    kl_dl_maps_text(text, sizeof text);
+    pthread_mutex_lock(&mu);
+    if (strcmp(text, last) != 0) {
+        char path[1100], tmp[1130];
+        snprintf(path, sizeof path, "%s/proc/self/maps", g_procroot);
+        snprintf(tmp, sizeof tmp, "%s.tmp", path);
+        FILE *f = fopen(tmp, "wb");
+        if (f) {
+            fputs(text, f);
+            fclose(f);
+            if (rename(tmp, path) == 0) snprintf(last, sizeof last, "%s", text);
+        }
+    }
+    pthread_mutex_unlock(&mu);
 }
 
 static void proc_build(void) {
@@ -1779,6 +2197,7 @@ static void proc_build(void) {
     // loop's upper bound and the nodes that exist agree.
     snprintf(buf, sizeof buf, "%ld\n", nfreq - 1);
     proc_put("/sys/devices/system/cpu/kernel_max", buf);
+    proc_put("/proc/self/maps", "");   // makes the directory; proc_refresh_maps fills it at every open
     fprintf(stderr, "[proc] synthetic /proc and /sys at %s (%ld cpus, %llu MB budget)\n",
             g_procroot, ncpu, (unsigned long long)(kl_mem_total() >> 20));
 }
@@ -2187,6 +2606,7 @@ static const char *kl_guest_path_inner(const char *path, char *buf, size_t cap) 
     if (strcmp(path, "/proc/meminfo") == 0 ||
         strcmp(path, "/proc/self/statm") == 0 ||
         strcmp(path, "/proc/self/status") == 0) proc_refresh_mem();
+    if (strcmp(path, "/proc/self/maps") == 0) proc_refresh_maps();
     snprintf(buf, cap, "%s%s", g_procroot, path);
     struct stat st;
     return stat(buf, &st) == 0 ? buf : KL_GP_PASS();
@@ -3536,13 +3956,15 @@ off_t  klb_lseek(int fd, off_t o, int w)   { int handled; off_t r = kl_obbmap_ls
 // ...and close, so an OBB read-through fd is unregistered before its number can
 // be recycled by an unrelated open (or the table would misroute that open).
 void   kl_extra4_fd_closed(int fd);        // kl_bionic_extra4.c: stops the feeder of a timerfd/signalfd/inotify/pidfd
-int    klb_close(int fd)                   { int handled; int r = kl_obbmap_close(fd, &handled);
+int    klb_close(int fd)                   { kl_fstat_close(fd); int handled; int r = kl_obbmap_close(fd, &handled);
                                              if (!handled) kl_extra4_fd_closed(fd);
                                              return handled ? r : close(fd); }
 // bare-name pread (libUE4 uses it): interpose the read-through window.
 ssize_t klb_pread(int fd, void *buf, size_t n, off_t off) {
     int handled; ssize_t r = kl_obbmap_pread(fd, buf, n, off, &handled);
-    return handled ? r : pread(fd, buf, n, off);
+    if (!handled) r = pread(fd, buf, n, off);
+    if (r > 0) kl_fstat_read(fd, (size_t)r);
+    return r;
 }
 // The stdio half of the same family: 32-bit Linux needed a second spelling for
 // every off_t call and bionic keeps both, while Darwin's off_t has always been
@@ -4421,6 +4843,7 @@ void *klb_mmap(void *addr, size_t len, int prot, int flags, int fd, off_t off) {
     if (df & MAP_ANON) fd = -1;                  // Darwin insists on -1 for anonymous
     if (klb_refuse_exec("mmap", (df & MAP_ANON) != 0, prot)) return MAP_FAILED;
     void *p = mmap(addr, len, prot, df, fd, off); // PROT_* match on both sides
+    if (p != MAP_FAILED && fd >= 0) kl_fstat_mmap(fd, len);
     // __builtin_return_address(0) is the GUEST here: mmap is not variadic, so
     // nothing of ours sits between this frame and the caller's.
     if (kl_file_watch && p != MAP_FAILED && fd >= 0)
@@ -4810,6 +5233,7 @@ int klb_madvise(void *a, size_t n, int advice) {
 void kl_fs_trace_open(const char *path, int flags, int fd) {
     kl_media_probe_log("open", path, NULL, fd < 0);
     (void)flags;
+    if (fd >= 0) kl_fstat_open(path, fd);
     kl_fs_trace("open", path, NULL, fd < 0);
     if (kl_file_watch && fd >= 0) kl_file_watch("open", path, fd, NULL, 0, 0, NULL);
 }

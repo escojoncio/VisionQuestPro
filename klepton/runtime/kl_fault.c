@@ -12,6 +12,7 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <errno.h>
+#include <time.h>
 #include <sys/ucontext.h>
 #include <mach/mach.h>
 #include "klepton.h"
@@ -56,9 +57,21 @@ static const char *kl_fault_thread_kind(void) {
 static char g_crash_path[1024];
 static int  g_crash_fd = -1;
 
+// First line of every crash file: which build, which process, when the session started. A report
+// from another build or game (a stale file copied next to a newer log) is then recognisable at a
+// glance. Built here, outside any signal handler; the commit comes from the app (KL_BUILD_COMMIT).
+static char g_crash_hdr[256];
+
 void kl_fault_set_crash_path(const char *path) {
     if (!path) { g_crash_path[0] = 0; return; }
     snprintf(g_crash_path, sizeof g_crash_path, "%s", path);
+    const char *commit = getenv("KL_BUILD_COMMIT");
+    time_t now = time(NULL);
+    struct tm tm;
+    char when[40] = "?";
+    if (gmtime_r(&now, &tm)) strftime(when, sizeof when, "%Y-%m-%dT%H:%M:%SZ", &tm);
+    snprintf(g_crash_hdr, sizeof g_crash_hdr, "== klepton-crash: build %s, pid %d, session start %s ==\n",
+             commit && *commit ? commit : "unknown", (int)getpid(), when);
 }
 
 // Every line of the report goes through here: fd 2 as before, plus the crash
@@ -212,8 +225,12 @@ static void report_fault(int sig, siginfo_t *si, void *uctx) {
     }
     // Before anything else can fail: a report that is written only after the
     // interesting work has succeeded is missing exactly when it is needed.
-    if (g_crash_path[0] && g_crash_fd < 0)
+    if (g_crash_path[0] && g_crash_fd < 0) {
         g_crash_fd = open(g_crash_path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+        if (g_crash_fd >= 0 && g_crash_hdr[0]) {
+            ssize_t hw = write(g_crash_fd, g_crash_hdr, strlen(g_crash_hdr)); (void)hw;
+        }
+    }
     void *pc = uc ? (void *)uc->uc_mcontext->__ss.__pc : NULL;
     uint64_t tid = 0;
     pthread_threadid_np(NULL, &tid);

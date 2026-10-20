@@ -40,6 +40,15 @@ klepton_tests() {
       tests/spatial_test.c kl_spatial.c kl_ovrp_spatial.c -lm -lpthread
   cd "$ROOT/klepton" || return 1
   run t_ptw tests/t_ptw.c runtime/gfx/kl_reproject_ptw.c -lm
+  mkdir -p "$T/memdiag"
+  awk '/KL-TEST-BEGIN (rate|range|fstat)/{p=1;next} /KL-TEST-END (rate|range|fstat)/{p=0} p' runtime/libc/kl_libc.c > "$T/memdiag/libc_blocks.inc"
+  awk '/KL-TEST-BEGIN ent/{p=1;next} /KL-TEST-END ent/{p=0} p' visionos/Sources/kl_app.c > "$T/memdiag/app_blocks.inc"
+  run t_memdiag -I"$T/memdiag" tests/t_memdiag.c -lpthread
+  awk '/^static int klj_decode_args\(/,/^}/{print} /^static int klj_decode_args_a\(/,/^}/{print}' runtime/kl_jni.c > "$T/memdiag/jni_decoders.inc"
+  run t_jni_sig -I"$T/memdiag" tests/t_jni_sig.c
+  mkdir -p "$T/fence"
+  awk '/KL-TEST-BEGIN fence/{p=1;next} /KL-TEST-END fence/{p=0} p' runtime/gfx/kl_vulkan.c > "$T/fence/fence_blocks.inc"
+  run t_frame_fence -Wno-unused-function -I"$T/fence" -I"$VPK/gpu/vulkan/third_party/vulkan-headers/include" tests/t_frame_fence.c -lpthread
   return $rc
 }
 

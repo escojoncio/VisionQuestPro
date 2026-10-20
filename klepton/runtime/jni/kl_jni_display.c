@@ -81,9 +81,16 @@ static klj_val klj_Display_getRotation(void *env, void *self, const klj_val *a, 
     (void)env; (void)self; (void)a; (void)n;
     return (klj_val){.j = KLJ_DISPLAY_ROTATION};
 }
+// Effective rate: what the guest asked for and was granted, else the panel's measured
+// rate (kl_ovrp_guest_display_frequency) -- the same number ovrp/OpenXR report. The
+// KLJ_DISPLAY_REFRESH constant (72) is only the fallback before any rate is published.
+static float klj_display_hz(void) {
+    float hz = kl_ovrp_guest_display_frequency();
+    return (hz >= 30.0f && hz <= 240.0f) ? hz : KLJ_DISPLAY_REFRESH;
+}
 klj_val klj_Display_getRefreshRate(void *env, void *self, const klj_val *a, int n) {
     (void)env; (void)self; (void)a; (void)n;
-    return (klj_val){.d = KLJ_DISPLAY_REFRESH};
+    return (klj_val){.d = (double)klj_display_hz()};
 }
 // The DisplayMetrics the guest passes is already answered from the same
 // constants by the field dispatch, so there is nothing to write into it — one
@@ -93,7 +100,7 @@ static klj_val klj_Display_getMetrics(void *env, void *self, const klj_val *a, i
     (void)env; (void)self; (void)a; (void)n;
     static int said;
     if (!said++) KLJ_LOG("Display.get*Metrics: %dx%d @ %ddpi, %.0f Hz (fields are constants)",
-                         KLJ_DISPLAY_W, KLJ_DISPLAY_H, KLJ_DISPLAY_DPI, (double)KLJ_DISPLAY_REFRESH);
+                         KLJ_DISPLAY_W, KLJ_DISPLAY_H, KLJ_DISPLAY_DPI, (double)klj_display_hz());
     return (klj_val){0};
 }
 // Frame-pacing numbers. Unity's FrameTiming asks for these to decide when to
@@ -107,7 +114,7 @@ klj_val klj_Display_getAppVsyncOffsetNanos(void *env, void *self, const klj_val 
 }
 klj_val klj_Display_getPresentationDeadlineNanos(void *env, void *self, const klj_val *a, int n) {
     (void)env; (void)self; (void)a; (void)n;
-    return (klj_val){.j = (uint64_t)(1e9 / KLJ_DISPLAY_REFRESH) + 1000000};
+    return (klj_val){.j = (uint64_t)(1e9 / (double)klj_display_hz()) + 1000000};
 }
 // sRGB, not wide gamut — which is what the panel description above says, and
 // claiming otherwise would have Unity pick a colour space it then renders into.
@@ -140,7 +147,7 @@ static klj_val klj_Display_isHdr(void *env, void *self, const klj_val *a, int n)
 // GLES 3.2 capability set right.
 static klj_val klj_Display_getSupportedModes(void *env, void *self, const klj_val *a, int n) {
     (void)env; (void)self; (void)a; (void)n;
-    static void *modes;
+    static void *modes;     // one mode; its rate is read live by Mode.getRefreshRate
     if (!modes) {
         modes = klj_new_array('L', "android/view/Display$Mode", 1);
         void **slot = klj_arr(modes)->data;
@@ -162,7 +169,7 @@ static klj_val klj_Mode_getPhysicalHeight(void *env, void *self, const klj_val *
 }
 static klj_val klj_Mode_getRefreshRate(void *env, void *self, const klj_val *a, int n) {
     (void)env; (void)self; (void)a; (void)n;
-    return (klj_val){.d = KLJ_DISPLAY_REFRESH};
+    return (klj_val){.d = (double)klj_display_hz()};
 }
 
 // UnityPermissions.skipPermissionsDialog() reads the manifest's

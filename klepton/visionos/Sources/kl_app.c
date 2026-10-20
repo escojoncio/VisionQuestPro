@@ -2,6 +2,9 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <mach/mach.h>          // task_info(TASK_VM_INFO) — the heartbeat's footprint
+#include <mach-o/dyld.h>        // _NSGetExecutablePath — the entitlement probe
+#include <mach-o/loader.h>      // mach_header_64, LC_CODE_SIGNATURE
+#include <strings.h>            // strcasestr
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -555,16 +558,258 @@ static void kl_ipc_counts(int *ports, int *fds) {
     *fds = n;
 }
 
+// ---- entitlement probe (once, at heartbeat start) ----
+// What the process was actually granted, for the memory ceiling (8191 MiB jetsam line on a Vision Pro): the
+// entitlements SIGNED INTO the main binary (code signature, slot 5 = XML) and the ones in embedded.mobileprovision
+// when the bundle carries it, plus the effective limit the kernel enforces (footprint + limit_bytes_remaining).
+// Sideloading re-signs, so the two can differ and only the first is what AMFI/jetsam see. No private API:
+// the executable file is read from disk. Keys are listed (shortened) with their value when it is a boolean/number.
+/* KL-TEST-BEGIN ent */
+static void kl_ent_format(const char *tag, const char *xml, size_t n, char *line, size_t linecap) {
+    int w = snprintf(line, linecap, "[ent] %s:", tag);
+    unsigned total = 0, interesting = 0;
+    const char *p = xml, *end = xml + n;
+    while (p < end) {
+        const char *k = memmem(p, (size_t)(end - p), "<key>", 5);
+        if (!k) break;
+        k += 5;
+        const char *ke = memmem(k, (size_t)(end - k), "</key>", 6);
+        if (!ke) break;
+        size_t kl = (size_t)(ke - k);
+        total++;
+        const char *v = ke + 6;
+        while (v < end && (*v == ' ' || *v == '\t' || *v == '\n' || *v == '\r')) v++;
+        char val[32] = "";
+        if (v + 7 <= end && !memcmp(v, "<true/>", 7)) snprintf(val, sizeof val, "true");
+        else if (v + 8 <= end && !memcmp(v, "<false/>", 8)) snprintf(val, sizeof val, "false");
+        else if (v + 9 <= end && !memcmp(v, "<integer>", 9)) {
+            const char *ie = memmem(v + 9, (size_t)(end - v - 9), "</integer>", 10);
+            size_t il = ie ? (size_t)(ie - v - 9) : 0;
+            snprintf(val, sizeof val, "%.*s", (int)(il < 20 ? il : 20), v + 9);
+        } else if (v + 8 <= end && !memcmp(v, "<string>", 8)) snprintf(val, sizeof val, "(string)");
+        else if (v + 7 <= end && !memcmp(v, "<array>", 7)) snprintf(val, sizeof val, "(array)");
+        else if (v + 6 <= end && !memcmp(v, "<dict>", 6)) snprintf(val, sizeof val, "(dict)");
+        char key[128];
+        snprintf(key, sizeof key, "%.*s", (int)(kl < 127 ? kl : 127), k);
+        const char *show = key;
+        if (!strncmp(show, "com.apple.developer.", 20)) show += 20;
+        else if (!strncmp(show, "com.apple.", 10)) show += 10;
+        // Everything is listed until the line is full; the memory-related ones are flagged with '*'.
+        int mem = strcasestr(key, "memory") || strcasestr(key, "kernel") || strcasestr(key, "virtual") ||
+                  strcasestr(key, "jit") || strcasestr(key, "task-allow") || strcasestr(key, "gpu") || strcasestr(key, "debug");
+        if (mem) interesting++;
+        if (w > 0 && (size_t)w + 80 < linecap)
+            w += snprintf(line + w, linecap - (size_t)w, " %s%s%s%s", mem ? "*" : "", show, val[0] ? "=" : "", val);
+        p = ke + 6;
+    }
+    if (w > 0 && (size_t)w + 40 < linecap)
+        snprintf(line + w, linecap - (size_t)w, "  [%u keys, %u memory/kernel/jit/debug]", total, interesting);
+}
+
+// The LC_CODE_SIGNATURE of a Mach-O's load commands: its blob's file offset and size. 0 when there is none.
+static int kl_macho_codesig(const uint8_t *cmds, uint32_t ncmds, uint32_t sizeofcmds, uint32_t *off, uint32_t *size) {
+    uint32_t pos = 0;
+    for (uint32_t i = 0; i < ncmds && pos + sizeof(struct load_command) <= sizeofcmds; i++) {
+        struct load_command lc;
+        memcpy(&lc, cmds + pos, sizeof lc);
+        if (lc.cmdsize < sizeof lc || pos + lc.cmdsize > sizeofcmds) return 0;
+        if (lc.cmd == LC_CODE_SIGNATURE && lc.cmdsize >= sizeof(struct linkedit_data_command)) {
+            struct linkedit_data_command ld;
+            memcpy(&ld, cmds + pos, sizeof ld);
+            *off = ld.dataoff;
+            *size = ld.datasize;
+            return 1;
+        }
+        pos += lc.cmdsize;
+    }
+    return 0;
+}
+
+static uint32_t kl_be32(const uint8_t *p) {
+    return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) | ((uint32_t)p[2] << 8) | (uint32_t)p[3];
+}
+
+// The XML entitlements (slot blob magic 0xfade7171) inside a code-signature SuperBlob (magic 0xfade0cc0), all fields
+// big-endian. Every offset is checked against `size`. 1 and the XML's pointer / length when found.
+static int kl_superblob_xml(const uint8_t *sb, size_t size, const char **xml, size_t *len) {
+    if (size < 12 || kl_be32(sb) != 0xfade0cc0u) return 0;
+    uint32_t count = kl_be32(sb + 8);
+    for (uint32_t i = 0; i < count && i < 32 && 12 + (size_t)i * 8 + 8 <= size; i++) {
+        uint32_t off = kl_be32(sb + 12 + (size_t)i * 8 + 4);
+        if ((size_t)off + 8 > size) continue;
+        if (kl_be32(sb + off) != 0xfade7171u) continue;
+        uint32_t blen = kl_be32(sb + off + 4);
+        if (blen < 8 || (size_t)off + blen > size) continue;
+        *xml = (const char *)sb + off + 8;
+        *len = blen - 8;
+        return 1;
+    }
+    return 0;
+}
+/* KL-TEST-END ent */
+
+static void kl_ent_scan(const char *tag, const char *xml, size_t n) {
+    char line[900];
+    kl_ent_format(tag, xml, n, line, sizeof line);
+    fprintf(stderr, "%s\n", line);
+}
+
+static void kl_entitlements_probe(void) {
+    char exe[2048];
+    uint32_t sz = sizeof exe;
+    if (_NSGetExecutablePath(exe, &sz) != 0) { fprintf(stderr, "[ent] executable path unavailable\n"); return; }
+    uint64_t lim = 0, foot = 0;
+    {
+        task_vm_info_data_t ti;
+        memset(&ti, 0, sizeof ti);
+        mach_msg_type_number_t cnt = TASK_VM_INFO_COUNT;
+        if (task_info(mach_task_self(), TASK_VM_INFO, (task_info_t)&ti, &cnt) == KERN_SUCCESS) {
+            foot = (uint64_t)ti.phys_footprint;
+            if (cnt * sizeof(natural_t) >= __builtin_offsetof(task_vm_info_data_t, limit_bytes_remaining) +
+                                               sizeof ti.limit_bytes_remaining)
+                lim = foot + (uint64_t)ti.limit_bytes_remaining;
+        }
+    }
+    fprintf(stderr, "[ent] kernel limit: %lld MiB (footprint %lld MiB + limit_bytes_remaining); os_proc_available_memory %lld MiB\n",
+            (long long)(lim >> 20), (long long)(foot >> 20), kl_avail_memory() >> 20);
+    // 1. the signature of the main binary
+    int fd = open(exe, O_RDONLY);
+    if (fd >= 0) {
+        struct mach_header_64 mh;
+        if (pread(fd, &mh, sizeof mh, 0) == (ssize_t)sizeof mh && mh.magic == MH_MAGIC_64 &&
+            mh.sizeofcmds > 0 && mh.sizeofcmds <= (1u << 20)) {
+            uint8_t *cmds = malloc(mh.sizeofcmds);
+            uint32_t sig_off = 0, sig_size = 0;
+            int have_sig = 0;
+            if (cmds && pread(fd, cmds, mh.sizeofcmds, (off_t)sizeof mh) == (ssize_t)mh.sizeofcmds)
+                have_sig = kl_macho_codesig(cmds, mh.ncmds, mh.sizeofcmds, &sig_off, &sig_size);
+            free(cmds);
+            if (have_sig && sig_size >= 12 && sig_size <= (4u << 20)) {
+                uint8_t *sb = malloc(sig_size);
+                const char *xml = NULL;
+                size_t xml_len = 0;
+                if (sb && pread(fd, sb, sig_size, (off_t)sig_off) == (ssize_t)sig_size &&
+                    kl_superblob_xml(sb, sig_size, &xml, &xml_len))
+                    kl_ent_scan("signed", xml, xml_len);
+                else
+                    fprintf(stderr, "[ent] signed: no XML entitlements blob in the code signature (%u bytes)\n", sig_size);
+                free(sb);
+            } else {
+                fprintf(stderr, "[ent] signed: no code signature (size %u)\n", sig_size);
+            }
+        } else {
+            fprintf(stderr, "[ent] signed: main binary is not a thin arm64 Mach-O (not parsed)\n");
+        }
+        close(fd);
+    }
+    // 2. embedded.mobileprovision next to the executable, when the bundle has one
+    char *slash = strrchr(exe, '/');
+    if (slash) {
+        char prov[2100];
+        snprintf(prov, sizeof prov, "%.*s/embedded.mobileprovision", (int)(slash - exe), exe);
+        FILE *f = fopen(prov, "rb");
+        if (f) {
+            size_t cap = 1u << 20;
+            char *buf = malloc(cap);
+            size_t n = buf ? fread(buf, 1, cap, f) : 0;
+            fclose(f);
+            const char *e = n ? memmem(buf, n, "<key>Entitlements</key>", 23) : NULL;
+            if (e) kl_ent_scan("provision", e, n - (size_t)(e - buf) < 8192 ? n - (size_t)(e - buf) : 8192);
+            else fprintf(stderr, "[ent] provision: embedded.mobileprovision present (%zu bytes), no Entitlements key\n", n);
+            free(buf);
+        } else {
+            fprintf(stderr, "[ent] provision: no embedded.mobileprovision in the bundle\n");
+        }
+    }
+    fflush(stderr);
+}
+
+static uint64_t kl_mono_ms(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000ull + (uint64_t)ts.tv_nsec / 1000000ull;
+}
+
+// The IOAccelerator region walk (up to 1.5 s, one vm_region_recurse_64 per region, 40k regions at the AC Nexus wall)
+// runs on its own utility-QoS thread: on the heartbeat it would blank the 50 ms [hbm]/[vkagg] samples for the whole
+// climb it is meant to explain, and delay the stall watchdog. `why` is a string literal. Never two at once.
+static volatile int g_ioaccel_busy;
+
+static void *kl_ioaccel_thread(void *arg) {
+    kl_mem_ioaccel_dump(stderr, (const char *)arg);
+    __atomic_store_n(&g_ioaccel_busy, 0, __ATOMIC_RELEASE);
+    return NULL;
+}
+
+static void kl_ioaccel_dump_async(const char *why) {
+    if (__atomic_exchange_n(&g_ioaccel_busy, 1, __ATOMIC_ACQ_REL)) return;
+    pthread_attr_t at;
+    pthread_t th;
+    pthread_attr_init(&at);
+    pthread_attr_set_qos_class_np(&at, QOS_CLASS_UTILITY, 0);
+    pthread_attr_setdetachstate(&at, PTHREAD_CREATE_DETACHED);
+    if (pthread_create(&th, &at, kl_ioaccel_thread, (void *)why) != 0)
+        __atomic_store_n(&g_ioaccel_busy, 0, __ATOMIC_RELEASE);
+    pthread_attr_destroy(&at);
+}
+
 static void *heartbeat(void *arg) {
     (void)arg;
+    kl_entitlements_probe();
     // Polled faster than it prints, so a phase change is reported when it
     // happens rather than up to two seconds later. That matters here: the first
     // device run to reach graphics died inside one 2 s interval, so the whole
     // lifecycle was described by a single "phase=start" line.
+    //
+    // Two cadences. The loop runs every 50 ms while a footprint jump is fresh (10 s after a rise of > 200 MiB in one
+    // slow tick) and every 250 ms otherwise; everything that used to be counted in 250 ms ticks (the phase line, the
+    // stall watchdog, the jump detector) still runs on a 250 ms "slow tick" of its own. Each iteration prints the
+    // compact [hbm] line (time, footprint, graphics ledger, compressed, internal) and the Vulkan-layer aggregate
+    // [vkagg] of what happened since the previous iteration; once a second the VPKEngine counters [mtl] and the
+    // per-thread CPU baseline. Line counts are capped (the cap on [hbm] still lets a >= 64 MiB change through).
     const char *last_phase = NULL;
     int ticks = 0;
-    long long prev_foot = -1;   // footprint at the previous 250 ms tick (jump detector)
+    long long prev_foot = -1;   // footprint at the previous slow tick (jump detector)
+    const uint64_t t0 = kl_mono_ms();
+    uint64_t next_slow = t0, next_sec = t0, fast_until = 0, hbm_last_foot = 0;
+    unsigned hbm_lines = 0, vk_lines = 0, mtl_lines = 0, vms_lines = 0, dumps = 0;
     for (;;) {
+        const uint64_t now = kl_mono_ms();
+        const int slow_tick = now >= next_slow;
+        if (slow_tick) next_slow = now + 250;
+        {
+            uint64_t led[4];
+            if (kl_mem_ledger(led)) {
+                uint64_t d = led[0] > hbm_last_foot ? led[0] - hbm_last_foot : hbm_last_foot - led[0];
+                if (hbm_lines < 4000 || d >= (64ull << 20)) {
+                    hbm_lines++;
+                    hbm_last_foot = led[0];
+                    fprintf(stderr, "[hbm] +%llu.%03llus foot=%lluM gfx=%lluM comp=%lluM int=%lluM\n",
+                            (unsigned long long)((now - t0) / 1000), (unsigned long long)((now - t0) % 1000),
+                            (unsigned long long)(led[0] >> 20), (unsigned long long)(led[1] >> 20),
+                            (unsigned long long)(led[2] >> 20), (unsigned long long)(led[3] >> 20));
+                }
+            }
+            char agg[1100];
+            size_t an = kl_vulkan_diag(0, agg, sizeof agg);
+            if (an && vk_lines < 2400) {
+                vk_lines++;
+                fprintf(stderr, "[vkagg] +%llu.%03llus %s\n", (unsigned long long)((now - t0) / 1000),
+                        (unsigned long long)((now - t0) % 1000), agg);
+            }
+        }
+        if (now >= next_sec) {
+            next_sec = now + 1000;
+            kl_sample_threads_baseline();
+            char mt[1100];
+            size_t mn = kl_vulkan_diag(1, mt, sizeof mt);
+            if (mn && mtl_lines < 900) {
+                mtl_lines++;
+                fprintf(stderr, "[mtl] +%llu.%03llus %s\n", (unsigned long long)((now - t0) / 1000),
+                        (unsigned long long)((now - t0) % 1000), mt);
+            }
+        }
+        if (slow_tick) {
         const char *phase = g_phase;
         if (phase != last_phase || ticks % 8 == 0) {
             struct timespec ts;
@@ -651,11 +896,35 @@ static void *heartbeat(void *arg) {
                     jump_snap_done = 1;
                     kl_sample_snapshot(stderr, "mem jump");
                 }
+                if (jump > 200) {
+                    fast_until = now + 10000;   // 50 ms cadence for the next 10 s
+                    char vs[512];
+                    if (vms_lines < 80 && kl_mem_vmstat(vs, sizeof vs)) {
+                        vms_lines++;
+                        fprintf(stderr, "[hb] vmstat %s\n", vs);
+                    }
+                    // Who owns the memory: the first jump, the first one past 4 GiB and the first one past 6 GiB
+                    // get the full dump (hot threads and their stacks, per-file reads, the IOAccelerator regions
+                    // with the share of them inside VkDeviceMemory / VPKEngine buffers). The region walk is the slow
+                    // part, so it goes last; at most 3 per run.
+                    const char *dlabel = NULL;
+                    if (dumps == 0) dlabel = "first jump";
+                    else if (dumps == 1 && foot > (4096LL << 20)) dlabel = "first jump above 4 GiB";
+                    else if (dumps == 2 && foot > (6000LL << 20)) dlabel = "first jump above 6 GiB";
+                    if (dlabel) {
+                        dumps++;
+                        kl_sample_hot_threads(stderr, dlabel);
+                        kl_fstat_dump(stderr, dlabel);
+                        kl_ioaccel_dump_async(dlabel);
+                    }
+                }
                 fflush(stderr);
             }
         }
         ticks++;
-        struct timespec iv = { 0, 250000000 };  // nanosleep: usleep is EINVAL at >= 1e6
+        }   // slow tick
+        uint64_t nap_ms = now < fast_until ? 50 : 250;
+        struct timespec iv = { 0, (long)(nap_ms * 1000000ull) };  // nanosleep: usleep is EINVAL at >= 1e6
         nanosleep(&iv, NULL);
     }
     return NULL;
