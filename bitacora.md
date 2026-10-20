@@ -210,3 +210,5 @@ Logs en `QUEST/Registros/` (compartibles desde la app); línea 1 = hash de build
 - **Bitácora**: actualizar tras cada función, bug o build.
 
 - OpenXR: la swapchain de color de la capa de proyeccion se marca como imagen de ojo (kl_vulkan_xr_image_mark_eye -> vpvk_mark_eye_image). Fallback 2D de hostvideo: solo borra el nombre del guest si el bind 2D falla. EOS de vtdec: FinishDelayedFrames + WaitForAsynchronousFrames. Pendiente en visor: Steam Link/CTS con LOCAL elevado; samplerExternalOES con hostvideo.
+
+- Build en verde: run CI 39419833988 (commit 4b29253, motor ed942c7), IPA en el release `visionos`. Sin probar en visor.
