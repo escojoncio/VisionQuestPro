@@ -370,6 +370,19 @@ static const kl_gp_word k_wrath2_forcevk[] = {
     { 0xc319348, 0xa9025ff8, 0xd65f03c0, "ret" },
 };
 
+// Resident Evil 4 (libUE4.so, com.Armature.VR4 2.3) — the same gate, same cause.
+// HasVulkanDriverSupport() passes (vkCreateInstance/EnumeratePhysicalDevices/
+// GetPhysicalDeviceProperties answered, state 2), but FAndroidMisc::
+// IsVulkanAvailable() (@0x65de4e8, disassembled) still ends in "does not support
+// Vulkan": its (bSupportsVulkan || bSupportsVulkanSM5) config read happens before
+// the cooked config is readable. Same prologue words as wrath2, so the same
+// `mov w0,#1; ret`. KL_GUEST_PATCH_OFF=re4-force-vulkan-available disables it.
+static const kl_gp_word k_re4_forcevk[] = {
+    { 0x65de4e8, 0xd10183ff, 0x52800020, "mov w0, #1  (IsVulkanAvailable -> true)" },
+    { 0x65de4ec, 0xa9025ff8, 0xd65f03c0, "ret" },
+};
+
+// ---------------------------------------------------------------------------
 // Wrath2 (libUE4.so) — force the "COMPILING SHADERS" title segment to complete.
 //
 // AAW_CompileShadersTitleScreenSegment gates on
@@ -474,6 +487,9 @@ static const kl_gp_patch k_patches[] = {
     { "wrath2-force-vulkan-available", "libUE4.so",
       "FAndroidMisc::IsVulkanAvailable() always returns true (the RHI gate)",
       k_wrath2_forcevk, sizeof k_wrath2_forcevk / sizeof *k_wrath2_forcevk },
+    { "re4-force-vulkan-available", "libUE4.so",
+      "FAndroidMisc::IsVulkanAvailable() always returns true (RE4's RHI gate)",
+      k_re4_forcevk, sizeof k_re4_forcevk / sizeof *k_re4_forcevk },
     { "wrath2-pso-done", "libUE4.so",
       "FShaderPipelineCache::NumPrecompilesRemaining() returns 0 (title segment completes)",
       k_wrath2_pso_done, sizeof k_wrath2_pso_done / sizeof *k_wrath2_pso_done },
