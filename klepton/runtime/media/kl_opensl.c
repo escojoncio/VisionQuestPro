@@ -390,6 +390,9 @@ typedef struct kl_sl_player {
     int      is_float;                      // guest buffers are 32-bit float (PCM_EX)
     int16_t *conv; size_t conv_cap;         // float -> int16 staging, feeder thread only
     int      mixes;                          // 1: feed kl_audio; 0: usleep-pace only
+    int      resample;                       // 1: rate/channels differ from the device: convert before feeding
+    int16_t *rs; size_t rs_cap;              // resampled staging, feeder thread only
+    double   rs_pos; int16_t rs_prev[8];     // linear resampler phase + last input frame
     unsigned long consumed;
     // SLVolumeItf state. gain is derived (linear, 1.0 = unity) and read by the
     // feeder without the lock: a torn read of one float is one buffer at the old
@@ -466,6 +469,7 @@ static kl_sl_recorder g_recorder;
 static kl_sl_player g_players[KL_SL_MAX_PLAYERS];
 static int          g_audio_users;     // players that opened kl_audio (refcount)
 static unsigned     g_device_rate;     // the rate the device was opened at (first player)
+static unsigned     g_device_ch;       // and its channel count
 static pthread_mutex_t g_players_lock = PTHREAD_MUTEX_INITIALIZER;
 static unsigned long g_buffers_consumed;
 
@@ -599,7 +603,51 @@ static void *feeder(void *arg) {
                 buf = p->conv;
             }
         }
-        size_t played = (buf && p->mixes) ? kl_audio_write_src(p, buf, size) : 0;
+        size_t played;
+        if (buf && p->mixes && p->resample && p->bits == 16) {
+            // Convert to the device's rate/channels (linear), so a second player
+            // at another rate (UE4 48 kHz vs FMOD 44.1 kHz) is mixed, not dropped.
+            unsigned nch = p->channels ? p->channels : 1, dch = g_device_ch ? g_device_ch : 2;
+            size_t n = size / (nch * sizeof(int16_t));
+            double step = (double)rate / (double)g_device_rate;
+            size_t cap = (size_t)((double)n / step + 2) * dch;
+            if (cap > p->rs_cap) {
+                int16_t *c = realloc(p->rs, cap * sizeof(int16_t));
+                if (c) { p->rs = c; p->rs_cap = cap; }
+            }
+            size_t m = 0;
+            if (cap <= p->rs_cap && n) {
+                const int16_t *in = buf;
+                double t = p->rs_pos;
+                while (t < (double)n - 1.0 && (m + 1) * dch <= p->rs_cap) {
+                    long k = (long)floor(t); double fr = t - (double)k;
+                    for (unsigned c = 0; c < dch; c++) {
+                        float a[2], v;
+                        for (int j = 0; j < 2; j++) {
+                            long idx = k + j;
+                            const int16_t *f = idx < 0 ? NULL : in + (size_t)idx * nch;
+                            if (dch == 1) {
+                                int sum = 0;
+                                for (unsigned q = 0; q < nch; q++) sum += f ? f[q] : p->rs_prev[q & 7];
+                                a[j] = (float)sum / nch;
+                            } else {
+                                unsigned q = c < nch ? c : 0;
+                                a[j] = f ? f[q] : p->rs_prev[q & 7];
+                            }
+                        }
+                        v = a[0] + (a[1] - a[0]) * (float)fr;
+                        p->rs[m * dch + c] = (int16_t)lrintf(v);
+                    }
+                    m++; t += step;
+                }
+                p->rs_pos = t - (double)n;
+                for (unsigned q = 0; q < nch && q < 8; q++) p->rs_prev[q] = in[(n - 1) * nch + q];
+            }
+            size_t osz = m * dch * sizeof(int16_t);
+            size_t w = osz ? kl_audio_write_src(p, p->rs, osz) : 0;
+            played = osz ? (size_t)((uint64_t)size * w / osz) : size;
+        } else
+        played = (buf && p->mixes) ? kl_audio_write_src(p, buf, size) : 0;
         if (played < size) {
             uint64_t rem = ((uint64_t)size - played) / frame;
             useconds_t us = (useconds_t)(rem * 1000000ull / rate);
@@ -659,25 +707,21 @@ static SLresult obj_Realize(SLObjectItf self, SLboolean async) {
         // ring's format); later players mix into that same device by source key.
         // A failure here is not fatal — the feeder falls back to usleep pacing,
         // which is what this player did for its whole life before kl_audio.c.
-        // kl_audio has ONE input rate (the ring + per-source mix cursors assume
-        // it). The first player fixes that rate; a later player at the SAME rate
-        // mixes in, but one at a DIFFERENT rate (vampire: UE4's 44.1 kHz output
-        // alongside FMOD's 48 kHz) would advance the mix cursor at the wrong step
-        // and desync the ring — heard as the render callback starving and the
-        // device restarting (the "no render callback for N s" breakup). So a
-        // mismatched-rate player does NOT feed kl_audio; it paces with usleep and
-        // stays silent to the device, which is correct when it is the secondary,
-        // near-silent output (UE4's here). Same-rate players mix as before.
+        // kl_audio has ONE input format (the ring + per-source mix cursors assume
+        // it). The first player fixes it; a later player in another rate/channel
+        // layout is converted to it in the feeder (p->resample), never written raw
+        // (that desynced the ring).
         if (g_audio_users == 0) {
             kl_audio_open(p->rate, p->channels, p->bits);
             g_device_rate = p->rate;
+            g_device_ch = p->channels;
             p->mixes = 1;
         } else {
-            p->mixes = (p->rate == g_device_rate);
-            if (!p->mixes)
-                fprintf(stderr, "  [sl] player #%d at %u Hz != device %u Hz — pacing "
-                        "silently (not mixed) to avoid ring desync\n",
-                        (int)(p - g_players), p->rate, g_device_rate);
+            p->mixes = 1;
+            p->resample = (p->rate != g_device_rate || p->channels != g_device_ch);
+            if (p->resample)
+                fprintf(stderr, "  [sl] player #%d at %u Hz/%uch resampled to device %u Hz/%uch\n",
+                        (int)(p - g_players), p->rate, p->channels, g_device_rate, g_device_ch);
         }
         g_audio_users++;
         p->started = p->running = 1;
@@ -1198,7 +1242,7 @@ static SLresult eng_CreateAudioPlayer(SLEngineItf self, SLObjectItf *out,
     pthread_mutex_unlock(&g_players_lock);
     player_stop(p);                 // no-op for a free slot (!started)
     unsigned gen = p->generation;
-    free(p->conv);                  // feeder joined by player_stop above
+    free(p->conv); free(p->rs);     // feeder joined by player_stop above
     memset(p, 0, sizeof *p);
     p->generation = gen;
     p->obj_vt = &g_obj_vt;
