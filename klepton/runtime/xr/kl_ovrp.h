@@ -827,16 +827,6 @@ int kl_ovrp_hand_motion(int hand, float *pos, float *quat, float *vel, float *an
 // velocity of zero, which asserts the thing is stationary. KL_OVRP_DERIVE_VELOCITY=0
 // turns the derivation off, and is the A/B for anything that looks velocity-shaped.
 int kl_ovrp_hand_motion_known(int hand);
-
-// The pointer ray of a HAND-TRACKED hand, for OpenXR's aim pose: origin at the
-// thumb-index pinch point, aimed from an estimated shoulder through it (what a
-// Quest does with hands; see hand_pointer in kl_ovrp_input.c). Independent of any
-// grip/hilt frame convention, which is the point. `head` is the display-space head
-// pose (px py pz qx qy qz qw, from kl_ovrp_get_guest_head_pose); outputs are display space like
-// kl_ovrp_hand_motion's. Returns 0 when the hand's joints are not published
-// (Sense controller, hand lost): the caller then keeps its controller-based aim.
-int kl_ovrp_hand_aim_pose(int hand, const float head[7], float quat[4], float pos[3]);
-
 int kl_ovrp_controller_input(int hand, uint32_t *buttons, uint32_t *touches,
                              float *index_trigger, float *hand_trigger,
                              float *stick_x, float *stick_y);

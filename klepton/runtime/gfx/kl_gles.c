@@ -41,6 +41,7 @@ static vpgles_device_fn g_device;
 static vpgles_wrap_fn   g_wrap;
 static uint32_t (*g_wrap_as)(uint32_t, void *, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t);
 static vpgles_flush_fn  g_flush;
+static int (*g_mark_eye)(void *);   // vpvk_mark_eye_image: the pipeline gate's "this VkImage is the eye" (soft passes)
 static void            *g_vk_gipa;
 static void            *g_vk_lib;
 static int              g_state;  // 0 unknown, 1 up, -1 off/failed
@@ -220,6 +221,7 @@ static void kl_gles_bringup(void) {
     g_wrap_as = (uint32_t (*)(uint32_t, void *, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t))dlsym(h, "vpgles_wrap_image_as");
     g_flush  = (vpgles_flush_fn)dlsym(h, "vpgles_flush");
     g_vk_gipa = dlsym(h, "vkGetInstanceProcAddr");
+    g_mark_eye = (int (*)(void *))dlsym(h, "vpvk_mark_eye_image");
     if (!init || !g_proc || !g_device || !g_wrap || !g_flush || !g_vk_gipa) {
         fprintf(stderr, "  [gles] this VPVulkan has no vpgles entry points — GLES stays on the "
                         "previous gateway\n");
@@ -337,6 +339,27 @@ static void *mtl_of(VkImage img) {
 #define KL_GLES_MTL_MAX 512
 static uint32_t g_mtl_name[KL_GLES_MTL_MAX];
 static void *g_mtl_tex[KL_GLES_MTL_MAX];
+// GL name -> VkImage of every layer texture (eye or not): the OpenXR route learns which swapchain is the eye only at
+// xrEndFrame and marks its images then (kl_gles_mark_eye_texture). Full table = no mark = every pass waits (safe).
+#define KL_GLES_IMG_MAX 1024
+static uint32_t g_img_name[KL_GLES_IMG_MAX];
+static void *g_img_vk[KL_GLES_IMG_MAX];
+static int g_img_n;
+static pthread_mutex_t g_img_mu = PTHREAD_MUTEX_INITIALIZER;
+static void gles_mark_eye_image(void *vk_image) {
+    if (!g_mark_eye || !vk_image) return;
+    const int r = g_mark_eye(vk_image);
+    static int said;
+    if (said++ < 16) fprintf(stderr, "  [gles] eye image %p: vpvk_mark_eye_image -> %d\n", vk_image, r);
+}
+void kl_gles_mark_eye_texture(uint32_t name) {
+    void *img = NULL;
+    pthread_mutex_lock(&g_img_mu);
+    for (int i = 0; i < g_img_n; i++)
+        if (g_img_name[i] == name) img = g_img_vk[i];
+    pthread_mutex_unlock(&g_img_mu);
+    gles_mark_eye_image(img);
+}
 void *kl_gles_texture_mtl(uint32_t name) {
     for (int i = 0; i < KL_GLES_MTL_MAX && g_mtl_name[i]; i++)
         if (g_mtl_name[i] == name) return g_mtl_tex[i];
@@ -386,6 +409,10 @@ static uint32_t layer_texture_impl(uint32_t as_name, int is_eye, int eye, int st
                                                      (uint32_t)layers, 1) : 0)
                             : g_wrap((void *)img, (uint32_t)fmt, target, (uint32_t)w, (uint32_t)h, (uint32_t)layers, 1);
     if (!name) return 0;
+    pthread_mutex_lock(&g_img_mu);
+    if (g_img_n < KL_GLES_IMG_MAX) { g_img_name[g_img_n] = name; g_img_vk[g_img_n] = (void *)img; g_img_n++; }
+    pthread_mutex_unlock(&g_img_mu);
+    if (is_eye) gles_mark_eye_image((void *)img);
     void *mtl = mtl_of(img);
     if (mtl) {
         static int n_mtl;

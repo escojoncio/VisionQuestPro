@@ -3161,8 +3161,6 @@ static int klxr_action_space_hand(const klxr_space *sp, int *is_aim);
 // two guests cannot be made to disagree by this knob. If this ever needs to
 // move into kl_ovrp, it needs a per-guest split at that moment — the shared
 // seam is the reason, not the knob.
-// These two defaults are the SENSE controller's (see klxr_hand_aim): a hand-tracked
-// hand keeps the grip pitch but takes its aim from the joints.
 #define KLXR_GRIP_PITCH_DEFAULT (37.0f)
 #define KLXR_AIM_PITCH_DEFAULT  (-37.0f)
 static void klxr_pitch_about_x(XrPosef *p, float degrees) {
@@ -3387,39 +3385,6 @@ static void klxr_pose_corrections(XrPosef *p, int is_aim, int hand) {
         p->position.y += d.y;
         p->position.z += d.z;
     }
-}
-
-// The aim pose of a HAND-TRACKED hand. The +37/-37 pair above was measured on a
-// Sense controller: +37 undoes the -37 hilt pitch the frontend bakes into a
-// Sense pose for OVRPlugin guests, and -37 is the Sense's own grip-to-aim angle
-// (-34.8, measured on device). A hand has neither: its published grip is the wrist
-// frame with no hilt pitch, so the pair left the ray at the hand's own pitch —
-// measured on Demeo ([xr-ctrl] AIM euler 38.3 / 34.2 deg about X at rest, both hands),
-// i.e. both rays 35-40 deg UP from hands held at chest height, crossing in front of
-// the user. So for a hand the ray is derived from the joints instead of from a
-// frame convention: origin at the thumb-index pinch point, aimed from an estimated
-// shoulder through it, as a Quest does with hands (kl_ovrp_hand_aim_pose, shared
-// with the OVRPlugin hand state's PointerPose). The grip is untouched.
-//
-// Source-based, not guest-based: a Sense controller (no joints published) keeps
-// the controller path. KL_XR_AIM_HANDS=0 restores the old aim for hands too, and a
-// pitch pushed from the tuning panel (g_tune_live) also wins, so it can still be
-// A/B'd by hand.
-static int klxr_hand_aim(int hand, XrPosef *out) {
-    static int on = -1;
-    if (on < 0) {
-        on = kl_env_on("KL_XR_AIM_HANDS", 1);
-        fprintf(stderr, "  [xr] aim of a hand-tracked hand: %s (KL_XR_AIM_HANDS)\n",
-                on ? "shoulder-to-pinch ray" : "controller pitch pair (old)");
-    }
-    if (!on || (unsigned)hand > 1 || __atomic_load_n(&g_tune_live, __ATOMIC_ACQUIRE)) return 0;
-    float head[7];
-    kl_ovrp_get_guest_head_pose(&head[0], &head[1], &head[2], &head[3], &head[4], &head[5], &head[6]);
-    float q[4], p[3];
-    if (!kl_ovrp_hand_aim_pose(hand, head, q, p)) return 0;
-    out->orientation = (XrQuaternionf){ q[0], q[1], q[2], q[3] };
-    out->position    = (XrVector3f){ p[0], p[1], p[2] };
-    return 1;
 }
 
 // ...and what that leaves the guest holding, in the same units and the same
@@ -3735,8 +3700,7 @@ static XrPosef klxr_space_pose_ex(const klxr_space *sp, int *tracked,
         base.position    = (XrVector3f){ pos[0], pos[1], pos[2] };
         base.orientation = (XrQuaternionf){ quat[0], quat[1], quat[2], quat[3] };
         XrPosef published = base;
-        if (!(is_aim && klxr_hand_aim(hand, &base)))
-            klxr_pose_corrections(&base, is_aim, hand);
+        klxr_pose_corrections(&base, is_aim, hand);
         klxr_ctrl_trace(&base, hand, is_aim);
         klxr_aimgrip_trace(&published, &base, hand, is_aim);
         if (lin) memcpy(lin, v, sizeof v);
@@ -5526,6 +5490,9 @@ static void klxr_publish_eye_vulkan(klxr_swapchain *sc, int eye, int slice) {
 static void klxr_publish_eye_gles(klxr_swapchain *sc, int eye, int slice) {
     if (eye < 0 || eye > 1 || (sc->gles_pub & (1 << eye))) return;
     if (sc->array_size <= 1) slice = 0;
+    // The eye layer's images are the only destination VPKEngine's pipeline gate may drop draws from while a pipeline
+    // compiles (the guest redraws them every frame); any other pass waits for its pipelines.
+    for (int k = 0; k < sc->count; k++) kl_gles_mark_eye_texture(sc->tex[k]);
     for (int k = 0; k < sc->count; k++)
         kl_glfb_note_eye_mtl_texture_o(eye, k, sc->gles_mtl[k], slice,
                                        (int)sc->width, (int)sc->height, 0);   // vpgles: bottom-up

@@ -39,6 +39,10 @@ uint32_t kl_gles_legacy_eye_texture(uint32_t name, int eye, int stage, int w, in
 // The MTLTexture behind a GL name made by kl_gles_layer_texture (any is_eye), or NULL.
 void *kl_gles_texture_mtl(uint32_t name);
 
+// Tells VPKEngine the VkImage behind a GL name made by kl_gles_layer_texture is the eye layer's (vpvk_mark_eye_image):
+// its pipeline gate may then drop draws still compiling from passes that draw there; every other pass waits for them.
+void kl_gles_mark_eye_texture(uint32_t name);
+
 // End of a guest frame (ovrp EndFrame): the GL work of the frame is submitted and complete before
 // the compositor samples the eye textures.
 void kl_gles_frame_end(void);
