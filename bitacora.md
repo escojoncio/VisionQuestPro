@@ -256,3 +256,7 @@ Logs en `QUEST/Registros/` (compartibles desde la app); línea 1 = hash de build
   2. Crecimiento de gfx 3,1 → 4,2 GB en ~6 s antes del jetsam: no atribuido. Se ven imágenes 1088x1568 (formatos 43/125/129, layers 2) creadas y destruidas 7 por frame y un tick de 28 imágenes (75 Mpx) a 566,6 s. Origen en el guest no identificado en este repo (la traza `vkCreateImageView` de kl_vulkan.c:5802 solo registra). Balance del run según vkagg: 2626 creadas, 1211 destruidas; no separa carga normal de fuga.
   3. Si `onLowMemory` no libera nada en UE4: valorar tope de caché de pipelines (`libs_kept` ~2555) o límite de imágenes 1088x1568 en vpgles.
   4. `[mem] threshold (...)` queda silenciado tras el primer fallo (`g_lowmem_untold` nunca vuelve a 0 sin entrega); con esta vía debería volver a salir.
+
+## 2026-10-21 — RE4: jetsam a ~163 s con onLowMemory entregado (087f2e0)
+- Log: onLowMemory llega al guest (x7) pero no libera; `vpvk_trim_memory` liberaba 0 MiB en las 300+ llamadas. Causa en VPKEngine (48aa108): `drainIdle` exigía los 3 slots libres y 150 ms sin frame (nunca durante el juego). Ahora libera los retirados de frames completados (`slotDone`) y el trim por presión también drena (try-lock). Sin cambios en este repo.
+- Sin probar en visor. Pendiente: salto gfx +1 GB en 0,25 s (+163,4 s) sin atribuir; memoria no contabilizada 238 MiB -> 3,5 GiB.
