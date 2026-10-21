@@ -263,3 +263,8 @@ Logs en `QUEST/Registros/` (compartibles desde la app); línea 1 = hash de build
 
 ## 2026-10-21 — RE4: patrón del cierre (dato del usuario)
 - Con 9bbdbde sigue cerrando siempre en el mismo punto: al abrir el inventario tras cambiar de zona. Coincide con el salto gfx +1 GB en 0,25 s (imágenes 1088x1568 / MSAA) sin atribuir. Pendiente: log de esa sesión (commit 9bbdbde) para ver si `[mem] trim` libera algo ahora y qué asigna el salto; mirar `[vkagg]` y `gpu alloc` en la ventana previa al cierre.
+
+## 2026-10-21 — RE4: log 9bbdbde, causa del jetsam a 157 s (inventario tras cambio de zona)
+- foot 7835M -> 8189M en 0,16 s (límite ~8192M). `[hb] gpu alloc` crece 0,28 -> 3,2 -> 4,4 -> 6,05 GB; texturas/buffers contabilizados ~2,4 GB estables; pso=3900/lib=2558 constantes. Memoria GPU NO contabilizada: 0,2 -> ~3,7 GB, continua toda la sesión (el inventario solo la remata).
+- Balance `[vkagg]` de la sesión: memtype0 144 allocs (3,77 GB) vs 50 frees (1,47 GB) = +94 vivas / +2,3 GB; img_create 2422 vs img_destroy 1023 (+1399 sin destruir). 9bbdbde (drenaje de retirados) no lo cubre: no está retirado, sigue vivo.
+- Pendiente (siguiente sesión): identificar quién retiene esas vkAllocateMemory/imágenes de memtype 0 (guest UE4 sin vkFree/vkDestroyImage, o capa/VPKEngine que difiere o pierde el free). Trazar por tamaño y call-site el alloc sin free; ver si UE4 libera en onLowMemory.
