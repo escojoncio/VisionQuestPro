@@ -268,3 +268,10 @@ Logs en `QUEST/Registros/` (compartibles desde la app); línea 1 = hash de build
 - foot 7835M -> 8189M en 0,16 s (límite ~8192M). `[hb] gpu alloc` crece 0,28 -> 3,2 -> 4,4 -> 6,05 GB; texturas/buffers contabilizados ~2,4 GB estables; pso=3900/lib=2558 constantes. Memoria GPU NO contabilizada: 0,2 -> ~3,7 GB, continua toda la sesión (el inventario solo la remata).
 - Balance `[vkagg]` de la sesión: memtype0 144 allocs (3,77 GB) vs 50 frees (1,47 GB) = +94 vivas / +2,3 GB; img_create 2422 vs img_destroy 1023 (+1399 sin destruir). 9bbdbde (drenaje de retirados) no lo cubre: no está retirado, sigue vivo.
 - Pendiente (siguiente sesión): identificar quién retiene esas vkAllocateMemory/imágenes de memtype 0 (guest UE4 sin vkFree/vkDestroyImage, o capa/VPKEngine que difiere o pierde el free). Trazar por tamaño y call-site el alloc sin free; ver si UE4 libera en onLowMemory.
+
+## 2026-10-21 — RE4: análisis manual del jetsam (log 9bbdbde, sin causa cerrada)
+- Salto final: +780 MiB en 0,28 s (+156,55 -> +156,83 s) con solo ~100 MiB de allocs visibles en `[vkagg]` y sin ninguna línea de log en el intervalo: memoria Metal no registrada.
+- Memoria GPU no contabilizada (`gpu alloc` - tex_color - tex_depth - tex_msaa - buf_*): 238 MiB (+7 s) -> 407 (+17 s) -> 795 (+33 s) -> 1355 (+34 s) -> 2059 (+99 s) -> 2338 (+148 s) -> 3469 (+157 s). Crece a saltos ligados a cambios de escena; pso=3900/lib=2558 fijos desde +30 s, no son pipelines.
+- Arranque: +5,8..+7,5 s el guest crea imágenes 2816x2260 (606+412 MiB) y 1920x1080; hasta +7,9 s solo se liberan ~330 MiB; `tex_color` queda ~1,6 GB toda la sesión aunque el ojo pasa a 1088x1568. Posible resto sin liberar, NO demostrado.
+- `tex_msaa` 275-551 MiB con `msaa_freed_total=0` en todos los trims (nada llama a liberar MSAA); `msaa_queued` = MSAA vivas, no cola.
+- Pendiente: medir de una vez, en los saltos, qué ocupa `MTLDevice.currentAllocatedSize` (heaps, PSO/funciones, buffers transitorios, drawables) y atribuirlo por categoría; comprobar si las imágenes 2816x2260 iniciales se destruyen; valorar liberar MSAA bajo presión.
