@@ -260,3 +260,6 @@ Logs en `QUEST/Registros/` (compartibles desde la app); línea 1 = hash de build
 ## 2026-10-21 — RE4: jetsam a ~163 s con onLowMemory entregado (087f2e0)
 - Log: onLowMemory llega al guest (x7) pero no libera; `vpvk_trim_memory` liberaba 0 MiB en las 300+ llamadas. Causa en VPKEngine (48aa108): `drainIdle` exigía los 3 slots libres y 150 ms sin frame (nunca durante el juego). Ahora libera los retirados de frames completados (`slotDone`) y el trim por presión también drena (try-lock). Sin cambios en este repo.
 - Sin probar en visor. Pendiente: salto gfx +1 GB en 0,25 s (+163,4 s) sin atribuir; memoria no contabilizada 238 MiB -> 3,5 GiB.
+
+## 2026-10-21 — RE4: patrón del cierre (dato del usuario)
+- Con 9bbdbde sigue cerrando siempre en el mismo punto: al abrir el inventario tras cambiar de zona. Coincide con el salto gfx +1 GB en 0,25 s (imágenes 1088x1568 / MSAA) sin atribuir. Pendiente: log de esa sesión (commit 9bbdbde) para ver si `[mem] trim` libera algo ahora y qué asigna el salto; mirar `[vkagg]` y `gpu alloc` en la ventana previa al cierre.
