@@ -286,3 +286,4 @@ Logs en `QUEST/Registros/` (compartibles desde la app); línea 1 = hash de build
 - Maestro (UE4/GLES): cierre CODESIGNING 0x2 con PC=0 (salto a NULL) en un hilo de libUE4. Candidatos: `eglGetProcAddress` que vpgles no resuelve, import `ovrMessageType_ToString` sin resolver. Sin confirmar.
 - Deadpool: jetsam a +225 s (foot 8191M, comp 1914M).
 - Logs en `Visionquestprologs/` (sin versionar).
+- **Continuación: `docs/sesion-2026-10-23/bitacora2.md`** (MSAA/depth memoryless + ledger en VPKEngine como parche sin pushear, ojos de Thrill, pendientes).

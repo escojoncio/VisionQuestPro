@@ -1,0 +1,778 @@
+./2026-10-22_00-31-35-sesion-anterior-Maestro_9bbdbde/2026-10-22_00-31-35-sesion-anterior-Maestro_9bbdbde/klepton-boot.log
+--- hb msaa (first/last 4)
+[hb] gpu alloc=219447296 ws_max=11453251584 tex_astc=0 tex_color=0 tex_depth=0 tex_msaa=0 buf_own=0 buf_guest=0 pso=0 fn=0 lib=0 lib_compiled=0 ar_entries=0 ar_files=0 tile_rejected=0 msaa_memoryless=0 recipes_bytes=12 recipes_pipes=0 recipes_shaders=0
+[hb] gpu alloc=219447296 ws_max=11453251584 tex_astc=0 tex_color=0 tex_depth=0 tex_msaa=0 buf_own=0 buf_guest=0 pso=0 fn=0 lib=0 lib_compiled=0 ar_entries=0 ar_files=0 tile_rejected=0 msaa_memoryless=0 recipes_bytes=12 recipes_pipes=0 recipes_shaders=0
+--- tile_rejected>0 frames
+0
+--- msaa/memoryless lines
+47:vk.cfg effective gen=22 fov=off sharp=0.35 periphery=0.50 vpktaa=1 100% sharp=0.50 scale=1.00 taa_native=1 taa_ui_mask=1 rcas=0.50 asw_off=1 quest3=1 anisotropy=16 prewarm=1 force_1x=0 msaa_override=0 msaa_device_max=4 fov_apply=0 fov_active=0 set_by_app=yes
+468:  [vk] [taa-inline] ON (GLES guest on vpgles): resolve at the guest's frame end on VPKEngine's queue; viewport jitter by VPKEngine (set_jitter yes, get_applied yes, native_device yes), frustum jitter off, live eye depth (MSAA included), no depth snapshots
+--- tail 25
+[jni] RegisterNatives  com/epicgames/ue4/BatteryReceiver.dispatchEvent(III)V -> 0x14bc9b6b4
+[jni] GetStaticMethodID  com/epicgames/ue4/BatteryReceiver.startReceiver(Landroid/app/Activity;)V
+[jni] GetStaticMethodID  com/epicgames/ue4/BatteryReceiver.stopReceiver(Landroid/app/Activity;)V
+[jni] FindClass  com/epicgames/ue4/HeadsetReceiver
+[jni] RegisterNatives  com/epicgames/ue4/HeadsetReceiver.stateChanged(I)V -> 0x14bc9b618
+[jni] GetStaticMethodID  com/epicgames/ue4/HeadsetReceiver.startReceiver(Landroid/app/Activity;)V
+[jni] GetStaticMethodID  com/epicgames/ue4/HeadsetReceiver.stopReceiver(Landroid/app/Activity;)V
+[hbm] +2.607s foot=511M gfx=213M comp=0M int=270M
+2026-10-22 00:31:30.377 VisionQuestPro[2280:1437039] [cp] trace f69 fence=0 layers=0 enc=0 cmd=69/68
+[jni] GetMetaDataString("ue4.displaymetrics.dpi") -> "320.00,320.00,320"
+[jni] FindClass  [I
+gles.diag INVALID_ENUM first at /Users/runner/work/VisionQuestPro/VisionQuestPro/vpkengine/gpu/gles/src/gl_api.cpp:565 (IsEnabled) enum=0x6789 thread=be21a6
+[jni] AndroidThunkJava_SetDesiredViewSize(1920, 1832) — recorded; the window size is kl_ndk's
+[jni] AndroidThunkJava_SetDesiredViewSize(1920, 1832) — recorded; the window size is kl_ndk's
+  [gles] vpgles does not resolve 'eglGetSystemTimeNV' (NULL: the gateway answers with its own or a logging stub)
+  [gles] vpgles does not resolve 'eglPresentationTimeANDROID' (NULL: the gateway answers with its own or a logging stub)
+  [gles] vpgles does not resolve 'eglGetNextFrameIdANDROID' (NULL: the gateway answers with its own or a logging stub)
+  [gles] vpgles does not resolve 'eglGetCompositorTimingANDROID' (NULL: the gateway answers with its own or a logging stub)
+  [gles] vpgles does not resolve 'eglGetFrameTimestampsANDROID' (NULL: the gateway answers with its own or a logging stub)
+  [gles] vpgles does not resolve 'eglQueryTimestampSupportedANDROID' (NULL: the gateway answers with its own or a logging stub)
+  [gles] vpgles does not resolve 'eglGetCompositorTimingSupportedANDROID' (NULL: the gateway answers with its own or a logging stub)
+  [gles] vpgles does not resolve 'eglGetFrameTimestampsSupportedANDROID' (NULL: the gateway answers with its own or a logging stub)
+  [gles] vpgles does not resolve 'glDebugMessageLogKHR' (NULL: the gateway answers with its own or a logging stub)
+  [gles] t1437104 eglMakeCurrent ctx=0x10bb16800 draw=0x116353300 read=0x116353300 -> 0x1
+  [gles] t1437104 eglMakeCurrent ctx=0x10bb15400 draw=0x116350d20 read=0x116350d20 -> 0x1
+./2026-10-22_00-38-35-fin-The_Thrill_of_the_Fight_/2026-10-22_00-38-35-fin-The_Thrill_of_the_Fight_/klepton-boot.log
+--- hb msaa (first/last 4)
+[hb] gpu alloc=219709440 ws_max=11453251584 tex_astc=0 tex_color=0 tex_depth=0 tex_msaa=0 buf_own=0 buf_guest=0 pso=0 fn=0 lib=0 lib_compiled=0 ar_entries=0 ar_files=2 tile_rejected=0 msaa_memoryless=0 recipes_bytes=12 recipes_pipes=0 recipes_shaders=0
+[hb] gpu alloc=551174144 ws_max=11453251584 tex_astc=91035904 tex_color=78824704 tex_depth=0 tex_msaa=32896 buf_own=0 buf_guest=139034624 pso=0 fn=0 lib=0 lib_compiled=0 ar_entries=0 ar_files=2 tile_rejected=0 msaa_memoryless=0 recipes_bytes=12 recipes_pipes=0 recipes_shaders=0
+[hb] gpu alloc=2372075520 ws_max=11453251584 tex_astc=479732480 tex_color=478071296 tex_depth=6881408 tex_msaa=1027571840 buf_own=0 buf_guest=104349696 pso=550 fn=435 lib=435 lib_compiled=437 ar_entries=15 ar_files=2 tile_rejected=0 msaa_memoryless=769959936 recipes_bytes=13603871 recipes_pipes=550 recipes_shaders=440
+[hb] gpu alloc=2372075520 ws_max=11453251584 tex_astc=479732480 tex_color=478071296 tex_depth=6881408 tex_msaa=1027571840 buf_own=0 buf_guest=104349696 pso=550 fn=435 lib=435 lib_compiled=437 ar_entries=15 ar_files=2 tile_rejected=0 msaa_memoryless=769959936 recipes_bytes=13603871 recipes_pipes=550 recipes_shaders=440
+[hb] gpu alloc=2372239360 ws_max=11453251584 tex_astc=479732480 tex_color=478071296 tex_depth=6881408 tex_msaa=1027571840 buf_own=0 buf_guest=104513536 pso=550 fn=435 lib=435 lib_compiled=437 ar_entries=15 ar_files=2 tile_rejected=0 msaa_memoryless=769959936 recipes_bytes=13603871 recipes_pipes=550 recipes_shaders=440
+[hb] gpu alloc=2370273280 ws_max=11453251584 tex_astc=479732480 tex_color=478071296 tex_depth=6881408 tex_msaa=1027571840 buf_own=0 buf_guest=102547456 pso=550 fn=435 lib=435 lib_compiled=437 ar_entries=15 ar_files=2 tile_rejected=0 msaa_memoryless=769959936 recipes_bytes=13603871 recipes_pipes=550 recipes_shaders=440
+--- tile_rejected>0 frames
+0
+--- msaa/memoryless lines
+58:vk.cfg effective gen=22 fov=off sharp=0.35 periphery=0.50 vpktaa=1 100% sharp=0.50 scale=1.00 taa_native=1 taa_ui_mask=1 rcas=0.50 asw_off=1 quest3=1 anisotropy=16 prewarm=1 force_1x=0 msaa_override=0 msaa_device_max=4 fov_apply=0 fov_active=0 set_by_app=yes
+417:  [vk] [taa-inline] ON (GLES guest on vpgles): resolve at the guest's frame end on VPKEngine's queue; viewport jitter by VPKEngine (set_jitter yes, get_applied yes, native_device yes), frustum jitter off, live eye depth (MSAA included), no depth snapshots
+895:vk.cfg effective gen=22 fov=off sharp=0.35 periphery=0.50 vpktaa=1 100% sharp=0.50 scale=1.00 taa_native=1 taa_ui_mask=1 rcas=0.50 asw_off=1 quest3=1 anisotropy=16 prewarm=1 force_1x=0 msaa_override=0 msaa_device_max=4 fov_apply=0 fov_active=0 set_by_app=yes
+1402:gpu.metal.info what=trim level=1 libs_dropped=0 libs_kept=0 libs=0.0 msaa_queued=0.0 args_queued=0.0 msaa_freed_total=0.0 args_freed_total=0.0
+1403:  [vk] [mem] trim (footprint rate): VPKEngine released 18 MiB (libs_dropped=0 libs_kept=0 libs=0.0 msaa_queued=0.0 args_queued=0.0 msaa_freed_total=0.0 args_freed_total=0.0 retired_released=7 retired_mib=18.0)
+2356:W/Unity: Ignoring depth surface store action as it is memoryless
+2360:vk.msaa detected eye=4x size=3552x2258 multiview=1 by=eye_size
+2382:2026-10-22 00:36:26.248 VisionQuestPro[2308:1448847] [aa] detected eye MSAA 4x -> mode auto: game MSAA 4x kept, VPKTAA off | device max 4x | stored vq.aaDetected.com.HalfbrickStudios.TheThrilloftheFight2
+2418:  [vk] [aa] mode auto: VPKTAA inline off — game eye pass is MSAA 4x — the game's MSAA is kept (not forced to 1x)
+3046:gpu.metal.info what=trim level=1 libs_dropped=2 libs_kept=10 libs=0.0 msaa_queued=951.9 args_queued=0.0 msaa_freed_total=0.0 args_freed_total=0.0
+3047:  [vk] [mem] trim (footprint rate): VPKEngine released 30 MiB (libs_dropped=2 libs_kept=10 libs=0.0 msaa_queued=951.9 args_queued=0.0 msaa_freed_total=0.0 args_freed_total=0.0 retired_released=2 retired_mib=30.9)
+3353:W/Unity: Ignoring depth surface store action as it is memoryless
+--- tail 25
+    ovr_User_GetPresence
+    ovr_User_GetPresenceDeeplinkMessage
+    ovr_User_GetPresenceDestinationApiName
+    ovr_User_GetPresenceLobbySessionId
+    ovr_User_GetPresenceMatchSessionId
+    ovr_User_GetSmallImageUrl
+
+=== OpenXR surface (libklepton_openxr) ===
+  553 entry points served; 0 resolved by the guest, 0 refused by name
+  decommit: 24 MADV_DONTNEED calls, 259 MiB, mode=remap
+  memory: 3673 MiB footprint (peak 3673) of a 8192 MiB budget, 1 low-memory notifications
+[files] final: 22 files, 141 opens (+0 opens of files past the table), size 0M, read 34M, mmap'd 0M in 0 files
+[files]   global-metadata.dat size=0K opens=3 read=33987K mmap=0K(x0)
+[files]   mscorlib.dll-resources.dat size=0K opens=3 read=659K mmap=0K(x0)
+[files]   System.Data.dll-resources.dat size=0K opens=2 read=183K mmap=0K(x0)
+[files]   AmateurSimulationDataObject.json.tmp size=0K opens=1 read=148K mmap=0K(x0)
+[files]   maps size=0K opens=106 read=76K mmap=0K(x0)
+[files]   System.Drawing.dll-resources.dat size=0K opens=2 read=49K mmap=0K(x0)
+[files]   ScheduleDataObject.json.tmp size=0K opens=1 read=12K mmap=0K(x0)
+[files]   analytics-event-queue.json size=0K opens=3 read=12K mmap=0K(x0)
+[files]   Calibration.json.tmp size=0K opens=6 read=9K mmap=0K(x0)
+[files]   cpuinfo size=1K opens=2 read=3K mmap=0K(x0)
+[files]   CharacterCustomization.json.tmp size=0K opens=1 read=3K mmap=0K(x0)
+[files]   log.txt size=0K opens=1 read=3K mmap=0K(x0)
+2026-10-22 00:38:35.482 VisionQuestPro[2308:1447038] [app] immersive space ended (phase background)
+./2026_10_21_18_29_21_sesion_anterior_Marvels_Deadpool_VR_9bbdbde/2026-10-21_18-29-21-sesion-anterior-Marvels_Deadpool_VR_9bbdbde/klepton-boot.log
+--- hb msaa (first/last 4)
+[hb] gpu alloc=243040256 ws_max=11453251584 tex_astc=0 tex_color=0 tex_depth=0 tex_msaa=0 buf_own=0 buf_guest=0 pso=0 fn=0 lib=0 lib_compiled=0 ar_entries=0 ar_files=170 tile_rejected=0 msaa_memoryless=0 recipes_bytes=250169446 recipes_pipes=7521 recipes_shaders=4454
+[hb] gpu alloc=245923840 ws_max=11453251584 tex_astc=0 tex_color=512 tex_depth=65536 tex_msaa=0 buf_own=0 buf_guest=0 pso=7521 fn=4353 lib=4353 lib_compiled=4353 ar_entries=0 ar_files=170 tile_rejected=0 msaa_memoryless=0 recipes_bytes=250169446 recipes_pipes=7521 recipes_shaders=4454
+[hb] gpu alloc=3853303808 ws_max=11453251584 tex_astc=744169984 tex_color=525635456 tex_depth=67011328 tex_msaa=234881024 buf_own=8388608 buf_guest=381517824 pso=4421 fn=3230 lib=3230 lib_compiled=4376 ar_entries=19 ar_files=170 tile_rejected=14380 msaa_memoryless=0 recipes_bytes=251490973 recipes_pipes=7541 recipes_shaders=4463
+[hb] gpu alloc=3965091840 ws_max=11453251584 tex_astc=748704384 tex_color=514396032 tex_depth=67011328 tex_msaa=234881024 buf_own=8388608 buf_guest=382648320 pso=4441 fn=3242 lib=3242 lib_compiled=4388 ar_entries=27 ar_files=170 tile_rejected=15800 msaa_memoryless=0 recipes_bytes=252299561 recipes_pipes=7549 recipes_shaders=4469
+[hb] gpu alloc=4129800192 ws_max=11453251584 tex_astc=748437632 tex_color=528709760 tex_depth=67011328 tex_msaa=234881024 buf_own=8388608 buf_guest=382697472 pso=4455 fn=3255 lib=3255 lib_compiled=4401 ar_entries=30 ar_files=170 tile_rejected=17262 msaa_memoryless=0 recipes_bytes=252837912 recipes_pipes=7553 recipes_shaders=4472
+[hb] gpu alloc=4248731648 ws_max=11453251584 tex_astc=736741504 tex_color=544977792 tex_depth=67011328 tex_msaa=234881024 buf_own=8388608 buf_guest=381583360 pso=4473 fn=3270 lib=3270 lib_compiled=4416 ar_entries=39 ar_files=170 tile_rejected=18656 msaa_memoryless=0 recipes_bytes=253505068 recipes_pipes=7561 recipes_shaders=4476
+--- tile_rejected>0 frames
+gpu.frame f=29 enc=9 render=8 compute=1 naive=12 passes=10 merged=2 hoisted=0 sunk=0 dropped=0 barriers=0 intra=0 raw=0 war=0 waw=0 tile_local=0 tile_rejected=4 saved_mb=0.0 cpu_ms=0.017
+gpu.frame f=31 enc=1 render=1 compute=0 naive=2 passes=2 merged=1 hoisted=0 sunk=0 dropped=0 barriers=0 intra=0 raw=0 war=0 waw=0 tile_local=0 tile_rejected=2 saved_mb=0.0 cpu_ms=0.008
+gpu.frame f=33 enc=1 render=1 compute=0 naive=2 passes=2 merged=1 hoisted=0 sunk=0 dropped=0 barriers=0 intra=0 raw=0 war=0 waw=0 tile_local=0 tile_rejected=2 saved_mb=0.0 cpu_ms=0.010
+gpu.frame f=36 enc=3 render=3 compute=0 naive=4 passes=4 merged=1 hoisted=0 sunk=0 dropped=0 barriers=1 intra=0 raw=0 war=0 waw=1 tile_local=0 tile_rejected=2 saved_mb=0.0 cpu_ms=0.012
+gpu.frame f=41 enc=1 render=1 compute=0 naive=2 passes=2 merged=1 hoisted=0 sunk=0 dropped=0 barriers=0 intra=0 raw=0 war=0 waw=0 tile_local=0 tile_rejected=2 saved_mb=0.0 cpu_ms=0.010
+240
+--- msaa/memoryless lines
+144:vk.cfg effective gen=22 fov=off sharp=0.35 periphery=0.50 vpktaa=0 100% sharp=0.50 scale=1.00 taa_native=0 taa_ui_mask=1 rcas=0.50 asw_off=1 quest3=1 anisotropy=16 prewarm=1 force_1x=0 msaa_override=0 msaa_device_max=4 fov_apply=0 fov_active=0 set_by_app=yes
+1272:gpu.metal.info what=trim level=1 libs_dropped=0 libs_kept=4353 libs=0.0 msaa_queued=0.0 args_queued=0.0 msaa_freed_total=0.0 args_freed_total=0.0
+1273:  [vk] [mem] trim (footprint rate): VPKEngine released 0 MiB (libs_dropped=0 libs_kept=4353 libs=0.0 msaa_queued=0.0 args_queued=0.0 msaa_freed_total=0.0 args_freed_total=0.0)
+1295:vk.cfg effective gen=22 fov=off sharp=0.35 periphery=0.50 vpktaa=0 100% sharp=0.50 scale=1.00 taa_native=0 taa_ui_mask=1 rcas=0.50 asw_off=1 quest3=1 anisotropy=16 prewarm=1 force_1x=0 msaa_override=0 msaa_device_max=4 fov_apply=0 fov_active=0 set_by_app=yes
+2573:vk.msaa detected eye=2x size=3552x2260 multiview=1 by=multiview
+2584:2026-10-21 18:25:26.363 VisionQuestPro[2096:1238173] [aa] detected eye MSAA 2x -> mode auto: game MSAA 2x kept, VPKTAA off | device max 4x | stored vq.aaDetected.com.twistedpixelgames.PILO
+2699:gpu.metal.info what=msaa_materialized index=232 3552x2260x2 samples=2 fmt=RGBA8Srgb mb=124.2 why=LoadsContents label=
+2700:gpu.metal.info what=msaa_materialized index=234 3552x2260x2 samples=2 fmt=D24UnormS8 mb=159.8 why=LoadsContents label=
+2702:gpu.metal.info what=msaa_materialized index=239 2784x2260x2 samples=2 fmt=RGBA8Srgb mb=97.6 why=LoadsContents label=
+2703:gpu.metal.info what=msaa_materialized index=241 2784x2260x2 samples=2 fmt=D24UnormS8 mb=126.4 why=LoadsContents label=
+2811:gpu.metal.info what=trim level=1 libs_dropped=0 libs_kept=4353 libs=0.0 msaa_queued=508.0 args_queued=0.0 msaa_freed_total=0.0 args_freed_total=0.0
+2812:  [vk] [mem] trim (footprint rate): VPKEngine released 0 MiB (libs_dropped=0 libs_kept=4353 libs=0.0 msaa_queued=508.0 args_queued=0.0 msaa_freed_total=0.0 args_freed_total=0.0)
+7750:gpu.metal.info what=trim level=1 libs_dropped=0 libs_kept=4353 libs=0.0 msaa_queued=224.0 args_queued=0.0 msaa_freed_total=0.0 args_freed_total=0.0
+7751:  [vk] [mem] trim (footprint rate): VPKEngine released 0 MiB (libs_dropped=0 libs_kept=4353 libs=0.0 msaa_queued=224.0 args_queued=0.0 msaa_freed_total=0.0 args_freed_total=0.0)
+8696:gpu.metal.info what=trim level=1 libs_dropped=0 libs_kept=4353 libs=0.0 msaa_queued=224.0 args_queued=0.0 msaa_freed_total=0.0 args_freed_total=0.0
+8697:  [vk] [mem] trim (footprint rate): VPKEngine released 0 MiB (libs_dropped=0 libs_kept=4353 libs=0.0 msaa_queued=224.0 args_queued=0.0 msaa_freed_total=0.0 args_freed_total=0.0)
+9659:gpu.metal.info what=trim level=1 libs_dropped=0 libs_kept=4353 libs=0.0 msaa_queued=224.0 args_queued=0.0 msaa_freed_total=0.0 args_freed_total=0.0
+9660:  [vk] [mem] trim (footprint rate): VPKEngine released 0 MiB (libs_dropped=0 libs_kept=4353 libs=0.0 msaa_queued=224.0 args_queued=0.0 msaa_freed_total=0.0 args_freed_total=0.0)
+9676:gpu.metal.info what=trim level=2 libs_dropped=0 libs_kept=4353 libs=0.0 msaa_queued=224.0 args_queued=0.0 msaa_freed_total=0.0 args_freed_total=0.0
+9677:  [vk] [mem] trim (system critical): VPKEngine released 0 MiB (libs_dropped=0 libs_kept=4353 libs=0.0 msaa_queued=224.0 args_queued=0.0 msaa_freed_total=0.0 args_freed_total=0.0)
+10748:gpu.metal.info what=trim level=2 libs_dropped=0 libs_kept=4353 libs=0.0 msaa_queued=224.0 args_queued=0.0 msaa_freed_total=0.0 args_freed_total=0.0
+10749:  [vk] [mem] trim (system critical): VPKEngine released 0 MiB (libs_dropped=0 libs_kept=4353 libs=0.0 msaa_queued=224.0 args_queued=0.0 msaa_freed_total=0.0 args_freed_total=0.0)
+10957:gpu.metal.info what=trim level=2 libs_dropped=0 libs_kept=4353 libs=0.0 msaa_queued=224.0 args_queued=0.0 msaa_freed_total=0.0 args_freed_total=0.0
+10958:  [vk] [mem] trim (system critical): VPKEngine released 0 MiB (libs_dropped=0 libs_kept=4353 libs=0.0 msaa_queued=224.0 args_queued=0.0 msaa_freed_total=0.0 args_freed_total=0.0)
+12989:gpu.metal.info what=trim level=2 libs_dropped=0 libs_kept=4353 libs=0.0 msaa_queued=224.0 args_queued=0.0 msaa_freed_total=0.0 args_freed_total=0.0
+12990:  [vk] [mem] trim (system critical): VPKEngine released 0 MiB (libs_dropped=0 libs_kept=4353 libs=0.0 msaa_queued=224.0 args_queued=0.0 msaa_freed_total=0.0 args_freed_total=0.0)
+24558:gpu.metal.info what=trim level=1 libs_dropped=0 libs_kept=3214 libs=0.0 msaa_queued=224.0 args_queued=0.0 msaa_freed_total=0.0 args_freed_total=0.0
+24559:  [vk] [mem] trim (footprint rate): VPKEngine released 0 MiB (libs_dropped=0 libs_kept=3214 libs=0.0 msaa_queued=224.0 args_queued=0.0 msaa_freed_total=0.0 args_freed_total=0.0)
+--- tail 25
+gpu.time f=24027 gpu_ms=12.043
+  [ovrp] CalculateEyeLayerDesc: layout=3 2256x2258 mips=1 samples=1 fmt=0 (R8G8B8A8_sRGB -> GL 0x8c43) depth=10 mv=2/7 flags=0 scale=1.000/1.000
+gpu.time f=24030 gpu_ms=0.034
+gpu.time f=24031 gpu_ms=14.083
+  [ovrp] CalculateEyeLayerDesc: layout=3 2256x2258 mips=1 samples=1 fmt=0 (R8G8B8A8_sRGB -> GL 0x8c43) depth=10 mv=2/7 flags=0 scale=1.000/1.000
+gpu.time f=24035 gpu_ms=12.669
+  [ovrp] CalculateEyeLayerDesc: layout=3 2256x2258 mips=1 samples=1 fmt=0 (R8G8B8A8_sRGB -> GL 0x8c43) depth=10 mv=2/7 flags=0 scale=1.000/1.000
+gpu.time f=24039 gpu_ms=13.517
+  [ovrp] CalculateEyeLayerDesc: layout=3 2256x2258 mips=1 samples=1 fmt=0 (R8G8B8A8_sRGB -> GL 0x8c43) depth=10 mv=2/7 flags=0 scale=1.000/1.000
+  [ovrp] CalculateEyeLayerDesc: layout=3 2256x2258 mips=1 samples=1 fmt=0 (R8G8B8A8_sRGB -> GL 0x8c43) depth=10 mv=2/7 flags=0 scale=1.000/1.000
+gpu.time f=24044 gpu_ms=13.460
+gpu.time f=24046 gpu_ms=14.000
+  [ovrp] CalculateEyeLayerDesc: layout=3 2256x2258 mips=1 samples=1 fmt=0 (R8G8B8A8_sRGB -> GL 0x8c43) depth=10 mv=2/7 flags=0 scale=1.000/1.000
+  [ovrp] CalculateEyeLayerDesc: layout=3 2256x2258 mips=1 samples=1 fmt=0 (R8G8B8A8_sRGB -> GL 0x8c43) depth=10 mv=2/7 flags=0 scale=1.000/1.000
+gpu.time f=24051 gpu_ms=13.743 enc_ms=1.6,1.7,3.9,8.2
+  [ovrp] CalculateEyeLayerDesc: layout=3 2256x2258 mips=1 samples=1 fmt=0 (R8G8B8A8_sRGB -> GL 0x8c43) depth=10 mv=2/7 flags=0 scale=1.000/1.000
+gpu.sec f=24053 n=129 p50=0.13 p95=14.56 max=15.20 over10=45
+gpu.time f=24053 gpu_ms=13.955
+  [ovrp] CalculateEyeLayerDesc: layout=3 2256x2258 mips=1 samples=1 fmt=0 (R8G8B8A8_sRGB -> GL 0x8c43) depth=10 mv=2/7 flags=0 scale=1.000/1.000
+gpu.time f=24056 gpu_ms=13.339
+  [ovrp] CalculateEyeLayerDesc: layout=3 2256x2258 mips=1 samples=1 fmt=0 (R8G8B8A8_sRGB -> GL 0x8c43) depth=10 mv=2/7 flags=0 scale=1.000/1.000
+gpu.time f=24059 gpu_ms=14.621
+  [ovrp] CalculateEyeLayerDesc: layout=3 2256x2258 mips=1 samples=1 fmt=0 (R8G8B8A8_sRGB -> GL 0x8c43) depth=10 mv=2/7 flags=0 scale=1.000/1.000
+2026-10-21 18:29:03.090 VisionQuestPro[2096:1238173] [cp] timewarp: stage 1 serial 10266, delta 0.06 deg (worst 0.54), pose age 20.4 ms (worst 21.1), 0 stale in a row
+gpu.time f=24062 gpu_ms=13.950
+./2026_10_22_00_40_23_sesion_anterior_UBOAT_The_Silent_Wolf_9bbdbde/2026-10-22_00-40-23-sesion-anterior-UBOAT-_The_Silent_Wolf_9bbdbde/klepton-boot.log
+--- hb msaa (first/last 4)
+--- tile_rejected>0 frames
+0
+--- msaa/memoryless lines
+45:vk.cfg effective gen=22 fov=off sharp=0.35 periphery=0.50 vpktaa=1 100% sharp=0.50 scale=1.00 taa_native=1 taa_ui_mask=1 rcas=0.50 asw_off=1 quest3=1 anisotropy=16 prewarm=1 force_1x=0 msaa_override=0 msaa_device_max=4 fov_apply=0 fov_active=0 set_by_app=yes
+468:  [vk] [taa-inline] ON (GLES guest on vpgles): resolve at the guest's frame end on VPKEngine's queue; viewport jitter by VPKEngine (set_jitter yes, get_applied yes, native_device yes), frustum jitter off, live eye depth (MSAA included), no depth snapshots
+--- tail 25
+    ovr_CloudStorage_Delete
+    ovr_Voip_Accept
+    ovr_Voip_Start
+    ovr_Voip_Stop
+    ovr_Voip_GetOutputBufferMaxSize
+    ovr_Voip_GetPCM
+    ovr_Voip_GetPCMSize
+    ovr_Message_GetMatchmakingBrowseResult
+    ovr_MatchmakingBrowseResult_GetRooms
+    ovr_MatchmakingRoomArray_GetSize
+    ovr_MatchmakingRoomArray_GetElement
+    ovr_MatchmakingRoom_GetRoom
+    ovr_MatchmakingRoom_HasPingTime
+    ovr_MatchmakingRoom_GetPingTime
+    ovr_Message_GetCloudStorageMetadataArray
+    ovr_CloudStorageMetadataArray_GetSize
+    ovr_CloudStorageMetadataArray_GetElement
+    ovr_CloudStorageMetadata_GetKey
+    ovr_CloudStorageMetadata_GetDataSize
+    ovr_CloudStorageMetadataArray_HasNextPage
+    ovr_Message_GetCloudStorageData
+    ovr_CloudStorageData_GetDataSize
+    ovr_CloudStorageData_GetData
+    ovr_Error_GetHttpCode
+    ovr_Error_GetDisplayableMessage
+./Archivo__18_/2026-10-22_00-28-42-sesion-anterior-Mobile_Suit_Gundam-_Silv_9bbdbde/klepton-boot.log
+--- hb msaa (first/last 4)
+[hb] gpu alloc=220151808 ws_max=11453251584 tex_astc=0 tex_color=0 tex_depth=0 tex_msaa=0 buf_own=0 buf_guest=0 pso=0 fn=0 lib=0 lib_compiled=0 ar_entries=0 ar_files=6 tile_rejected=0 msaa_memoryless=0 recipes_bytes=12 recipes_pipes=0 recipes_shaders=0
+[hb] gpu alloc=508887040 ws_max=11453251584 tex_astc=262144 tex_color=158909056 tex_depth=0 tex_msaa=65792 buf_own=0 buf_guest=54919168 pso=0 fn=0 lib=0 lib_compiled=0 ar_entries=0 ar_files=6 tile_rejected=0 msaa_memoryless=0 recipes_bytes=12 recipes_pipes=0 recipes_shaders=0
+[hb] gpu alloc=6757580800 ws_max=11453251584 tex_astc=208470016 tex_color=572278400 tex_depth=117211392 tex_msaa=1478000768 buf_own=0 buf_guest=97370112 pso=514 fn=571 lib=571 lib_compiled=591 ar_entries=23 ar_files=6 tile_rejected=0 msaa_memoryless=610201920 recipes_bytes=15818758 recipes_pipes=611 recipes_shaders=706
+[hb] gpu alloc=6757580800 ws_max=11453251584 tex_astc=208470016 tex_color=572278400 tex_depth=117211392 tex_msaa=1478000768 buf_own=0 buf_guest=97370112 pso=576 fn=636 lib=636 lib_compiled=658 ar_entries=20 ar_files=6 tile_rejected=0 msaa_memoryless=610201920 recipes_bytes=15818758 recipes_pipes=611 recipes_shaders=706
+[hb] gpu alloc=6755762176 ws_max=11453251584 tex_astc=208470016 tex_color=572278400 tex_depth=117211392 tex_msaa=1478000768 buf_own=0 buf_guest=97370112 pso=610 fn=669 lib=669 lib_compiled=691 ar_entries=22 ar_files=6 tile_rejected=0 msaa_memoryless=610201920 recipes_bytes=15818758 recipes_pipes=611 recipes_shaders=706
+[hb] gpu alloc=7751598080 ws_max=11453251584 tex_astc=318296064 tex_color=594429568 tex_depth=117211392 tex_msaa=1478000768 buf_own=0 buf_guest=104939520 pso=614 fn=675 lib=675 lib_compiled=697 ar_entries=26 ar_files=6 tile_rejected=0 msaa_memoryless=610201920 recipes_bytes=15924424 recipes_pipes=616 recipes_shaders=712
+--- tile_rejected>0 frames
+0
+--- msaa/memoryless lines
+55:vk.cfg effective gen=22 fov=off sharp=0.35 periphery=0.50 vpktaa=1 100% sharp=0.50 scale=1.00 taa_native=1 taa_ui_mask=1 rcas=0.50 asw_off=1 quest3=1 anisotropy=16 prewarm=1 force_1x=0 msaa_override=0 msaa_device_max=4 fov_apply=0 fov_active=0 set_by_app=yes
+440:  [vk] [taa-inline] ON (GLES guest on vpgles): resolve at the guest's frame end on VPKEngine's queue; viewport jitter by VPKEngine (set_jitter yes, get_applied yes, native_device yes), frustum jitter off, live eye depth (MSAA included), no depth snapshots
+914:vk.cfg effective gen=22 fov=off sharp=0.35 periphery=0.50 vpktaa=1 100% sharp=0.50 scale=1.00 taa_native=1 taa_ui_mask=1 rcas=0.50 asw_off=1 quest3=1 anisotropy=16 prewarm=1 force_1x=0 msaa_override=0 msaa_device_max=4 fov_apply=0 fov_active=0 set_by_app=yes
+1701:gpu.metal.info what=trim level=1 libs_dropped=0 libs_kept=0 libs=0.0 msaa_queued=758.3 args_queued=0.0 msaa_freed_total=0.0 args_freed_total=0.0
+1702:  [vk] [mem] trim (footprint rate): VPKEngine released 0 MiB (libs_dropped=0 libs_kept=0 libs=0.0 msaa_queued=758.3 args_queued=0.0 msaa_freed_total=0.0 args_freed_total=0.0)
+1796:vk.msaa detected eye=1x size=2815x2258 multiview=1 by=multiview
+1797:W/Unity: Ignoring depth surface store action as it is memoryless
+1820:vk.msaa detected eye=4x (changed from 1x) size=2815x2258 multiview=1
+1836:2026-10-22 00:27:46.928 VisionQuestPro[2258:1428587] [aa] detected eye MSAA 4x -> mode auto: game MSAA 4x kept, VPKTAA off | device max 4x | stored vq.aaDetected.com.mrf.Astrea.Gundam
+1880:  [vk] [aa] mode auto: VPKTAA inline off — game eye pass is MSAA 4x — the game's MSAA is kept (not forced to 1x)
+1895:vk.msaa detected eye=1x (changed from 4x) size=2815x2258 multiview=1
+1897:vk.msaa detected eye=4x (changed from 1x) size=2815x2258 multiview=1
+3702:W/Unity: Ignoring depth surface store action as it is memoryless
+3717:gpu.metal.info what=trim level=1 libs_dropped=0 libs_kept=4 libs=0.0 msaa_queued=1289.5 args_queued=0.0 msaa_freed_total=0.0 args_freed_total=0.0
+3718:  [vk] [mem] trim (footprint rate): VPKEngine released 0 MiB (libs_dropped=0 libs_kept=4 libs=0.0 msaa_queued=1289.5 args_queued=0.0 msaa_freed_total=0.0 args_freed_total=0.0)
+5089:gpu.metal.info what=trim level=1 libs_dropped=0 libs_kept=32 libs=0.0 msaa_queued=1409.5 args_queued=0.0 msaa_freed_total=0.0 args_freed_total=0.0
+5090:  [vk] [mem] trim (footprint rate): VPKEngine released 0 MiB (libs_dropped=0 libs_kept=32 libs=0.0 msaa_queued=1409.5 args_queued=0.0 msaa_freed_total=0.0 args_freed_total=0.0)
+5618:gpu.metal.info what=trim level=2 libs_dropped=3 libs_kept=186 libs=0.0 msaa_queued=1409.5 args_queued=0.0 msaa_freed_total=0.0 args_freed_total=0.0
+5619:  [vk] [mem] trim (system critical): VPKEngine released 0 MiB (libs_dropped=3 libs_kept=186 libs=0.0 msaa_queued=1409.5 args_queued=0.0 msaa_freed_total=0.0 args_freed_total=0.0)
+5867:gpu.metal.info what=trim level=2 libs_dropped=8 libs_kept=274 libs=0.0 msaa_queued=1409.5 args_queued=0.0 msaa_freed_total=0.0 args_freed_total=0.0
+5868:  [vk] [mem] trim (system critical): VPKEngine released 0 MiB (libs_dropped=8 libs_kept=274 libs=0.0 msaa_queued=1409.5 args_queued=0.0 msaa_freed_total=0.0 args_freed_total=0.0)
+6776:gpu.metal.info what=trim level=1 libs_dropped=3 libs_kept=384 libs=0.0 msaa_queued=1409.5 args_queued=2.0 msaa_freed_total=0.0 args_freed_total=0.0
+6777:  [vk] [mem] trim (footprint rate): VPKEngine released 23 MiB (libs_dropped=3 libs_kept=384 libs=0.0 msaa_queued=1409.5 args_queued=2.0 msaa_freed_total=0.0 args_freed_total=0.0 retired_released=2 retired_mib=23.8)
+6946:  [ovrp] first-call ovrp_GetSystemRecommendedMSAALevel <- libil2cpp.so+0x30b9804
+6997:W/Unity: Ignoring depth surface store action as it is memoryless
+7087:gpu.metal.info what=trim level=1 libs_dropped=6 libs_kept=483 libs=0.0 msaa_queued=1409.5 args_queued=0.0 msaa_freed_total=0.0 args_freed_total=2.0
+7088:  [vk] [mem] trim (footprint rate): VPKEngine released 0 MiB (libs_dropped=6 libs_kept=483 libs=0.0 msaa_queued=1409.5 args_queued=0.0 msaa_freed_total=0.0 args_freed_total=2.0)
+10078:gpu.metal.info what=trim level=1 libs_dropped=0 libs_kept=669 libs=0.0 msaa_queued=1409.5 args_queued=0.0 msaa_freed_total=0.0 args_freed_total=2.0
+10079:  [vk] [mem] trim (footprint rate): VPKEngine released 0 MiB (libs_dropped=0 libs_kept=669 libs=0.0 msaa_queued=1409.5 args_queued=0.0 msaa_freed_total=0.0 args_freed_total=2.0)
+10195:W/Unity: Ignoring depth surface store action as it is memoryless
+--- tail 25
+  [vk] vkCreateImageView: image 0x713acd8f00 viewType 1 format 130 aspect 0x6 mips 0+1 layers 1+1 createFlags 0
+  [vk] vkCreateImageView: image 0x713acd9100 viewType 1 format 124 aspect 0x2 mips 0+1 layers 0+1 createFlags 0
+  [vk] vkCreateImageView: image 0x713acd9000 viewType 1 format 124 aspect 0x2 mips 0+1 layers 0+1 createFlags 0
+W/Unity: Ignoring depth surface store action as it is memoryless
+UnityEngine.Rendering.Universal.UniversalRenderPipeline:RenderSingleCamera(ScriptableRenderContext, CameraData, Boolean)
+UnityEngine.Rendering.Universal.UniversalRenderPipeline:RenderCameraStack(ScriptableRenderContext, Camera)
+UnityEngine.Rendering.Universal.UniversalRenderPipeline:Render(ScriptableRenderContext, List`1)
+UnityEngine.Rendering.RenderPipelineManager:DoRenderLoop_Internal(RenderPipelineAsset, IntPtr, List`1)
+
+[ line 2088235416]
+
+
+  [au] guest PCM so far: peak 15448/32767, 8886 of 11001 buffers all-zero — producing audio; underruns 0, target 40 ms
+[hbm] +48.190s foot=8038M gfx=4697M comp=215M int=1294M
+[vkagg] +48.190s img n=8 px=76275242 fail=0 [f122 2815x2258 m1 l2]x4 [f130 2815x2258 m1 l2]x2 [f124 1x1 m1 l1]x2 | vk dt=255 alloc0=6 alloc0_b=1017003776 free0=6 free0_b=1017003776 alloc1=1 alloc1_b=162560 buf_create=9 buf_create_b=171772 buf_destroy=2 buf_bind=9 buf_bind_b=171772 img_create=8 img_c
+[mtl] +48.190s mtl dt=1019 buf_nocopy=41 buf_nocopy_b=96190464 tex_new=49 tex_new_b=987804032 cb=88 enc_render=211 enc_blit=17 res_add=90 res_remove=12 res_commit=19 drain_runs=1 drained=3 drained_b=98304 g_held=12 g_held_b=855892352
+[hb] blocked  phase=frame pump  foot=8038M  heap=2911M(res 3043M) internal=1294M comp=215M file=164M gfx=4697M gfx_nofp=8M media=0M media_nofp=0M net=0M purg=32M fp_peak=8109M lim_rem=153M physfp=8038M
+[hb] gpu alloc=7751598080 ws_max=11453251584 tex_astc=318296064 tex_color=594429568 tex_depth=117211392 tex_msaa=1478000768 buf_own=0 buf_guest=104939520 pso=614 fn=675 lib=675 lib_compiled=697 ar_entries=26 ar_files=6 tile_rejected=0 msaa_memoryless=610201920 recipes_bytes=15924424 recipes_pipes=61
+2026-10-22 00:28:31.437 VisionQuestPro[2258:1428587] [cp] pinch: L no skeleton (0 frames) | R no skeleton (0 frames) (open 0.050 closed 0.030, 0 spatial events, 0 unattributed)
+[hb] vm regions=3733 resident=2769M: untagged=1780M/65279Mv MALLOC_LARGE=386M/2627Mv MALLOC_SMALL=341M/488Mv IOSurface=205M/205Mv IOAccelerator=27M/151Mv tag35=17M/139Mv MALLOC=4M/17Mv STACK=2M/46Mv
+2026-10-22 00:28:31.467 VisionQuestPro[2258:1428587] [cp] alive: 4625 iters, 4304 with a picture, 321 black, guest=1, bail(frame/drawable/pipeline)=0/0/0, cmdbuf 4624/4625 done fence=0 layers=0 enc=2
+2026-10-22 00:28:31.467 VisionQuestPro[2258:1428587] [cp] cadence 10.00 ms mean / 10.00 max = 1.00 periods, 0/51 held >=1.5, 0 past deadline
+2026-10-22 00:28:31.467 VisionQuestPro[2258:1428587] [cp] slack min/mean 9.36/9.56 ms fps_guest 0.0
+2026-10-22 00:28:31.468 VisionQuestPro[2258:1428587] [cp] stages: s0 draws=0 serial=3076 e0=f28a00 e1=f28a00 | s1 draws=0 serial=3077 e0=f2a080 e1=f2a080 | s2 draws=0 serial=3075 e0=eed180 e1=eed180 |
+2026-10-22 00:28:31.564 VisionQuestPro[2258:1429236] [cp] gpu p50/p95/max 4.69/8.18/8.92 ms (100 cmdbufs, rcas fused 0.50) | pass frag p50/max 4.19/8.35 vert p50 0.03 ms (100 samples) rt 2432x2368 layered foveated
+./Archivo__18_/2026-10-22_00-30-42-fin-Mobile_Suit_Gundam-_Silv/klepton-boot.log
+--- hb msaa (first/last 4)
+[hb] gpu alloc=221020160 ws_max=11453251584 tex_astc=0 tex_color=0 tex_depth=0 tex_msaa=0 buf_own=0 buf_guest=0 pso=616 fn=690 lib=690 lib_compiled=690 ar_entries=0 ar_files=22 tile_rejected=0 msaa_memoryless=0 recipes_bytes=15935288 recipes_pipes=616 recipes_shaders=712
+[hb] gpu alloc=444760064 ws_max=11453251584 tex_astc=262144 tex_color=104202880 tex_depth=0 tex_msaa=65792 buf_own=0 buf_guest=43663360 pso=616 fn=690 lib=690 lib_compiled=690 ar_entries=0 ar_files=22 tile_rejected=0 msaa_memoryless=0 recipes_bytes=15935288 recipes_pipes=616 recipes_shaders=712
+[hb] gpu alloc=5677613056 ws_max=11453251584 tex_astc=507919744 tex_color=566250112 tex_depth=117211392 tex_msaa=682918016 buf_own=0 buf_guest=127664128 pso=639 fn=719 lib=719 lib_compiled=721 ar_entries=19 ar_files=22 tile_rejected=0 msaa_memoryless=610201920 recipes_bytes=16802444 recipes_pipes=639 recipes_shaders=742
+[hb] gpu alloc=5678006272 ws_max=11453251584 tex_astc=507919744 tex_color=566250112 tex_depth=117211392 tex_msaa=682918016 buf_own=0 buf_guest=127926272 pso=639 fn=719 lib=719 lib_compiled=721 ar_entries=19 ar_files=22 tile_rejected=0 msaa_memoryless=610201920 recipes_bytes=16802444 recipes_pipes=639 recipes_shaders=742
+[hb] gpu alloc=5678268416 ws_max=11453251584 tex_astc=507919744 tex_color=566250112 tex_depth=117211392 tex_msaa=682918016 buf_own=0 buf_guest=128188416 pso=639 fn=719 lib=719 lib_compiled=721 ar_entries=19 ar_files=22 tile_rejected=0 msaa_memoryless=610201920 recipes_bytes=16802444 recipes_pipes=639 recipes_shaders=742
+[hb] gpu alloc=5678252032 ws_max=11453251584 tex_astc=507919744 tex_color=566250112 tex_depth=117211392 tex_msaa=682918016 buf_own=0 buf_guest=128172032 pso=639 fn=719 lib=719 lib_compiled=721 ar_entries=19 ar_files=22 tile_rejected=0 msaa_memoryless=610201920 recipes_bytes=16802444 recipes_pipes=639 recipes_shaders=742
+--- tile_rejected>0 frames
+0
+--- msaa/memoryless lines
+56:vk.cfg effective gen=22 fov=off sharp=0.35 periphery=0.50 vpktaa=0 100% sharp=0.50 scale=1.00 taa_native=0 taa_ui_mask=1 rcas=0.50 asw_off=1 quest3=1 anisotropy=16 prewarm=1 force_1x=0 msaa_override=0 msaa_device_max=4 fov_apply=0 fov_active=0 set_by_app=yes
+1010:vk.cfg effective gen=22 fov=off sharp=0.35 periphery=0.50 vpktaa=0 100% sharp=0.50 scale=1.00 taa_native=0 taa_ui_mask=1 rcas=0.50 asw_off=1 quest3=1 anisotropy=16 prewarm=1 force_1x=0 msaa_override=0 msaa_device_max=4 fov_apply=0 fov_active=0 set_by_app=yes
+1847:gpu.metal.info what=trim level=1 libs_dropped=0 libs_kept=690 libs=0.0 msaa_queued=0.1 args_queued=0.0 msaa_freed_total=0.0 args_freed_total=0.0
+1848:  [vk] [mem] trim (footprint rate): VPKEngine released 0 MiB (libs_dropped=0 libs_kept=690 libs=0.0 msaa_queued=0.1 args_queued=0.0 msaa_freed_total=0.0 args_freed_total=0.0)
+1927:vk.msaa detected eye=1x size=2815x2258 multiview=1 by=multiview
+1932:W/Unity: Ignoring depth surface store action as it is memoryless
+1945:vk.msaa detected eye=4x (changed from 1x) size=2815x2258 multiview=1
+1959:2026-10-22 00:28:47.021 VisionQuestPro[2271:1431050] [aa] detected eye MSAA 4x -> mode auto: game MSAA 4x kept, VPKTAA off | device max 4x | stored vq.aaDetected.com.mrf.Astrea.Gundam
+3757:W/Unity: Ignoring depth surface store action as it is memoryless
+3784:gpu.metal.info what=trim level=1 libs_dropped=0 libs_kept=690 libs=0.0 msaa_queued=596.2 args_queued=0.0 msaa_freed_total=0.0 args_freed_total=0.0
+3785:  [vk] [mem] trim (footprint rate): VPKEngine released 0 MiB (libs_dropped=0 libs_kept=690 libs=0.0 msaa_queued=596.2 args_queued=0.0 msaa_freed_total=0.0 args_freed_total=0.0)
+4855:gpu.metal.info what=trim level=1 libs_dropped=0 libs_kept=690 libs=0.1 msaa_queued=651.3 args_queued=0.0 msaa_freed_total=0.0 args_freed_total=0.0
+4856:  [vk] [mem] trim (footprint rate): VPKEngine released 0 MiB (libs_dropped=0 libs_kept=690 libs=0.1 msaa_queued=651.3 args_queued=0.0 msaa_freed_total=0.0 args_freed_total=0.0)
+5730:gpu.metal.info what=trim level=1 libs_dropped=0 libs_kept=690 libs=0.0 msaa_queued=651.3 args_queued=6.0 msaa_freed_total=0.0 args_freed_total=0.0
+5731:  [vk] [mem] trim (footprint rate): VPKEngine released 0 MiB (libs_dropped=0 libs_kept=690 libs=0.0 msaa_queued=651.3 args_queued=6.0 msaa_freed_total=0.0 args_freed_total=0.0)
+5787:  [ovrp] first-call ovrp_GetSystemRecommendedMSAALevel <- libil2cpp.so+0x30b9804
+5833:W/Unity: Ignoring depth surface store action as it is memoryless
+9541:gpu.metal.info what=trim level=1 libs_dropped=0 libs_kept=688 libs=0.0 msaa_queued=651.3 args_queued=0.0 msaa_freed_total=0.0 args_freed_total=6.0
+9542:  [vk] [mem] trim (footprint rate): VPKEngine released 0 MiB (libs_dropped=0 libs_kept=688 libs=0.0 msaa_queued=651.3 args_queued=0.0 msaa_freed_total=0.0 args_freed_total=6.0)
+9638:W/Unity: Ignoring depth surface store action as it is memoryless
+9652:gpu.metal.info what=trim level=2 libs_dropped=0 libs_kept=688 libs=0.0 msaa_queued=651.3 args_queued=0.0 msaa_freed_total=0.0 args_freed_total=6.0
+9653:  [vk] [mem] trim (system critical): VPKEngine released 0 MiB (libs_dropped=0 libs_kept=688 libs=0.0 msaa_queued=651.3 args_queued=0.0 msaa_freed_total=0.0 args_freed_total=6.0)
+19840:    ovrp_GetSystemRecommendedMSAALevel           x7335
+--- tail 25
+    UnityRenderEvent
+    UnityGetAudioEffectDefinitions
+    UnityPluginUnload
+    UnityRenderingExtEvent
+    UnityRenderingExtQuery
+    ovr_Message_GetNativeMessage
+
+=== OpenXR surface (libklepton_openxr) ===
+  553 entry points served; 0 resolved by the guest, 0 refused by name
+  decommit: 23 MADV_DONTNEED calls, 372 MiB, mode=remap
+  memory: 6969 MiB footprint (peak 7145) of a 8192 MiB budget, 6 low-memory notifications
+[files] final: 183 files, 410 opens (+0 opens of files past the table), size 5524M, read 5922M, mmap'd 0M in 0 files
+[files]   gvr_sequences_assets_s23_b701ce69b2b1cd750fe8cb3035862331.bundle size=1455426K opens=4 read=3299737K mmap=0K(x0)
+[files]   gvr_sequences_assets_s12_22690e0608221398b985a3424cdbbd11.bundle size=659525K opens=3 read=714358K mmap=0K(x0)
+[files]   gvr_sequences_assets_s22_8586c494bc08f60d8c0d95b15e611b59.bundle size=377481K opens=3 read=509689K mmap=0K(x0)
+[files]   gvr_sequences_assets_s06_bf24e60fb389ea3681dc3062187522a9.bundle size=327813K opens=3 read=371992K mmap=0K(x0)
+[files]   gvr_sequences_assets_s01_48b3934eb7281fd64358740fbe1be1e8.bundle size=289706K opens=4 read=351555K mmap=0K(x0)
+[files]   gvr_sequences_assets_s21_2b2b27ebd37b41703ee9118bc4af6e8a.bundle size=277035K opens=3 read=225632K mmap=0K(x0)
+[files]   gvr_sequences_assets_s02_ca085887c3c2f1aa165bd80f7219fff2.bundle size=104910K opens=3 read=114154K mmap=0K(x0)
+[files]   gvr_sequences_assets_s18_81da18a5e1e1c6649684a9e22209c707.bundle size=63844K opens=3 read=92446K mmap=0K(x0)
+[files]   gvr_sequences_assets_s04_bba7ece75723de5fbfb24b5bf6c03e1c.bundle size=235707K opens=2 read=92198K mmap=0K(x0)
+[files]   gvr_shared_assets__96617e5e6dee357d536e0bc0bdc86038.bundle size=543323K opens=3 read=50548K mmap=0K(x0)
+[files]   gvr_sequences_assets_s06s23_50bbc44588bb7b70ab261978c79a89a6.bundle size=35363K opens=3 read=34915K mmap=0K(x0)
+[files]   gvr_sequences_assets_s10_c5641e5b4605a87dba28ae4ed8023cfe.bundle size=116779K opens=2 read=34368K mmap=0K(x0)
+2026-10-22 00:30:42.140 VisionQuestPro[2271:1430678] [app] immersive space ended (phase background)
+#### ./Archivo__18_/2026-10-22_00-30-42-fin-Mobile_Suit_Gundam-_Silv/klepton-boot.log
+1850:[vkagg] +3.607s img n=6 px=76275240 fail=0 [f43 2815x2258 m1 l2]x3 [f129 2815x2258 m1 l2]x3 | vk dt=50 alloc3=7 alloc3_b=1220535296 img_create=6 img_create_px=76275240 img_bind=6 img_create_optimal=6
+2255:[vkagg] +3.769s img n=9 px=103243140 fail=0 [f43 2674x2145 m1 l2]x3 [f129 2674x2145 m1 l2]x3 [f122 2674x2145 m1 l2]x2 [f130 2674x2145 m1 l2]x1 | vk dt=55 alloc0=12 alloc0_b=424493824 free0=9 free0_b=267004416 free1=6 free1_b=56449792 alloc3=6 alloc3_b=1101261312 free3=6 free3_b=1220404224 buf_destroy=8 img_create=18 img_cre
+3769:[vkagg] +8.316s img n=8 px=68828762 fail=0 [f122 2674x2145 m1 l2]x4 [f130 2674x2145 m1 l2]x2 [f124 1x1 m1 l1]x2 | vk dt=50 alloc0=6 alloc0_b=917717760 img_create=8 img_create_px=68828762 img_bind=8 img_create_optimal=8
+3924:[vkagg] +8.477s img n=12 px=152550480 fail=0 [f122 2815x2258 m1 l2]x4 [f43 2815x2258 m1 l2]x3 [f129 2815x2258 m1 l2]x3 [f130 2815x2258 m1 l2]x2 | vk dt=54 alloc0=15 alloc0_b=1284008192 alloc3=6 alloc3_b=1220404224 img_create=21 img_create_px=209763684 img_bind=21 img_create_optimal=21
+5843:[vkagg] +17.521s img n=8 px=76275242 fail=0 [f122 2815x2258 m1 l2]x4 [f130 2815x2258 m1 l2]x2 [f124 1x1 m1 l1]x2 | vk dt=53 alloc0=7 alloc0_b=1017145088 free0=6 free0_b=1017003776 buf_create=3 buf_create_b=156288 buf_destroy=2 buf_bind=3 buf_bind_b=156288 img_create=8 img_create_px=76275242 img_destroy=9 img_bind=8 img_crea
+9661:[vkagg] +38.519s img n=9 px=80469546 fail=0 [f122 2815x2258 m1 l2]x4 [f130 2815x2258 m1 l2]x2 [f124 1x1 m1 l1]x2 [f166 2048x2048 m12 l1]x1 | vk dt=250 alloc0=7 alloc0_b=1019501568 free0=7 free0_b=52775168 alloc1=1 alloc1_b=162560 buf_create=12 buf_create_b=178812 buf_bind=12 buf_bind_b=178812 img_create=9 img_create_px=8046
+10466:[vkagg] +38.975s img n=9 px=6828468 fail=0 [f122 1407x1129 m1 l2]x2 [f122 351x282 m1 l2]x2 [f122 140x112 m1 l2]x2 [f122 70x56 m1 l2]x2 | vk dt=51 alloc0=7 alloc0_b=27393536 alloc1=1 alloc1_b=162560 buf_create=514 buf_create_b=181524 buf_bind=514 buf_bind_b=181524 img_create=9 img_create_px=6828468 img_bind=9 img_create_opt
+#### ./Archivo__18_/2026-10-22_00-28-42-sesion-anterior-Mobile_Suit_Gundam-_Silv_9bbdbde/klepton-boot.log
+1716:[vkagg] +3.571s img n=6 px=76275240 fail=0 [f43 2815x2258 m1 l2]x3 [f129 2815x2258 m1 l2]x3 | vk dt=94 alloc0=11 alloc0_b=826356224 alloc3=4 alloc3_b=610333184 img_create=14 img_create_px=120775904 img_bind=14 img_create_optimal=14
+1849:[vkagg] +3.727s img n=11 px=56684310 fail=0 [f166 512x512 m10 l1]x2 [f166 128x128 m8 l6]x2 [f122 2815x2258 m1 l2]x2 [f124 1x1 m1 l1]x2 | vk dt=53 alloc0=10 alloc0_b=214764800 alloc1=1 alloc1_b=9961728 free1=2 free1_b=33554944 buf_create=6 buf_create_b=10159844 buf_destroy=2 buf_bind=6 buf_bind_b=10159844 img_create=11 img_c
+2092:[vkagg] +3.829s img n=9 px=103243140 fail=0 [f43 2674x2145 m1 l2]x3 [f129 2674x2145 m1 l2]x3 [f122 2674x2145 m1 l2]x2 [f130 2674x2145 m1 l2]x1 | vk dt=50 alloc0=13 alloc0_b=906284800 alloc3=3 alloc3_b=550630656 img_create=16 img_create_px=140532070 img_destroy=5 img_bind=16 img_create_optimal=16
+3712:[vkagg] +8.272s img n=8 px=68828762 fail=0 [f122 2674x2145 m1 l2]x4 [f130 2674x2145 m1 l2]x2 [f124 1x1 m1 l1]x2 | vk dt=52 alloc0=6 alloc0_b=917717760 img_create=8 img_create_px=68828762 img_bind=8 img_create_optimal=8
+3995:[vkagg] +8.856s img n=12 px=152550480 fail=0 [f122 2815x2258 m1 l2]x4 [f43 2815x2258 m1 l2]x3 [f129 2815x2258 m1 l2]x3 [f130 2815x2258 m1 l2]x2 | vk dt=51 alloc0=11 alloc0_b=1665357056 alloc3=3 alloc3_b=610202112 img_create=14 img_create_px=158909008 img_bind=14 img_create_optimal=14
+7007:[vkagg] +22.081s img n=8 px=76275242 fail=0 [f122 2815x2258 m1 l2]x4 [f130 2815x2258 m1 l2]x2 [f124 1x1 m1 l1]x2 | vk dt=51 alloc0=7 alloc0_b=1017145088 buf_create=3 buf_create_b=156288 buf_bind=3 buf_bind_b=156288 img_create=8 img_create_px=76275242 img_bind=8 img_create_optimal=8
+10206:[vkagg] +48.190s img n=8 px=76275242 fail=0 [f122 2815x2258 m1 l2]x4 [f130 2815x2258 m1 l2]x2 [f124 1x1 m1 l1]x2 | vk dt=255 alloc0=6 alloc0_b=1017003776 free0=6 free0_b=1017003776 alloc1=1 alloc1_b=162560 buf_create=9 buf_create_b=171772 buf_destroy=2 buf_bind=9 buf_bind_b=171772 img_create=8 img_create_px=76275242 img_de
+#### ./2026-10-22_00-38-35-fin-The_Thrill_of_the_Fight_/2026-10-22_00-38-35-fin-The_Thrill_of_the_Fight_/klepton-boot.log
+2201:[vkagg] +4.594s img n=6 px=96244992 fail=0 [f43 3552x2258 m1 l2]x3 [f129 3552x2258 m1 l2]x3 | vk dt=50 alloc0=6 alloc0_b=962449920 alloc3=4 alloc3_b=770091008 img_create=9 img_create_px=144367488 img_bind=9 img_create_optimal=9
+2244:[vkagg] +4.644s img n=2 px=257 fail=0 [f126 1x1 m1 l1]x1 [f100 128x1 m1 l2]x1 | vk dt=50 img_create=2 img_create_px=257 img_bind=2 img_create_optimal=2
+DONE
+  [unity-kw] I/OvrAudio: getEventObjRef: Failed to create AnalyticsEvent object
+I/OvrAudio: getEventObjRef: Failed to create AnalyticsEvent object
+  [unity-kw] I/OvrAudio: processEvent: Failed to create events object
+I/OvrAudio: processEvent: Failed to create events object
+  [sl] play state -> STOPPED
+  [sl] play state -> PLAYING
+2026-10-22 00:36:25.837 VisionQuestPro[2308:1448847] [cp] trace f267 fence=0 layers=0 enc=0 cmd=267/266
+2026-10-22 00:36:25.847 VisionQuestPro[2308:1448847] [cp] trace f268 fence=0 layers=0 enc=0 cmd=268/267
+  [ovrp] first-call ovrp_CalculateEyeLayerDesc3 <- libOculusXRPlugin.so+0x10988
+  [ovrp] CalculateEyeLayerDesc: layout=3 2815x2258 mips=1 samples=1 fmt=0 (R8G8B8A8_sRGB -> GL 0x8c43) depth=10 mv=2/7 flags=0x1000 scale=1.000/1.000
+  [asw] eye desc decoded: flags 0x1000 = SpaceWarpDataAllocation, eye depth 10 (None), motion 2 (R16G16B16A16_FP), motion depth 7 (D24_S8), MotionVectorTextureSize 1408x1129 (SpaceWarp storage will be served)
+  [ovrp] first-call ovrp_SetupLayer <- libOculusXRPlugin.so+0x10aec
+  [ovrp] eye layer built at 3552x2258 from a 2815x2258 desc: plugin widening 1.262x1.000 (next eye descs are divided by it)
+  [ovrp] SetupLayer(device=0x11c9e0000) -> layer 1, EYE, 3552x2258 layout=3 fmt=0 samples=1
+  [asw] SetupLayer: eye layer 1 as the provider passed it back: flags 0x1000 depth 10 motion 2 motion-depth 7 MotionVectorTextureSize 1776x1129
+  [ovrp] first-call ovrp_CalculateEyeViewportRect <- libOculusXRPlugin.so+0xea18
+  [ovrp] first-call ovrp_CalculateEyePreviewRect <- libOculusXRPlugin.so+0x10ba0
+  [ovrp] first-call ovrp_GetLayerTextureStageCount <- libOculusXRPlugin.so+0x12d80
+  [ovrp] first-call ovrp_GetLayerTexture2 <- libOculusXRPlugin.so+0x130d4
+gpu.frame f=5 enc=2 render=2 compute=0 naive=2 passes=2 merged=0 hoisted=0 sunk=0 dropped=0 barriers=0 intra=0 raw=0 war=0 waw=0 tile_local=0 tile_rejected=0 saved_mb=0.0 cpu_ms=0.005
+gpu.cut f=5 FrameStart=1 AttachmentChange=1 ClearLoad=0 Feedback=0 TileBudget=0 PinnedCopy=0 ComputeBetween=0 ComputeWork=0 CopyWork=0
+gpu.sec f=4 n=5 p50=4.10 p95=9.01 max=9.01 over10=0
+gpu.time f=4 gpu_ms=4.255
+2026-10-22 00:36:25.857 VisionQuestPro[2308:1448847] [cp] trace f269 fence=0 layers=0 enc=0 cmd=269/268
+vk.eye_image marked=3552x2258 layers=2 samples=1 bound=1
+  [vk] eye image 0x165c8fb00 stage 0 eye 0: vpvk_mark_eye_image -> 1
+  [glfb] eye 0 stage 0 is MTLTexture 0x11d9e2580 slice 0 (3552x2258), from Vulkan — top-left origin, the compositor can sample it
+  [glfb] eye 1 stage 0 is MTLTexture 0x11d9e2580 slice 1 (3552x2258), from Vulkan — top-left origin, the compositor can sample it
+  [vk] eye image stage 0 both eyes (2 array layers) = VkImage 0x165c8fb00 (3552x2258 R8G8B8A8_SRGB)
+  [ovrp] GetLayerTexture2: eye layer 1 eye 0 stage 0 = VkImage 0x165c8fb00 (3552x2258 R8G8B8A8_sRGB, array slice — both eyes share this image)
+vq.fov ovrp ovrp_GetLayerTextureFoveation -> off (no effect)
+----
+382:2026-10-22 00:36:23.157 VisionQuestPro[2308:1448847] [cp] eye 0 display tangents l=1.7321 r=1.0000 t=1.0000 b=1.1918 (105.0 x 95.0 degrees)
+383:2026-10-22 00:36:23.157 VisionQuestPro[2308:1448847] [cp] eye 1 display tangents l=1.0000 r=1.7320 t=1.0000 b=1.1918 (105.0 x 95.0 degrees)
+2082:  [ovrp] eye layer built at 3552x2258 from a 2815x2258 desc: plugin widening 1.262x1.000 (next eye descs are divided by it)
+2306:2026-10-22 00:36:25.958 VisionQuestPro[2308:1448847] [cp] eye placement: v0 slice=0 tan(l1.732 r1.000 t1.000 b1.192) vis=1 flip=1 | v1 slice=1 tan(l1.000 r1.732 t1.000 b1.192) vis=1 flip=1 | rec=yes layered=true stage=0
+DONE
+49:vk.caps features geometryShader=1 tessellationShader=1 imageCubeArray=1 sampleRateShading=1 fragmentStoresAndAtomics=1 vertexPipelineStoresAndAtomics=1 shaderInt16=1 shaderFloat64=0 shaderStorageImageMultisample=0 shaderClipDistance=1 multiViewport=0 astc=1 etc2=1 bc=0 depthClamp=1 independentBle
+279:2026-10-22 00:36:21.804 VisionQuestPro[2308:1448525] [au] microphone disabled — category .playback
+300:2026-10-22 00:36:21.957 VisionQuestPro[2308:1448847] [cp] eye size from rate map screenSize: 6261x5023 (view[0] viewport 6261x5023, 1 colour texture(s))
+413:2026-10-22 00:36:23.179 VisionQuestPro[2308:1448847] [cp]   view[0] -> texture 0 slice 0 viewport MTLViewport(originX: 0.0, originY: 0.0, width: 6261.0, height: 5023.0, znear: 0.0, zfar: 1.0)
+414:2026-10-22 00:36:23.179 VisionQuestPro[2308:1448847] [cp]   view[1] -> texture 0 slice 1 viewport MTLViewport(originX: 0.0, originY: 0.0, width: 6261.0, height: 5023.0, znear: 0.0, zfar: 1.0)
+417:  [vk] [taa-inline] ON (GLES guest on vpgles): resolve at the guest's frame end on VPKEngine's queue; viewport jitter by VPKEngine (set_jitter yes, get_applied yes, native_device yes), frustum jitter off, live eye depth (MSAA included), no depth snapshots
+419:2026-10-22 00:36:23.180 VisionQuestPro[2308:1448847] [taa-inline] mode: resolve at the guest's frame end on VPKEngine's queue, no CPU wait (output shown when its command buffer completes, max 2 in flight), jitter applied by VPKEngine (viewport), pct=100 rcas=0.50
+886:  [vk] features to the guest: vertexStores=1 fragStores=1 geom=1 tess=1 int16=1 multiViewport=0 imgNoFmt=0/0
+2085:  [ovrp] first-call ovrp_CalculateEyeViewportRect <- libOculusXRPlugin.so+0xea18
+2122:  [ovrp] first-call ovrp_GetViewportStencil <- libOculusXRPlugin.so+0x119dc
+2144:  [taa-inline] frustum jitter OFF (VPKEngine jitters the viewport) — frame records carry jitter_mode 0
+2254:  [ovrp] first-call ovrp_EndFrame4 <- libOculusXRPlugin.so+0xe5dc
+2255:  [ovrp] overlay set boundary = ovrp_EndFrame4 (frameIndex of Enqueue'd layers no longer splits the set)
+2256:  [ovrp] frameloop EndFrame4 #0 frameIdx=0 layers=1 sync=0x0 tid=1448979
+2257:  [ovrp] render viewport: eye0 0,0 3552x2258  eye1 0,0 3552x2258 of a 3552x2258 eye texture (100.0% of the width)
+2273:  [ovrp] EndFrame4 #0 -> 0
+2307:2026-10-22 00:36:25.958 VisionQuestPro[2308:1448847] [cp] first render viewport read from the frame record: 0,0 3552x2258 (stage 0, serial 1)
+2374:gpu.diag viewport views=2 x=0.0 y=0.0 w=3552.0 h=2258.0 z=0.00..1.00 scissor=1
+2405:  [ovrp] frameloop EndFrame4 #1 frameIdx=1 layers=1 sync=0x0 tid=1448979
+2471:  [ovrp] EndFrame4 #1 -> 0
+2594:  [ovrp] overlays enqueued on thread 1448906, EndFrame4 on 1448979: the set is closed on the enqueuing thread (layerIndex 0 / repeated id), never half-way from EndFrame4
+2595:  [ovrp] frameloop EndFrame4 #2 frameIdx=2 layers=1 sync=0x0 tid=1448979
+2608:  [ovrp] EndFrame4 #2 -> 0
+2655:  [ovrp] frameloop EndFrame4 #3 frameIdx=3 layers=1 sync=0x0 tid=1448979
+2666:  [ovrp] EndFrame4 #3 -> 0
+2689:  [ovrp] frameloop EndFrame4 #4 frameIdx=4 layers=1 sync=0x0 tid=1448979
+2690:  [ovrp] EndFrame4 #4 -> 0
+2720:  [ovrp] frameloop EndFrame4 #5 frameIdx=5 layers=1 sync=0x0 tid=1448979
+2744:  [ovrp] frameloop EndFrame4 #6 frameIdx=6 layers=1 sync=0x0 tid=1448979
+2760:  [ovrp] frameloop EndFrame4 #7 frameIdx=7 layers=1 sync=0x0 tid=1448979
+DONE
+start=19741
+=== OVRPlugin surface (work list) ===
+  resolved: 142, of which called: 106
+  eye swapchain: 3 stage(s), frames per stage 2848 2848 2847 (8544 begun, 8543 filed on a guessed stage, 0 where the guest's frame index disagreed)
+  ...of which 8543 took the stage the guest NAMED in its submit, 433 of them differing from the frame counter  <-- the counter would have been wrong there
+  ...and 1 frame(s) named the SAME stage again and were dropped as having drawn nothing (KL_OVRP_DROP_REPEAT=0 files them anyway)
+  eye draw targets observed per stage: 0 0 0
+  pose<->picture association: 0 frame(s) drew into no eye stage, 0 into several, 0 drawn off-thread  (clean)
+  --- called ---
+    ovrp_PreInitialize3                          x1
+    ovrp_GetInitialized                          x117506
+    ovrp_Initialize7                             x1
+    ovrp_GetVersion2                             x1
+    ovrp_GetSystemHeadsetType2                   x1
+    ovrp_GetAudioOutId2                          x8545
+    ovrp_GetAudioInId2                           x8545
+    ovrp_WaitToBeginFrame                        x8544
+    ovrp_BeginFrame4                             x8544
+    ovrp_Update3                                 x17088
+    ovrp_EndFrame4                               x8544
+    ovrp_GetNodePoseState3                       x222144
+    ovrp_GetControllerState4                     x42720
+    ovrp_GetNodePresent2                         x119616
+    ovrp_GetNodePositionTracked2                 x119616
+    ovrp_GetNodeOrientationTracked2              x85440
+    ovrp_GetNodeOrientationValid                 x34176
+    ovrp_GetNodePositionValid                    x34784
+    ovrp_RecenterTrackingOrigin2                 x1
+    ovrp_GetAppHasVrFocus2                       x8544
+    ovrp_GetAppHasInputFocus                     x31847
+    ovrp_GetAppShouldRecenter2                   x8544
+    ovrp_GetLocalTrackingSpaceRecenterCount      x15880
+    ovrp_GetUserPresent2                         x17088
+    ovrp_GetSystemProductName2                   x1
+    ovrp_CalculateEyeViewportRect                x6
+    ovrp_GetAppCpuStartToGpuEndTime2             x8544
+    ovrp_GetSystemDisplayFrequency2              x8547
+    ovrp_GetSystemDisplayAvailableFrequencies    x2
+    ovrp_GetSystemBatteryLevel2                  x8544
+    ovrp_GetSystemBatteryTemperature2            x8544
+    ovrp_GetSystemPowerSavingMode2               x8544
+    ovrp_GetAdaptiveGpuPerformanceScale2         x8544
+    ovrp_GetSystemGpuLevel2                      x8544
+    ovrp_GetSystemCpuLevel2                      x8544
+    ovrp_GetAppPerfStats2                        x25632
+    ovrp_SetTrackingOriginType2                  x2
+    ovrp_GetTrackingOriginType2                  x2
+    ovrp_GetBoundaryConfigured2                  x4
+    ovrp_GetBoundaryGeometry3                    x8
+    ovrp_GetDisplayAdapterId2                    x1
+    ovrp_GetNodeFrustum2                         x57392
+    ovrp_SetupLayer                              x3
+    ovrp_CalculateEyeLayerDesc3                  x3
+    ovrp_CalculateEyePreviewRect                 x6
+    ovrp_DestroyLayer                            x2
+    ovrp_GetUserIPD2                             x8544
+    ovrp_GetSystemMultiViewSupported2            x1
+    ovrp_GetViewportStencil                      x9
+    ovrp_SetupDistortionWindow3                  x1
+    ovrp_GetLayerTextureStageCount               x3
+    ovrp_GetLayerTexture2                        x9
+    ovrp_GetLayerTextureFoveation                x9
+---
+DONE
+## ./2026-10-22_00-31-35-sesion-anterior-Maestro_9bbdbde/2026-10-22_00-31-35-sesion-anterior-Maestro_9bbdbde/klepton-boot.log
+2
+
+## ./2026-10-22_00-38-35-fin-The_Thrill_of_the_Fight_/2026-10-22_00-38-35-fin-The_Thrill_of_the_Fight_/klepton-boot.log
+28
+  [input] hand 1 buttons 0 -> 0x8000000 (trig 0.00 grip 1.00)
+  [input] hand 0 buttons 0 -> 0x20000000 (trig 0.00 grip 1.00)
+  [input] hand 0 buttons 0x20000000 -> 0x30000000 (trig 0.13 grip 1.00)
+"Button Menu [L]" "Grip [L]" "Grip [R]" "Trigger [L]" "Trigger [R]" 
+## ./2026_10_21_18_29_21_sesion_anterior_Marvels_Deadpool_VR_9bbdbde/2026-10-21_18-29-21-sesion-anterior-Marvels_Deadpool_VR_9bbdbde/klepton-boot.log
+400
+  [input] hand 1 buttons 0 -> 0x8000000 (trig 0.00 grip 1.00)
+  [input] hand 0 buttons 0 -> 0x20000000 (trig 0.00 grip 1.00)
+  [input] hand 0 buttons 0x20000000 -> 0x20000010 (trig 0.00 grip 1.00)
+"Button A [L]" "Button A [R]" "Button B [L]" "Button B [R]" "Grip [L]" "Grip [R]" "Trigger [L]" "Trigger [R]" 
+## ./2026_10_22_00_40_23_sesion_anterior_UBOAT_The_Silent_Wolf_9bbdbde/2026-10-22_00-40-23-sesion-anterior-UBOAT-_The_Silent_Wolf_9bbdbde/klepton-boot.log
+2
+
+## ./Archivo__18_/2026-10-22_00-28-42-sesion-anterior-Mobile_Suit_Gundam-_Silv_9bbdbde/klepton-boot.log
+26
+  [input] hand 1 buttons 0x1 -> 0x8000001 (trig 0.00 grip 1.00)
+"Button A [R]" "Button B [R]" "Grip [R]" "Trigger [R]" 
+## ./Archivo__18_/2026-10-22_00-30-42-fin-Mobile_Suit_Gundam-_Silv/klepton-boot.log
+400
+  [input] hand 1 buttons 0x3 -> 0x8000003 (trig 0.00 grip 1.00)
+  [input] hand 1 buttons 0x8000003 -> 0xc000003 (trig 0.00 grip 1.00)
+  [input] hand 1 buttons 0xc000003 -> 0xc000001 (trig 1.00 grip 1.00)
+"Button A [L]" "Button A [R]" "Button B [L]" "Button B [R]" "Button Menu [R]" "Grip [L]" "Grip [R]" "Trigger [L]" "Trigger [R]" 
+13://      one whose pose the platform publishes as a proper `.grip`, and the only
+22://    * **Hands**, always. `HandTrackingProvider`'s skeleton supplies the grip
+23://      pose (the middle-finger metacarpal, so a hilt is gripped rather than
+57:    var handTrigger: Float = 0
+103:    static let rHandTrigger: UInt32   = 0x0800_0000   // (v)
+105:    static let lHandTrigger: UInt32   = 0x2000_0000   // (v)
+108:/// The wrist frame ARKit reports, expressed in the grip frame the guest wants.
+112:/// anatomical and mirrored between hands; the guest wants an Oculus Touch grip
+121:///   grip X = wrist +Y, grip Y = wrist +Z, grip Z = wrist +X
+135:/// which means **the visible hilt axis is the grip's X**, not its Z. (It is not
+136:/// our Z because the game does not point a saber down the raw grip axis:
+160:private let klGripFromWrist: [simd_quatf] = {
+172:/// rotation and offset in the *grip's own* frame, applied to every **hand** pose
+179:/// controller's tracked origin sits — while `AccessoryAnchor`'s `.grip` already
+194:/// grip pose does not put the saber where a Quest player's muscle memory
+202:    /// sliding back down its own pointing ray. Directionally right, not gripped
+213:            NSLog("[cp] \(k): hand \(hand) extra grip rotation \(d) degrees")
+217:            NSLog("[cp] \(k): hand \(hand) extra grip offset \(p) m")
+260:/// the grip's frame, per hand with `_L`/`_R`.
+263:/// places. `AccessoryAnchor`'s `.grip` is the platform's own answer to "where
+266:/// grip convention and the pose an *Oculus Touch* controller would have
+285:///     platform's `.grip` is where the hand holds the controller, and what the
+309:    /// `KL_SENSE_PIVOT="x,y,z"` — the point, in the grip's own frame, that
+324:    /// with the same name and units, as `KL_XR_GRIP_PIVOT` on the OpenXR path.
+332:    /// A grip offset is a point on a hand, and the two hands are mirror images:
+353:            NSLog(String(format: "[cp] Sense grip pitch %.3f deg about X "
+360:            NSLog("[cp] \(k): hand \(hand) Sense grip rotation \(d) degrees")
+367:            NSLog("[cp] \(k): hand \(hand) Sense grip offset \(t.pos) m")
+371:            NSLog("[cp] \(k): hand \(hand) Sense grip rotates about \(t.pivot) m")
+379:    /// The default follows ALVR, which rotates both velocities by the grip
+691:    /// Every frame this controller publishes, in its own `.grip` frame — once
+697:    /// exactly where an Oculus Touch's tracked pose, `openxr_grip` and
+700:    /// OpenXR guest asks for grip or aim, and on a Touch those are 10.2 cm and
+703:    /// The half that is not: whether Apple's `.grip` means what OpenXR's grip
+708:    /// below the grip with something near -60 degrees of pitch; a *sign* that
+721:        guard a.accessory.locations.contains(.grip) else {
+722:            NSLog("[cp] sense frames (\(side)): \(a.accessory.name) publishes no .grip")
+725:        let grip = a.coordinateSpace(for: .grip, correction: .none)
+732:        if a.accessory.locations.contains(.gripSurface) {
+733:            rows.append(("gripSurface", a.coordinateSpace(for: .gripSurface, correction: .none)
+DONE
+2026-10-22 00:31:30.237 VisionQuestPro[2280:1437039] [cp] trace f55 fence=0 layers=0 enc=0 cmd=55/54
+2026-10-22 00:31:30.247 VisionQuestPro[2280:1437039] [cp] trace f56 fence=0 layers=0 enc=0 cmd=56/55
+2026-10-22 00:31:30.257 VisionQuestPro[2280:1437039] [cp] trace f57 fence=0 layers=0 enc=0 cmd=57/56
+[hbm] +2.497s foot=472M gfx=213M comp=0M int=231M
+2026-10-22 00:31:30.267 VisionQuestPro[2280:1437039] [cp] trace f58 fence=0 layers=0 enc=0 cmd=58/57
+2026-10-22 00:31:30.277 VisionQuestPro[2280:1437039] [cp] trace f59 fence=0 layers=0 enc=0 cmd=59/58
+2026-10-22 00:31:30.287 VisionQuestPro[2280:1437039] [cp] trace f60 fence=0 layers=0 enc=0 cmd=60/59
+2026-10-22 00:31:30.289 VisionQuestPro[2280:1436625] [vq] Meta API: Mobile Suit Gundam- Silver Phantom v1.1.58.402: 921 nombres únicos (631 ovrp_*, 290 xr*), implementados 721, sin implementar 200
+2026-10-22 00:31:30.297 VisionQuestPro[2280:1437039] [cp] trace f61 fence=0 layers=0 enc=0 cmd=61/60
+2026-10-22 00:31:30.307 VisionQuestPro[2280:1437039] [cp] trace f62 fence=0 layers=0 enc=0 cmd=62/61
+2026-10-22 00:31:30.308 VisionQuestPro[2280:1436625] [vq] Meta API: OpenXR CTS (Khronos) v1.1.58: 532 nombres únicos (0 ovrp_*, 532 xr*), implementados 209, sin implementar 323
+2026-10-22 00:31:30.317 VisionQuestPro[2280:1437039] [cp] trace f63 fence=0 layers=0 enc=0 cmd=63/62
+[hbm] +2.552s foot=472M gfx=213M comp=0M int=231M
+2026-10-22 00:31:30.327 VisionQuestPro[2280:1437039] [cp] trace f64 fence=0 layers=0 enc=0 cmd=64/63
+2026-10-22 00:31:30.337 VisionQuestPro[2280:1437039] [cp] trace f65 fence=0 layers=0 enc=0 cmd=65/64
+2026-10-22 00:31:30.347 VisionQuestPro[2280:1437039] [cp] trace f66 fence=0 layers=0 enc=0 cmd=66/65
+  [net] UDP sockets marked NET_SERVICE_TYPE_RV (interactive AV; KL_NET_RV=0 reverts)
+  [plat] ovr_PlatformInitializeAndroid -> 0 (no Oculus platform service on this host; reporting failure rather than inventing success)
+  [plat] ovr_GetLoggedInUserID -> synthetic offline user (KL_PLAT_USER=1); NOT an entitlement grant
+  [plat] ovr_User_GetLoggedInUser -> request 1, completion queued (type 0x436f345d, payload 0)
+  [dl] /private/var/mobile/Containers/Shared/AppGroup/D3A7E8FD-83B6-476E-A3F1-4B928F10A54F/File Provider Storage/Quest/Cache/Maestro/tree/lib/arm64-v8a/libOculusSpatializerWwise.so: -1 DT_NEEDED
+  [klepton] guest dlopen("libOculusSpatializerWwise.so") FAILED: open /private/var/mobile/Containers/Shared/AppGroup/D3A7E8FD-83B6-476E-A3F1-4B928F10A54F/File Provider Storage/Quest/Cache/Maestro/tree/lib/arm64-v8a/libOculusSpatializerWwise.so: No su
+  [dl] /private/var/mobile/Containers/Shared/AppGroup/D3A7E8FD-83B6-476E-A3F1-4B928F10A54F/File Provider Storage/Quest/Cache/Maestro/tree/lib/arm64-v8a/libOculusSpatializerFMOD.so: -1 DT_NEEDED
+  [klepton] guest dlopen("libOculusSpatializerFMOD.so") FAILED: open /private/var/mobile/Containers/Shared/AppGroup/D3A7E8FD-83B6-476E-A3F1-4B928F10A54F/File Provider Storage/Quest/Cache/Maestro/tree/lib/arm64-v8a/libOculusSpatializerFMOD.so: No such
+  [ovrp] guest dlopen("libOVRPlugin.so") -> synthetic OVRPlugin (the real one NEEDs libvrapi.so) [open #1]
+  [ovrp] guest dlopen("libOVRPlugin.so") -> synthetic OVRPlugin (the real one NEEDs libvrapi.so) [open #2]
+2026-10-22 00:31:30.357 VisionQuestPro[2280:1437039] [cp] trace f67 fence=0 layers=0 enc=0 cmd=67/66
+  [ovrp] first-call ovrp_PreInitialize5 <- libUE4.so+0x5c4e5fc
+  [ovrp] first-call ovrp_GetSystemHeadsetType2 <- libUE4.so+0x5c50520
+2026-10-22 00:31:30.367 VisionQuestPro[2280:1437039] [cp] trace f68 fence=0 layers=0 enc=0 cmd=68/67
+[jni] FindClass  com/epicgames/ue4/VolumeReceiver
+[jni] RegisterNatives  com/epicgames/ue4/VolumeReceiver.volumeChanged(I)V -> 0x14bc9b654
+[jni] GetStaticMethodID  com/epicgames/ue4/VolumeReceiver.startReceiver(Landroid/app/Activity;)V
+[jni] GetStaticMethodID  com/epicgames/ue4/VolumeReceiver.stopReceiver(Landroid/app/Activity;)V
+[jni] FindClass  com/epicgames/ue4/BatteryReceiver
+[jni] RegisterNatives  com/epicgames/ue4/BatteryReceiver.dispatchEvent(III)V -> 0x14bc9b6b4
+[jni] GetStaticMethodID  com/epicgames/ue4/BatteryReceiver.startReceiver(Landroid/app/Activity;)V
+[jni] GetStaticMethodID  com/epicgames/ue4/BatteryReceiver.stopReceiver(Landroid/app/Activity;)V
+[jni] FindClass  com/epicgames/ue4/HeadsetReceiver
+[jni] RegisterNatives  com/epicgames/ue4/HeadsetReceiver.stateChanged(I)V -> 0x14bc9b618
+[jni] GetStaticMethodID  com/epicgames/ue4/HeadsetReceiver.startReceiver(Landroid/app/Activity;)V
+[jni] GetStaticMethodID  com/epicgames/ue4/HeadsetReceiver.stopReceiver(Landroid/app/Activity;)V
+[hbm] +2.607s foot=511M gfx=213M comp=0M int=270M
+2026-10-22 00:31:30.377 VisionQuestPro[2280:1437039] [cp] trace f69 fence=0 layers=0 enc=0 cmd=69/68
+[jni] GetMetaDataString("ue4.displaymetrics.dpi") -> "320.00,320.00,320"
+[jni] FindClass  [I
+gles.diag INVALID_ENUM first at /Users/runner/work/VisionQuestPro/VisionQuestPro/vpkengine/gpu/gles/src/gl_api.cpp:565 (IsEnabled) enum=0x6789 thread=be21a6
+[jni] AndroidThunkJava_SetDesiredViewSize(1920, 1832) — recorded; the window size is kl_ndk's
+[jni] AndroidThunkJava_SetDesiredViewSize(1920, 1832) — recorded; the window size is kl_ndk's
+---
+53:  [gles] vpgles does not resolve 'eglGetProcAddress' (NULL: the gateway answers with its own or a logging stub)
+54:  [dl] libUE4.dylib: 1 unresolved import(s): ovrMessageType_ToString
+171:  libUE4.so: 1 unique unresolved import
+724:  [gles] vpgles does not resolve 'eglGetSystemTimeNV' (NULL: the gateway answers with its own or a logging stub)
+725:  [gles] vpgles does not resolve 'eglPresentationTimeANDROID' (NULL: the gateway answers with its own or a logging stub)
+726:  [gles] vpgles does not resolve 'eglGetNextFrameIdANDROID' (NULL: the gateway answers with its own or a logging stub)
+727:  [gles] vpgles does not resolve 'eglGetCompositorTimingANDROID' (NULL: the gateway answers with its own or a logging stub)
+728:  [gles] vpgles does not resolve 'eglGetFrameTimestampsANDROID' (NULL: the gateway answers with its own or a logging stub)
+729:  [gles] vpgles does not resolve 'eglQueryTimestampSupportedANDROID' (NULL: the gateway answers with its own or a logging stub)
+730:  [gles] vpgles does not resolve 'eglGetCompositorTimingSupportedANDROID' (NULL: the gateway answers with its own or a logging stub)
+731:  [gles] vpgles does not resolve 'eglGetFrameTimestampsSupportedANDROID' (NULL: the gateway answers with its own or a logging stub)
+732:  [gles] vpgles does not resolve 'glDebugMessageLogKHR' (NULL: the gateway answers with its own or a logging stub)
+DONE
+#### UBOAT
+00:40:18 MetricKit: diagnóstico 2026-10-21 22:40:12 +0000 - 2026-10-21 22:40:12 +0000: 1 cierre(s), 0 bloqueo(s), 0 CPU, 0 disco
+00:40:18 MetricKit: CIERRE exceptionType=10 exceptionCode=0 signal=6 terminationReason=Namespace SIGNAL, Code 0x6 versión=0.1.0
+virtualMemoryRegionInfo=?
+callStackTree={
+  "callStacks" : [
+    {
+      "threadAttributed" : false,
+      "callStackRootFrames" : [
+        {
+          "binaryUUID" : "81735C63-F32C-3B32-A99F-4BB21356C037",
+          "offsetIntoBinaryTextSegment" : 3144,
+          "sampleCount" : 1,
+          "subFrames" : [
+            {
+              "binaryUUID" : "81735C63-F32C-3B32-A99F-4BB21356C037",
+#### UBOAT frames
+36:          "offsetIntoBinaryTextSegment" : 3144,
+41:              "offsetIntoBinaryTextSegment" : 40164,
+46:                  "offsetIntoBinaryTextSegment" : 40872,
+51:                      "offsetIntoBinaryTextSegment" : 40368,
+56:                          "offsetIntoBinaryTextSegment" : 573672,
+61:                              "offsetIntoBinaryTextSegment" : 569908,
+66:                                  "offsetIntoBinaryTextSegment" : 546112,
+71:                                      "offsetIntoBinaryTextSegment" : 11592,
+76:                                          "offsetIntoBinaryTextSegment" : 15075036,
+81:                                              "offsetIntoBinaryTextSegment" : 9982292,
+86:                                                  "offsetIntoBinaryTextSegment" : 9981864,
+91:                                                      "offsetIntoBinaryTextSegment" : 7054360,
+96:                                                          "offsetIntoBinaryTextSegment" : 116668,
+101:                                                              "offsetIntoBinaryTextSegment" : 166972,
+103:                                                              "binaryName" : "dyld",
+107:                                                          "binaryName" : "VisionQuestPro",
+111:                                                      "binaryName" : "SwiftUI",
+115:                                                  "binaryName" : "SwiftUI",
+119:                                              "binaryName" : "SwiftUI",
+123:                                          "binaryName" : "UIKitCore",
+127:                                      "binaryName" : "GraphicsServices",
+131:                                  "binaryName" : "CoreFoundation",
+135:                              "binaryName" : "CoreFoundation",
+139:                          "binaryName" : "CoreFoundation",
+143:                      "binaryName" : "libsystem_kernel.dylib",
+147:                  "binaryName" : "libsystem_kernel.dylib",
+151:              "binaryName" : "libsystem_kernel.dylib",
+155:          "binaryName" : "libsystem_kernel.dylib",
+177:          "offsetIntoBinaryTextSegment" : 576412,
+182:              "offsetIntoBinaryTextSegment" : 716976,
+187:                  "offsetIntoBinaryTextSegment" : 687576,
+192:                      "offsetIntoBinaryTextSegment" : 196432,
+197:                          "offsetIntoBinaryTextSegment" : 6444,
+202:                              "offsetIntoBinaryTextSegment" : 107980,
+207:                                  "offsetIntoBinaryTextSegment" : 228020,
+212:                                      "offsetIntoBinaryTextSegment" : 78040,
+217:                                          "offsetIntoBinaryTextSegment" : 79632,
+222:                                              "offsetIntoBinaryTextSegment" : 11768,
+227:                                                  "offsetIntoBinaryTextSegment" : 2320,
+229:                                                  "binaryName" : "libsystem_pthread.dylib",
+233:                                              "binaryName" : "libsystem_pthread.dylib",
+237:                                          "binaryName" : "libdispatch.dylib",
+241:                                      "binaryName" : "libdispatch.dylib",
+245:                                  "binaryName" : "libdispatch.dylib",
+249:                              "binaryName" : "libdispatch.dylib",
+253:                          "binaryName" : "libdispatch.dylib",
+257:                      "binaryName" : "VisionQuestPro",
+261:                  "binaryName" : "VisionQuestPro",
+265:              "binaryName" : "VisionQuestPro",
+269:          "binaryName" : "libswiftCore.dylib",
+285:          "offsetIntoBinaryTextSegment" : 3036,
+290:              "offsetIntoBinaryTextSegment" : 219960,
+295:                  "offsetIntoBinaryTextSegment" : 14472,
+300:                      "offsetIntoBinaryTextSegment" : 77196,
+305:                          "offsetIntoBinaryTextSegment" : 4280,
+310:                              "offsetIntoBinaryTextSegment" : 2332,
+312:                              "binaryName" : "libsystem_pthread.dylib",
+316:                          "binaryName" : "libsystem_pthread.dylib",
+320:                      "binaryName" : "libdispatch.dylib",
+324:                  "binaryName" : "libdispatch.dylib",
+#### MAESTRO
+00:31:32 MetricKit: diagnóstico 2026-10-21 22:31:30 +0000 - 2026-10-21 22:31:30 +0000: 1 cierre(s), 0 bloqueo(s), 0 CPU, 0 disco
+00:31:32 MetricKit: CIERRE exceptionType=1 exceptionCode=2 signal=9 terminationReason=Namespace CODESIGNING, Code 0x2 versión=0.1.0
+virtualMemoryRegionInfo=0 is not in any region.  Bytes before following region: 4337975296
+      REGION TYPE                   START - END        [ VSIZE] PRT/MAX SHRMOD  REGION DETAIL
+      UNUSED SPACE AT START
+--->  
+      __TEXT                     102904000-102c80000   [ 3568K] r-x/r-x SM=COW  /var/containers/Bundle/Application/B2E7A9CA-1B0D-41FE-9E36-3E68AFE51BB0/App.app/VisionQuestPro
+callStackTree={
+  "callStacks" : [
+    {
+      "threadAttributed" : false,
+      "callStackRootFrames" : [
+        {
+          "binaryUUID" : "81735C63-F32C-3B32-A99F-4BB21356C037",
+          "offsetIntoBinaryTextSegment" : 3144,
+#### MAESTRO frames
+40:          "offsetIntoBinaryTextSegment" : 3144,
+45:              "offsetIntoBinaryTextSegment" : 40164,
+50:                  "offsetIntoBinaryTextSegment" : 40872,
+55:                      "offsetIntoBinaryTextSegment" : 40368,
+60:                          "offsetIntoBinaryTextSegment" : 573672,
+65:                              "offsetIntoBinaryTextSegment" : 569908,
+70:                                  "offsetIntoBinaryTextSegment" : 546112,
+75:                                      "offsetIntoBinaryTextSegment" : 11592,
+80:                                          "offsetIntoBinaryTextSegment" : 15075036,
+85:                                              "offsetIntoBinaryTextSegment" : 9982292,
+90:                                                  "offsetIntoBinaryTextSegment" : 9981864,
+95:                                                      "offsetIntoBinaryTextSegment" : 7054360,
+100:                                                          "offsetIntoBinaryTextSegment" : 116668,
+105:                                                              "offsetIntoBinaryTextSegment" : 166972,
+107:                                                              "binaryName" : "dyld",
+111:                                                          "binaryName" : "VisionQuestPro",
+115:                                                      "binaryName" : "SwiftUI",
+119:                                                  "binaryName" : "SwiftUI",
+123:                                              "binaryName" : "SwiftUI",
+127:                                          "binaryName" : "UIKitCore",
+131:                                      "binaryName" : "GraphicsServices",
+135:                                  "binaryName" : "CoreFoundation",
+139:                              "binaryName" : "CoreFoundation",
+143:                          "binaryName" : "CoreFoundation",
+147:                      "binaryName" : "libsystem_kernel.dylib",
+151:                  "binaryName" : "libsystem_kernel.dylib",
+155:              "binaryName" : "libsystem_kernel.dylib",
+159:          "binaryName" : "libsystem_kernel.dylib",
+169:          "offsetIntoBinaryTextSegment" : 576416,
+174:              "offsetIntoBinaryTextSegment" : 191940,
+179:                  "offsetIntoBinaryTextSegment" : 702072,
+184:                      "offsetIntoBinaryTextSegment" : 716720,
+189:                          "offsetIntoBinaryTextSegment" : 687576,
+194:                              "offsetIntoBinaryTextSegment" : 196432,
+199:                                  "offsetIntoBinaryTextSegment" : 6444,
+204:                                      "offsetIntoBinaryTextSegment" : 107980,
+209:                                          "offsetIntoBinaryTextSegment" : 228020,
+214:                                              "offsetIntoBinaryTextSegment" : 78040,
+219:                                                  "offsetIntoBinaryTextSegment" : 79632,
+224:                                                      "offsetIntoBinaryTextSegment" : 11768,
+DONE
+#### ./2026_10_22_00_40_23_sesion_anterior_UBOAT_The_Silent_Wolf_
+attributed thread 24
+libsystem_kernel.dylib+11020
+libsystem_pthread.dylib+8100
+libsystem_c.dylib+493724
+VisionQuestPro+2781276
+VisionQuestPro+2781212
+libUE4.dylib+128993404
+libUE4.dylib+143279988
+libUE4.dylib+143278932
+libUE4.dylib+124198436
+libUE4.dylib+124198056
+libUE4.dylib+124197460
+libUE4.dylib+124196672
+libUE4.dylib+143279988
+libUE4.dylib+143667192
+libUE4.dylib+143735140
+libUE4.dylib+143742828
+libUE4.dylib+115700084
+libUE4.dylib+115691712
+libUE4.dylib+115664428
+libUE4.dylib+115663812
+libUE4.dylib+115678180
+libUE4.dylib+115775476
+VisionQuestPro+2391224
+libsystem_pthread.dylib+4280
+libsystem_pthread.dylib+2332
+#### ./2026-10-22_00-31-35-sesion-anterior-Maestro_9bbdbde/2026-1
+attributed thread 24
+None+0
+libUE4.dylib+156633276
+libUE4.dylib+156469320
+libUE4.dylib+117521220
+libUE4.dylib+117312696
+libUE4.dylib+156427624
+libUE4.dylib+116564884
+libUE4.dylib+94932420
+libUE4.dylib+94901804
+libUE4.dylib+94901188
+libUE4.dylib+94915556
+libUE4.dylib+95012860
+VisionQuestPro+2391224
+libsystem_pthread.dylib+4280
+libsystem_pthread.dylib+2332
+DONE

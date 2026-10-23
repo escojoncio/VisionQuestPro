@@ -852,7 +852,7 @@ static void *heartbeat(void *arg) {
                 fprintf(stderr, "[hb] %02d:%02d:%02d  phase=%s  foot=%lldM avail=%lldM ports=%d fds=%d  %s\n",
                         tm.tm_hour, tm.tm_min, tm.tm_sec, phase,
                         kl_phys_footprint() >> 20, kl_avail_memory() >> 20, ports, fds, mb);
-                char gb[1024];
+                char gb[2048];   // VPKEngine's line ends with the memory ledger (vpvk/config.h)
                 if (kl_vulkan_mem_stats(gb, sizeof gb))
                     fprintf(stderr, "[hb] gpu %s\n", gb);
             } else
@@ -905,7 +905,7 @@ static void *heartbeat(void *arg) {
             long long jump = (prev_foot >= 0 && foot >= 0) ? (foot - prev_foot) >> 20 : 0;
             if (foot >= 0) prev_foot = foot;
             if (jump > 200 || blocked) {
-                char mb2[512], gb2[1024], rg2[512];
+                char mb2[512], gb2[2048], rg2[512];
                 kl_mem_breakdown(mb2, sizeof mb2);
                 if (jump > 200)
                     fprintf(stderr, "[hb] jump +%lld MiB  phase=%s  foot=%lldM avail=%lldM  %s\n",

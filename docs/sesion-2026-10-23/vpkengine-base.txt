@@ -1,0 +1,10 @@
+2ac7923
+ gpu/metal2/include/vpgpu/metal2/metal_backend.h |   6 +-
+ gpu/metal2/src/metal_backend.mm                 | 106 ++++++++++++++++++++----
+ gpu/vulkan/include/vpvk/config.h                |   5 +-
+ gpu/vulkan/src/entry.cpp                        |  37 ++++++---
+ gpu/vulkan/src/pipelines.cpp                    |   5 +-
+ gpu/vulkan/src/platform_metal.mm                |   4 +-
+ gpu/vulkan/src/vpvk.h                           |   5 +-
+ gpu/vulkan/tests/vk_tests.cpp                   |  11 ++-
+ 8 files changed, 141 insertions(+), 38 deletions(-)

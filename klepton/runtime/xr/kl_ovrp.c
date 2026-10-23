@@ -1751,6 +1751,19 @@ static int klovrp_unify_default(void) {
     return 0;
 }
 
+// The same case, DETECTED instead of listed by name: the guest's plugin widened
+// the eye texture (g_widen_w > 1, learned at SetupLayer: it rendered both eyes
+// with one union cone, Oculus symmetric projection) and then submitted both eyes
+// at 0,0 full-width — no per-eye sub-rect saying where each eye's own cone sits
+// in that union. The Thrill of the Fight 2 does exactly this (desc 2815x2258 ->
+// layer 3552x2258, then "render viewport: eye0 0,0 3552x2258 eye1 0,0 3552x2258"):
+// the composite reprojected each eye through its own canted cone a picture drawn
+// through the union, and the eyes looked wrong. Set once by
+// klovrp_note_collapsed_rects; from then on every reader (the guest's frustum,
+// the desc, the frame record) gets the union, so what the guest renders and what
+// the composite unwarps agree. KL_OVRP_UNIFY_FRUSTUM=0 still forces it off.
+static int g_unify_detected;
+
 static const float *klovrp_eye_tan(int eye) {
     // Written by whichever thread reads first and rewritten with identical
     // values by any other — the inputs are the display's, fixed for the run.
@@ -1760,10 +1773,16 @@ static const float *klovrp_eye_tan(int eye) {
     const float (*src)[4] = forced ? (const float (*)[4])forced
                                    : (const float (*)[4])g_eye_tan;
     // Read once: this is on the frame path (every ovrp_GetNodeFrustum2, every
-    // layer desc, every frame record) and the answer cannot change mid-run.
+    // layer desc, every frame record). The env decides for good; without it,
+    // the per-title default can be raised later by the detection above.
     static int on = -1;
-    if (on < 0) on = kl_env_on("KL_OVRP_UNIFY_FRUSTUM", klovrp_unify_default());
-    if (!on) return src[eye];
+    if (on < 0) {
+        const char *e = getenv("KL_OVRP_UNIFY_FRUSTUM");
+        on = (e && *e) ? kl_env_on("KL_OVRP_UNIFY_FRUSTUM", 0) : (klovrp_unify_default() ? 1 : 2);
+    }
+    if (on == 2) {   // auto: the detection decides
+        if (!__atomic_load_n(&g_unify_detected, __ATOMIC_RELAXED)) return src[eye];
+    } else if (!on) return src[eye];
     for (int i = 0; i < 4; i++)
         u[0][i] = u[1][i] = src[0][i] > src[1][i] ? src[0][i] : src[1][i];
     // Said once, and said with the numbers: a frustum that is silently widened
@@ -1771,12 +1790,29 @@ static const float *klovrp_eye_tan(int eye) {
     // texture's pixel budget moved with it.
     static int said;
     if (!said++)
-        fprintf(stderr, "  [ovrp] KL_OVRP_UNIFY_FRUSTUM=1: both eyes told ONE "
+        fprintf(stderr, "  [ovrp] %s: both eyes told ONE "
                         "frustum l=%.4f r=%.4f t=%.4f b=%.4f (the union of the "
                         "two cones — the guest then renders at the union's "
                         "angular density and submits full-width per-eye rects)\n",
+                on == 2 ? "unified frustum (detected: widened layer, collapsed eye rects)"
+                        : "KL_OVRP_UNIFY_FRUSTUM=1",
                 (double)u[0][0], (double)u[0][1], (double)u[0][2], (double)u[0][3]);
     return u[eye];
+}
+
+// EndFrame4's eye-layer rects, checked for the shape described above g_unify_detected: a widened layer (the
+// plugin's union of the two cones) whose two eyes were both submitted at the same origin-anchored rect. A guest
+// that honours per-eye cones in a widened layer (BONELAB) submits two DIFFERENT rects and is left alone.
+static void klovrp_note_collapsed_rects(const int vp[8], const int of[2]) {
+    if (__atomic_load_n(&g_unify_detected, __ATOMIC_RELAXED)) return;
+    if (!(g_widen_w > 1.02f) || of[0] <= 0) return;
+    if (vp[0] != 0 || vp[1] != 0 || memcmp(vp, vp + 4, 4 * sizeof *vp) != 0) return;
+    if (vp[2] > 0 && (float)vp[2] < 0.5f * (float)of[0]) return;   // a half-width eye rect is a per-eye layout
+    __atomic_store_n(&g_unify_detected, 1, __ATOMIC_RELAXED);
+    fprintf(stderr, "  [ovrp] eye layer widened %.3fx by the guest's plugin (one union cone for both eyes) and both "
+                    "eyes submitted at %d,%d %dx%d of %dx%d — no per-eye sub-rect: from now on both eyes are told, "
+                    "and the composite unwarps with, the union cone (KL_OVRP_UNIFY_FRUSTUM=0 turns this off)\n",
+            (double)g_widen_w, vp[0], vp[1], vp[2], vp[3], of[0], of[1]);
 }
 
 // The head->eye offsets, head-local metres, and the guest's whole source of
@@ -3849,6 +3885,7 @@ static uint64_t klovrp_EndFrame4(int guest_frame_index, const void *layer_submit
     klovrp_record_overlays(layer_submits, layer_submit_count);
     int vp[8], of[2] = { 0, 0 };
     int have = klovrp_submit_viewports(layer_submits, layer_submit_count, vp, of);
+    if (have) klovrp_note_collapsed_rects(vp, of);
     // The guest's own answer to "which stage did I just draw?", at submit+0x04.
     // -1 when there is no eye layer in the list to read it from, which is a
     // different thing from stage 0 and has to stay distinguishable — the frame
