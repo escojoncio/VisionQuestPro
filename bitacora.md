@@ -275,3 +275,14 @@ Logs en `QUEST/Registros/` (compartibles desde la app); línea 1 = hash de build
 - Arranque: +5,8..+7,5 s el guest crea imágenes 2816x2260 (606+412 MiB) y 1920x1080; hasta +7,9 s solo se liberan ~330 MiB; `tex_color` queda ~1,6 GB toda la sesión aunque el ojo pasa a 1088x1568. Posible resto sin liberar, NO demostrado.
 - `tex_msaa` 275-551 MiB con `msaa_freed_total=0` en todos los trims (nada llama a liberar MSAA); `msaa_queued` = MSAA vivas, no cola.
 - Pendiente: medir de una vez, en los saltos, qué ocupa `MTLDevice.currentAllocatedSize` (heaps, PSO/funciones, buffers transitorios, drawables) y atribuirlo por categoría; comprobar si las imágenes 2816x2260 iniciales se destruyen; valorar liberar MSAA bajo presión.
+
+## 2026-10-23 — Logs 9bbdbde (Gundam, Thrill of the Fight 2, UBOAT, Maestro, Deadpool): análisis, sin cambios de código
+- Acceso: el Codespace no ve `escojoncio/VPKEngine` (403/404). Añadido `.devcontainer/devcontainer.json` (contents: write sobre VPKEngine; `postCreateCommand` lo clona en `vpkengine/`). Hace falta crear un Codespace NUEVO y aceptar el permiso (un rebuild no lo aplica).
+- MSAA (todos los Unity/Vulkan con MSAA 4x): `tex_msaa` real nunca baja y `msaa_freed_total=0` en todos los trims. Gundam s1: `tex_msaa` 1478 MB, `msaa_queued` 1409,5 MiB, `msaa_memoryless`=610 MB a la vez (el contador NO es memoria memoryless real). Thrill 2: `tex_msaa` 1027 MB. Deadpool: 224 MB, `tile_rejected` acumulado 18656. `tile_rejected=434` no aparece en estos logs.
+- Gundam s1 (22:27:43Z): jetsam a +48 s (`[hb] blocked` foot 8038M, gfx 4697M, lim_rem 153M). s2: pico 7145 MiB, 6 avisos de baja memoria.
+- Mandos Gundam: los botones llegan al runtime (`[input] hand 1 buttons 0 -> 0x1/0x2`, gatillo 1.00) y `[mprobe]` ve OVRInput connected=0x3 active=0x3 desde f1440 (f1200: connected=0x0). `GetControllerState6(mask=0x10/0x60)` -> Connected=0. Causa sin cerrar: falta ver qué lee el guest.
+- Thrill of the Fight 2: `CalculateEyeLayerDesc` 2815x2258, pero `SetupLayer` -> 3552x2258 (ensanche por FOV asimétrico, tangentes l=1.7321 r=1.0, 105x95°); `vk.msaa detected eye=4x size=3552x2258`. Candidato para los ojos mal: el ancho del desc no coincide con el que pide el juego. Sin confirmar.
+- UBOAT (UE4/GLES): SIGABRT a ~5 s por `[klepton] fatal: called unresolved import 'EOS_Initialize'` (Epic Online Services sin shim). Pendiente: stubs EOS offline en Klepton.
+- Maestro (UE4/GLES): cierre CODESIGNING 0x2 con PC=0 (salto a NULL) en un hilo de libUE4. Candidatos: `eglGetProcAddress` que vpgles no resuelve, import `ovrMessageType_ToString` sin resolver. Sin confirmar.
+- Deadpool: jetsam a +225 s (foot 8191M, comp 1914M).
+- Logs en `Visionquestprologs/` (sin versionar).

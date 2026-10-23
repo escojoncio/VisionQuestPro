@@ -1,0 +1,16 @@
+{
+  "name": "VisionQuestPro",
+  "image": "mcr.microsoft.com/devcontainers/universal",
+  "customizations": {
+    "codespaces": {
+      "repositories": {
+        "escojoncio/VPKEngine": {
+          "permissions": {
+            "contents": "write"
+          }
+        }
+      }
+    }
+  },
+  "postCreateCommand": "[ -d vpkengine/.git ] || git clone https://github.com/escojoncio/VPKEngine vpkengine || echo 'VPKEngine no clonado: acepta el permiso al crear el Codespace'"
+}
