@@ -85,6 +85,12 @@ static const char *const UE4_CHAIN[] = {
     "libfmodstudio.so",
     "libovraudio64.so",     // the Oculus audio spatializer
     "libplaycore.so",       // Google Play core — the OBB downloader's half
+    // Epic Online Services. Same shape as FMOD: in libUE4's DT_NEEDED and bound at
+    // relocation time. Absent from the chain, UBOAT's 319 EOS_* imports were left
+    // unresolved and the first one called (EOS_Initialize) aborted the process.
+    // Online/account services: with no backend the SDK fails its login and the
+    // engine takes its offline path. KL_REFUSE_EOS=1 still refuses it (kl_dl.c).
+    "libEOSSDK.so",
     UE4_LIB,
 };
 
@@ -449,6 +455,10 @@ int kl_ue4_load(FILE *out) {
                              UE4_CHAIN[i]);
             continue;
         }
+        if (!strcmp(UE4_CHAIN[i], "libEOSSDK.so") && kl_env_on("KL_REFUSE_EOS", 0)) {
+            if (out) fprintf(out, "  --     %-22s refused (KL_REFUSE_EOS=1)\n", UE4_CHAIN[i]);
+            continue;
+        }
         kl_image *img = kl_load_auto(path);
         if (!img) {
             snprintf(g_err, sizeof g_err, "%s: %s", UE4_CHAIN[i], kl_error());
@@ -505,6 +515,25 @@ int kl_ue4_load(FILE *out) {
                 kl_jni_local_frame_pop();
                 if (out) { fprintf(out, "  libfmod JNI_OnLoad -> 0x%08x "
                                         "(FMOD Android platform init)\n", fr); fflush(out); }
+            }
+        }
+    }
+    // libEOSSDK the same way: on Android System.loadLibrary("EOSSDK") runs its
+    // JNI_OnLoad, which keeps the JavaVM the SDK's platform layer needs. The
+    // chain above only ran DT_INIT.
+    {
+        char epath[1200];
+        snprintf(epath, sizeof epath, "%s/libEOSSDK.so", g_libdir);
+        kl_image *eos = kl_find_image(epath);
+        if (eos) {
+            int (*eonload)(void *, void *) = (int (*)(void *, void *))
+                kl_sym(eos, "JNI_OnLoad");
+            if (eonload) {
+                kl_jni_local_frame_push();
+                int er = eonload(kl_jni_vm(), NULL);
+                kl_jni_local_frame_pop();
+                if (out) { fprintf(out, "  libEOSSDK JNI_OnLoad -> 0x%08x "
+                                        "(Epic Online Services, offline)\n", er); fflush(out); }
             }
         }
     }
