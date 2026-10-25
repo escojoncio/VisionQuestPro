@@ -1847,19 +1847,46 @@ static size_t kl_malloc_usable_size(const void *p) { return malloc_size(p); }
 // is not jemalloc and exports none of them, so unresolved they were NULL and the
 // first call jumped to 0x0 → an uncatchable AMFI SIGKILL. Map them onto the host
 // allocator (Darwin's malloc_size / malloc_good_size give the sized-alloc info
-// jemalloc's flags variants carry). The `flags` (arena/alignment/zero hints) are
-// advisory and dropped; correctness does not depend on them.
+// jemalloc's flags variants carry). The arena/tcache hints in `flags` are
+// advisory and dropped; ZERO (0x40) and the alignment (low 6 bits,
+// MALLOCX_LG_ALIGN: the block is aligned to 1 << n) are a contract and are kept.
+/* KL-TEST-BEGIN mallocx */
 static void  *kl_mallocx(size_t size, int flags) {
     if (!size) size = 1;
-    void *p = malloc(size);
+    void *p = NULL;
+    if (flags & 0x3f) {
+        size_t al = (size_t)1 << (flags & 0x3f);
+        if (al < sizeof(void *)) al = sizeof(void *);
+        if (posix_memalign(&p, al, size)) p = NULL;
+    } else p = malloc(size);
     if (p && (flags & 0x40)) memset(p, 0, size);   // MALLOCX_ZERO
     return p;
 }
-static void  *kl_rallocx(void *p, size_t size, int flags) { (void)flags; return realloc(p, size); }
+static void  *kl_rallocx(void *p, size_t size, int flags) {
+    size_t old = malloc_size(p);
+    void *q;
+    if (flags & 0x3f) {            // realloc cannot promise an alignment: move
+        q = kl_mallocx(size, flags & ~0x40);
+        if (!q) return NULL;
+        memcpy(q, p, old < size ? old : size);
+        free(p);
+    } else {
+        q = realloc(p, size);
+        if (!q) return NULL;
+    }
+    if ((flags & 0x40) && size > old) memset((char *)q + old, 0, size - old);   // MALLOCX_ZERO: the new tail
+    return q;
+}
 static size_t kl_sallocx(const void *p, int flags)        { (void)flags; return malloc_size(p); }
 static void   kl_dallocx(void *p, int flags)              { (void)flags; free(p); }
 static void   kl_sdallocx(void *p, size_t size, int flags){ (void)size; (void)flags; free(p); }
-static size_t kl_nallocx(size_t size, int flags)          { (void)flags; return size ? malloc_good_size(size) : 0; }
+// With an alignment the block comes from posix_memalign, whose usable size is not
+// malloc_good_size's, so answer the request itself: a lower bound, never an overshoot.
+static size_t kl_nallocx(size_t size, int flags) {
+    if (flags & 0x3f) return size;
+    return size ? malloc_good_size(size) : 0;
+}
+/* KL-TEST-END mallocx */
 // xallocx resizes in place and returns the resulting size. We cannot grow in
 // place, so report the current size unchanged; a caller that wanted more sees no
 // growth and falls back to rallocx/realloc, which is the sanctioned path.
