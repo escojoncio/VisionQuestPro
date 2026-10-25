@@ -1536,6 +1536,36 @@ static int klvk_is_eye_image(VkImage img) {
         if (g_eye[st][e].img==img) return 1;
     return 0;
 }
+// Eye images marked through klvk_mark_eye_image (OpenXR projection swapchain
+// images never enter g_eye). Only the twin render pass decision and the eye-size
+// match read this; klvk_eye_image_which / eye_hold keep g_eye semantics. A ring
+// of atomics: marks are a handful per run, reads are on the render-pass path.
+#define KLVK_XEYE_MAX 64
+static VkImage g_xeye[KLVK_XEYE_MAX];
+static unsigned g_xeye_n;
+static void klvk_xeye_add(VkImage img) {
+    if (!img) return;
+    for (unsigned i = 0; i < KLVK_XEYE_MAX; i++)
+        if (__atomic_load_n(&g_xeye[i], __ATOMIC_ACQUIRE) == img) return;
+    unsigned slot = __atomic_fetch_add(&g_xeye_n, 1, __ATOMIC_RELAXED) % KLVK_XEYE_MAX;
+    __atomic_store_n(&g_xeye[slot], img, __ATOMIC_RELEASE);
+}
+static void klvk_xeye_del(VkImage img) {
+    if (!img) return;
+    for (unsigned i = 0; i < KLVK_XEYE_MAX; i++) {
+        VkImage e = img;
+        __atomic_compare_exchange_n(&g_xeye[i], &e, VK_NULL_HANDLE, 0, __ATOMIC_ACQ_REL, __ATOMIC_RELAXED);
+    }
+}
+// Eye image for the twin render pass decision: g_eye (atomic reads) or a marked one.
+static int klvk_twin_eye_image(VkImage img) {
+    if (!img) return 0;
+    for (int st = 0; st < KLVK_EYE_STAGES; st++) for (int e = 0; e < 2; e++)
+        if (__atomic_load_n(&g_eye[st][e].img, __ATOMIC_ACQUIRE) == img) return 1;
+    for (unsigned i = 0; i < KLVK_XEYE_MAX; i++)
+        if (__atomic_load_n(&g_xeye[i], __ATOMIC_ACQUIRE) == img) return 1;
+    return 0;
+}
 static int klvk_layer_image_key(VkImage img) {
     if (!img) return 0;
     for (int i=0;i<KLVK_MAX_LAYERS;i++) { if (!g_layer_img[i].key) continue;
@@ -2361,6 +2391,11 @@ static int klvk_eye_size_match(uint32_t w, uint32_t h) {
     for (int st = 0; st < KLVK_EYE_STAGES; st++)
         for (int e = 0; e < 2; e++)
             if (g_eye[st][e].img && g_eye[st][e].w == w && g_eye[st][e].h == h) return 1;
+    for (unsigned i = 0; i < KLVK_XEYE_MAX; i++) {     // marked (OpenXR) eye images: size from the image registry
+        VkImage m = __atomic_load_n(&g_xeye[i], __ATOMIC_ACQUIRE);
+        uint32_t mw = 0, mh = 0;
+        if (m && klvk_img_info_get(m, NULL, &mw, &mh) && mw == w && mh == h) return 1;
+    }
     return 0;
 }
 
@@ -2435,7 +2470,7 @@ static int klvk_rpd_get(VkRenderPass rp, int *depth_att, int *clears) {
 }
 
 // Framebuffers: their attachment images (up to 8).
-#define KLVK_FBD_MAX 512
+#define KLVK_FBD_MAX 2048
 static struct { VkFramebuffer fb; VkImage img[8]; uint32_t n; } g_fbd[KLVK_FBD_MAX];
 static unsigned g_fbd_n;
 static pthread_mutex_t g_fbd_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -2465,6 +2500,151 @@ static uint32_t klvk_fbd_get(VkFramebuffer fb, VkImage out[8]) {
     }
     pthread_mutex_unlock(&g_fbd_lock);
     return got;
+}
+
+// Twin render passes. The guest always gets its ORIGINAL pass, with the game's
+// DONT_CARE stores, so every render target stays memoryless (Quest GMEM parity).
+// Metal, though, discards a DONT_CARE attachment the compositor / VPKTAA still
+// needs: an MSAA resolve target that IS the eye image (wanderer: black eye) and
+// the eye depth. A pass that has such an attachment gets a hidden twin, identical
+// except that those stores are STORE (same formats / samples / subpasses, so
+// framebuffers and pipelines stay compatible). vkCmdBeginRenderPass(2) swaps the
+// twin in only when the framebuffer really holds an eye image.
+// Open-addressing hash keyed by the pass handle (rp == 0 empty, KLVK_RPT_TOMB
+// freed), grown under the lock: no cap, O(1) lookup.
+// resolve_mask: bit per attachment whose DONT_CARE store the twin forces (< 32);
+// depth_att: the depth attachment whose store the twin forces, or -1.
+#define KLVK_RPT_TOMB ((VkRenderPass)(uintptr_t)1)
+typedef struct { VkRenderPass rp, twin; VkDevice dev; uint32_t resolve_mask; int depth_att; } klvk_rpt_e;
+static klvk_rpt_e *g_rpt;
+static unsigned g_rpt_cap, g_rpt_used, g_rpt_tomb;
+static pthread_mutex_t g_rpt_lock = PTHREAD_MUTEX_INITIALIZER;
+static unsigned klvk_rpt_hash(VkRenderPass rp, unsigned cap) {
+    uint64_t x = (uint64_t)(uintptr_t)rp;
+    x ^= x >> 33; x *= 0xff51afd7ed558ccdull; x ^= x >> 33;
+    return (unsigned)(x & (cap - 1));
+}
+static klvk_rpt_e *klvk_rpt_find(VkRenderPass rp) {      // lock held
+    if (!g_rpt_cap) return NULL;
+    unsigned i = klvk_rpt_hash(rp, g_rpt_cap);
+    for (unsigned n = 0; n < g_rpt_cap; n++, i = (i + 1) & (g_rpt_cap - 1)) {
+        if (!g_rpt[i].rp) return NULL;
+        if (g_rpt[i].rp == rp) return &g_rpt[i];
+    }
+    return NULL;
+}
+static void klvk_rpt_grow(void) {                        // lock held; leaves the table as is when out of memory
+    unsigned ncap = g_rpt_cap ? g_rpt_cap : 256;
+    if (g_rpt_cap && g_rpt_used * 2 >= g_rpt_cap) ncap = g_rpt_cap * 2;   // else it only drops tombstones
+    klvk_rpt_e *n = calloc(ncap, sizeof *n);
+    if (!n) return;
+    for (unsigned i = 0; i < g_rpt_cap; i++) {
+        if (!g_rpt[i].rp || g_rpt[i].rp == KLVK_RPT_TOMB) continue;
+        unsigned j = klvk_rpt_hash(g_rpt[i].rp, ncap);
+        while (n[j].rp) j = (j + 1) & (ncap - 1);
+        n[j] = g_rpt[i];
+    }
+    free(g_rpt); g_rpt = n; g_rpt_cap = ncap; g_rpt_tomb = 0;
+}
+// 0 only when memory ran out.
+static int klvk_rpt_add(VkDevice dev, VkRenderPass rp, VkRenderPass twin, uint32_t resolve_mask, int depth_att) {
+    int ok = 0;
+    pthread_mutex_lock(&g_rpt_lock);
+    klvk_rpt_e *e = klvk_rpt_find(rp);
+    if (!e) {
+        if (!g_rpt_cap || (g_rpt_used + g_rpt_tomb + 1) * 4 > g_rpt_cap * 3) klvk_rpt_grow();
+        if (g_rpt_cap && g_rpt_used + g_rpt_tomb < g_rpt_cap) {
+            unsigned i = klvk_rpt_hash(rp, g_rpt_cap);
+            while (g_rpt[i].rp && g_rpt[i].rp != KLVK_RPT_TOMB) i = (i + 1) & (g_rpt_cap - 1);
+            if (g_rpt[i].rp == KLVK_RPT_TOMB) g_rpt_tomb--;
+            e = &g_rpt[i]; g_rpt_used++;
+        }
+    }
+    if (e) {
+        e->rp = rp; e->twin = twin; e->dev = dev;
+        e->resolve_mask = resolve_mask; e->depth_att = depth_att;
+        ok = 1;
+    }
+    pthread_mutex_unlock(&g_rpt_lock);
+    return ok;
+}
+// Forget the pass; returns its twin (or 0) for the caller to destroy.
+static VkRenderPass klvk_rpt_take(VkRenderPass rp) {
+    VkRenderPass twin = VK_NULL_HANDLE;
+    if (!rp) return twin;
+    pthread_mutex_lock(&g_rpt_lock);
+    klvk_rpt_e *e = klvk_rpt_find(rp);
+    if (e) { twin = e->twin; e->rp = KLVK_RPT_TOMB; e->twin = VK_NULL_HANDLE; g_rpt_used--; g_rpt_tomb++; }
+    pthread_mutex_unlock(&g_rpt_lock);
+    return twin;
+}
+// A pass was just created: an entry left under a reused handle must not survive it.
+static void klvk_rpt_drop_stale(VkDevice dev, VkRenderPass rp, const VkAllocationCallbacks *a) {
+    VkRenderPass twin = klvk_rpt_take(rp);
+    if (!twin) return;
+    PFN_vkDestroyRenderPass dr = real_gdpa ? (PFN_vkDestroyRenderPass)real_gdpa(dev, "vkDestroyRenderPass") : NULL;
+    if (dr) dr(dev, twin, a);
+}
+// vkDestroyDevice: the twins of this device's passes go before it.
+static void klvk_rpt_purge(VkDevice dev) {
+    pthread_mutex_lock(&g_rpt_lock);
+    for (unsigned i = 0; i < g_rpt_cap; i++) {
+        if (!g_rpt[i].rp || g_rpt[i].rp == KLVK_RPT_TOMB || g_rpt[i].dev != dev) continue;
+        PFN_vkDestroyRenderPass dr = real_gdpa ? (PFN_vkDestroyRenderPass)real_gdpa(dev, "vkDestroyRenderPass") : NULL;
+        if (dr && g_rpt[i].twin) dr(dev, g_rpt[i].twin, NULL);
+        g_rpt[i].rp = KLVK_RPT_TOMB; g_rpt[i].twin = VK_NULL_HANDLE; g_rpt_used--; g_rpt_tomb++;
+    }
+    pthread_mutex_unlock(&g_rpt_lock);
+}
+// KL_VK_RESOLVE_STORE: 0 off (no twin), 1 twin for eye passes (default), 2 twin always
+// (the old "force STORE everywhere" behaviour: nothing memoryless).
+static int klvk_resolve_store_mode(void) {
+    static int v = -1;
+    if (v < 0) {
+        const char *e = getenv("KL_VK_RESOLVE_STORE");
+        v = e && e[0] == '2' && !e[1] ? 2 : kl_env_on("KL_VK_RESOLVE_STORE", 1);
+    }
+    return v;
+}
+// The twin to begin `bi->renderPass` with, or 0 to keep the original. Eye = a
+// resolve target the twin stores is an eye image, or (twin stores the depth) any
+// other attachment is (g_eye or a marked OpenXR image, klvk_twin_eye_image). Attachment images: VkRenderPassAttachmentBeginInfo
+// (imageless), else the framebuffer table. An unknown framebuffer, or an
+// attachment past what the table holds, takes the twin: a black eye is worse than
+// one lost memoryless pass.
+static VkRenderPass klvk_rpt_pick(const VkRenderPassBeginInfo *bi) {
+    if (!bi || !bi->renderPass) return VK_NULL_HANDLE;
+    VkRenderPass twin = VK_NULL_HANDLE; uint32_t mask = 0; int datt = -1;
+    pthread_mutex_lock(&g_rpt_lock);
+    klvk_rpt_e *e = klvk_rpt_find(bi->renderPass);
+    if (e) { twin = e->twin; mask = e->resolve_mask; datt = e->depth_att; }
+    pthread_mutex_unlock(&g_rpt_lock);
+    if (!twin) return VK_NULL_HANDLE;
+    if (klvk_resolve_store_mode() == 2) return twin;
+    VkImage im[8] = { 0 };
+    uint32_t n = 0;
+    for (const VkBaseInStructure *p = bi->pNext; p; p = p->pNext) {
+        if (p->sType != VK_STRUCTURE_TYPE_RENDER_PASS_ATTACHMENT_BEGIN_INFO) continue;
+        const VkRenderPassAttachmentBeginInfo *ab = (const VkRenderPassAttachmentBeginInfo *)p;
+        for (uint32_t k = 0; ab->pAttachments && k < ab->attachmentCount && n < 8; k++)
+            im[n++] = klvk_view_image(ab->pAttachments[k]);
+    }
+    if (!n) n = klvk_fbd_get(bi->framebuffer, im);
+    if (!n) return twin;
+    for (uint32_t k = 0; k < 32; k++)
+        if ((mask >> k) & 1u) {
+            if (k >= n || !im[k]) return twin;
+            if (klvk_twin_eye_image(im[k])) return twin;
+        }
+    if (datt >= 0) {
+        for (uint32_t k = 0; k < n; k++)
+            if ((int)k != datt && klvk_twin_eye_image(im[k])) return twin;
+        // A depth-only pass at eye size is still a VPKTAA candidate (klvk_ed_candidate, size match).
+        uint32_t w = 0, h = 0;
+        if ((uint32_t)datt >= n || !im[datt]) return twin;
+        if (klvk_depth_info_get(im[datt], NULL, &w, &h, NULL, NULL) && klvk_eye_size_match(w, h)) return twin;
+    }
+    return VK_NULL_HANDLE;
 }
 
 // Pipeline depthCompareOp census: GREATER/GREATER_OR_EQUAL = reversed-Z.
@@ -3853,6 +4033,7 @@ static void klvk_vpvk_resolve(void) {
 // Tells VPKEngine this VkImage belongs to the eye layer. Under MoltenVK (no vpvk_*) it is a no-op. Logged for every
 // image (a handful per run): -1 means no export: the pipeline gate then treats every pass as hard (waits, never drops).
 static void klvk_mark_eye_image(VkImage img, int stage, int eye) {
+    klvk_xeye_add(img);
     klvk_vpvk_resolve();
     int r = -1;
     if (g_vpvk.mark_eye_image) r = g_vpvk.mark_eye_image((void *)(uintptr_t)img);
@@ -4451,6 +4632,7 @@ static void klvk_retire_forget(klvk_device *d, VkImage img) {
             }
         }
     klvk_img_reg_del(img);
+    klvk_xeye_del(img);
     klvk_img_info_del(img);
     klvk_depth_info_del(img);
     klvk_shadow_forget(img);
@@ -5782,6 +5964,7 @@ static void VKAPI_CALL klvk_DestroyImage(VkDevice dev, VkImage img,
     static PFN_vkDestroyImage real;
     if (!real && real_gdpa) real = (PFN_vkDestroyImage)real_gdpa(dev, "vkDestroyImage");
     klvk_img_reg_del(img);
+    klvk_xeye_del(img);
     klvk_img_info_del(img);
     klvk_depth_info_del(img);
     klvk_shadow_forget(img);
@@ -6225,7 +6408,7 @@ static void klvk_retire_note_pass(const VkRenderPassBeginInfo *bi) {
         for (uint32_t k = 0; ab->pAttachments && k < ab->attachmentCount && n < 8; k++)
             im[n++] = klvk_view_image(ab->pAttachments[k]);
     }
-    if (!n) n = klvk_fbd_get(bi->framebuffer, im);   // filled while VPKTAA depth tracking is on
+    if (!n) n = klvk_fbd_get(bi->framebuffer, im);   // every framebuffer is registered
     if (!n) { im[0] = klvk_fb_image0(bi->framebuffer); n = im[0] ? 1 : 0; }
     for (uint32_t k = 0; k < n; k++) klvk_retire_touch(im[k], "render pass attachment");
 }
@@ -6292,7 +6475,7 @@ static VkResult VKAPI_CALL klvk_CreateFramebuffer(VkDevice dev,
             klvk_eye_fb_note(ak, ci->width, ci->height);   // diagnostic, see kl_vulkan_frame_done
         }
         klvk_asw_fb_add(*out, ci);
-        if (klvk_taa_depth_on()) klvk_fbd_add(*out, ci);
+        klvk_fbd_add(*out, ci);   // eye-pass detection (twin render passes) and VPKTAA depth
         pthread_mutex_lock(&g_fb_map_lock);
         if (g_fb_map_n < KLVK_FB_MAP_MAX) {
             g_fb_map[g_fb_map_n].fb = *out; g_fb_map[g_fb_map_n].img0 = img0;
@@ -6416,7 +6599,11 @@ static void VKAPI_CALL klvk_CmdBeginRenderPass(VkCommandBuffer cb,
     klvk_ed_note_pass(bi);
     if (bi) klvk_prov_pass_begin(cb, bi->framebuffer);
     VkRenderPassBeginInfo tmp; VkClearValue *inj = klvk_probe_inject_clears(bi, &tmp);
-    if (real) real(cb, inj ? &tmp : bi, c);
+    const VkRenderPassBeginInfo *use = inj ? &tmp : bi;
+    VkRenderPassBeginInfo twb;
+    VkRenderPass twin = klvk_rpt_pick(use);    // eye pass: the twin that STOREs (see klvk_rpt_add)
+    if (twin) { twb = *use; twb.renderPass = twin; use = &twb; }
+    if (real) real(cb, use, c);
     free(inj);
 }
 static void VKAPI_CALL klvk_CmdBeginRenderPass2(VkCommandBuffer cb,
@@ -6436,7 +6623,11 @@ static void VKAPI_CALL klvk_CmdBeginRenderPass2(VkCommandBuffer cb,
     if (bi) klvk_prov_pass_begin(cb, bi->framebuffer);
     klvk_ed_note_pass(bi);
     VkRenderPassBeginInfo tmp; VkClearValue *inj = klvk_probe_inject_clears(bi, &tmp);
-    if (real) real(cb, inj ? &tmp : bi, sbi);
+    const VkRenderPassBeginInfo *use = inj ? &tmp : bi;
+    VkRenderPassBeginInfo twb;
+    VkRenderPass twin = klvk_rpt_pick(use);    // eye pass: the twin that STOREs (see klvk_rpt_add)
+    if (twin) { twb = *use; twb.renderPass = twin; use = &twb; }
+    if (real) real(cb, use, sbi);
     free(inj);
 }
 
@@ -6451,11 +6642,9 @@ static VkResult VKAPI_CALL klvk_CreateRenderPass(VkDevice dev,
         VkRenderPass *out) {
     static PFN_vkCreateRenderPass real;
     if (!real && real_gdpa) real = (PFN_vkCreateRenderPass)real_gdpa(dev, "vkCreateRenderPass");
-    // VPKTAA eye depth: remember the depth attachment, and STORE it (DONT_CARE
-    // would discard it on Metal before VPKTAA can read it).
-    int ed_att = -1, ed_clear = 0;
-    VkAttachmentDescription *ed_atts = NULL;
-    VkRenderPassCreateInfo ed_ci;
+    // VPKTAA eye depth: remember the depth attachment. Its DONT_CARE store (Metal
+    // would discard it before VPKTAA can read it) is forced on the twin only.
+    int ed_att = -1, ed_clear = 0, ed_force = 0;
     if (ci && klvk_taa_depth_on() && ci->pAttachments) {
         for (uint32_t sp = 0; sp < ci->subpassCount && ed_att < 0; sp++) {
             const VkAttachmentReference *ds = ci->pSubpasses[sp].pDepthStencilAttachment;
@@ -6464,17 +6653,49 @@ static VkResult VKAPI_CALL klvk_CreateRenderPass(VkDevice dev,
         }
         if (ed_att >= 0 && klvk_is_depth_format(ci->pAttachments[ed_att].format)) {
             ed_clear = ci->pAttachments[ed_att].loadOp == VK_ATTACHMENT_LOAD_OP_CLEAR;
-            if (ci->pAttachments[ed_att].storeOp == VK_ATTACHMENT_STORE_OP_DONT_CARE &&
-                (ci->pAttachments[ed_att].samples == VK_SAMPLE_COUNT_1_BIT || klvk_taa_wants_ms_depth()) &&
-                (ed_atts = malloc(ci->attachmentCount * sizeof *ed_atts))) {
-                memcpy(ed_atts, ci->pAttachments, ci->attachmentCount * sizeof *ed_atts);
-                ed_atts[ed_att].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-                ed_ci = *ci; ed_ci.pAttachments = ed_atts; ci = &ed_ci;
-            }
+            ed_force = ci->pAttachments[ed_att].storeOp == VK_ATTACHMENT_STORE_OP_DONT_CARE &&
+                (ci->pAttachments[ed_att].samples == VK_SAMPLE_COUNT_1_BIT || klvk_taa_wants_ms_depth());
         } else ed_att = -1;
     }
     VkResult r = real ? real(dev, ci, a, out) : VK_ERROR_INITIALIZATION_FAILED;
     if (r == VK_SUCCESS && out && ed_att >= 0) klvk_rpd_add(*out, ed_att, ed_clear);
+    // Hidden twin with the eye stores forced (see klvk_rpt_add); the guest keeps `*out`.
+    if (r == VK_SUCCESS && out) klvk_rpt_drop_stale(dev, *out, a);   // no twin below = no entry for a reused handle
+    if (r == VK_SUCCESS && out && ci && ci->pAttachments) {
+        uint32_t rmask = 0;
+        if (klvk_resolve_store_mode())
+            for (uint32_t sp = 0; sp < ci->subpassCount; sp++) {
+                const VkSubpassDescription *d = &ci->pSubpasses[sp];
+                for (uint32_t k = 0; d->pResolveAttachments && k < d->colorAttachmentCount; k++) {
+                    uint32_t ai = d->pResolveAttachments[k].attachment;
+                    if (ai < ci->attachmentCount && ai < 32 &&
+                        ci->pAttachments[ai].storeOp == VK_ATTACHMENT_STORE_OP_DONT_CARE)
+                        rmask |= 1u << ai;
+                }
+            }
+        VkAttachmentDescription *ta = NULL;
+        if ((rmask || ed_force) && (ta = malloc(ci->attachmentCount * sizeof *ta))) {
+            memcpy(ta, ci->pAttachments, ci->attachmentCount * sizeof *ta);
+            for (uint32_t k = 0; k < ci->attachmentCount && k < 32; k++)
+                if ((rmask >> k) & 1u) ta[k].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+            if (ed_force) ta[ed_att].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+            VkRenderPassCreateInfo tci = *ci; tci.pAttachments = ta;
+            VkRenderPass twin = VK_NULL_HANDLE;
+            if (real(dev, &tci, a, &twin) == VK_SUCCESS) {
+                VKI("CreateRenderPass: twin for %#llx — STORE forced on %u resolve target(s)%s "
+                    "(game's DONT_CARE kept on the original)\n",
+                    (unsigned long long)(uintptr_t)*out, (unsigned)__builtin_popcount(rmask),
+                    ed_force ? " + depth" : "");
+                if (!klvk_rpt_add(dev, *out, twin, rmask, ed_force ? ed_att : -1)) {
+                    VKI("CreateRenderPass: twin table out of memory — eye stores NOT forced for %#llx\n",
+                        (unsigned long long)(uintptr_t)*out);
+                    PFN_vkDestroyRenderPass dr = (PFN_vkDestroyRenderPass)real_gdpa(dev, "vkDestroyRenderPass");
+                    if (dr) dr(dev, twin, a);
+                }
+            }
+            free(ta);
+        }
+    }
     if (r == VK_SUCCESS && out && ci) {   // provenance: which attachments are colour / resolve
         uint8_t role[KLVK_PROV_ATT] = { 0 };
         for (uint32_t sp = 0; sp < ci->subpassCount; sp++) {
@@ -6507,7 +6728,6 @@ static VkResult VKAPI_CALL klvk_CreateRenderPass(VkDevice dev,
                     k, d->pInputAttachments[k].attachment, (int)d->pInputAttachments[k].layout);
         }
     }
-    free(ed_atts);
     return r;
 }
 static VkResult VKAPI_CALL klvk_CreateRenderPass2(VkDevice dev,
@@ -6518,21 +6738,18 @@ static VkResult VKAPI_CALL klvk_CreateRenderPass2(VkDevice dev,
         real = (PFN_vkCreateRenderPass2)real_gdpa(dev, "vkCreateRenderPass2");
         if (!real) real = (PFN_vkCreateRenderPass2)real_gdpa(dev, "vkCreateRenderPass2KHR");
     }
-    // Force STORE on every MSAA resolve target. UE5 (wanderer) resolves its
-    // multiview scene colour into the eye image but marks that resolve attachment
+    // The guest keeps the game's stores (DONT_CARE = memoryless); the stores the
+    // eye needs are forced on a hidden TWIN pass (klvk_rpt_add), begun only when the
+    // framebuffer holds an eye image. UE5 (wanderer) resolves its multiview scene
+    // colour into the eye image but marks that resolve attachment
     // storeOp=DONT_CARE — legal on a Quest tiler where the resolve write survives,
-    // but on Metal/MoltenVK a DONT_CARE resolve attachment maps to a store action
-    // that DISCARDS the resolved pixels, leaving the eye image black. Rewriting the
-    // resolve target's storeOp to STORE makes MoltenVK write it back. Safe for
-    // other titles: a resolve target you keep is exactly one you meant to store, so
-    // this only ever costs a writeback that was already intended. KL_VK_RESOLVE_STORE=0
-    // opts out. Modifies a COPY; the guest's arrays stay untouched.
+    // but on Metal a DONT_CARE resolve attachment maps to a store action that
+    // DISCARDS the resolved pixels, leaving the eye image black. The twin's STORE
+    // makes it write back. KL_VK_RESOLVE_STORE=0 opts out. The guest's arrays stay
+    // untouched (the twin is built from a COPY).
     // VPKTAA eye depth: same as klvk_CreateRenderPass (depth attachment noted,
-    // DONT_CARE store forced to STORE). Applied first; the rewrites below copy
-    // from whatever `ci` points at.
-    int ed_att = -1, ed_clear = 0;
-    VkAttachmentDescription2 *ed_atts = NULL;
-    VkRenderPassCreateInfo2 ed_ci;
+    // its DONT_CARE store forced to STORE on the twin).
+    int ed_att = -1, ed_clear = 0, ed_force = 0;
     if (ci && klvk_taa_depth_on() && ci->pAttachments) {
         for (uint32_t sp = 0; sp < ci->subpassCount && ed_att < 0; sp++) {
             const VkAttachmentReference2 *ds = ci->pSubpasses[sp].pDepthStencilAttachment;
@@ -6541,23 +6758,17 @@ static VkResult VKAPI_CALL klvk_CreateRenderPass2(VkDevice dev,
         }
         if (ed_att >= 0 && klvk_is_depth_format(ci->pAttachments[ed_att].format)) {
             ed_clear = ci->pAttachments[ed_att].loadOp == VK_ATTACHMENT_LOAD_OP_CLEAR;
-            if (ci->pAttachments[ed_att].storeOp == VK_ATTACHMENT_STORE_OP_DONT_CARE &&
-                (ci->pAttachments[ed_att].samples == VK_SAMPLE_COUNT_1_BIT || klvk_taa_wants_ms_depth()) &&
-                (ed_atts = malloc(ci->attachmentCount * sizeof *ed_atts))) {
-                memcpy(ed_atts, ci->pAttachments, ci->attachmentCount * sizeof *ed_atts);
-                ed_atts[ed_att].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-                ed_ci = *ci; ed_ci.pAttachments = ed_atts; ci = &ed_ci;
-            }
+            ed_force = ci->pAttachments[ed_att].storeOp == VK_ATTACHMENT_STORE_OP_DONT_CARE &&
+                (ci->pAttachments[ed_att].samples == VK_SAMPLE_COUNT_1_BIT || klvk_taa_wants_ms_depth());
         } else ed_att = -1;
     }
     VkAttachmentDescription2 *atts = NULL;
     VkRenderPassCreateInfo2 ci2;
     int probe = klvk_eye_probe_on();
     int msaastore = klvk_msaa_store_on();
-    int resolve_store = kl_env_on("KL_VK_RESOLVE_STORE", 1);
     uint32_t probe_att = VK_ATTACHMENT_UNUSED;         // eye resolve target we CLEARed
-    if (ci && ci->attachmentCount && (resolve_store || probe || msaastore)) {
-        int forced = 0, msaa_forced = 0;
+    if (ci && ci->attachmentCount && (probe || msaastore)) {
+        int msaa_forced = 0;
         atts = malloc(ci->attachmentCount * sizeof *atts);
         if (atts) {
             memcpy(atts, ci->pAttachments, ci->attachmentCount * sizeof *atts);
@@ -6569,10 +6780,6 @@ static VkResult VKAPI_CALL klvk_CreateRenderPass2(VkDevice dev,
                     uint32_t ai  = d->pResolveAttachments[k].attachment;                 // resolve target = eye
                     uint32_t src = d->pColorAttachments ? d->pColorAttachments[k].attachment
                                                         : VK_ATTACHMENT_UNUSED;          // MSAA source
-                    if (resolve_store && ai < ci->attachmentCount &&
-                        atts[ai].storeOp == VK_ATTACHMENT_STORE_OP_DONT_CARE) {
-                        atts[ai].storeOp = VK_ATTACHMENT_STORE_OP_STORE; forced++;
-                    }
                     if (mv && probe && ai < ci->attachmentCount) {
                         atts[ai].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR; probe_att = ai;   // discriminator
                     }
@@ -6583,11 +6790,8 @@ static VkResult VKAPI_CALL klvk_CreateRenderPass2(VkDevice dev,
                     }
                 }
             }
-            if (forced || msaa_forced || probe_att != VK_ATTACHMENT_UNUSED) {
+            if (msaa_forced || probe_att != VK_ATTACHMENT_UNUSED) {
                 ci2 = *ci; ci2.pAttachments = atts; ci = &ci2;
-                if (forced)
-                    VKI("CreateRenderPass2: forced STORE on %d resolve target(s) "
-                        "(was DONT_CARE — Metal would discard the resolve)\n", forced);
                 if (probe_att != VK_ATTACHMENT_UNUSED)
                     VKI("CreateRenderPass2: wanderer eye-resolve PROBE armed — att%u "
                         "loadOp->CLEAR (bright magenta); MSAA-source STORE forced on %d att(s)\n",
@@ -6599,6 +6803,43 @@ static VkResult VKAPI_CALL klvk_CreateRenderPass2(VkDevice dev,
     if (r == VK_SUCCESS && out && ed_att >= 0) klvk_rpd_add(*out, ed_att, ed_clear);
     if (r == VK_SUCCESS && out && probe_att != VK_ATTACHMENT_UNUSED)
         klvk_clearpass_add(*out, probe_att);
+    // Hidden twin with the eye stores forced (see klvk_rpt_add); the guest keeps `*out`.
+    if (r == VK_SUCCESS && out) klvk_rpt_drop_stale(dev, *out, a);   // no twin below = no entry for a reused handle
+    if (r == VK_SUCCESS && out && ci && ci->pAttachments) {
+        uint32_t rmask = 0;
+        if (klvk_resolve_store_mode())
+            for (uint32_t sp = 0; sp < ci->subpassCount; sp++) {
+                const VkSubpassDescription2 *d = &ci->pSubpasses[sp];
+                for (uint32_t k = 0; d->pResolveAttachments && k < d->colorAttachmentCount; k++) {
+                    uint32_t ai = d->pResolveAttachments[k].attachment;
+                    if (ai < ci->attachmentCount && ai < 32 &&
+                        ci->pAttachments[ai].storeOp == VK_ATTACHMENT_STORE_OP_DONT_CARE)
+                        rmask |= 1u << ai;
+                }
+            }
+        VkAttachmentDescription2 *ta = NULL;
+        if ((rmask || ed_force) && (ta = malloc(ci->attachmentCount * sizeof *ta))) {
+            memcpy(ta, ci->pAttachments, ci->attachmentCount * sizeof *ta);
+            for (uint32_t k = 0; k < ci->attachmentCount && k < 32; k++)
+                if ((rmask >> k) & 1u) ta[k].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+            if (ed_force) ta[ed_att].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+            VkRenderPassCreateInfo2 tci = *ci; tci.pAttachments = ta;
+            VkRenderPass twin = VK_NULL_HANDLE;
+            if (real(dev, &tci, a, &twin) == VK_SUCCESS) {
+                VKI("CreateRenderPass2: twin for %#llx — STORE forced on %u resolve target(s)%s "
+                    "(game's DONT_CARE kept on the original)\n",
+                    (unsigned long long)(uintptr_t)*out, (unsigned)__builtin_popcount(rmask),
+                    ed_force ? " + depth" : "");
+                if (!klvk_rpt_add(dev, *out, twin, rmask, ed_force ? ed_att : -1)) {
+                    VKI("CreateRenderPass2: twin table out of memory — eye stores NOT forced for %#llx\n",
+                        (unsigned long long)(uintptr_t)*out);
+                    PFN_vkDestroyRenderPass dr = (PFN_vkDestroyRenderPass)real_gdpa(dev, "vkDestroyRenderPass");
+                    if (dr) dr(dev, twin, a);
+                }
+            }
+            free(ta);
+        }
+    }
     if (r == VK_SUCCESS && out && ci) {   // provenance: which attachments are colour / resolve
         uint8_t role[KLVK_PROV_ATT] = { 0 };
         for (uint32_t sp = 0; sp < ci->subpassCount; sp++) {
@@ -6639,8 +6880,16 @@ static VkResult VKAPI_CALL klvk_CreateRenderPass2(VkDevice dev,
         }
     }
     free(atts);
-    free(ed_atts);
     return r;
+}
+// vkDestroyRenderPass: the hidden twin (klvk_rpt_add) goes with its pass.
+static void VKAPI_CALL klvk_DestroyRenderPass(VkDevice dev, VkRenderPass rp,
+        const VkAllocationCallbacks *a) {
+    static PFN_vkDestroyRenderPass real;
+    if (!real && real_gdpa) real = (PFN_vkDestroyRenderPass)real_gdpa(dev, "vkDestroyRenderPass");
+    VkRenderPass twin = klvk_rpt_take(rp);
+    if (real && twin) real(dev, twin, a);
+    if (real) real(dev, rp, a);
 }
 // KL_TRACE: dynamic-rendering census (vkCmdBeginRendering). If the guest renders
 // its eye/menu with VK_KHR_dynamic_rendering there is NO framebuffer and NO
@@ -7300,7 +7549,7 @@ static VkResult VKAPI_CALL klvk_EnumerateDeviceExtensionProperties(
     uint32_t n = 0;
     VkResult r = real(pd, layer, &n, NULL);
     if (r != VK_SUCCESS) return r;
-    VkExtensionProperties *all = calloc(n ? n : 1, sizeof *all);
+    VkExtensionProperties *all = calloc(n + 1, sizeof *all);
     if (!all) return VK_ERROR_OUT_OF_HOST_MEMORY;
     r = real(pd, layer, &n, all);
     if (r != VK_SUCCESS && r != VK_INCOMPLETE) { free(all); return r; }
@@ -7311,6 +7560,16 @@ static VkResult VKAPI_CALL klvk_EnumerateDeviceExtensionProperties(
             !strcmp(e, "VK_KHR_fragment_shading_rate") ||
             !strcmp(e, "VK_QCOM_fragment_density_map_offset")) continue;
         all[k++] = all[i];
+    }
+    // VK_KHR_swapchain is advertised because we implement it (the swapchain is
+    // synthesized here): a guest that checks this list before enabling it finds it.
+    // klvk_CreateDevice drops the name again when the real device lacks it, so it
+    // never reaches vkCreateDevice.
+    if (!layer && !ext_supported(all, k, VK_KHR_SWAPCHAIN_EXTENSION_NAME)) {
+        snprintf(all[k].extensionName, sizeof all[k].extensionName, "%s",
+                 VK_KHR_SWAPCHAIN_EXTENSION_NAME);
+        all[k].specVersion = 70;
+        k++;
     }
     if (!props) { *count = k; free(all); return VK_SUCCESS; }
     uint32_t w = *count < k ? *count : k;
@@ -7428,6 +7687,7 @@ static void VKAPI_CALL klvk_DestroyDevice(VkDevice dev, const VkAllocationCallba
     klvk_device *d = nf ? dev_find(dev) : NULL;
     if (d && d->DeviceWaitIdle) d->DeviceWaitIdle(dev);
     for (unsigned i = 0; d && d->DestroyFence && i < nf; i++) d->DestroyFence(dev, fs[i], NULL);
+    klvk_rpt_purge(dev);
     if (real) real(dev, ac);
 }
 
@@ -9365,7 +9625,7 @@ static const entry g_ours[] = {
     E(CreateFramebuffer), E(CmdBeginRenderPass),
     E(CmdBeginRenderPass2),
     { "vkCmdBeginRenderPass2KHR", (PFN_vkVoidFunction)klvk_CmdBeginRenderPass2 },
-    E(CreateRenderPass), E(CreateRenderPass2),
+    E(CreateRenderPass), E(CreateRenderPass2), E(DestroyRenderPass),
     { "vkCreateRenderPass2KHR", (PFN_vkVoidFunction)klvk_CreateRenderPass2 },
     { "vkCreateRenderPassKHR",  (PFN_vkVoidFunction)klvk_CreateRenderPass },
     E(CmdBeginRendering),
