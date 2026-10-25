@@ -7,13 +7,13 @@
 - 2026-10-25: VPKEngine `662a70b`: todo attachment memoryless diferido; build 698fa20.
 
 ## Current state
-- Última build: 698fa20 (VPKEngine 662a70b). Todo lo de `wip-auditoria` y VPKEngine posterior: unverified en visor; `.mm`/Swift solo compilan en CI.
+- Última build en verde: run CI 40236686338 (commit a5f6bc0, VPKEngine main 935621d). Todo lo de la auditoría: unverified en visor.
 - Causas demostradas (APK + logs) y arreglo en `wip-auditoria`/VPKEngine:
   - Maestro: `GLFuncPointers::glTexBufferEXT`==NULL (vpgles no anunciaba `GL_EXT_texture_buffer`) → VPKEngine `cab00a7`.
   - UBOAT: EOS `Application.getClassLoader`/`ClassLoader.loadClass` simulados → jmethodID 0 → abort → JNI implementado (bloque A).
   - Gundam: `HandsQualityFilter` oculta los brazos si connected no tiene 0x20/0x40 → connected 0x63, active 0x3, in-hand, `HandTrackingEnabled` estable (bloque A; Swift publica Sense adjunto).
 - Pendiente (orden):
-  1. Pasar `wip-auditoria` a `main` y build `[build]` SOLO con visto bueno del usuario (esperar a cambios externos que el usuario anunció).
+  1. Probar la build a5f6bc0 en Maestro, UBOAT, Gundam, Deadpool, RE4 y leer logs. Heap Vulkan de VPKEngine (6 GiB fijo, physical_device.cpp:152): otro proyecto lo hará configurable; VQP debe quedarse en 6 GiB o menos (UE4 dimensiona pool y expulsión con él).
   2. Deadpool jetsam: `MTLDevice.currentAllocatedSize` crece ~10 MB/s con texturas/buffers planos (no atribuido). Leer en el próximo log `[hb] gpu … held_b views args_b buf_int_b taa_b fov_b` para atribuirlo.
   3. Verificar en log: `[dlsym] … -> NULL` (traza siempre activa), `[mprobe f1800/f3600]` detalle de escena (Gundam), `loads_dropped=`, `ml_pool=`, `memoryless_attrib`, `image_buffer_unbound`, `device_feature_not_present`.
   4. Resto auditoría no aplicado: `AMediaMuxer_*` (Gundam, solo grabar); `/proc/stat`, `self/exe`, topology; `ovrp_GetNodePresent`/`PositionTracked` sin sufijo siempre true; 2 tipos de mensaje IAP sin `ovrMessageType` (id 0).
