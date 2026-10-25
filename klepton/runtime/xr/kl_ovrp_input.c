@@ -332,14 +332,68 @@ static ovrpResult klovrp_GetHandState(int step, int hand, void *out) {
 static ovrpResult klovrp_GetHandStateAtTime(double time, int hand, void *out) {
     return hand_state("ovrp_GetHandStateAtTime", hand, time, out);
 }
+// ---- what the app is driven by: controllers or tracked hands ---------------
+// As on a Quest 3 with hand tracking enabled in the system settings: the Hand
+// bits (LHand 0x20 / RHand 0x40) are connected whenever the device has a hand
+// provider, next to the Touch pair. Games read these together (OVRInput's
+// in-hand state is NoHand unless the Hand bits are connected, which hides the
+// arms; the hands manager switches to hands when GetHandTrackingEnabled is
+// true), so every answer comes from here.
+//
+// The Touch pair is ALWAYS connected, attached Sense controller or not: a hand
+// without one is driven by the pinch-as-controller emulation, which is what a
+// title without hand support (or one hand free next to a held controller)
+// plays with. Attachment (kl_ovrp_set_controller_attached, from the GCController
+// set) decides one thing: hand tracking is "enabled" only while no Sense
+// controller is attached.
+static int g_ctrl_attached[2];
+
+void kl_ovrp_set_controller_attached(int hand, int attached) {
+    if (hand < 0 || hand > 1) return;
+    __atomic_store_n(&g_ctrl_attached[hand], attached ? 1 : 0, __ATOMIC_RELAXED);
+}
+
+uint32_t klovrp_ctrl_connected(void) {
+    uint32_t c = 0x3u;                                                  // LTouch | RTouch
+    if (__atomic_load_n(&g_hj_supported, __ATOMIC_RELAXED)) c |= 0x60u; // LHand | RHand
+    return c;
+}
+
+// The Touch controllers that are connected.
+uint32_t klovrp_ctrl_active(void) {
+    return klovrp_ctrl_connected() & 0x3u;
+}
+
+// ovrpNode 3/4 are HandLeft/HandRight and 12/13 ControllerLeft/ControllerRight:
+// the same physical hand (kl_ovrp.c, klovrp_GetNodePoseState_impl).
+static int node_hand(int node) {
+    return (node == 3 || node == 12) ? 0 : (node == 4 || node == 13) ? 1 : -1;
+}
+
+int klovrp_ctrl_in_hand(int node) {
+    int h = node_hand(node);
+    return h >= 0 && (klovrp_ctrl_connected() & (1u << h)) != 0;
+}
+
+// A hand/controller node exists while its Touch controller is connected. Every
+// other node (head, eyes, trackers) is always there.
+int klovrp_node_live(int node) {
+    int h = node_hand(node);
+    return h < 0 || (klovrp_ctrl_connected() & (1u << h)) != 0;
+}
+
 // ovrpResult ovrp_GetHandTrackingEnabled(ovrpBool *out). The gate OVRHand
-// reads before it ever asks for a state; true where the device has a hand
-// provider (a hand out of view is then just "not tracked", as on a Quest).
+// reads before it ever asks for a state. A system setting, not per-frame hand
+// visibility: true where the device has a hand provider and no Sense controller
+// is attached (a hand out of view is then just "not tracked", as on a Quest),
+// false while the controllers drive the app.
 // Not in the Lote 2 list, but nothing above is reachable without it.
 static ovrpResult klovrp_GetHandTrackingEnabled(int32_t *out) {
     kl_ovrp_hit("ovrp_GetHandTrackingEnabled");
     if ((uintptr_t)out < 0x10000u) return KLOVRP_INVALID_PARAM;
-    *out = __atomic_load_n(&g_hj_supported, __ATOMIC_RELAXED) ? 1 : 0;
+    *out = __atomic_load_n(&g_hj_supported, __ATOMIC_RELAXED) &&
+           !__atomic_load_n(&g_ctrl_attached[0], __ATOMIC_RELAXED) &&
+           !__atomic_load_n(&g_ctrl_attached[1], __ATOMIC_RELAXED);
     return KLOVRP_SUCCESS;
 }
 

@@ -1710,6 +1710,11 @@ const klj_binding klj_bind_android[] = {
     {"android/app/Activity",   "getIntent",  "()Landroid/content/Intent;", klj_Activity_getIntent},
     {"android/app/Activity",   "getApplicationContext", "()Landroid/content/Context;",
      klj_Activity_getApplicationContext},
+    // The Application is reached through ActivityThread.getApplication() by
+    // native SDKs with no Context of their own (EOS); its answer is the same
+    // singleton the Activity gives.
+    {"android/app/Application", "getApplicationContext", "()Landroid/content/Context;",
+     klj_Activity_getApplicationContext},
     {"android/util/DisplayMetrics", "<init>", "()V", klj_generic_init},
     // Unity's ReflectionHelper spells every reference return as Object, so it asks
     // for getClass with a signature real Java does not declare. Matching is on the

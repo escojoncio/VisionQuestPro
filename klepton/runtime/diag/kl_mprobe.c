@@ -29,6 +29,9 @@ static struct {
     const char       *(*class_get_name)(Il2CppClass *);
     void             *(*class_get_type)(Il2CppClass *);
     Il2CppObject     *(*type_get_object)(void *);
+    uint8_t           (*class_is_subclass_of)(Il2CppClass *, Il2CppClass *, uint8_t);   // optional
+    const void       *(*method_get_param)(const MethodInfo *, uint32_t);                // optional
+    Il2CppClass      *(*class_from_type)(const void *);                                 // optional
 } il;
 
 // Managed object layouts (v24 / Unity 2019.4, LP64). Only the fields read here.
@@ -65,6 +68,9 @@ static int mprobe_init(void) {
     BIND(class_get_type,            "il2cpp_class_get_type");
     BIND(type_get_object,           "il2cpp_type_get_object");
 #undef BIND
+    *(void **)&il.class_is_subclass_of = kl_sym(img, "il2cpp_class_is_subclass_of");
+    *(void **)&il.method_get_param     = kl_sym(img, "il2cpp_method_get_param");
+    *(void **)&il.class_from_type      = kl_sym(img, "il2cpp_class_from_type");
     g_state = 1;
     return 1;
 }
@@ -420,6 +426,121 @@ static void probe_menu_connected(unsigned frame, unsigned from, unsigned to) {
     fprintf(stderr, "\n");
 }
 
+// ---- per-object census of the KL_PROBE_TYPES set ----------------------------
+// The counts above say an OVRHand / LineRenderer / Canvas EXISTS; "the hands are
+// invisible" and "the menu cannot be selected" need to know whether it is on,
+// on a layer the camera draws, and has a Renderer that is enabled and seen.
+// Printed at most twice (first probe tick after f1800 and after f3600) and at
+// most 8 objects per type. A method this Unity build does not have is skipped
+// without a word, so the lookups here are quiet where find_method is not.
+static const MethodInfo *quiet_method(const char *ns, const char *cls,
+                                      const char *meth, int argc) {
+    Il2CppClass *k = find_class(ns, cls);
+    return k ? il.class_get_method_from_name(k, meth, argc) : NULL;
+}
+
+static int unbox_bool(Il2CppObject *r) { return r ? *(uint8_t *)il.object_unbox(r) : -1; }
+
+static void probe_scene_detail(unsigned frame, Il2CppObject *const *types,
+                               char (*tnames)[64], unsigned n_types,
+                               const MethodInfo *m_findall) {
+    const MethodInfo *m_name   = quiet_method("UnityEngine", "Object", "get_name", 0);
+    const MethodInfo *m_go     = quiet_method("UnityEngine", "Component", "get_gameObject", 0);
+    const MethodInfo *m_tf     = quiet_method("UnityEngine", "Component", "get_transform", 0);
+    const MethodInfo *m_parent = quiet_method("UnityEngine", "Transform", "get_parent", 0);
+    const MethodInfo *m_aself  = quiet_method("UnityEngine", "GameObject", "get_activeSelf", 0);
+    const MethodInfo *m_ahier  = quiet_method("UnityEngine", "GameObject", "get_activeInHierarchy", 0);
+    const MethodInfo *m_layer  = quiet_method("UnityEngine", "GameObject", "get_layer", 0);
+    const MethodInfo *m_getc   = quiet_method("UnityEngine", "GameObject", "GetComponent", 1);
+    const MethodInfo *m_ren_en = quiet_method("UnityEngine", "Renderer", "get_enabled", 0);
+    const MethodInfo *m_ren_vis = quiet_method("UnityEngine", "Renderer", "get_isVisible", 0);
+    const MethodInfo *m_tracked = quiet_method("", "OVRHand", "get_IsTracked", 0);
+    const MethodInfo *m_valid   = quiet_method("", "OVRHand", "get_IsDataValid", 0);
+    // GetComponent has a (string) and a (Type) overload and the name lookup returns the
+    // first 1-arg one: hand it a Type only after its parameter is checked to BE one.
+    if (m_getc) {
+        const void *pt = il.method_get_param && il.class_from_type ? il.method_get_param(m_getc, 0) : NULL;
+        Il2CppClass *pk = pt ? il.class_from_type(pt) : NULL;
+        if (!pk || strcmp(il.class_get_name(pk), "Type") != 0) m_getc = NULL;
+    }
+    Il2CppClass *comp_k = find_class("UnityEngine", "Component");
+    Il2CppClass *ren_k  = find_class("UnityEngine", "Renderer");
+    Il2CppObject *ren_type = ren_k ? il.type_get_object(il.class_get_type(ren_k)) : NULL;
+
+    // Camera.main is the camera the scene is drawn with; an object on a layer
+    // outside its cullingMask is invisible however enabled it is.
+    const MethodInfo *m_cam = quiet_method("UnityEngine", "Camera", "get_main", 0);
+    const MethodInfo *m_cull = quiet_method("UnityEngine", "Camera", "get_cullingMask", 0);
+    if (m_cam && m_cull) {
+        Il2CppObject *cam = invoke(m_cam, NULL, "Camera.main");
+        Il2CppObject *cm = cam ? invoke_on(cam, m_cull, NULL, "Camera.cullingMask") : NULL;
+        char cn[96] = "?";
+        if (cam && m_name) str_ascii(invoke_on(cam, m_name, NULL, "Object.get_name"), cn, sizeof cn);
+        if (cam && cm)
+            fprintf(stderr, "  [mprobe f%u] Camera.main \"%s\" cullingMask=0x%x\n", frame, cn,
+                    *(uint32_t *)il.object_unbox(cm));
+        else
+            fprintf(stderr, "  [mprobe f%u] Camera.main %s\n", frame, cam ? "cullingMask=?" : "<null>");
+    }
+
+    for (unsigned t = 0; t < n_types; t++) {
+        void *ta[1] = { types[t] };
+        Il2CppObject *all = invoke(m_findall, ta, "FindObjectsOfTypeAll");
+        uint32_t n = all ? il.array_length(all) : 0;
+        for (uint32_t i = 0; i < n && i < 8; i++) {
+            Il2CppObject *o = ((Il2CppObject **)((uint8_t *)all + ARR_DATA))[i];
+            if (!o) continue;
+            Il2CppClass *ok = il.object_get_class(o);
+            fprintf(stderr, "  [mprobe f%u] %s[%u] class=%s", frame, tnames[t], i,
+                    ok ? il.class_get_name(ok) : "?");
+            // Everything below asks Component / GameObject members, which is only
+            // sound on a Component (a ScriptableObject would be a bad `this`).
+            if (!ok || !comp_k || !il.class_is_subclass_of ||
+                !il.class_is_subclass_of(ok, comp_k, 0) || !m_go) {
+                fprintf(stderr, "\n");
+                continue;
+            }
+            Il2CppObject *go = invoke_on(o, m_go, NULL, "Component.gameObject");
+            if (!go) { fprintf(stderr, " gameObject=<null>\n"); continue; }
+            char nb[96] = "?";
+            if (m_name) str_ascii(invoke_on(go, m_name, NULL, "Object.get_name"), nb, sizeof nb);
+            fprintf(stderr, " name=\"%s\"", nb);
+            if (m_aself)  fprintf(stderr, " self=%d", unbox_bool(invoke_on(go, m_aself, NULL, "activeSelf")));
+            if (m_ahier)  fprintf(stderr, " hier=%d", unbox_bool(invoke_on(go, m_ahier, NULL, "activeInHierarchy")));
+            if (m_layer) {
+                Il2CppObject *ly = invoke_on(go, m_layer, NULL, "GameObject.layer");
+                if (ly) fprintf(stderr, " layer=%d", *(int32_t *)il.object_unbox(ly));
+            }
+            if (m_getc && ren_type) {
+                void *ra[1] = { ren_type };
+                Il2CppObject *rd = invoke_on(go, m_getc, ra, "GameObject.GetComponent(Renderer)");
+                if (rd) {
+                    fprintf(stderr, " renderer(enabled=%d,visible=%d)",
+                            m_ren_en ? unbox_bool(invoke_on(rd, m_ren_en, NULL, "Renderer.enabled")) : -1,
+                            m_ren_vis ? unbox_bool(invoke_on(rd, m_ren_vis, NULL, "Renderer.isVisible")) : -1);
+                }
+            }
+            if (strcmp(tnames[t], "OVRHand") == 0 && (m_tracked || m_valid))
+                fprintf(stderr, " IsTracked=%d IsDataValid=%d",
+                        m_tracked ? unbox_bool(invoke_on(o, m_tracked, NULL, "OVRHand.IsTracked")) : -1,
+                        m_valid ? unbox_bool(invoke_on(o, m_valid, NULL, "OVRHand.IsDataValid")) : -1);
+            // Parent chain by name; "(off)" marks an ancestor switched off in its own right.
+            fprintf(stderr, " chain:");
+            Il2CppObject *tf = m_tf ? invoke_on(o, m_tf, NULL, "Component.transform") : NULL;
+            for (unsigned d = 0; tf && d < 8; d++) {
+                Il2CppObject *g2 = invoke_on(tf, m_go, NULL, "Component.gameObject");
+                if (!g2) break;
+                char pn[96] = "?";
+                if (m_name) str_ascii(invoke_on(g2, m_name, NULL, "Object.get_name"), pn, sizeof pn);
+                fprintf(stderr, " %s%s%s", d ? "< " : "", pn,
+                        m_aself && unbox_bool(invoke_on(g2, m_aself, NULL, "activeSelf")) == 0 ? "(off)" : "");
+                tf = m_parent ? invoke_on(tf, m_parent, NULL, "Transform.parent") : NULL;
+            }
+            fprintf(stderr, "\n");
+        }
+    }
+}
+
 void kl_mprobe_tick(unsigned frame) {
     // Independent of KL_PROBE_INPUT and of KL_PROBE_FROM: this one has to land
     // BEFORE the throw it exists to describe, and the throw here is on the
@@ -582,8 +703,8 @@ void kl_mprobe_tick(unsigned frame) {
     // the menu pointer chain.
     static const MethodInfo *m_find, *m_findall, *m_vactive, *m_vnode, *m_vpos;
     static Il2CppObject *vrc_type;
-    static Il2CppObject *types[12];
-    static char          tnames[12][64];
+    static Il2CppObject *types[16];
+    static char          tnames[16][64];
     static unsigned      n_types;
     static int resolved_scene;
     if (!resolved_scene) {
@@ -597,10 +718,14 @@ void kl_mprobe_tick(unsigned frame) {
         if (k) vrc_type = il.type_get_object(il.class_get_type(k));
 
         const char *spec = kl_env_str("KL_PROBE_TYPES", "VRUIControls.VRPointer,VRUIControls.VRInputModule,"
-                                                        "VRUIControls.VRLaserPointer,VRUIControls.VRGraphicRaycaster");
+                                                        "VRUIControls.VRLaserPointer,VRUIControls.VRGraphicRaycaster,"
+                                                        "OVRHand,OVRSkeleton,OVRMeshRenderer,OVRSkeletonRenderer,"
+                                                        "OVRControllerHelper,OVRInputModule,OVRRaycaster,OVRGazePointer,"
+                                                        "OVRCameraRig,UnityEngine.LineRenderer,"
+                                                        "UnityEngine.EventSystems.EventSystem,UnityEngine.Canvas");
         char buf[512];
         snprintf(buf, sizeof buf, "%s", spec);
-        for (char *tok = strtok(buf, ","); tok && n_types < 12;
+        for (char *tok = strtok(buf, ","); tok && n_types < 16;
              tok = strtok(NULL, ",")) {
             char ns[64] = "", nm[64];
             const char *dot = strrchr(tok, '.');
@@ -629,6 +754,13 @@ void kl_mprobe_tick(unsigned frame) {
                     b ? (int)il.array_length(b) : -1);
         }
         fprintf(stderr, "  (active/all)\n");
+    }
+    // Per-object detail, twice: first probe tick at/after f1800 and after f3600.
+    static unsigned detail_stage;
+    const unsigned stage = frame >= 3600 ? 2 : frame >= 1800 ? 1 : 0;
+    if (n_types && stage > detail_stage) {
+        detail_stage = stage;
+        probe_scene_detail(frame, types, tnames, n_types, m_findall);
     }
     // Walk each VRController up its parent chain, naming every object and
     // whether it is switched off in its own right (activeSelf). An object can

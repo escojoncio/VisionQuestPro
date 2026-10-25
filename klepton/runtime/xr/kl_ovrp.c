@@ -1068,21 +1068,21 @@ static uint64_t klovrp_GetNodePresent2(int node, int *out) {
     ovrp_hit("ovrp_GetNodePresent2");
     // node comes FIRST (real 0x16f450: w0 = ovrpNode, x1 = int* out) — the
     // last "write a bool" shape this guest has that is NOT a single
-    // pointer. Any node a caller names is one we report; the value is written
-    // for the callers that read it, since at least one (OculusSystem::
-    // GetNodePresent, libOculusXRPlugin+0xf264) only checks the return.
-    (void)node;
-    if (out) *out = 1;
+    // pointer. The value is written for the callers that read it, since at
+    // least one (OculusSystem::GetNodePresent, libOculusXRPlugin+0xf264) only
+    // checks the return. Head always; a hand/controller node only while that
+    // controller is connected (klovrp_node_live).
+    if (out) *out = klovrp_node_live(node);
     return OVRP_SUCCESS;
 }
 
 // Another node-first predicate, real 0x16f4b0 is the same (int node, int *out)
 // shape as GetNodePresent2 — w0=node, x1=out. Orientation IS tracked for
-// every node we report poses for.
+// every node we report poses for, so it follows klovrp_node_live like the
+// position probes.
 static uint64_t klovrp_GetNodeOrientationTracked2(int node, int *out) {
     ovrp_hit("ovrp_GetNodeOrientationTracked2");
-    (void)node;
-    if (out) *out = 1;
+    if (out) *out = klovrp_node_live(node);
     return OVRP_SUCCESS;
 }
 
@@ -2224,7 +2224,8 @@ static uint64_t klovrp_GetTrackingTransformRelativePose(float *out, int origin);
 
 // The per-frame node loop's tracked/valid probes (0x9bbe78..0x9bbeb4): u32
 // out-param, which is why these cannot be shared handlers. Tracked and valid
-// is the honest answer for the head we pose ourselves.
+// is the honest answer for the head we pose ourselves; a hand/controller node
+// answers klovrp_node_live (its Touch controller connected).
 //
 // These return ovrpResult, NOT ovrpBool — the answer is the out-param and
 // SUCCESS IS 0. Returning OVRP_TRUE (1) here read as a failure code, and the
@@ -2238,7 +2239,7 @@ static uint64_t klovrp_GetTrackingTransformRelativePose(float *out, int origin);
 static uint64_t node_tracked(const char *name, int n, uint32_t *out) {
     ovrp_hit(name);
     ovrp_log_arg(name, n, __builtin_return_address(0));
-    *out = 1;
+    *out = (uint32_t)klovrp_node_live(n);
     return OVRP_SUCCESS;
 }
 static uint64_t klovrp_GetNodePositionTracked2(int n, uint32_t *o) {
@@ -5103,9 +5104,9 @@ static ovrpVector3f klovrp_GetBoundaryDimensions(void) {
 
 // Controller masks (metadata OVRPlugin.Controller): LTouch=1, RTouch=2,
 // Touch=3, Remote=4, Gamepad=0x10, LHand=0x20, RHand=0x40, Hands=0x60,
-// Active=0x80000000. Only the Touch controllers exist here, so a mask asking
-// for anything else (Remote/Gamepad/Hands) connects nothing. Active expands
-// to the controllers that are present.
+// Active=0x80000000. A mask is answered with the bits klovrp_ctrl_connected
+// has (Touch, hands; never Remote/Gamepad); only Touch bits carry button
+// state. Active expands to klovrp_ctrl_active.
 #define OVRP_CTRL_LTOUCH 0x1u
 #define OVRP_CTRL_RTOUCH 0x2u
 #define OVRP_CTRL_ACTIVE 0x80000000u
@@ -5203,8 +5204,9 @@ static void fill_controller_state(int mask, void *out, int version) {
     // Sizes the real builds write: State 48, State2 64, State4 96, State5 100, State6 108.
     memset(out, 0, version >= 6 ? 108 : version == 5 ? 100 : version >= 4 ? 0x60 : version == 2 ? 0x40 : 0x30);
     uint32_t m = (uint32_t)mask;
-    if (m & OVRP_CTRL_ACTIVE) m |= OVRP_CTRL_LTOUCH | OVRP_CTRL_RTOUCH;
-    uint32_t conn = m & (OVRP_CTRL_LTOUCH | OVRP_CTRL_RTOUCH);
+    if (m & OVRP_CTRL_ACTIVE) m |= klovrp_ctrl_active();
+    uint32_t avail = m & klovrp_ctrl_connected();         // what the mask asked for AND is connected
+    uint32_t conn = avail & (OVRP_CTRL_LTOUCH | OVRP_CTRL_RTOUCH);   // the ones that carry state
     uint32_t fake = conn ? klovrp_fake_buttons() : 0;
     float fake_trig = conn ? klovrp_fake_trigger() : 0.0f;
     uint8_t *b = out;
@@ -5215,7 +5217,7 @@ static void fill_controller_state(int mask, void *out, int version) {
     // script is timed, so two reads inside one fill could straddle a press's
     // end and hand the guest a button that is down in Buttons and up in Touches.
     klovrp_input_state in[2] = { klovrp_input(0), klovrp_input(1) };
-    w[0] = conn;                                        // ConnectedControllers
+    w[0] = avail;                                       // ConnectedControllers
     if (conn & OVRP_CTRL_LTOUCH) {
         w[1] |= in[0].buttons;                          // Buttons
         w[2] |= klovrp_raw_touch(0, in[0].touches);                          // Touches
@@ -9390,36 +9392,47 @@ static uint64_t klovrp_GetHmdColorDesc(void) {
     return 3;
 }
 
-// The controller masks: LTouch | RTouch — scalar returns in every form
+// The controller masks, from klovrp_ctrl_connected / klovrp_ctrl_active (kl_ovrp_input.c):
+// the Touch pair plus the hand bits — scalar returns in the un-suffixed forms
 // (OVRPlugin.cs: Controller ovrp_GetActiveController(), uint ...2()).
 static uint64_t klovrp_GetActiveController(void) {
     ovrp_hit("ovrp_GetActiveController");
-    return 3;
+    return klovrp_ctrl_active();
 }
 static uint64_t klovrp_GetConnectedControllers(void) {
     ovrp_hit("ovrp_GetConnectedControllers");
-    return 3;
+    return klovrp_ctrl_connected();
 }
 // The ...2 forms are ovrpResult f(unsigned *out) (1.117: RESULT{-1002,-1001,0},
 // a 4-byte out through x0) - the mask goes through the pointer, 0 is success.
 static uint64_t klovrp_GetActiveController2(uint32_t *out) {
     ovrp_hit("ovrp_GetActiveController2");
     if (!out) return OVRP_FAIL_INVALID_PARAM;
-    *out = 3;
+    *out = klovrp_ctrl_active();
     return OVRP_SUCCESS;
 }
 static uint64_t klovrp_GetConnectedControllers2(uint32_t *out) {
     ovrp_hit("ovrp_GetConnectedControllers2");
     if (!out) return OVRP_FAIL_INVALID_PARAM;
-    *out = 3;
+    *out = klovrp_ctrl_connected();
     return OVRP_SUCCESS;
 }
-// (ovrpStep, ovrpNode, ovrpBool*): the PSVR2 controllers are always in hand.
+// (ovrpStep, ovrpNode, ovrpBool*): the PSVR2 controllers are in hand while connected.
 static uint64_t klovrp_GetControllerIsInHand(int step, int node, int32_t *out) {
     ovrp_hit("ovrp_GetControllerIsInHand");
     (void)step;
     if (!out) return OVRP_FAIL_INVALID_PARAM;
-    *out = (node == 3 || node == 4 || node == 12 || node == 13);
+    *out = klovrp_ctrl_in_hand(node);
+    return OVRP_SUCCESS;
+}
+// (ovrpHand, ovrpInteractionProfile*): OVRPlugin.InteractionProfile None 0 /
+// Touch 1 / TouchPro 2 / TouchPlus 4 (read from the Gundam IL2CPP metadata).
+// The Sense pair presents as the Quest Touch profile, per hand with a
+// connected Touch controller; None otherwise.
+static uint64_t klovrp_GetCurrentInteractionProfile(int hand, int *out) {
+    ovrp_hit("ovrp_GetCurrentInteractionProfile");
+    if (!out) return OVRP_FAIL_INVALID_PARAM;
+    *out = ((unsigned)hand < 2 && (klovrp_ctrl_connected() & (1u << hand))) ? 1 : 0;
     return OVRP_SUCCESS;
 }
 static uint64_t klovrp_GetHandNodePoseStateLatency(double *out) {
@@ -9826,6 +9839,7 @@ static const struct { const char *name; void *fn; } g_ovrp_impl[] = {
     {"ovrp_GetActiveController2", (void *)klovrp_GetActiveController2},
     {"ovrp_GetConnectedControllers2", (void *)klovrp_GetConnectedControllers2},
     {"ovrp_GetControllerIsInHand", (void *)klovrp_GetControllerIsInHand},
+    {"ovrp_GetCurrentInteractionProfile", (void *)klovrp_GetCurrentInteractionProfile},
     {"ovrp_GetHandNodePoseStateLatency", (void *)klovrp_GetHandNodePoseStateLatency},
     {"ovrp_IsLayerShapeSupported", (void *)klovrp_IsLayerShapeSupported},
     {"ovrp_GetAppFramerate",   (void *)klovrp_GetAppFramerate},
@@ -9935,10 +9949,8 @@ static const char *const g_ovrp_result_ok[] = {
     // Per-eye buffer sharpening hint (wanderer, UE5). Advisory image post; nothing
     // to configure on the visionOS compositor path, so accept the set as a no-op.
     "ovrp_SetEyeBufferSharpenType",
-    // wanderer polls the active interaction profile per frame. Success + a pre-zeroed
-    // out reads as "profile 0"; controllers still flow through GetControllerState6, so
-    // this only gates a binding-string lookup the guest does not need on this path.
-    "ovrp_GetCurrentInteractionProfile",
+    // (ovrp_GetCurrentInteractionProfile is served for real now: Touch per hand
+    // with a connected controller, see klovrp_GetCurrentInteractionProfile.)
     // Environment depth (Quest 3 passthrough occlusion) — wanderer probes the frame
     // descriptor. No depth pipe on visionOS; success + a zeroed desc reads as an
     // empty/absent depth frame, which the guest treats as "no occlusion this frame".

@@ -135,6 +135,16 @@ float klovrp_guest_origin_y(void);
 float klovrp_measured_eye_height(void);
 // kl_ovrp_tracking_origin() (kl_ovrp.h): 0 eye, 1 floor, 2 stage.
 
+// ---- controller / hand coherence (defined in kl_ovrp_input.c) --------------
+// The ONE answer to "what is the app driven by", shared by every query that
+// can disagree about it. ovrpController bits: LTouch 1, RTouch 2, LHand 0x20,
+// RHand 0x40. The Touch pair is always connected (pinch emulation drives a hand
+// without a Sense controller), the Hand bits follow the hand-tracking provider.
+uint32_t klovrp_ctrl_connected(void);   // ovrp_GetConnectedControllers
+uint32_t klovrp_ctrl_active(void);      // ovrp_GetActiveController
+int      klovrp_ctrl_in_hand(int node); // ovrp_GetControllerIsInHand (nodes 3/4/12/13)
+int      klovrp_node_live(int node);    // ovrp node present / tracked: head always
+
 // ---- events (ovrp_PollEvent2 / ovrp_PollEvent) ------------------------------
 // type: ovrpEventType value. payload/len: the bytes of the event-specific struct
 // (what ovrp_PollEvent2 returns through *eventData; for ovrp_PollEvent they are

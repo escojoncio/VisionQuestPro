@@ -854,24 +854,44 @@ static void *kl_dl_interpose(const char *name, void *real);
 // that asked. A NULL returned here and then CALLED is the jump-to-0x0 AMFI kills
 // as an "Invalid Page" (OLAR) — uncatchable, so the crash report cannot name the
 // culprit, but the last line this prints before the kill does.
-// Default the dlsym-NULL trace ON for titles stuck in the jump-to-0x0 SIGKILL
-// with nothing else naming the culprit — olar dies right after libmrutilitykit
-// shared loads, and on device the user cannot set env, so it has to be the
-// default there. KL_TRACE_DLSYM still overrides either way.
-static int kl_dlsym_trace_default(void) {
-    static const char *on[] = { "olar" };
-    const char *t = kl_driver_target_name();
-    if (t) for (unsigned i = 0; i < sizeof on / sizeof on[0]; i++)
-        if (strcmp(t, on[i]) == 0) return 1;
-    return 0;
-}
-static void *klb_dlsym_null(const char *name) {
-    if (kl_env_on("KL_TRACE_DLSYM", kl_dlsym_trace_default())) {
-        size_t off = 0;
-        const char *who = kl_addr_image(__builtin_return_address(0), &off);
-        fprintf(stderr, "  [dlsym] '%s' -> NULL (undefined) — asked from %s+0x%zx; "
-                        "calling this is a jump-to-0x0\n",
-                name ? name : "(null)", who ? who : "(host)", off);
+// Default the dlsym-NULL trace ON for every title: on device the user cannot set
+// env, and the target name is the game folder's, so a per-title list never
+// matched (Maestro died in a jump-to-0x0 with nothing naming the culprit).
+// KL_TRACE_DLSYM=0 turns it off. Each name prints once, so a guest probing the
+// same missing symbol in a loop cannot flood the log.
+// `bad_handle` is non-NULL for the unknown-handle path (a NULL handle is
+// RTLD_DEFAULT and never reaches it), `ret` is the caller of klb_dlsym.
+static void *klb_dlsym_null(const char *name, void *ret, void *bad_handle) {
+    if (kl_env_on("KL_TRACE_DLSYM", 1)) {
+        static pthread_mutex_t seen_lock = PTHREAD_MUTEX_INITIALIZER;
+        static char *seen[512];
+        static unsigned nseen;
+        const char *nm = name ? name : "(null)";
+        int first = 1;
+        pthread_mutex_lock(&seen_lock);
+        for (unsigned i = 0; i < nseen; i++) if (strcmp(seen[i], nm) == 0) { first = 0; break; }
+        // Table full: new names can no longer be remembered, so say so once and stop
+        // printing them rather than repeating every call.
+        static int full_said;
+        int say_full = 0;
+        if (first && nseen < sizeof seen / sizeof seen[0]) seen[nseen++] = strdup(nm);
+        else if (first) { first = 0; say_full = !full_said; full_said = 1; }
+        pthread_mutex_unlock(&seen_lock);
+        if (say_full)
+            fprintf(stderr, "  [dlsym] seen-name table full (%zu) — further unresolved names are not listed\n",
+                    sizeof seen / sizeof seen[0]);
+        if (first) {
+            size_t off = 0;
+            const char *who = kl_addr_image(ret, &off);
+            if (bad_handle)
+                fprintf(stderr, "  [dlsym] '%s' -> NULL (unknown handle %p) — asked from %s+0x%zx; "
+                                "calling this is a jump-to-0x0\n",
+                        nm, bad_handle, who ? who : "(host)", off);
+            else
+                fprintf(stderr, "  [dlsym] '%s' -> NULL (undefined) — asked from %s+0x%zx; "
+                                "calling this is a jump-to-0x0\n",
+                        nm, who ? who : "(host)", off);
+        }
     }
     return NULL;
 }
@@ -904,7 +924,7 @@ void *klb_dlsym(void *handle, const char *name) {
             if (v) return v;
         }
         snprintf(g_dlerr, sizeof g_dlerr, "klepton: undefined symbol: %s", name);
-        return klb_dlsym_null(name);
+        return klb_dlsym_null(name, __builtin_return_address(0), NULL);
     }
     // Anything left is meant to be a real loaded image. Validate it before
     // dereferencing: a guest's linker-hook init probes dlsym(handle=1,
@@ -917,11 +937,11 @@ void *klb_dlsym(void *handle, const char *name) {
     if (!known) {
         snprintf(g_dlerr, sizeof g_dlerr,
                  "klepton: dlsym on unknown handle %p (symbol %s)", handle, name);
-        return NULL;
+        return klb_dlsym_null(name, __builtin_return_address(0), handle);
     }
     void *v = kl_sym((kl_image *)handle, name);
     if (!v) { snprintf(g_dlerr, sizeof g_dlerr, "klepton: undefined symbol: %s", name);
-              return klb_dlsym_null(name); }
+              return klb_dlsym_null(name, __builtin_return_address(0), NULL); }
     { void *w = kl_dl_interpose(name, v); if (w) return w; }
     return v;
 }

@@ -969,8 +969,16 @@ static kl_jint klj_GetJavaVM(void *env, void **vm) { (void)env; *vm = kl_jni_vm(
     // klj_call knows an implementation is genuinely missing.
     return w;
 }
-static void *klj_GetMethodID(void *e, void *c, const char *n, const char *s)       { (void)e; return klj_want(c, n, s, 'm'); }
-static void *klj_GetStaticMethodID(void *e, void *c, const char *n, const char *s) { (void)e; return klj_want(c, n, s, 'M'); }
+static void *klj_GetMethodID(void *e, void *c, const char *n, const char *s) {
+    (void)e;
+    if (!c) KLJ_LOG("GetMethodID with a NULL jclass: %s%s", n, s);
+    return klj_want(c, n, s, 'm');
+}
+static void *klj_GetStaticMethodID(void *e, void *c, const char *n, const char *s) {
+    (void)e;
+    if (!c) KLJ_LOG("GetStaticMethodID with a NULL jclass: %s%s", n, s);
+    return klj_want(c, n, s, 'M');
+}
 static void *klj_GetFieldID(void *e, void *c, const char *n, const char *s)        { (void)e; return klj_want(c, n, s, 'f'); }
 static void *klj_GetStaticFieldID(void *e, void *c, const char *n, const char *s)  { (void)e; return klj_want(c, n, s, 'F'); }
 

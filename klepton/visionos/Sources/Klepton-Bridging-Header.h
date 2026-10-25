@@ -58,3 +58,5 @@
 // ...the 26 hand joints ARKit's HandTrackingProvider feeds the ovrp hand state (kl_ovrp_input.c).
 void kl_ovrp_set_hand_joints(int hand, const float *pose7x26, uint32_t tracked_mask,
                              const float *pinch5, uint32_t pinch_bits);
+// ...and which hands have a Sense controller attached (kl_ovrp_input.c): ovrp_GetHandTrackingEnabled.
+void kl_ovrp_set_controller_attached(int hand, int attached);

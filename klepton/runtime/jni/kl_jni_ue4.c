@@ -429,15 +429,54 @@ static klj_val klj_GA_getNativeDisplayRefreshRate(void *env, void *self, const k
     return (klj_val){.j = (uint64_t)klj_ue4_refresh_hz()};
 }
 
-// AndroidThunkJava_GetDeviceOrientation()I feeds FAndroidMisc::GetDeviceOrientation,
-// whose return is an EDeviceScreenOrientation: 0 Unknown, 1 Portrait,
-// 2 PortraitUpsideDown, 3 LandscapeLeft, 4 LandscapeRight. On a headset there is
-// no phone panel to rotate — the scene goes to the XR compositor, not a rotated
-// surface — but the guest may still branch on this (e.g. width/height ordering),
-// so we report the fixed landscape UE4 uses by default for VR: LandscapeLeft.
+// AndroidThunkJava_GetDeviceOrientation()I returns Display.getRotation() (0-3), which
+// FAndroidMisc::GetDeviceOrientation maps to an EDeviceScreenOrientation: 0 Portrait,
+// 1 LandscapeLeft, 2 PortraitUpsideDown, 3 LandscapeRight (anything above 3 is ignored).
+// On a headset there is no phone panel to rotate — the scene goes to the XR compositor,
+// not a rotated surface — but the guest may still branch on this (e.g. width/height
+// ordering), so we report the fixed landscape UE4 uses by default for VR: ROTATION_90,
+// i.e. LandscapeLeft.
 static klj_val klj_GA_getDeviceOrientation(void *env, void *self, const klj_val *a, int n) {
     (void)env; (void)self; (void)a; (void)n;
-    return (klj_val){.j = 3};   // EDeviceScreenOrientation::LandscapeLeft
+    return (klj_val){.j = 1};   // Surface.ROTATION_90 -> EDeviceScreenOrientation::LandscapeLeft
+}
+
+// AndroidThunkJava_GetNetworkConnectionType()I: the raw int FAndroidMisc maps through a byte
+// table (0 None, 1 Airplane, 2 Ethernet, 3 Cell, 4 WiFi, 5 WiMAX, 6 Bluetooth). Offline-only
+// policy (KL_NET_OFFLINE, default on): None, the same "no network" NetworkInfo/ConnectivityManager
+// give. Otherwise WiFi, the one transport NetworkInfo.getType reports.
+static klj_val klj_GA_getNetworkConnectionType(void *env, void *self, const klj_val *a, int n) {
+    (void)env; (void)self; (void)a; (void)n;
+    static int off = -1;
+    if (off < 0) off = kl_env_on("KL_NET_OFFLINE", 1);
+    return (klj_val){.j = off ? 0 : 4};
+}
+
+// Microphone thunks (UBOAT's voice chat). HasPermission asks the same manifest-driven answer as
+// Context.checkSelfPermission; there is no microphone to hand out, so Start fails (false) and
+// Ask/Stop have nothing to do.
+static klj_val klj_GA_hasPermissionMicrophone(void *env, void *self, const klj_val *a, int n) {
+    (void)env; (void)self; (void)a; (void)n;
+    const char *why = "";
+    return (klj_val){.j = (uint64_t)klj_permission_state("android.permission.RECORD_AUDIO", &why)};
+}
+static klj_val klj_GA_startMicrophone(void *env, void *self, const klj_val *a, int n) {
+    (void)env; (void)self; (void)a; (void)n;
+    return (klj_val){.j = 0};
+}
+
+// com/epicgames/mobile/eossdk/EOSSDK statics (UBOAT, resolved in JNI_OnLoad). GetOSVersion is
+// Build.VERSION.RELEASE of the Android 10 we present; LaunchURL returns 0 ok / 1 non-https /
+// 2 no activity to open it: nothing is opened offline, so 2. (Keychain_* lives in kl_jni_prefs.c.)
+static klj_val klj_EOSSDK_getOSVersion(void *env, void *self, const klj_val *a, int n) {
+    (void)env; (void)self; (void)a; (void)n;
+    return (klj_val){.l = kl_jni_new_string("10")};
+}
+static klj_val klj_EOSSDK_launchURL(void *env, void *self, const klj_val *a, int n) {
+    (void)env; (void)self;
+    KLJ_LOG("EOSSDK.LaunchURL(\"%s\") — not available offline (no browser); not opened",
+            n > 0 && klj_str(a[0].l) ? klj_str(a[0].l) : "");
+    return (klj_val){.j = 2};
 }
 // SetNativeDisplayRefreshRate(I)Z: a rate the runtime offers is granted (and is then what the getter
 // above, ovrp and OpenXR all report back); one it does not offer is refused, as the Java's
@@ -1153,6 +1192,20 @@ const klj_binding klj_bind_ue4[] = {
      "()I", klj_GA_getNativeDisplayRefreshRate},
     {"com/epicgames/ue4/GameActivity", "AndroidThunkJava_GetDeviceOrientation",
      "()I", klj_GA_getDeviceOrientation},
+    {"com/epicgames/ue4/GameActivity", "AndroidThunkJava_GetNetworkConnectionType",
+     "()I", klj_GA_getNetworkConnectionType},
+    {"com/epicgames/ue4/GameActivity", "AndroidThunkJava_AndroidHasPermissionMicrophone",
+     "()Z", klj_GA_hasPermissionMicrophone},
+    {"com/epicgames/ue4/GameActivity", "AndroidThunkJava_AndroidStartMicrophone",
+     "(I)Z", klj_GA_startMicrophone},
+    {"com/epicgames/ue4/GameActivity", "AndroidThunkJava_AndroidAskPermissionMicrophone",
+     "()V", klj_GA_void_noop},
+    {"com/epicgames/ue4/GameActivity", "AndroidThunkJava_AndroidStopMicrophone",
+     "()V", klj_GA_void_noop},
+    {"com/epicgames/mobile/eossdk/EOSSDK", "GetOSVersion",
+     "()Ljava/lang/String;", klj_EOSSDK_getOSVersion},
+    {"com/epicgames/mobile/eossdk/EOSSDK", "LaunchURL",
+     "(Ljava/lang/String;)I", klj_EOSSDK_launchURL},
     {"com/epicgames/ue4/GameActivity", "AndroidThunkJava_SetNativeDisplayRefreshRate",
      "(I)Z", klj_GA_setNativeDisplayRefreshRate},
     {"com/epicgames/ue4/GameActivity", "AndroidThunkJava_GetSupportedNativeDisplayRefreshRates",
