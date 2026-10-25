@@ -26,6 +26,7 @@
 - Mandos: Touch 0x3 siempre conectado (Sense real o emulación por pellizco) + bits de mano 0x60; `HandTrackingEnabled` = proveedor de manos y ningún Sense adjunto.
 - Render pass: el guest recibe sus store ops; twin con STORE forzado solo si toca imagen de ojo o framebuffer desconocido (`KL_VK_RESOLVE_STORE=2` = todo forzado).
 - `vkGetInstanceProcAddr` desconocido devuelve stub no-NULL (Wrath2). `VPVK_REPORT_GEOM=1` se mantiene (128 interpoladores Unity).
+- `VPVK_MSAA_DEAD_STORE` (VPKEngine 454f7cc, elisión heurística de stores MSAA) apagado en juegos y conformidad hasta que exista `Attachment::keepSamples`.
 - VPKEngine `main` siempre actualizado con cualquier arreglo del motor de cualquier proyecto.
 - MSAA del juego mantenido por defecto; Automático: VPKTAA solo si no hay MSAA.
 - `nativeLowMemory` solo en el hilo del juego; no desde `kl_jni_drain_ui_tasks`.
