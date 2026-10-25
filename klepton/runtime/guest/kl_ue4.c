@@ -57,6 +57,11 @@ static const char *ue4_meta_str(const char *key);   // defined below; used by co
 // DT_INIT_ARRAY, which is the first line of libc++_shared that a static
 // initializer reaches.
 //
+// This list is NOT the whole of the entry's DT_NEEDED, only the members every UE
+// title is known to carry. Whatever else the entry names (libOmniConnectShared in
+// Into the Radius 2's libUnreal, for one) is mapped by kl_load_needed in
+// kl_ue4_load, right before the entry, and initialised ahead of it.
+//
 // libUE4's DT_NEEDED also names libovrplatformloader.so, and it is deliberately
 // NOT here: that is one of the three libraries this project REPLACES
 // (kl_ovrplat), so loading the guest's copy would map an Oculus forwarder to a
@@ -102,6 +107,7 @@ static const char *const UE4_CHAIN[] = {
 // wrong here in a way that only shows up as a FindClass several layers in.
 
 
+#define UE4_MAX_EXTRA 32   // entry DT_NEEDED beyond UE4_CHAIN (kl_load_needed)
 static char g_libdir[1024];
 static char g_err[512] = "no error";
 static kl_image *g_ue4;
@@ -438,6 +444,8 @@ int kl_ue4_load(FILE *out) {
     // libc++_shared, so a chain that ran each library's DT_INIT_ARRAY as it
     // loaded would be running libUE4's against a libc++ whose own had not
     // happened yet.
+    kl_image *extra[UE4_MAX_EXTRA];   // entry's DT_NEEDED outside the chain, leaves first
+    int nextra = 0;
     for (size_t i = 0; i < sizeof UE4_CHAIN / sizeof *UE4_CHAIN; i++) {
         char path[1200];
         snprintf(path, sizeof path, "%s/%s", g_libdir, UE4_CHAIN[i]);
@@ -458,6 +466,41 @@ int kl_ue4_load(FILE *out) {
         if (!strcmp(UE4_CHAIN[i], "libEOSSDK.so") && kl_env_on("KL_REFUSE_EOS", 0)) {
             if (out) fprintf(out, "  --     %-22s refused (KL_REFUSE_EOS=1)\n", UE4_CHAIN[i]);
             continue;
+        }
+        // The entry's own DT_NEEDED beyond the fixed chain, mapped and registered
+        // BEFORE the entry so its imports bind at relocation time. libUnreal
+        // (Into the Radius 2) needs libOmniConnectShared, which carries the
+        // statically linked libc++/libc++abi (__cxa_guard_acquire, std::__ndk1)
+        // and OmniConnectShared_*; absent from the chain, 120 imports were left
+        // unresolved. Shim-served names and the members above are skipped by the
+        // loader; init is deferred to the second loop, ahead of the entry's.
+        if (!strcmp(UE4_CHAIN[i], UE4_LIB)) {
+            int nfailed = 0;
+            int found = kl_load_needed(path, extra, UE4_MAX_EXTRA, &nfailed);
+            // Not fatal: a dependency that does not load leaves only ITS imports
+            // unresolved, which is how this title behaved before the entry's
+            // DT_NEEDED was followed at all. The loader names each one on stderr
+            // as `dependency <soname> of <lib> failed to load`.
+            nextra = found < UE4_MAX_EXTRA ? found : UE4_MAX_EXTRA;
+            if (out && nfailed > 0) {
+                fprintf(out, "  !! %d DT_NEEDED of %s failed to load (named in the "
+                             "'[klepton] dependency ... failed' lines) — skipped, "
+                             "their imports will be UNRESOLVED\n", nfailed, UE4_CHAIN[i]);
+                fflush(out);
+            }
+            if (out && found > UE4_MAX_EXTRA) {
+                fprintf(out, "  !! %d DT_NEEDED of %s mapped but only %d fit the init "
+                             "list — the other %d are mapped WITHOUT their init\n",
+                        found, UE4_CHAIN[i], UE4_MAX_EXTRA, found - UE4_MAX_EXTRA);
+                fflush(out);
+            }
+            // Same line shape as the chain's, so tools/symbolize_sample.py joins them.
+            for (int e = 0; e < nextra && out; e++) {
+                const char *so = kl_addr_image(kl_base(extra[e]), NULL);
+                fprintf(out, "  mapped %-22s @%p %7.2f MB   (DT_NEEDED of %s)\n",
+                        so ? so : "?", kl_base(extra[e]),
+                        kl_span(extra[e]) / 1048576.0, UE4_CHAIN[i]);
+            }
         }
         kl_image *img = kl_load_auto(path);
         if (!img) {
@@ -487,6 +530,13 @@ int kl_ue4_load(FILE *out) {
     for (size_t i = 0; i < sizeof UE4_CHAIN / sizeof *UE4_CHAIN; i++) {
         char path[1200];
         snprintf(path, sizeof path, "%s/%s", g_libdir, UE4_CHAIN[i]);
+        // The entry's extra dependencies initialise just before it, in dependency
+        // order, as Android runs a library's DT_NEEDED init before its own.
+        if (!strcmp(UE4_CHAIN[i], UE4_LIB))
+            for (int e = 0; e < nextra; e++) {
+                if (out) { fprintf(out, "  init %s's dependency #%d\n", UE4_CHAIN[i], e + 1); fflush(out); }
+                kl_run_init(extra[e]);
+            }
         kl_image *img = kl_find_image(path);
         if (!img) continue;
         if (out) { fprintf(out, "  init %s\n", UE4_CHAIN[i]); fflush(out); }

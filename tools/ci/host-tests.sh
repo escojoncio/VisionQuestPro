@@ -56,6 +56,9 @@ klepton_tests() {
   run t_media_announce -I"$T/memdiag" tests/t_media_announce.c
   awk '/KL-TEST-BEGIN backpressure/{p=1;next} /KL-TEST-END backpressure/{p=0} p' runtime/media/kl_mediandk.c > "$T/memdiag/backpressure.inc"
   run t_media_backpressure -I"$T/memdiag" tests/t_media_backpressure.c
+  mkdir -p "$T/ldeps"
+  awk '/KL-TEST-BEGIN ldeps/{p=1;next} /KL-TEST-END ldeps/{p=0} p' runtime/kl_dl.c > "$T/ldeps/ldeps.inc"
+  run t_load_needed -Wno-unused-function -I"$T/ldeps" tests/t_load_needed.c
   mkdir -p "$T/fence"
   awk '/KL-TEST-BEGIN fence/{p=1;next} /KL-TEST-END fence/{p=0} p' runtime/gfx/kl_vulkan.c > "$T/fence/fence_blocks.inc"
   run t_frame_fence -Wno-unused-function -I"$T/fence" -I"$VPK/gpu/vulkan/third_party/vulkan-headers/include" tests/t_frame_fence.c -lpthread

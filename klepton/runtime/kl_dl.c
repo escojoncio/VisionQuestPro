@@ -308,6 +308,7 @@ void *kl_guest_sym_global(const char *name) {
 // shim-served (libc/libm/libdl/liblog/... or a synthetic gateway) and skipped.
 // Names Klepton serves from its own shims rather than from a bundled file, so
 // a missing file for one of these is expected, not a packaging error.
+// KL-TEST-BEGIN ldeps (extracted by tools/ci/host-tests.sh into klepton/tests/t_load_needed.c)
 static int kl_dep_is_shim_served(const char *name) {
     static const char *shim[] = {
         "libc.so", "libm.so", "libdl.so", "liblog.so", "libstdc++.so",
@@ -348,10 +349,25 @@ static void kl_maybe_jni_onload(const char *path, kl_image *img) {
             b, r);
 }
 
-kl_image *kl_load_recursive(const char *path) {
-    kl_image *have = kl_find_image(path);
-    if (have) return have;                       // cycle guard / already loaded
+// Deferred-init mode of the loader below (NULL = load and init immediately).
+typedef struct {
+    kl_image **img;   // newly mapped images, leaves first (only the first `cap` are stored)
+    int        cap;
+    int        n;     // how many were mapped, which may exceed `cap`
+    int        nfailed;
+} kl_defer;
 
+static kl_image *kl_load_image(const char *path, kl_defer *d);
+static int kl_dlopen_refused(const char *path);   // below; the dlopen door's refusals
+
+// Map and register every DT_NEEDED of `path` that is neither shim-served nor
+// already loaded, dependencies first. `path` itself is not loaded. With `d` set,
+// each newly mapped image is recorded in it (leaves first) INSTEAD of having its
+// init run, so a caller that runs "map everything, then init in order" (the UE4
+// chain) keeps that model; there a dependency that fails to load is named, counted
+// and skipped, and the rest still load. Without `d`, returns 0 on the first
+// dependency that failed (kl_load_recursive's contract), else 1.
+static int kl_load_deps(const char *path, kl_defer *d) {
     char names[32][128];
     int nn = kl_list_needed(path, names, 32);
     if (kl_env_on("KL_TRACE_NEEDED", 1)) {
@@ -404,22 +420,73 @@ kl_image *kl_load_recursive(const char *path) {
                     names[i], path);
             continue;
         }
+        if (kl_find_image(full)) {
+            if (kl_env_on("KL_TRACE_NEEDED", 1))
+                fprintf(stderr, "  [dl]     %s -> already loaded (skip)\n", names[i]);
+            continue;
+        }
+        // Same refusals as the dlopen door (KL_DLOPEN_REFUSE, the global AMFI
+        // tripper list, per-target defaults, KL_REFUSE_EOS): a library the guest
+        // may not dlopen must not come back in through a DT_NEEDED edge either.
+        if (kl_dlopen_refused(full)) {
+            if (kl_env_on("KL_TRACE_NEEDED", 1))
+                fprintf(stderr, "  [dl]     %s -> refused (skip)\n", names[i]);
+            continue;
+        }
         if (kl_env_on("KL_TRACE_NEEDED", 1))
             fprintf(stderr, "  [dl]     %s -> loading (%s)\n", names[i], full);
-        if (!kl_load_recursive(full)) {
-            fprintf(stderr, "  [klepton] dependency %s of %s failed to load: %s\n",
-                    names[i], path, kl_error());
-            return NULL;
+        if (!kl_load_image(full, d)) {
+            fprintf(stderr, "  [klepton] dependency %s of %s failed to load: %s%s\n",
+                    names[i], path, kl_error(),
+                    d ? " — skipped; its imports will be UNRESOLVED" : "");
+            if (!d) return 0;
+            d->nfailed++;
         }
     }
+    return 1;
+}
+
+static kl_image *kl_load_image(const char *path, kl_defer *d) {
+    kl_image *have = kl_find_image(path);
+    if (have) return have;                       // cycle guard / already loaded
+
+    if (!kl_load_deps(path, d)) return NULL;
 
     kl_image *img = kl_load_auto(path);
     if (!img) return NULL;
     kl_register_image(path, img);
+    if (d) {
+        // The caller runs the init, in order. Beyond its capacity the image is
+        // still mapped and registered (so imports bind) but cannot be handed
+        // back; the count lets the caller say how many there were.
+        if (d->n < d->cap) d->img[d->n] = img;
+        d->n++;
+        return img;
+    }
     kl_run_init(img);
     kl_maybe_jni_onload(path, img);
     return img;
 }
+
+kl_image *kl_load_recursive(const char *path) {
+    return kl_load_image(path, NULL);
+}
+
+// Map and register the DT_NEEDED of `path` WITHOUT loading `path` and without
+// running any init: the new images are returned in `out` (up to `max`), leaves
+// first, for the caller to kl_run_init in that order before `path`'s own. For a
+// library the caller maps itself (kl_ue4_load's entry): its imports bind at
+// relocation time against whatever is registered by then, so its dependencies
+// have to be mapped first. Returns how many were mapped, which can exceed `max`
+// (the extras are mapped but not in `out`). A dependency that fails to load is
+// named on stderr, counted in *nfailed (if given) and skipped; the rest load.
+int kl_load_needed(const char *path, kl_image **out, int max, int *nfailed) {
+    kl_defer d = { out, max, 0, 0 };
+    kl_load_deps(path, &d);
+    if (nfailed) *nfailed = d.nfailed;
+    return d.n;
+}
+// KL-TEST-END ldeps
 
 // Which guest image an address falls in, and how far into it. Guest libraries
 // are mapped at whatever address the kernel picked, so a raw pc from a fault is

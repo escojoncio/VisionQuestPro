@@ -130,6 +130,11 @@ void      kl_register_image(const char *soname, kl_image *img);
 kl_image *kl_find_image(const char *soname);
 // Load an .so plus its DT_NEEDED chain, dependencies first (kl_dl.c).
 kl_image *kl_load_recursive(const char *path);
+// Map and register only the DT_NEEDED of `path` (not `path`), init deferred: the
+// new images come back in `out`, leaves first, for the caller to kl_run_init.
+// Returns the count (may exceed max); a failing dependency is skipped, named on
+// stderr and counted in *nfailed (kl_dl.c).
+int       kl_load_needed(const char *path, kl_image **out, int max, int *nfailed);
 // Read a file's DT_NEEDED sonames without loading it (kl_image.c).
 int       kl_list_needed(const char *path, char names[][128], int max);
 // Search every registered guest image for an export (kl_dl.c); used by the
