@@ -2,6 +2,7 @@
 
 ## Last done
 - 2026-10-25: `.claude/agents/coder.md`: maxTurns → 70
+- 2026-10-25: `CLAUDE.md` línea 1: regla de cumplir siempre el rol asignado.
 - 2026-10-25: VPKEngine `662a70b`: TODO attachment (1x y MSAA, color/depth) memoryless diferido (paridad GMEM Quest); ban por textura; vpgles `glInvalidateFramebuffer` + `vpvk_cmd_pass_drop`; ctest 235/235. Build `[build]` (run de `fb5829a` cancelado).
 - 2026-10-25: sub-agentes `reader`/`coder`/`Explore` en `.claude/agents/`; bitácora compactada a `notas/`.
 - 2026-10-25: log RE4 `047bd4c` revisado: CODESIGNING 0x2 a ~3 s tras "does not support Vulkan" (ya arreglado después); sin datos de MSAA.
