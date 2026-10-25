@@ -2,7 +2,6 @@
 
 ## Last done
 - 2026-10-25: VPKEngine `662a70b`: TODO attachment (1x y MSAA, color/depth) memoryless diferido (paridad GMEM Quest); ban por textura; vpgles `glInvalidateFramebuffer` + `vpvk_cmd_pass_drop`; ctest 235/235. Build `[build]` (run de `fb5829a` cancelado).
-- 2026-10-25: Klepton STORE de depth (`kl_vulkan.c` 6468/6545/6715) sin cambios: sin efecto (VPKTAA ⇒ todo 1x residente; MSAA ⇒ `klvk_taa_depth_on()` cerrado).
 - 2026-10-25: sub-agentes `reader`/`coder`/`Explore` en `.claude/agents/`; bitácora compactada a `notas/`.
 - 2026-10-25: log RE4 `047bd4c` revisado: CODESIGNING 0x2 a ~3 s tras "does not support Vulkan" (ya arreglado después); sin datos de MSAA.
 - 2026-10-23: `kl_ue4.c` `libEOSSDK.so` en `UE4_CHAIN` (UBOAT); `kl_ovrp.c` unión de frustums con ojos colapsados (Thrill 2); `kl_app.c` buffers `[hb] gpu` 2048.
@@ -12,12 +11,13 @@
 - Última build en verde: run CI 39419833988 (commit 4b29253, motor ed942c7). Todo lo posterior sin build ni visor.
 - Ninguna build desde 9bbdbde. Todo lo de 2026-10-21/23 unverified en visor.
 - Pendiente (orden):
-  1. Build con VPKEngine `662a70b`: en log mirar `memoryless_banned`/`memoryless_disabled`, `msaa_materialized why=` (STORE del juego = sin ahorro), `ledger:`; en GLES (Maestro) foveado/UI tras el cambio de load/store. Todo unverified en visor; `.mm` solo compila en CI Mac.
-  2. RE4 jetsam (9bbdbde, inventario tras cambio de zona): memoria GPU no contabilizada 0,2→3,7 GB; +94 allocs memtype0 vivas; +1399 imágenes sin destruir. Quién las retiene: unverified.
-  3. Gundam mandos: `GetControllerState6(mask=0x10/0x60)` → Connected=0; probar `KL_PROBE_INPUT=1`.
-  4. Maestro: CODESIGNING 0x2, PC=0 en libUE4. Sin cerrar. vpgles ahora respeta `glInvalidateFramebuffer`.
-  5. Deadpool: jetsam +225 s comp=1914M; crash al Salir en `KleptonCompositor.eyeSource`.
-  6. Próximo log: `vk.msaa_tile memoryless`, `msaa_materialized why=`, `msaa_released`, `ledger:`, `eye layer widened`, `libEOSSDK JNI_OnLoad`.
+  1. Build con VPKEngine `662a70b` (run 40208206559): en log mirar `memoryless_banned`/`memoryless_disabled`, `msaa_materialized why=` (STORE del juego = sin ahorro), `ledger:`; en GLES (Maestro) foveado/UI tras el cambio de load/store. Todo unverified en visor; `.mm` solo compila en CI Mac.
+  2. `kl_vulkan.c` 6468/6545/6715: con VPKTAA/PTW activo (`klvk_taa_depth_on()`) fuerza STORE en la depth de TODO render pass (no solo el ojo) → con la depth 1x diferida esas depths se materializan. En `CmdBeginRendering` ya limitado al ojo; en `CreateRenderPass(2)` no se puede identificar el ojo (opción: variante de render pass en `vkCmdBeginRenderPass`). Con MSAA en auto no aplica.
+  3. RE4 jetsam (9bbdbde, inventario tras cambio de zona): memoria GPU no contabilizada 0,2→3,7 GB; +94 allocs memtype0 vivas; +1399 imágenes sin destruir. Quién las retiene: unverified.
+  4. Gundam mandos: `GetControllerState6(mask=0x10/0x60)` → Connected=0; probar `KL_PROBE_INPUT=1`.
+  5. Maestro: CODESIGNING 0x2, PC=0 en libUE4. Sin cerrar. vpgles ahora respeta `glInvalidateFramebuffer`.
+  6. Deadpool: jetsam +225 s comp=1914M; crash al Salir en `KleptonCompositor.eyeSource`.
+  7. Próximo log: `vk.msaa_tile memoryless`, `msaa_materialized why=`, `msaa_released`, `ledger:`, `eye layer widened`, `libEOSSDK JNI_OnLoad`.
 - Riesgos abiertos: lo keyed por `kl_driver_target_name()` no se activa (target = carpeta); `klj_arr(x)->data` sin proteger en `jni/kl_jni_{android,bridge,services,ue4,window}.c`; pausa con la Corona = `_exit(0)`; foveado propio sin probar; GLES sin transform feedback/geometry/tess.
 
 ## Decisions
