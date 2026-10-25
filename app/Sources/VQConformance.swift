@@ -471,6 +471,7 @@ enum VQConformance {
         setenv("VPVK_TAA_NATIVE", "0", 1)
         setenv("KL_RCAS", "0", 1)   // the driver tests see the game's picture untouched
         setenv("VPVK_RCAS", "0", 1)
+        unsetenv("VPVK_MSAA_DEAD_STORE")   // dead-store elision off (see VQLaunch)
         var c = vq_gfx_config()
         c.foveation_mode = 0
         c.vpktaa_enabled = 0
