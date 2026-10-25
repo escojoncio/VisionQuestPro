@@ -37,7 +37,10 @@
 static klj_val klj_Class_getClassLoader(void *env, void *self, const klj_val *a, int n) {
     (void)env; (void)self; (void)a; (void)n;
     static void *loader;
-    if (!loader) loader = kl_jni_new_object("java/lang/ClassLoader");
+    if (!loader) {
+        loader = kl_jni_new_object("java/lang/ClassLoader");
+        kl_jni_pin_object(loader);   // cached across calls: must outlive the frame it was made in
+    }
     return (klj_val){.l = loader};
 }
 
@@ -148,6 +151,13 @@ const klj_binding klj_bind_lang[] = {
     {"java/lang/Class", "getClassLoader", "()Ljava/lang/ClassLoader;", klj_Class_getClassLoader},
     {"java/lang/Class", "forName", "(Ljava/lang/String;ZLjava/lang/ClassLoader;)Ljava/lang/Class;", klj_Class_forName},
     {"java/lang/ClassLoader", "findClass", "(Ljava/lang/String;)Ljava/lang/Class;", klj_ClassLoader_findClass},
+    // loadClass(name) is findClass(name) behind the delegation chain, and there
+    // is exactly one namespace here, so it is the same lookup (EOS SDK's init
+    // takes this door off Application.getClassLoader()).
+    {"java/lang/ClassLoader", "loadClass", "(Ljava/lang/String;)Ljava/lang/Class;", klj_ClassLoader_findClass},
+    // Application.getClassLoader() answers with the one loader Class.getClassLoader
+    // hands out, so a class and the application agree on who loaded it.
+    {"android/app/Application", "getClassLoader", "()Ljava/lang/ClassLoader;", klj_Class_getClassLoader},
 
     {"java/lang/StringBuilder", "<init>",   "()V",                  klj_SB_init},
     {"java/lang/StringBuilder", "toString", "()Ljava/lang/String;", klj_SB_toString},

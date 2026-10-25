@@ -329,6 +329,14 @@ static klj_val klj_AudioSystem_getPrimaryOutputSamplingRate(void *env, void *sel
     KLJ_LOG("AudioSystem.getPrimaryOutputSamplingRate() -> %d", KLJ_AUDIO_RATE);
     return (klj_val){.j = KLJ_AUDIO_RATE};
 }
+// AudioTrack.getNativeOutputSampleRate(int streamType) -- static; Wwise (UE4) asks it for stream 3
+// (music) and sizes its mixer from the answer, so it is the same device rate, whatever the stream.
+static klj_val klj_AudioTrack_getNativeOutputSampleRate(void *env, void *self,
+                                                        const klj_val *a, int n) {
+    (void)env; (void)self; (void)a; (void)n;
+    KLJ_LOG("AudioTrack.getNativeOutputSampleRate() -> %d", KLJ_AUDIO_RATE);
+    return (klj_val){.j = KLJ_AUDIO_RATE};
+}
 static klj_val klj_AudioSystem_getPrimaryOutputFrameCount(void *env, void *self,
                                                           const klj_val *a, int n) {
     (void)env; (void)self; (void)a; (void)n;
@@ -884,6 +892,7 @@ const klj_binding klj_bind_window[] = {
     // AudioSystem class instead of AudioManager.getProperty(). Same numbers.
     {"android/media/AudioSystem", "getPrimaryOutputSamplingRate", "()I", klj_AudioSystem_getPrimaryOutputSamplingRate},
     {"android/media/AudioSystem", "getPrimaryOutputFrameCount", "()I", klj_AudioSystem_getPrimaryOutputFrameCount},
+    {"android/media/AudioTrack", "getNativeOutputSampleRate", "(I)I", klj_AudioTrack_getNativeOutputSampleRate},
     // ...and asks the decor view for its insets to compute a safe area.
     {"android/view/View", "getRootWindowInsets", "()Landroid/view/WindowInsets;", klj_View_getRootWindowInsets},
     {"android/view/View", "onApplyWindowInsets", "(Landroid/view/WindowInsets;)Landroid/view/WindowInsets;", klj_View_onApplyWindowInsets},

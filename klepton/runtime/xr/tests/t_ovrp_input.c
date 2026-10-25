@@ -106,6 +106,40 @@ int main(void) {
     klovrp_GetTrackerPose_impl(0, r);
     assert(r[3] == 1.0f && klovrp_GetTrackerFrustum(0).zNear == 0.0f);
     assert(klovrp_GetControllerState3(3, out) == 0 && klovrp_GetControllerState3(3, 0) == KLOVRP_INVALID_PARAM);
+    // controller/hand coherence: one source for connected, active, in-hand, node presence and
+    // GetHandTrackingEnabled. The Touch pair is always connected (pinch emulation drives a hand
+    // with no Sense controller) next to the hand bits; attachment only turns hand tracking off.
+    int32_t ht;
+    kl_ovrp_set_hand_joints(0, NULL, 0, NULL, 0);
+    kl_ovrp_set_hand_joints(1, NULL, 0, NULL, 0);
+    assert(klovrp_ctrl_connected() == 0x63u && klovrp_ctrl_active() == 0x3u);
+    assert(klovrp_ctrl_in_hand(3) && klovrp_ctrl_in_hand(4) && klovrp_ctrl_in_hand(12) && klovrp_ctrl_in_hand(13));
+    assert(!klovrp_ctrl_in_hand(0) && !klovrp_ctrl_in_hand(9));
+    assert(klovrp_node_live(0) && klovrp_node_live(3) && klovrp_node_live(4) && klovrp_node_live(12) && klovrp_node_live(13));
+    // Stable system-setting semantics: enabled (provider present, nothing attached) whether or
+    // not a hand is visible right now.
+    assert(klovrp_GetHandTrackingEnabled(&ht) == 0 && ht == 1);
+    kl_ovrp_set_hand_joints(1, pose, 0x3FFFFFF, pin, 2);
+    assert(klovrp_GetHandTrackingEnabled(&ht) == 0 && ht == 1);
+    assert(klovrp_ctrl_connected() == 0x63u && klovrp_ctrl_active() == 0x3u);
+    assert(klovrp_GetHandTrackingEnabled(0) == KLOVRP_INVALID_PARAM);
+    // One Sense controller attached, other hand free: both Touch bits stay (the free hand keeps
+    // its pinch emulation), hand bits stay, hand tracking is off.
+    kl_ovrp_set_controller_attached(0, 1);
+    assert(klovrp_ctrl_connected() == 0x63u && klovrp_ctrl_active() == 0x3u);
+    assert(klovrp_ctrl_in_hand(3) && klovrp_ctrl_in_hand(12) && klovrp_ctrl_in_hand(4) && klovrp_ctrl_in_hand(13));
+    assert(klovrp_node_live(3) && klovrp_node_live(12) && klovrp_node_live(4) && klovrp_node_live(13));
+    assert(klovrp_GetHandTrackingEnabled(&ht) == 0 && ht == 0);
+    kl_ovrp_set_controller_attached(0, 0);
+    kl_ovrp_set_controller_attached(1, 1);
+    assert(klovrp_GetHandTrackingEnabled(&ht) == 0 && ht == 0);
+    kl_ovrp_set_controller_attached(0, 1);
+    assert(klovrp_ctrl_connected() == 0x63u && klovrp_GetHandTrackingEnabled(&ht) == 0 && ht == 0);
+    kl_ovrp_set_controller_attached(2, 1);                          // out-of-range hand: ignored
+    kl_ovrp_set_controller_attached(0, 0);
+    kl_ovrp_set_controller_attached(1, 0);
+    assert(klovrp_GetHandTrackingEnabled(&ht) == 0 && ht == 1);
+    kl_ovrp_set_hand_joints(1, NULL, 0, NULL, 0);
     puts("t_ovrp_input ok");
     return 0;
 }

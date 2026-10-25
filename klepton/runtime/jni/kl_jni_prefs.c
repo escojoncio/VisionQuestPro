@@ -263,6 +263,44 @@ static klj_val klj_Context_getSharedPreferences(void *env, void *self, const klj
     return (klj_val){.l = obj};
 }
 
+// com/epicgames/mobile/eossdk/EOSSDK Keychain_ReadValue / WriteValue / DeleteValue (UBOAT's EOS login
+// token store): static, so they go through the same persisted SharedPreferences file machinery
+// rather than a store of their own. Read of an absent key is "" (the Java returns "", never null).
+static klj_prefs *klj_keychain(void) {
+    klj_val args[2] = { {.l = kl_jni_new_string("eos_keychain")}, {.j = 0} };
+    void *obj = klj_Context_getSharedPreferences(NULL, NULL, args, 2).l;
+    return obj ? klj_as_object(obj)->data : NULL;
+}
+static klj_val klj_EOSSDK_keychainRead(void *env, void *self, const klj_val *a, int n) {
+    (void)env; (void)self;
+    klj_prefs  *p   = klj_keychain();
+    const char *key = n > 0 ? klj_str(a[0].l) : NULL;
+    klj_pref   *e   = p && key ? klj_pref_find(&p->kv, key) : NULL;
+    return (klj_val){.l = kl_jni_new_string(e && e->kind == 'S' && e->sval ? e->sval : "")};
+}
+static klj_val klj_EOSSDK_keychainWrite(void *env, void *self, const klj_val *a, int n) {
+    (void)env; (void)self;
+    klj_prefs  *p   = klj_keychain();
+    const char *key = n > 0 ? klj_str(a[0].l) : NULL;
+    const char *val = n > 1 ? klj_str(a[1].l) : NULL;
+    if (!p || !key) return (klj_val){.j = 0};
+    klj_pref *e = klj_pref_slot(&p->kv, key);
+    e->kind = 'S';
+    e->sval = strdup(val ? val : "");
+    klj_prefs_save(p);
+    return (klj_val){.j = 1};
+}
+
+static klj_val klj_EOSSDK_keychainDelete(void *env, void *self, const klj_val *a, int n) {
+    (void)env; (void)self;
+    klj_prefs  *p   = klj_keychain();
+    const char *key = n > 0 ? klj_str(a[0].l) : NULL;
+    if (!p || !key) return (klj_val){.j = 0};
+    klj_pref_erase(&p->kv, key);
+    klj_prefs_save(p);
+    return (klj_val){.j = 1};
+}
+
 static klj_prefs *klj_prefs_of(void *self) {
     klj_object *o = klj_as_object(self);
     return o ? o->data : NULL;
@@ -656,6 +694,13 @@ const klj_binding klj_bind_prefs[] = {
     // route it a real Context (permissive reports the null as java/lang/Object).
     {"java/lang/Object", "getSharedPreferences",
      "(Ljava/lang/String;I)Landroid/content/SharedPreferences;", klj_Context_getSharedPreferences},
+
+    {"com/epicgames/mobile/eossdk/EOSSDK", "Keychain_ReadValue",
+     "(Ljava/lang/String;)Ljava/lang/String;", klj_EOSSDK_keychainRead},
+    {"com/epicgames/mobile/eossdk/EOSSDK", "Keychain_WriteValue",
+     "(Ljava/lang/String;Ljava/lang/String;)Z", klj_EOSSDK_keychainWrite},
+    {"com/epicgames/mobile/eossdk/EOSSDK", "Keychain_DeleteValue",
+     "(Ljava/lang/String;)Z", klj_EOSSDK_keychainDelete},
 
     {"android/content/SharedPreferences", "getString",
      "(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;", klj_SP_getString},

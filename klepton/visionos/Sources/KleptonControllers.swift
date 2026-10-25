@@ -1056,6 +1056,8 @@ final class KleptonControllers {
             .filter { $0.productCategory == GCProductCategorySpatialController }
         var attached = [false, false]
         for c in spatial { attached[Self.hand(of: c)] = true }
+        // The same fact, for ovrp_GetHandTrackingEnabled (kl_ovrp_input.c).
+        for i in 0...1 { kl_ovrp_set_controller_attached(Int32(i), attached[i] ? 1 : 0) }
 
         lock.lock()
         for i in 0...1 where !attached[i] {

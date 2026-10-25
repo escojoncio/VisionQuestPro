@@ -136,7 +136,8 @@ static int plat_is_iap_catalog(const char *name) {
 // learns of no entitlement it did not already have. Fabrication would be
 // DELIVERING a PurchaseArray that names something as owned, or answering the
 // WRITE side — ovr_IAP_ConsumePurchase / ovr_IAP_LaunchCheckoutFlow and the
-// AssetFile delivery calls — all of which stay in plat_is_drm and keep aborting.
+// AssetFile delivery calls — all of which stay in plat_is_drm, where klplat_drm
+// answers them with the typed offline failure (never a grant).
 // So the honest failure is carved out and the grant-shaped calls are not.
 //
 // The whole ovr_IAP_GetViewerPurchases* family gets this treatment (plain,
@@ -144,7 +145,7 @@ static int plat_is_iap_catalog(const char *name) {
 // menu): every member is the same read-only "what do I own" question and the
 // same honest failure answers all of them. GetNextPurchaseArrayPage walks the
 // PurchaseArray of a request that never completed, so it fails the same way.
-// Consume / LaunchCheckoutFlow are WRITE calls and keep aborting.
+// Consume / LaunchCheckoutFlow are WRITE calls and keep failing offline (klplat_drm).
 static int plat_is_iap_owned_query(const char *name) {
     return strncmp(name, "ovr_IAP_GetViewerPurchases",
                    sizeof "ovr_IAP_GetViewerPurchases" - 1) == 0 ||
@@ -157,7 +158,7 @@ static int plat_is_iap_owned_query(const char *name) {
 // learns of no installed or owned content it did not already have, and nothing
 // is delivered. Batman: Arkham Shadow asks ovr_AssetFile_StatusByName during
 // boot. The DELIVERY calls (ovr_AssetFile_Download*, DownloadById) stay in
-// plat_is_drm and keep aborting.
+// plat_is_drm and keep failing offline (klplat_drm).
 static int plat_is_asset_status_query(const char *name) {
     return strcmp(name, "ovr_AssetFile_Status") == 0 ||
            strcmp(name, "ovr_AssetFile_StatusById") == 0 ||
@@ -199,12 +200,17 @@ static int plat_is_drm(const char *name) {
 
 // Ownership and licence queries — everything the carve-out above does NOT name,
 // which after it is the CONTENT half: IAP, purchase records, asset details, and
-// the delivery calls. This aborts unconditionally — KL_PERMISSIVE is a scouting
-// knob for things we intend to implement, and this is not one of them. Answering
-// 0 would be worse than useless here: for a call shaped like ovr_IAP_GetProducts
-// or ovr_AssetFile_DownloadById a fabricated answer is the circumvention itself,
-// and a permissive run would produce it silently.
+// the delivery calls. The licence check (Entitle*) aborts unconditionally —
+// KL_PERMISSIVE is a scouting knob for things we intend to implement, and this
+// is not one of them. The rest (IAP, Purchase, AssetFile, AssetDetails: checkout,
+// consume, delete, cancel...) get the honest typed OFFLINE failure instead of an
+// abort: a request id plus an error completion on the queue, which grants and
+// delivers nothing and which the guest's own error path already handles. A
+// fabricated SUCCESS would be the circumvention itself; a failure is not.
+static uint64_t klplat_called(const char *name);
+static int plat_is_entitlement(const char *name) { return strstr(name, "Entitle") != NULL; }
 static uint64_t klplat_drm(const char *name) {
+    if (!plat_is_entitlement(name)) return klplat_called(name);
     int s = plat_slot(name);
     if (s >= 0) { g_plat[s].calls++; g_plat[s].drm = 1; }
     g_drm_calls++;
@@ -224,8 +230,10 @@ static uint64_t klplat_drm(const char *name) {
 
 // Everything else: named, so the guest says which of the 1335 it wants — and
 // answered NEUTRALLY instead of aborting. The DRM classifier runs before this
-// (kl_ovrplat_sym), so nothing that reaches here is an ownership question; what
-// is left is decoration (avatars, presence, social, analytics). The type is read
+// (kl_ovrplat_sym); the entitlement family never reaches here, and the rest of
+// that classifier's names (IAP, Purchase, AssetFile, AssetDetails) arrive from
+// klplat_drm and are answered the same way: an offline FAILURE, never a grant.
+// What else is left is decoration (avatars, presence, social, analytics). The type is read
 // off the C SDK's naming convention, which is regular across all 1335 exports:
 //   *_Get<..>Url / Uri / String / Name / Path / Token / Message / Text / Title /
 //   (DeeplinkMessage) / Description / Locale / Tag / Hash / Key / Metadata / ApiName / Id(string)
@@ -248,7 +256,8 @@ static int plat_name_is_string(const char *name) {
         "Url", "Uri", "URL", "String", "Name", "Path", "Token", "DeeplinkMessage",
         "Text", "Title", "Description", "Locale", "Tag", "Hash", "Key",
         "Metadata", "ApiName", "Json", "Email", "OculusID",
-        "SessionId", "DisplayName", "Deeplink", "Presence", "Label", "Sku",
+        "SessionId", "DisplayName", "Deeplink", "Presence", "Label", "Sku", "SKU",
+        "StrID",
     };
     size_t fl = strlen(f);
     for (size_t i = 0; i < sizeof suf / sizeof suf[0]; i++) {
@@ -301,8 +310,8 @@ static uint64_t klplat_called(const char *name) {
 // place that answer can legitimately come from here: a self-declaration by the
 // person running their own copy, not a discovered fact. THE DRM LINE DOES NOT
 // MOVE WITH IT — IAP, purchase records, asset details and every delivery call
-// still abort unconditionally, and check_drm_guard still asserts both
-// directions. What changes is that the application's own entitlement, already
+// still grant nothing (klplat_drm: offline failure), and the entitlement family
+// still aborts. What changes is that the application's own entitlement, already
 // answered yes, is answered through the channel the guest actually reads.
 //
 // The three completions are all this queues, each issued only in response to
@@ -594,8 +603,9 @@ static const char g_plat_offline_text[] =
 
 // Queue an IsError completion of `name`'s own type and return its request id,
 // or 0 when the type is unknown (or KL_PLAT_OFFLINE_ERRORS=0). Logged once per
-// name. Never used for an ownership answer: plat_is_drm runs before every
-// classifier, so nothing here grants or delivers anything.
+// name. Never an ownership answer: it only ever completes with an ERROR, so
+// nothing here grants or delivers anything (the former DRM request names
+// IAP / Purchase / AssetFile / AssetDetails get exactly this from klplat_drm).
 static uint64_t klplat_offline_request(const char *name) {
     uint32_t type = plat_msg_type_of(name);
     int s = plat_slot(name);
@@ -722,7 +732,7 @@ static uint64_t klplat_IsPlatformInitialized(void) {
 // **The DRM line does not move with this.** Asking to connect to the platform is
 // not an ownership question (that is why this family was never among the
 // refusals); IAP, purchase records, asset details and every delivery call still
-// abort unconditionally and check_drm_guard still asserts both directions.
+// grant nothing (klplat_drm: offline failure) and the entitlement family still aborts.
 // What init being answered buys is that the app's own licence check — the one
 // carve-out this project deliberately made — becomes REACHABLE. A guest that
 // quits before it can ask is not a guest being refused; it is one that never got
@@ -1821,7 +1831,7 @@ void *kl_ovrplat_sym(const char *name) {
     // show what the guest went looking for even on a run where nothing aborted.
     // Resolving is still only a measurement — the refusal is at the call.
     if (plat_is_drm(name)) {
-        if (s >= 0) g_plat[s].drm = 1;
+        if (s >= 0 && plat_is_entitlement(name)) g_plat[s].drm = 1;   // only these are REFUSED
         return kl_named_stub(name, (void *)klplat_drm);
     }
     for (size_t i = 0; i < sizeof g_plat_impl / sizeof g_plat_impl[0]; i++)
