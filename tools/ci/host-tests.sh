@@ -47,6 +47,11 @@ klepton_tests() {
   run t_memdiag -I"$T/memdiag" tests/t_memdiag.c -lpthread
   awk '/^static int klj_decode_args\(/,/^}/{print} /^static int klj_decode_args_a\(/,/^}/{print}' runtime/kl_jni.c > "$T/memdiag/jni_decoders.inc"
   run t_jni_sig -I"$T/memdiag" tests/t_jni_sig.c
+  mkdir -p "$T/libcsem"
+  awk '/KL-TEST-BEGIN (affinity|madvclip)/{p=1;next} /KL-TEST-END (affinity|madvclip)/{p=0} p' runtime/libc/kl_libc.c > "$T/libcsem/libc_blocks.inc"
+  awk '/KL-TEST-BEGIN pthmap/{p=1;next} /KL-TEST-END pthmap/{p=0} p' runtime/libc/kl_pthread.c > "$T/libcsem/pthread_blocks.inc"
+  awk '/KL-TEST-BEGIN mallocx/{p=1;next} /KL-TEST-END mallocx/{p=0} p' runtime/libc/kl_shim.c > "$T/libcsem/shim_blocks.inc"
+  run t_libc_sem -Wno-unused-function -I"$T/libcsem" tests/t_libc_sem.c -lpthread
   awk '/KL-TEST-BEGIN announce/{p=1;next} /KL-TEST-END announce/{p=0} p' runtime/media/kl_mediandk.c > "$T/memdiag/announce.inc"
   run t_media_announce -I"$T/memdiag" tests/t_media_announce.c
   awk '/KL-TEST-BEGIN backpressure/{p=1;next} /KL-TEST-END backpressure/{p=0} p' runtime/media/kl_mediandk.c > "$T/memdiag/backpressure.inc"

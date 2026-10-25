@@ -26,6 +26,7 @@
 #include "../diag/kl_wait.h"   // per-thread "blocked on" registry for the [snap] dumps
 #include <sys/utsname.h>
 #include <sys/time.h>    // utimes (klb_utimes)
+#include <sys/resource.h>  // getrusage (/proc/self/stat)
 #include <utime.h>       // struct utimbuf (klb_utime)
 #include <glob.h>        // klb_glob runs the host glob over the mapped prefix
 // getentropy, behind klb_getrandom. <sys/random.h> is a macOS-SDK header: XROS
@@ -478,9 +479,36 @@ uint32_t klb_sysprop_wait_any(uint32_t old_serial) {
     sysprop_wait_forever();
     return cur;
 }
-int  klb_prctl(int op, ...)                  { (void)op; return 0; }
+// Fixed-arity like klb_syscall: a guest's variadic arguments arrive in x1-x4, which is where
+// a fixed-arity function reads its own. PR_SET_NAME (15) / PR_GET_NAME (16) are the calling
+// thread's name, 16 bytes with the NUL as in bionic; every other option is accepted and ignored.
+int  klb_prctl(int op, unsigned long a2, unsigned long a3, unsigned long a4, unsigned long a5) {
+    (void)a3; (void)a4; (void)a5;
+    if (op == 15 && a2) {
+        char nm[16]; size_t l = strnlen((const char *)a2, 15);
+        memcpy(nm, (const char *)a2, l); nm[l] = 0;
+        pthread_setname_np(nm);
+    } else if (op == 16) {
+        if (!a2) return errno = EFAULT, -1;
+        if (pthread_getname_np(pthread_self(), (char *)a2, 16)) ((char *)a2)[0] = 0;
+    }
+    return 0;
+}
+long kl_cpu_count(void);
+/* KL-TEST-BEGIN affinity */
+// The mask sched_getaffinity hands a guest: bits [0, ncpu) set and every other byte of the
+// buffer clear, so UE4's __sched_cpucount over 128 bytes counts the CPUs reported here
+// (kl_cpu_count, KL_CPUS applies) and not 1024. Returns the size of the kernel's own mask,
+// 8 * ceil(ncpu / 64) bytes, which is what the raw syscall returns; m may be NULL for that.
+static size_t kl_affinity_fill(void *m, size_t sz, long ncpu) {
+    unsigned char *b = m;
+    if (b) memset(b, 0, sz);
+    for (long i = 0; b && i < ncpu && (size_t)i < sz * 8; i++) b[i / 8] |= (unsigned char)(1u << (i % 8));
+    return (size_t)((ncpu + 63) / 64) * 8;
+}
+/* KL-TEST-END affinity */
 int  klb_sched_getaffinity(int p, size_t sz, void *m) {
-    (void)p; if (m && sz) memset(m, 0xFF, sz);       // pretend every CPU is available
+    (void)p; if (m && sz) kl_affinity_fill(m, sz, kl_cpu_count());
     return 0;
 }
 int  klb_sched_setaffinity(int p, size_t sz, const void *m) { (void)p;(void)sz;(void)m; return 0; }
@@ -978,12 +1006,18 @@ long kl_cpu_count(void) {
     return n;
 }
 
+static uint64_t kl_mem_total(void);
+static uint64_t proc_free_bytes(void);
 long klb_sysconf(int guest_name) {
     for (unsigned i = 0; i < sizeof g_sysconf / sizeof g_sysconf[0]; i++)
         if (g_sysconf[i].guest == guest_name) {
+            // Memory is the guest-visible budget (/proc/meminfo, sysinfo), not the host's RAM.
             long v = (g_sysconf[i].host == _SC_NPROCESSORS_ONLN ||
                       g_sysconf[i].host == _SC_NPROCESSORS_CONF)
-                         ? kl_cpu_count() : sysconf(g_sysconf[i].host);
+                         ? kl_cpu_count()
+                     : g_sysconf[i].host == _SC_PHYS_PAGES
+                         ? (long)(kl_mem_total() / (uint64_t)sysconf(_SC_PAGESIZE))
+                         : sysconf(g_sysconf[i].host);
             if (kl_env_on("KL_TRACE_SYSCONF", 0))
                 fprintf(stderr, "  [libc] sysconf(%s) -> %ld\n", g_sysconf[i].name, v);
             return v;
@@ -1023,9 +1057,11 @@ long klb_sysconf(int guest_name) {
     case 0x8d: case 0x90: case 0x93: case 0x96: case 0x99:     // *_CACHE_ASSOC
         return 8;                                             // plausible, never a divisor of 0
     }
-    // bionic's _SC_AVPHYS_PAGES (0x63) has no Darwin equivalent and lands here.
-    // -1 is sysconf's own "no such name", which is the truthful answer; the log
-    // line is what keeps it from being a silent zero.
+    // bionic's _SC_AVPHYS_PAGES (0x63) has no Darwin equivalent: answered from the same
+    // MemAvailable figure as /proc/meminfo.
+    if (guest_name == 0x63) return (long)(proc_free_bytes() / (uint64_t)sysconf(_SC_PAGESIZE));
+    // Anything else is sysconf's own "no such name"; the log line is what keeps the -1
+    // from being a silent zero.
     fprintf(stderr, "[libc] sysconf: no Darwin equivalent for bionic name 0x%x\n", guest_name);
     return -1;
 }
@@ -2115,6 +2151,64 @@ static void proc_refresh_maps(void) {
     pthread_mutex_unlock(&mu);
 }
 
+// /proc/self/cmdline (argv[0] with its NUL: the package name, which is what an Android process
+// is called and what Unity/UE4 derive theirs from) and /proc/self/stat, rebuilt at every open
+// like the memory files: the package is only known once the driver has pointed at the game.
+// Written to a temp name and renamed over the file, as proc_refresh_maps does.
+static void proc_put_atomic(const char *rel, const void *data, size_t len) {
+    static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;     // one shared tmp name per file
+    char path[1100], tmp[1130];
+    snprintf(path, sizeof path, "%s%s", g_procroot, rel);
+    snprintf(tmp, sizeof tmp, "%s.tmp", path);
+    pthread_mutex_lock(&mu);
+    FILE *f = fopen(tmp, "wb");
+    if (f) {
+        fwrite(data, 1, len, f);
+        fclose(f);
+        rename(tmp, path);
+    }
+    pthread_mutex_unlock(&mu);
+}
+// Process start in 100 Hz ticks since boot (field 22 of /proc/self/stat), from the kernel's
+// record of this pid and kern.boottime.
+static long long proc_start_ticks(void) {
+    static long long t = -1;
+    if (t >= 0) return t;
+    long long v = 0;
+    int mib[4] = { CTL_KERN, KERN_PROC, KERN_PROC_PID, (int)getpid() };
+    struct kinfo_proc kp; size_t kl = sizeof kp;
+    struct timeval boot; size_t bl = sizeof boot;
+    if (sysctl(mib, 4, &kp, &kl, NULL, 0) == 0 && sysctlbyname("kern.boottime", &boot, &bl, NULL, 0) == 0) {
+        struct timeval st = kp.kp_proc.p_un.__p_starttime;
+        v = ((long long)(st.tv_sec - boot.tv_sec) * 1000000 + (st.tv_usec - boot.tv_usec)) / 10000;
+        if (v < 0) v = 0;
+    }
+    return t = v;
+}
+static void proc_refresh_self(void) {
+    const char *pkg = kl_jni_guest_package();
+    proc_put_atomic("/proc/self/cmdline", pkg, strlen(pkg) + 1);
+    // Fields 1-52 of proc(5); utime/stime in 100 Hz ticks, rss in 4096-byte pages as statm.
+    struct rusage ru; getrusage(RUSAGE_SELF, &ru);
+    thread_act_array_t th; mach_msg_type_number_t nth = 0;
+    if (task_threads(mach_task_self(), &th, &nth) == KERN_SUCCESS) {
+        for (mach_msg_type_number_t i = 0; i < nth; i++) mach_port_deallocate(mach_task_self(), th[i]);
+        vm_deallocate(mach_task_self(), (vm_address_t)th, nth * sizeof *th);
+    }
+    task_vm_info_data_t ti; mach_msg_type_number_t tc = TASK_VM_INFO_COUNT;
+    unsigned long long vsize = task_info(mach_task_self(), TASK_VM_INFO, (task_info_t)&ti, &tc) == KERN_SUCCESS
+                                   ? (unsigned long long)ti.virtual_size : 0;
+    char buf[512];
+    int n = snprintf(buf, sizeof buf,
+        "%d (klepton) R 1 %d %d 0 -1 4194560 0 0 0 0 %lld %lld 0 0 20 0 %u 0 %lld %llu %llu 18446744073709551615 "
+        "0 0 0 0 0 0 0 0 0 0 0 0 17 0 0 0 0 0 0 0 0 0 0 0 0 0 0\n",
+        (int)getpid(), (int)getpid(), (int)getpid(),
+        (long long)ru.ru_utime.tv_sec * 100 + ru.ru_utime.tv_usec / 10000,
+        (long long)ru.ru_stime.tv_sec * 100 + ru.ru_stime.tv_usec / 10000,
+        (unsigned)nth, proc_start_ticks(), vsize, (unsigned long long)(kl_mem_footprint() / 4096));
+    proc_put_atomic("/proc/self/stat", buf, (size_t)n);
+}
+
 static void proc_build(void) {
     // TMPDIR, not /tmp: on visionOS the process is sandboxed into a container
     // and /tmp is not writable, while TMPDIR always names the container's own
@@ -2634,6 +2728,8 @@ static const char *kl_guest_path_inner(const char *path, char *buf, size_t cap) 
         strcmp(path, "/proc/self/statm") == 0 ||
         strcmp(path, "/proc/self/status") == 0) proc_refresh_mem();
     if (strcmp(path, "/proc/self/maps") == 0) proc_refresh_maps();
+    if (strcmp(path, "/proc/self/cmdline") == 0 ||
+        strcmp(path, "/proc/self/stat") == 0) proc_refresh_self();
     snprintf(buf, cap, "%s%s", g_procroot, path);
     struct stat st;
     return stat(buf, &st) == 0 ? buf : KL_GP_PASS();
@@ -4040,6 +4136,10 @@ int    klb_system(const char *cmd) { (void)cmd; warn_once("system"); return 127;
 #define KL_SYS_futex 98                 // aarch64 Linux
 #define KL_SYS_getrandom 278            // ...and the other one a guest depends on
 #define KL_SYS_gettid 178               // ...and the third, via libc++'s guards
+#define KL_SYS_clock_gettime 113        // libOVRPlugin's timestamps
+#define KL_SYS_sched_setaffinity 122    // UE4, PhysX, Wwise thread setup
+#define KL_SYS_sched_getaffinity 123    // PhysX, UE4 core counts
+#define KL_SYS_getcpu 168               // UE4 GetCurrentCoreNumber
 
 enum {
     KL_FUTEX_WAIT = 0, KL_FUTEX_WAKE = 1, KL_FUTEX_REQUEUE = 3, KL_FUTEX_CMP_REQUEUE = 4,
@@ -4362,12 +4462,13 @@ static int t_time(void) { static int t = -1; if (t < 0) t = kl_env_on("KL_TRACE_
 //           4 MONOTONIC_RAW 5 REALTIME_COARSE 6 MONOTONIC_COARSE 7 BOOTTIME
 //           8 REALTIME_ALARM 9 BOOTTIME_ALARM
 //   Darwin: 0 REALTIME 4 MONOTONIC_RAW 6 MONOTONIC 8 UPTIME_RAW
-//           12 PROCESS_CPUTIME_ID
+//           12 PROCESS_CPUTIME_ID 16 THREAD_CPUTIME_ID
 int kl_clock_to_darwin(int clk) {
     switch (clk) {
     case 0: case 5: case 8: return 0;    // realtime (coarse/alarm degrade to it)
     case 1: case 6:         return 6;    // monotonic (coarse degrades)
-    case 2: case 3:         return 12;   // cpu-time ids degrade to process
+    case 2:                 return 12;   // process cpu time
+    case 3:                 return 16;   // thread cpu time
     case 4:                 return 4;    // monotonic raw
     case 7: case 9:         return 8;    // boottime ~ uptime raw
     }
@@ -4742,6 +4843,28 @@ long klb_syscall(long n, long a1, long a2, long a3, long a4, long a5, long a6) {
     // id from the other and call every acquisition recursive.
     if (n == KL_SYS_gettid) return klb_gettid();
 
+    // The clock and affinity doors, answered by the same functions as the libc names so
+    // the two cannot disagree. The raw affinity form returns the bytes of mask the kernel
+    // wrote (and refuses a buffer smaller than that, as it does), not 0.
+    if (n == KL_SYS_clock_gettime)
+        return klb_clock_gettime((int)a1, (struct timespec *)(uintptr_t)a2);
+    if (n == KL_SYS_sched_setaffinity)
+        return klb_sched_setaffinity((int)a1, (size_t)a2, (const void *)(uintptr_t)a3);
+    if (n == KL_SYS_sched_getaffinity) {
+        long ncpu = kl_cpu_count();
+        size_t need = kl_affinity_fill(NULL, 0, ncpu);
+        if (!a3) { errno = EFAULT; return -1; }
+        if ((size_t)a2 < need || (a2 & 7)) { errno = EINVAL; return -1; }
+        return (long)kl_affinity_fill((void *)(uintptr_t)a3, need, ncpu);
+    }
+    // getcpu(cpu, node, cache): the host does not say which core runs the caller, so a stable
+    // per-thread number in [0, kl_cpu_count()) spreads per-core slots over the threads; node 0.
+    if (n == KL_SYS_getcpu) {
+        if (a1) *(unsigned *)(uintptr_t)a1 = ((uint32_t)klb_gettid() * 2654435761u >> 16) % (unsigned)kl_cpu_count();
+        if (a2) *(unsigned *)(uintptr_t)a2 = 0;
+        return 0;
+    }
+
     syscall_warn_once(n, __builtin_return_address(0));
     errno = ENOSYS;
     return -1;
@@ -5099,13 +5222,17 @@ int kl_ioctl(int fd, unsigned long req, uintptr_t arg) {
 // KL_MADV_DONTNEED picks how the decommit is served:
 //   remap       (default) mmap(MAP_FIXED|MAP_ANON) over the range, per region,
 //               at that region's own protection. Reproduces Linux exactly:
-//               footprint dropped AND zero on next touch.
-//   reusable    MADV_FREE_REUSABLE (7) — one call, drops phys_footprint, does
-//               NOT zero. Strictly correct only with MADV_FREE_REUSE on the
-//               recommit, which no guest here issues.
+//               footprint dropped AND zero on next touch. Where it is refused
+//               (not private anonymous, a hole) it falls back to zero, then reusable.
+//   reusable    MADV_FREE_REUSABLE (7) — one call, drops phys_footprint; the
+//               call itself does NOT zero, so the range is memset first
+//               (private anonymous memory only) to read back as zeros.
 //   zero        MADV_ZERO (11) — closest single-call match to Linux, and may
 //               answer ENOTSUP, so it falls back to reusable.
 //   passthrough the old behaviour, for the A/B.
+// The kernel calls only ever see whole 16 KiB host pages; the unaligned head and tail
+// of the guest's range (it may think in 4 KiB) are zeroed in place, never a byte outside
+// [addr, addr+len).
 static int kl_madv_mode(void) {
     static int mode = -1;   // 0 passthrough, 1 remap, 2 reusable, 3 zero
     if (mode < 0) {
@@ -5160,6 +5287,102 @@ static int kl_madv_remap(void *a, size_t n) {
     return 0;
 }
 
+/* KL-TEST-BEGIN madvclip */
+// Head = [s, *lo), whole host pages = [*lo, *hi), tail = [*hi, s+n). With no whole page the
+// head is the entire range.
+static void kl_madv_clip(uintptr_t s, size_t n, uintptr_t *lo, uintptr_t *hi) {
+    uintptr_t e = s + n;
+    *lo = (s + 16383) & ~(uintptr_t)16383;
+    *hi = e & ~(uintptr_t)16383;
+    if (*hi <= *lo) *lo = *hi = e;
+}
+/* KL-TEST-END madvclip */
+
+// Zero the bytes of [a, a+n), inside the writable private anonymous region `info`, that can
+// hold data. A never-touched page reads zero already and zeroing it would commit it, so: a
+// region with nothing resident and nothing swapped is skipped; one with nothing swapped has only
+// its resident pages (mincore) memset; one with swapped (compressed) pages is memset whole,
+// because those hold data that must not come back.
+static void kl_madv_zero_resident(uintptr_t a, size_t n, const vm_region_submap_info_data_64_t *info) {
+    if (info->share_mode == SM_EMPTY || (!info->pages_resident && !info->pages_swapped_out)) return;
+    if (info->pages_swapped_out) { memset((void *)a, 0, n); return; }
+    uintptr_t end = a + n;
+    for (uintptr_t p = a & ~(uintptr_t)16383; p < end; ) {
+        char vec[64];
+        size_t cnt = (end - p + 16383) / 16384;
+        if (cnt > sizeof vec) cnt = sizeof vec;
+        int known = mincore((void *)p, cnt * 16384, vec) == 0;      // unknown: zero it all
+        for (size_t i = 0; i < cnt; i++) {
+            uintptr_t lo = p + i * 16384, hi = lo + 16384;
+            if (lo < a) lo = a;
+            if (hi > end) hi = end;
+            if (!known || (vec[i] & MINCORE_INCORE)) memset((void *)lo, 0, hi - lo);
+        }
+        p += cnt * 16384;
+    }
+}
+
+// Why a decommit did less than Linux's would have, once per kind (the guest is told 0
+// either way): 0 remap refused, 1 MADV_ZERO refused, 2 not private anonymous memory (shared or
+// file-backed: left alone), 3 MADV_FREE_REUSABLE refused, 4 not writable or executable (a
+// partial page, or no way to zero: left unzeroed, protections are never changed).
+static void kl_madv_fail_once(int kind, void *a, size_t n) {
+    static _Atomic int seen[5];
+    static const char *what[] = {"remap refused", "MADV_ZERO refused",
+                                 "range is shared or file-backed memory (left alone)",
+                                 "MADV_FREE_REUSABLE refused",
+                                 "range is not writable or is executable (not zeroed)"};
+    int err = errno;
+    if (atomic_exchange(&seen[kind], 1)) return;
+    fprintf(stderr, "  [madv] DONTNEED %p +%zu KiB: %s%s%s (logged once per kind)\n", a, n >> 10, what[kind],
+            kind == 2 || kind == 4 ? "" : ": ", kind == 2 || kind == 4 ? "" : strerror(err));
+}
+
+// Release whole host pages [a, a+n) of one private anonymous region: remap, else MADV_ZERO, else
+// zero what is resident and MADV_FREE_REUSABLE (zero first: the pages are dropped afterwards, so
+// the footprint still falls). Mode 2 goes straight to the last.
+static void kl_madv_drop_one(void *a, size_t n, int mode, const vm_region_submap_info_data_64_t *info, int writable) {
+    if (mode == 1) {
+        if (kl_madv_remap(a, n) == 0) return;
+        kl_madv_fail_once(0, a, n);
+    }
+    if (mode != 2) {
+        if (madvise(a, n, 11 /* MADV_ZERO */) == 0) return;
+        kl_madv_fail_once(1, a, n);
+    }
+    if (writable) kl_madv_zero_resident((uintptr_t)a, n, info); else kl_madv_fail_once(4, a, n);
+    if (kl_madv_reusable(a, n) != 0) kl_madv_fail_once(3, a, n);
+}
+
+// DONTNEED over [a, a+n), region by region, touching only private anonymous memory: shared and
+// file-backed regions and holes are skipped. edge=0: whole host pages, dropped (kl_madv_drop_one).
+// edge=1: the unaligned head or tail of the guest's range, zeroed in place when writable and not
+// executable, otherwise left as it is.
+static void kl_madv_range(uintptr_t a, size_t n, int mode, int edge) {
+    uintptr_t want = a, end = a + n;
+    while (want < end) {
+        vm_address_t                   addr = (vm_address_t)want;
+        vm_size_t                      sz   = 0;
+        natural_t                      depth = 0;
+        vm_region_submap_info_data_64_t info;
+        mach_msg_type_number_t         cnt = VM_REGION_SUBMAP_INFO_COUNT_64;
+        if (vm_region_recurse_64(mach_task_self(), &addr, &sz, &depth,
+                                 (vm_region_recurse_info_t)&info, &cnt) != KERN_SUCCESS)
+            return;
+        if ((uintptr_t)addr > want) { want = (uintptr_t)addr < end ? (uintptr_t)addr : end; continue; }   // a hole
+        uintptr_t rend = (uintptr_t)addr + (uintptr_t)sz;
+        uintptr_t hi   = rend < end ? rend : end;
+        int anon = !info.is_submap && !info.external_pager &&
+                   info.share_mode != SM_SHARED && info.share_mode != SM_TRUESHARED;
+        int writable = (info.protection & VM_PROT_WRITE) && !(info.protection & VM_PROT_EXECUTE);
+        if (!anon) kl_madv_fail_once(2, (void *)want, hi - want);
+        else if (!edge) kl_madv_drop_one((void *)want, hi - want, mode, &info, writable);
+        else if (writable) kl_madv_zero_resident(want, hi - want, &info);
+        else kl_madv_fail_once(4, (void *)want, hi - want);
+        want = hi;
+    }
+}
+
 // The instrument. A decommit that returns nothing is invisible from every other
 // vantage point in the process, so the bytes are counted whether or not anyone
 // is watching, and KL_TRACE_MADV=1 prints them as they accumulate.
@@ -5167,12 +5390,15 @@ static int kl_madv_remap(void *a, size_t n) {
 static _Atomic uint64_t g_madv_calls, g_madv_bytes;
 
 static void kl_madv_note(size_t n, int mode) {
-    // Sample the footprint here as well as from the frame pump: a decommit is
-    // where the spike is, and a per-frame sample can walk straight past one.
-    kl_mem_footprint();
     uint64_t total = atomic_fetch_add(&g_madv_bytes, (uint64_t)n) + n;
     uint64_t calls = atomic_fetch_add(&g_madv_calls, 1) + 1;
-    if (!kl_env_on("KL_TRACE_MADV", 0)) return;
+    // Sample the footprint here as well as from the frame pump: a decommit is
+    // where the spike is, and a per-frame sample can walk straight past one. It is
+    // a task_info() call and UE4 decommits per 64 KiB block, so every 64th decommit
+    // unless tracing.
+    int trace = kl_env_on("KL_TRACE_MADV", 0);
+    if (trace || (calls & 63) == 0) kl_mem_footprint();
+    if (!trace) return;
     static _Atomic uint64_t next;   // first 8, then every 256 MiB
     if (calls > 8 && total < atomic_load(&next)) return;
     atomic_store(&next, total + (256u << 20));
@@ -5214,10 +5440,13 @@ int klb_madvise(void *a, size_t n, int advice) {
         uint64_t before = trace ? kl_mem_footprint() : 0;
         int rc = 0;
         if (mode == 0) rc = madvise(a, n, MADV_DONTNEED);
-        else if (mode == 1 && kl_madv_remap(a, n) == 0) rc = 0;
-        else if (mode == 3 && madvise(a, n, 11 /* MADV_ZERO */) == 0) rc = 0;
-        else if (kl_madv_reusable(a, n) == 0) rc = 0;
-        else rc = -2;
+        else {
+            uintptr_t s = (uintptr_t)a, lo, hi;
+            kl_madv_clip(s, n, &lo, &hi);
+            if (lo > s) kl_madv_range(s, lo - s, mode, 1);             // unaligned head
+            if (hi > lo) kl_madv_range(lo, hi - lo, mode, 0);          // whole host pages
+            if (s + n > hi) kl_madv_range(hi, s + n - hi, mode, 1);    // unaligned tail
+        }
         if (trace) {
             uint64_t after = kl_mem_footprint();
             static _Atomic int shown;
@@ -5227,11 +5456,10 @@ int klb_madvise(void *a, size_t n, int advice) {
                         (long long)(before >> 10), (long long)(after >> 10),
                         (long long)((int64_t)before - (int64_t)after) >> 10);
         }
-        if (rc != -2) return rc;
-        // Nothing worked. Do NOT report failure: the guest treats a failing
-        // decommit as an allocator error (BONELAB's release path checks errno
-        // for EACCES/ENOMEM), and Linux's advice is advisory to begin with.
-        return 0;
+        // A decommit that could not do all of it is logged (kl_madv_fail_once), NOT
+        // reported: the guest treats a failing decommit as an allocator error
+        // (BONELAB's release path checks errno for EACCES/ENOMEM).
+        return rc;
     }
 
     // Load-bearing: Darwin's 8 is MADV_FREE_REUSE, the OPPOSITE operation.

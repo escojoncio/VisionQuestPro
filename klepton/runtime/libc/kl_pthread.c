@@ -67,6 +67,7 @@
 // insert into a full table (the "abort past it" below was never implemented), which
 // looked like a hang with FAsyncLoading pinned 99% in mtx_entry_for. 8x the size so
 // a large UE4 load fits, and mtx_entry_for now bounds its probe (see there).
+/* KL-TEST-BEGIN pthmap */
 #define MTX_MAP_SIZE 262144         // power of two; mtx_entry_for degrades (not hangs) if full
 typedef struct {
     _Atomic(uintptr_t)   key;       // guest address; 0 = empty
@@ -86,6 +87,7 @@ typedef struct {
     _Atomic(int)         depth;
 } mtx_entry;
 static mtx_entry g_mtx_map[MTX_MAP_SIZE];
+/* KL-TEST-END pthmap */
 
 // rwlock table (implementation in the rwlock section below)
 #define RWL_MAP_SIZE 65536          // power of two
@@ -104,6 +106,7 @@ typedef struct {
 static rwl_entry g_rwl_map[RWL_MAP_SIZE];
 static pthread_mutex_t g_rwl_insert_mu = PTHREAD_MUTEX_INITIALIZER;
 
+/* KL-TEST-BEGIN pthmap */
 static unsigned mtx_hash(uintptr_t a) {
     return (unsigned)(((a >> 4) * 0x9E3779B97F4A7C15ULL) >> 46);   // 18 bits = MTX_MAP_SIZE
 }
@@ -116,6 +119,7 @@ static pthread_mutex_t *mtx_make(void) {
     pthread_mutex_init(fresh, &a); pthread_mutexattr_destroy(&a);
     return fresh;
 }
+/* KL-TEST-END pthmap */
 
 // ---------- condition variables: address-keyed, for the mutex map's reason ----
 // Keyed on the guest ADDRESS, like the mutex map above and for the same reason:
@@ -131,9 +135,9 @@ static pthread_mutex_t *mtx_make(void) {
 // It presents as a hang three subsystems away, with the spinning thread
 // reported as asleep. Linux never sees it: NPTL does not latch the mutex.
 //
-// Same shape as the mutex map: create-on-demand, destroy leaks (a host cond is
-// small, and freeing one a guest might still signal is worse), and guest
-// storage is never read or written.
+// Same shape as the mutex map: create-on-demand, tombstones on destroy (see
+// cnd_entry_for below), and guest storage is never read or written.
+/* KL-TEST-BEGIN pthmap */
 typedef struct {
     _Atomic(uintptr_t)       key;
     _Atomic(pthread_cond_t *) c;
@@ -171,25 +175,9 @@ static pthread_cond_t *cnd_make(void) {
 }
 
 // The map ENTRY, for callers that need more than the host cond (the guard wants
-// last_mutex). cnd() is this and one field.
-static cnd_entry *cnd_entry_for(void *g) {
-    uintptr_t want = (uintptr_t)g;
-    pthread_cond_t *fresh = NULL;
-    for (unsigned i = mtx_hash(want) & (MTX_MAP_SIZE - 1); ; i = (i + 1) & (MTX_MAP_SIZE - 1)) {
-        uintptr_t k = atomic_load(&g_cnd_map[i].key);
-        if (k == want) {
-            if (fresh) { pthread_cond_destroy(fresh); free(fresh); }
-            return &g_cnd_map[i];
-        }
-        if (k) continue;
-        if (!fresh) fresh = cnd_make();
-        uintptr_t expect = 0;
-        if (!atomic_compare_exchange_strong(&g_cnd_map[i].key, &expect, want))
-            { i--; continue; }
-        atomic_store(&g_cnd_map[i].c, fresh);
-        return &g_cnd_map[i];
-    }
-}
+// last_mutex). cnd() is this and one field. Defined with the mutex map's insert
+// lock and tombstones, further down.
+static cnd_entry *cnd_entry_for(void *g);
 
 // The host cond behind an entry, with the mutex map's publication wait: the key
 // is claimed before the cond is stored, so a reader that arrives between the
@@ -200,6 +188,7 @@ static pthread_cond_t *cnd_host(cnd_entry *e) {
     return c;
 }
 static pthread_cond_t *cnd(void *g) { return cnd_host(cnd_entry_for(g)); }
+/* KL-TEST-END pthmap */
 
 
 // The host mutex behind an entry. Separate from the lookup because the entry
@@ -207,6 +196,7 @@ static pthread_cond_t *cnd(void *g) { return cnd_host(cnd_entry_for(g)); }
 // publishes the key with the CAS and the mutex immediately after, so a reader
 // that arrives between the two waits rather than dereferencing NULL. Bounded by
 // a handful of instructions on the creating thread, so a yield loop is right.
+/* KL-TEST-BEGIN pthmap */
 static mtx_entry *mtx_overflow_quiet(void);
 static pthread_mutex_t *mtx_host(mtx_entry *e) {
     pthread_mutex_t *m = atomic_load(&e->m);
@@ -328,6 +318,94 @@ static mtx_entry *mtx_find(void *g) {
         if (!k || ++probes >= MTX_MAP_SIZE) return NULL;
     }
 }
+
+// A tombstone followed by an empty slot ends no chain, so it goes back to empty (and so do the
+// tombstones before it). Without this a map that churns distinct addresses ends up with no empty
+// slot at all and every miss walks the whole table. Caller holds g_mtx_insert_mu.
+#define MAP_UNTOMB(map, at) do { \
+    unsigned u_ = (at); \
+    while (atomic_load(&(map)[(u_ + 1) & (MTX_MAP_SIZE - 1)].key) == 0 && \
+           atomic_load(&(map)[u_].key) == MTX_TOMB) { \
+        atomic_store(&(map)[u_].key, 0); u_ = (u_ - 1) & (MTX_MAP_SIZE - 1); } } while (0)
+
+// Host mutexes and conds freed by a guest destroy are not freed at once but after 100 ms
+// in a FIFO: the thread that let the destroyer through (the last unlock, the last
+// broadcast) may still be inside that host call, and POSIX lets the destroy follow it.
+// Time, not a count, because a burst of destroys must not shorten the delay. When the
+// ring is full the object is leaked rather than freed early. The caller holds g_mtx_insert_mu.
+#define GRAVE_N  4096
+#define GRAVE_NS 100000000ull
+static struct { void *p; int cond; uint64_t t; } g_grave[GRAVE_N];
+static unsigned g_grave_head, g_grave_cnt;
+static void grave_put(void *p, int cond) {
+    if (!p) return;
+    uint64_t now = cnd_now_ns();
+    while (g_grave_cnt && now - g_grave[g_grave_head].t >= GRAVE_NS) {
+        void *old = g_grave[g_grave_head].p;
+        if (g_grave[g_grave_head].cond) pthread_cond_destroy(old); else pthread_mutex_destroy(old);
+        free(old);
+        g_grave_head = (g_grave_head + 1) % GRAVE_N; g_grave_cnt--;
+    }
+    if (g_grave_cnt == GRAVE_N) return;
+    unsigned i = (g_grave_head + g_grave_cnt++) % GRAVE_N;
+    g_grave[i].p = p; g_grave[i].cond = cond; g_grave[i].t = now;
+}
+
+// The cond map is the mutex map's twin (probe, tombstones, shared insert lock), so
+// a guest that destroys its condvars no longer fills the table for the life of the
+// process, and an unbounded probe past 262144 distinct addresses cannot hang.
+static cnd_entry *cnd_probe(uintptr_t want, unsigned *slot, int *full) {
+    unsigned probes = 0, tomb = ~0u;
+    unsigned i = mtx_hash(want) & (MTX_MAP_SIZE - 1);
+    *full = 0;
+    for (;; i = (i + 1) & (MTX_MAP_SIZE - 1)) {
+        uintptr_t k = atomic_load(&g_cnd_map[i].key);
+        if (k == want) return &g_cnd_map[i];
+        if (!k) break;
+        if (k == MTX_TOMB && tomb == ~0u) tomb = i;
+        if (++probes >= MTX_MAP_SIZE) { *full = (tomb == ~0u); break; }
+    }
+    *slot = tomb != ~0u ? tomb : i;
+    return NULL;
+}
+// Only when the whole table is live: one shared cond, as mtx_overflow does.
+static cnd_entry g_cnd_overflow;
+static cnd_entry *cnd_overflow(void) {
+    if (!atomic_load(&g_cnd_overflow.c)) atomic_store(&g_cnd_overflow.c, cnd_make());
+    static _Atomic int said;
+    if (atomic_fetch_add(&said, 1) == 0)
+        fprintf(stderr, "  [klb] cond table FULL (%d slots) — sharing one fallback "
+                        "cond; sync correctness degraded (raise MTX_MAP_SIZE)\n",
+                MTX_MAP_SIZE);
+    return &g_cnd_overflow;
+}
+static cnd_entry *cnd_entry_for(void *g) {
+    uintptr_t want = (uintptr_t)g;
+    unsigned at; int full;
+    cnd_entry *e = cnd_probe(want, &at, &full);
+    if (e) return e;
+    pthread_cond_t *fresh = cnd_make();           // built outside the lock
+    pthread_mutex_lock(&g_mtx_insert_mu);
+    e = cnd_probe(want, &at, &full);              // rescan: someone may have won
+    if (!e && full) e = cnd_overflow();
+    if (!e) {
+        e = &g_cnd_map[at];
+        atomic_store(&e->c, NULL);
+        atomic_store(&e->last_mutex, NULL);
+        atomic_store(&e->waiters, 0);
+        atomic_store(&e->signals, 0);
+        atomic_store(&e->last_sig_ns, 0);
+        atomic_store(&e->waiter_ra, NULL);
+        atomic_store(&e->waiter_ra2, NULL);
+        atomic_store(&e->key, want);              // readers wait in cnd_host for c
+        atomic_store(&e->c, fresh);
+        fresh = NULL;
+    }
+    pthread_mutex_unlock(&g_mtx_insert_mu);
+    if (fresh) { pthread_cond_destroy(fresh); free(fresh); }
+    return e;
+}
+/* KL-TEST-END pthmap */
 
 
 // KL_TRACE_MUTEX=1: lifecycle of translated mutexes — init, destroy, and
@@ -662,22 +740,32 @@ int klb_pthread_mutex_trylock(void *m) {
     }
     return r;
 }
+/* KL-TEST-BEGIN pthmap */
 int klb_pthread_mutex_destroy(void *p) {
     mtx_log("destroy", p, 0);
     mtx_entry *e = mtx_find(p);
     if (e) {
-        // The host mutex leaks (it may still be held); the slot becomes a
-        // tombstone so probe chains through it stay intact (see MTX_TOMB).
-        // Under the insert lock, so no insert can claim it mid-way.
+        // The slot becomes a tombstone so probe chains through it stay intact (see
+        // MTX_TOMB). The host mutex is freed unless the guest still holds it (its
+        // bug, and it may be unlocked later: that one leaks). Under the insert
+        // lock, so no insert can claim it mid-way.
         pthread_mutex_lock(&g_mtx_insert_mu);
         if (atomic_load(&e->key) == (uintptr_t)p) {
+            pthread_mutex_t *hm = atomic_load(&e->m);
             atomic_store(&e->key, MTX_TOMB);
             atomic_store(&e->m, NULL);
+            if (hm && !atomic_load(&e->owner) && atomic_load(&e->depth) <= 0 &&
+                pthread_mutex_trylock(hm) == 0) {
+                pthread_mutex_unlock(hm);
+                grave_put(hm, 0);
+            }
+            MAP_UNTOMB(g_mtx_map, (unsigned)(e - g_mtx_map));
         }
         pthread_mutex_unlock(&g_mtx_insert_mu);
     }
     return 0;
 }
+/* KL-TEST-END pthmap */
 
 static int thread_is_alive(void *self);        // threads section, below
 static const char *thread_name_of(void *self); // threads section, below
@@ -843,7 +931,25 @@ int klb_pthread_mutexattr_getprotocol(const int *a, int *proto) { *proto = (*a &
 // pooled object must not have the host object swapped under a thread that is
 // already waiting on it.
 int klb_pthread_cond_init(void *c, const void *a)  { (void)a; cnd(c); return 0; }
-int klb_pthread_cond_destroy(void *p) { (void)p; return 0; }
+/* KL-TEST-BEGIN pthmap */
+int klb_pthread_cond_destroy(void *p) {
+    unsigned at; int full;
+    cnd_entry *e = cnd_probe((uintptr_t)p, &at, &full);
+    if (e) {
+        // A cond somebody still sleeps on is the guest's bug: keep its host cond
+        // rather than free it under the sleeper. `c` stays set on the tombstone
+        // (the claim resets it) so a thread already holding the entry never spins.
+        pthread_mutex_lock(&g_mtx_insert_mu);
+        if (atomic_load(&e->key) == (uintptr_t)p && atomic_load(&e->waiters) == 0) {
+            atomic_store(&e->key, MTX_TOMB);
+            grave_put(atomic_load(&e->c), 1);
+            MAP_UNTOMB(g_cnd_map, (unsigned)(e - g_cnd_map));
+        }
+        pthread_mutex_unlock(&g_mtx_insert_mu);
+    }
+    return 0;
+}
+/* KL-TEST-END pthmap */
 int klb_pthread_cond_signal(void *c) {
     cnd_entry *ce = cnd_entry_for(c);
     atomic_fetch_add(&ce->signals, 1);
@@ -1614,8 +1720,21 @@ int klb_pthread_create(pthread_t *out, const bionic_attr *ga,
     }
     pthread_attr_t da;
     pthread_attr_init(&da);
+    // bionic's default stack is 1 MiB (Darwin's is 512 KiB), also for a NULL attr
+    // that never went through klb_pthread_attr_init. Darwin refuses a size that
+    // is not a multiple of its 16 KiB page with EINVAL, so a guest's 4 KiB-multiple
+    // request (UE4, PhysX) is rounded up instead of silently becoming the default.
+    size_t ssz = ga && ga->stack_size ? ga->stack_size : 1024 * 1024;
+    ssz = (ssz + 16383) & ~(size_t)16383;
+    if (ssz < 128 * 1024) ssz = 128 * 1024;      // a tiny request (or a wrapped round-up) is not a usable stack
+    int src = pthread_attr_setstacksize(&da, ssz);
+    if (src) {
+        static _Atomic int said;
+        if (atomic_fetch_add(&said, 1) < 8)
+            fprintf(stderr, "  [thr] pthread_attr_setstacksize(%zu) failed (%d) — "
+                            "thread gets Darwin's default stack\n", ssz, src);
+    }
     if (ga) {
-        if (ga->stack_size) pthread_attr_setstacksize(&da, ga->stack_size);
         if (ga->flags & BIONIC_ATTR_DETACHED)
             pthread_attr_setdetachstate(&da, PTHREAD_CREATE_DETACHED);
     }

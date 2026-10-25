@@ -1280,3 +1280,15 @@ build/t_memdiag: tests/t_memdiag.c runtime/libc/kl_libc.c visionos/Sources/kl_ap
 .PHONY: memdiag
 memdiag: build/t_memdiag
 	@./build/t_memdiag
+
+# Linux-semantics fixes of the libc/pthread shims (affinity mask, MADV_DONTNEED split, cond/mutex maps, mallocx flags).
+# Cut out of kl_libc.c / kl_pthread.c / kl_shim.c by their KL-TEST markers; plain C, Linux or macOS.
+build/t_libc_sem: tests/t_libc_sem.c runtime/libc/kl_libc.c runtime/libc/kl_pthread.c runtime/libc/kl_shim.c
+	@mkdir -p build/libcsem
+	awk '/KL-TEST-BEGIN (affinity|madvclip)/{p=1;next} /KL-TEST-END (affinity|madvclip)/{p=0} p' runtime/libc/kl_libc.c > build/libcsem/libc_blocks.inc
+	awk '/KL-TEST-BEGIN pthmap/{p=1;next} /KL-TEST-END pthmap/{p=0} p' runtime/libc/kl_pthread.c > build/libcsem/pthread_blocks.inc
+	awk '/KL-TEST-BEGIN mallocx/{p=1;next} /KL-TEST-END mallocx/{p=0} p' runtime/libc/kl_shim.c > build/libcsem/shim_blocks.inc
+	$(CC) -g -fsanitize=address,undefined -Wall -Wno-unused-function -Ibuild/libcsem -o $@ tests/t_libc_sem.c -lpthread
+.PHONY: libcsem
+libcsem: build/t_libc_sem
+	@./build/t_libc_sem
