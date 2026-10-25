@@ -448,6 +448,8 @@ final class VQSettings: ObservableObject {
         if aotShaders { setenv("VPVK_AOT", "1", 1) } else { unsetenv("VPVK_AOT") }
         // Games keep going after a single hung or faulting GPU frame (conformance runs set it to 1).
         unsetenv("VPVK_DEVICE_LOST_STRICT")
+        // Conformance-only: games never refuse a device for features they enable without using (VQConformance sets it).
+        unsetenv("VPVK_STRICT_FEATURES")
         // «Perfil Vulkan completo»; the conformance runs set it again either way (VQConformance).
         if vkFullProfile { setenv("VPVK_EXTRA_EXTENSIONS", "1", 1) } else { unsetenv("VPVK_EXTRA_EXTENSIONS") }
         // Async pipelines stay on with the full profile (only an explicit 0 turns them off); the conformance runs set 0 (VQConformance).
