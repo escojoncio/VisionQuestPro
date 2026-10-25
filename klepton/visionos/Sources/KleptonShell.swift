@@ -66,12 +66,16 @@ final class KleptonShellView: UIView {
         metalLayer.isOpaque = true
 
         do {
+            let before = kl_mtl_attr_probe(device)
             let lib = try device.makeLibrary(source: Self.shaderSource, options: nil)
+            kl_mtl_track_obj("shell.lib", lib, before)
             let d = MTLRenderPipelineDescriptor()
             d.vertexFunction = lib.makeFunction(name: "shell_v")
             d.fragmentFunction = lib.makeFunction(name: "shell_f")
             d.colorAttachments[0].pixelFormat = .bgra8Unorm
+            let before2 = kl_mtl_attr_probe(device)
             pipeline = try device.makeRenderPipelineState(descriptor: d)
+            kl_mtl_track_obj("shell.pso", pipeline, before2)
         } catch {
             NSLog("[shell] pipeline FAILED: \(error)")
         }
@@ -135,6 +139,7 @@ final class KleptonShellView: UIView {
             td.usage = .shaderRead
             td.storageMode = .shared
             texture = device.makeTexture(descriptor: td)
+            kl_mtl_track("shell.tex", texture)
             texW = Int(w); texH = Int(h)
             NSLog("[shell] guest surface \(w)x\(h)")
         }

@@ -24,6 +24,7 @@
 #include <dispatch/dispatch.h>
 #include <malloc/malloc.h>   // malloc_zone_statistics (kl_mem_breakdown)
 #include "../diag/kl_wait.h"   // per-thread "blocked on" registry for the [snap] dumps
+#include "../gfx/kl_mtl_attr.h"   // kl_mtl_attr_print: live Metal objects by creation site
 #include <sys/utsname.h>
 #include <sys/time.h>    // utimes (klb_utimes)
 #include <sys/resource.h>  // getrusage (/proc/self/stat)
@@ -1510,6 +1511,7 @@ void kl_mem_pressure_poll(void) {
                     (unsigned long long)(used >> 20), (unsigned long long)(limit >> 20),
                     pct, (unsigned long long)(avail >> 20),
                     (unsigned long long)(kl_mem_total() >> 20));
+        kl_mtl_attr_print("  [mem]", NULL);
         kl_mem_pressure_fire(why);
         if (atomic_load(&g_lowmem_untold)) atomic_store(&g_lowmem_crit_armed, 1);
     }
@@ -1549,6 +1551,7 @@ void kl_mem_pressure_init(void) {
         fprintf(stderr, "  [mem] OS pressure %s: footprint %llu MiB, OS headroom %llu MiB\n",
                 crit ? "critical" : "warning",
                 (unsigned long long)(kl_mem_footprint() >> 20), (unsigned long long)(av >> 20));
+        kl_mtl_attr_print("  [mem]", NULL);
         kl_mem_pressure_fire(crit ? "system critical" : "system warning");
         atomic_store(&g_lowmem_armed, 0);
         if (crit) atomic_store(&g_lowmem_crit_armed, 0);

@@ -24,6 +24,7 @@
 #include "kl_ovrp.h"
 #include "kl_reproject.h"
 #include "kl_view_mtl.h"
+#include "kl_mtl_attr.h"
 #include "kl_vulkan.h"
 #include "kl_env.h"
 
@@ -62,8 +63,10 @@ static id<MTLRenderPipelineState> klvm_pipeline_blend(const char *msl, const cha
                                                       const char *ffn, const char *what,
                                                       int blend) {
     NSError *err = nil;
+    uint64_t before = kl_mtl_attr_probe(g_dev);
     id<MTLLibrary> lib = [g_dev newLibraryWithSource:[NSString stringWithUTF8String:msl]
                                              options:nil error:&err];
+    kl_mtl_track_obj("view.lib", lib, before);
     id<MTLFunction> vf = [lib newFunctionWithName:[NSString stringWithUTF8String:vfn]];
     id<MTLFunction> ff = [lib newFunctionWithName:[NSString stringWithUTF8String:ffn]];
     if (!vf || !ff) {
@@ -93,8 +96,10 @@ static id<MTLRenderPipelineState> klvm_pipeline_blend(const char *msl, const cha
         pd.colorAttachments[0].destinationRGBBlendFactor = MTLBlendFactorOneMinusSourceAlpha;
         pd.colorAttachments[0].destinationAlphaBlendFactor = MTLBlendFactorOneMinusSourceAlpha;
     }
+    before = kl_mtl_attr_probe(g_dev);
     id<MTLRenderPipelineState> p = [g_dev newRenderPipelineStateWithDescriptor:pd
                                                                         error:&err];
+    kl_mtl_track_obj("view.pso", p, before);
     if (!p)
         fprintf(stderr, "  [vmtl] %s pipeline failed: %s\n", what,
                 err.localizedDescription.UTF8String ?: "?");
@@ -241,6 +246,7 @@ static id<MTLBuffer> klvm_grid_buffer(id<MTLTexture> src, const float *vp,
             g_grid_buf = [g_dev newBufferWithBytes:tmp length:n * sizeof *tmp
                                            options:MTLResourceStorageModeShared];
         }
+        kl_mtl_track("view.grid", g_grid_buf);
         g_grid_verts = kl_reproject_grid_vertices(nx, ny);
     }
     if (out_verts) *out_verts = g_grid_verts;
@@ -283,6 +289,7 @@ static id<MTLTexture> klvm_array_view(id<MTLTexture> src) {
                                               textureType:MTLTextureType2DArray
                                                    levels:NSMakeRange(0, src.mipmapLevelCount)
                                                    slices:NSMakeRange(0, 1)];
+    kl_mtl_track_count("view.arrayview", v);
     static int said;
     if (!v && !said) {
         said = 1;
@@ -309,6 +316,7 @@ static id<MTLBuffer> klvm_identity_grid(void) {
         g_grid_id = [g_dev newBufferWithBytes:tmp
                                        length:kl_reproject_grid_entries(1, 1) * sizeof *tmp
                                       options:MTLResourceStorageModeShared];
+        kl_mtl_track("view.grid_id", g_grid_id);
     }
     return g_grid_id;
 }
@@ -609,6 +617,7 @@ int kl_viewmtl_start(void *metal_layer) {
         g_flat_tex = [g_dev newTextureWithDescriptor:fd
                                            iosurface:(IOSurfaceRef)flatp
                                                plane:0];
+        kl_mtl_track("view.flat", g_flat_tex);
         if (!g_flat_tex) {
             static int said;
             if (!said++)
@@ -674,6 +683,7 @@ int kl_viewmtl_start(void *metal_layer) {
     td.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
     td.storageMode = MTLStorageModeShared;      // so the completion handler can read it
     g_stat = [g_dev newTextureWithDescriptor:td];
+    kl_mtl_track("view.stat", g_stat);
 
     g_layer = (__bridge CAMetalLayer *)metal_layer;
     g_layer.device = g_dev;

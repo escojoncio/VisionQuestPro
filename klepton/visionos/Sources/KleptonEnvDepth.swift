@@ -129,7 +129,9 @@ enum KleptonEnvDepth {
         init?() {
             guard let d = MTLCreateSystemDefaultDevice(), let q = d.makeCommandQueue() else { return nil }
             do {
+                let before = kl_mtl_attr_probe(d)
                 let lib = try d.makeLibrary(source: KleptonEnvDepth.msl, options: nil)
+                kl_mtl_track_obj("env.lib", lib, before)
                 guard let v = lib.makeFunction(name: "envdepth_vs"),
                       let f = lib.makeFunction(name: "envdepth_fs"),
                       let fc = lib.makeFunction(name: "envdepth_fs_color") else { return nil }
@@ -158,7 +160,9 @@ enum KleptonEnvDepth {
             d.depthAttachmentPixelFormat = depthFormat
             if color { d.colorAttachments[0].pixelFormat = .r16Unorm }
             do {
+                let before = kl_mtl_attr_probe(device)
                 let p = try device.makeRenderPipelineState(descriptor: d)
+                kl_mtl_track_obj("env.pso", p, before)
                 if color { psoColor = p } else { psoDepth[depthFormat.rawValue] = p }
                 return p
             } catch {
@@ -203,6 +207,8 @@ enum KleptonEnvDepth {
                     guard let vb = device.makeBuffer(bytes: v, length: v.count * 4, options: .storageModeShared),
                           let ib = device.makeBuffer(bytes: t, length: Int(tris) * 12, options: .storageModeShared)
                     else { continue }
+                    kl_mtl_track("env.mesh", vb)
+                    kl_mtl_track("env.mesh", ib)
                     var lo = SIMD3<Float>(repeating: .greatestFiniteMagnitude), hi = -lo
                     for j in 0..<Int(gv) {
                         let p = SIMD3<Float>(v[j * 3], v[j * 3 + 1], v[j * 3 + 2])
@@ -262,12 +268,14 @@ enum KleptonEnvDepth {
                     dd.usage = .renderTarget
                     dd.storageMode = .private
                     scratchDepth = device.makeTexture(descriptor: dd)
+                    kl_mtl_track("env.scratch_depth", scratchDepth)
                     let cd = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .r16Unorm, width: w, height: h, mipmapped: false)
                     cd.textureType = .type2DArray
                     cd.arrayLength = 2
                     cd.usage = .renderTarget
                     cd.storageMode = .shared
                     colorTex = device.makeTexture(descriptor: cd)
+                    kl_mtl_track("env.color", colorTex)
                 }
                 guard let sd = scratchDepth, colorTex != nil else {
                     kl_envdepth_job_done(&job, 0)

@@ -28,6 +28,7 @@
 #include "kl_env.h"
 #include "kl_sample.h"    // kl_sample_snapshot — the frame-stall watchdog
 #include "kl_vulkan.h"    // kl_vulkan_mem_stats — the heartbeat's GPU line
+#include "kl_mtl_attr.h"  // kl_mtl_attr_print — live Metal objects by creation site
 
 // --- Which guest ------------------------------------------------------------
 //
@@ -852,9 +853,12 @@ static void *heartbeat(void *arg) {
                 fprintf(stderr, "[hb] %02d:%02d:%02d  phase=%s  foot=%lldM avail=%lldM ports=%d fds=%d  %s\n",
                         tm.tm_hour, tm.tm_min, tm.tm_sec, phase,
                         kl_phys_footprint() >> 20, kl_avail_memory() >> 20, ports, fds, mb);
-                char gb[2048];   // VPKEngine's line ends with the memory ledger (vpvk/config.h)
+                char gb[4096];   // VPKEngine's line ends with the memory ledger (vpvk/config.h)
                 if (kl_vulkan_mem_stats(gb, sizeof gb))
                     fprintf(stderr, "[hb] gpu %s\n", gb);
+                else
+                    gb[0] = 0;
+                kl_mtl_attr_print("[hb]", gb);
             } else
             fprintf(stderr, "[hb] %02d:%02d:%02d  phase=%s  foot=%lldM avail=%lldM  %s\n",
                     tm.tm_hour, tm.tm_min, tm.tm_sec, phase,
@@ -905,7 +909,7 @@ static void *heartbeat(void *arg) {
             long long jump = (prev_foot >= 0 && foot >= 0) ? (foot - prev_foot) >> 20 : 0;
             if (foot >= 0) prev_foot = foot;
             if (jump > 200 || blocked) {
-                char mb2[512], gb2[2048], rg2[512];
+                char mb2[512], gb2[4096], rg2[512];
                 kl_mem_breakdown(mb2, sizeof mb2);
                 if (jump > 200)
                     fprintf(stderr, "[hb] jump +%lld MiB  phase=%s  foot=%lldM avail=%lldM  %s\n",
@@ -915,6 +919,9 @@ static void *heartbeat(void *arg) {
                             g_phase, foot >> 20, mb2);
                 if (kl_vulkan_mem_stats(gb2, sizeof gb2))
                     fprintf(stderr, "[hb] gpu %s\n", gb2);
+                else
+                    gb2[0] = 0;
+                kl_mtl_attr_print("[hb]", gb2);
                 if (kl_mem_regions(rg2, sizeof rg2))
                     fprintf(stderr, "[hb] vm %s\n", rg2);
                 // First big jump near the ceiling: who is running right now (the guest thread

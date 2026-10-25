@@ -410,6 +410,7 @@ final class KleptonTAA {
         d.storageMode = .private
         guard let t = device.makeTexture(descriptor: d) else { return nil }
         t.label = "vpktaa inline out \(k)"
+        kl_mtl_track("taa.inline.out", t)
         var layers: [MTLTexture] = [], reads: [MTLTexture] = []
         for e in 0..<2 {
             guard let v = t.makeTextureView(pixelFormat: wf, textureType: .type2DArray,

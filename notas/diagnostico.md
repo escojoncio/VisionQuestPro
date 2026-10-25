@@ -6,6 +6,7 @@ Logs en `QUEST/Registros/` (compartibles desde la app); línea 1 = hash de build
 |---|---|
 | `[hb]`, `[hb] jump +N MiB`, `[hb] blocked`, `[hb] gpu … ledger:` | Heartbeat con memoria (ledger gráfico/media/net/purg, fp_peak, lim_rem); salto >200 MiB/tick; hilo bloqueado; ledger de VPKEngine |
 | `[hbm]`, `[vkagg]`, `[mtl]` | Cadencia rápida tras salto: regiones, agregado `vkCreateImage`, estado Metal |
+| `[hb\|mem] gpu.attr total= tracked= (vpk= kl=) untracked=`, `gpu.bigalloc`, `[mtl] bigalloc` | Con cada `[hb] gpu` y en los avisos `[mem]`: `currentAllocatedSize` frente a los objetos Metal vivos por sitio de creación (`kl_top`/`vpk_top` = tag:MiB/vivos, `*_obj` = PSO/librerías con crecimiento medido al crearlas `~`, acumulado y aproximado, `*_cnt` = vistas/funciones, no suman); `untracked` = lo que ningún sitio etiquetado explica; `devs>1` = más de un MTLDevice. Toda asignación individual ≥32 MiB (máx. 200) se avisa al crearse con tag, tamaño, dims, formato, storage y usage |
 | `[mtl] cut_enc` / `chunk_wait` | Corte de encoders por presupuesto / contrapresión |
 | `[mem] threshold`, `[mem] OS pressure`, `[mem] trim (…)`, `[mem] low memory (<why>): told the guest` | Aviso 65/80 %, presión del SO, recorte, entrega al guest (Unity `nativeLowMemory` o NativeActivity `onLowMemory`) |
 | `vk.msaa_tile memoryless image=… usage=…`, `msaa_materialized why=`, `msaa_released`, `tile_rejected>0` | MSAA/depth en tile; materializado (y por qué); liberado tras 120 frames; MSAA 4x no cabe |

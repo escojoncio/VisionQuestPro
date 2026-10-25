@@ -623,7 +623,9 @@ final class KleptonCompositor {
         let d = MTLTextureDescriptor()
         d.textureType = .type2DArray; d.pixelFormat = .r8Unorm
         d.width = 1; d.height = 1; d.arrayLength = 1; d.usage = .shaderRead
-        return device.makeTexture(descriptor: d)
+        let t = device.makeTexture(descriptor: d)
+        kl_mtl_track("cp.uimask_dummy", t)
+        return t
     }()
     // Startup diagnostics for the signal-9 wall: what the last renderFrame saw,
     // surfaced into the alive report, plus a short per-frame trace of the first
@@ -978,7 +980,9 @@ final class KleptonCompositor {
         // every frame goes out cleared.
         let color = layerRenderer.configuration.colorFormat
         do {
+            let before = kl_mtl_attr_probe(device)
             let lib = try device.makeLibrary(source: src, options: nil)
+            kl_mtl_track_obj("cp.lib", lib, before)
             let desc = MTLRenderPipelineDescriptor()
             desc.vertexFunction   = lib.makeFunction(name: "kl_reproject_v")
             desc.fragmentFunction = lib.makeFunction(name: "kl_reproject_f")
@@ -992,7 +996,9 @@ final class KleptonCompositor {
             // display for the whole run.
             amplification = device.supportsVertexAmplificationCount(2) ? 2 : 1
             desc.maxVertexAmplificationCount = amplification
+            let before2 = kl_mtl_attr_probe(device)
             pipeline = try device.makeRenderPipelineState(descriptor: desc)
+            kl_mtl_track_obj("cp.pso", pipeline, before2)
 
             if ptwWanted {
                 do {
@@ -1442,6 +1448,7 @@ final class KleptonCompositor {
                 return 0
             }
             t.label = "klepton eye stage \(stage)"
+            kl_mtl_track("cp.eye", t)
             tex = t
             // The real cost, not the arithmetic one. Metal reports what it
             // actually reserved, so this is the only honest input to "is the
@@ -1506,6 +1513,7 @@ final class KleptonCompositor {
                 return 0
             }
             t.label = "klepton layer \(layer) stage \(stage)"
+            kl_mtl_track("cp.layer", t)
             tex = t
             layersLock.lock()
             layers[k] = t
@@ -2484,6 +2492,7 @@ final class KleptonCompositor {
         d.usage = [.shaderRead]
         d.storageMode = .shared
         guard let t = device.makeTexture(descriptor: d) else { return nil }
+        kl_mtl_track("cp.upload", t)
         t.replace(region: MTLRegionMake2D(0, 0, w, h), mipmapLevel: 0, withBytes: data, bytesPerRow: w * 4)
         return t
     }
@@ -3303,6 +3312,7 @@ final class KleptonCompositor {
             identityGridBuffer = tmp.withUnsafeBytes {
                 device.makeBuffer(bytes: $0.baseAddress!, length: $0.count, options: [])
             }
+            kl_mtl_track("cp.grid_id", identityGridBuffer)
         }
         return identityGridBuffer
     }
@@ -4151,6 +4161,7 @@ final class KleptonCompositor {
                 var px: [UInt8] = [0, 0, 0, 255]
                 t.replace(region: MTLRegionMake2D(0, 0, 1, 1), mipmapLevel: 0,
                           withBytes: &px, bytesPerRow: 4)
+                kl_mtl_track("cp.backfill_black", t)
                 blackBackfillTex = t
             }
         }
@@ -4781,6 +4792,7 @@ final class KleptonCompositor {
         td.width = 1; td.height = 1; td.arrayLength = 1; td.usage = .shaderRead
         td.storageMode = .shared
         let t = device.makeTexture(descriptor: td)!
+        kl_mtl_track("cp.asw_dummy", t)
         aswDummy = t
         return t
     }
@@ -5148,6 +5160,7 @@ final class KleptonCompositor {
                 gridBuffer = queue?.device.makeBuffer(bytes: table,
                                                       length: n * MemoryLayout<SIMD2<Float>>.stride)
             }
+            kl_mtl_track("cp.grid", gridBuffer)
             gridVertexCount = Int(kl_reproject_grid_vertices(nx, ny))
             gridPerEye = perEye
         }
@@ -5978,6 +5991,7 @@ enum FrameCapture {
                 guard let buf = t.device.makeBuffer(length: bpr * h, options: .storageModeShared) else {
                     NSLog("[cap] \(tag): could not allocate \(bpr * h) bytes — skipped"); continue
                 }
+                kl_mtl_track("cp.capture", buf)
                 blit.copy(from: t, sourceSlice: s, sourceLevel: 0,
                           sourceOrigin: MTLOrigin(x: 0, y: 0, z: 0),
                           sourceSize: MTLSize(width: w, height: h, depth: 1),
@@ -6004,6 +6018,7 @@ enum FrameCapture {
     private static func halfToRGBA8(_ j: Job) -> Job? {
         let n = j.w * j.h
         guard let out = j.buf.device.makeBuffer(length: n * 4, options: .storageModeShared) else { return nil }
+        kl_mtl_track("cp.capture", out)
         let src = j.buf.contents().assumingMemoryBound(to: Float16.self)
         let dst = out.contents().assumingMemoryBound(to: UInt8.self)
         var bad = 0

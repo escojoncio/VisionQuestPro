@@ -55,6 +55,8 @@
 #import "kl_spatial.h"
 // ...and the environment depth ring KleptonEnvDepth.swift renders into: kl_envdepth.
 #import "kl_envdepth.h"
+// ...and the live-Metal-object registry the heartbeat's gpu.attr line reads: kl_mtl_attr.
+#import "kl_mtl_attr.h"
 // ...the 26 hand joints ARKit's HandTrackingProvider feeds the ovrp hand state (kl_ovrp_input.c).
 void kl_ovrp_set_hand_joints(int hand, const float *pose7x26, uint32_t tracked_mask,
                              const float *pinch5, uint32_t pinch_bits);
