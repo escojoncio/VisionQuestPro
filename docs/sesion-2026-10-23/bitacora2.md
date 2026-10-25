@@ -1,8 +1,7 @@
 # Bitácora 2 — sesión 2026-10-23 (logs 9bbdbde: Gundam, Thrill 2, UBOAT, Maestro, Deadpool)
 
 Estado: A MEDIAS. Nada probado en visor. Ninguna build lanzada.
-- `vpkengine-memoryless.patch`: cambios de VPKEngine (base `2ac7923`). NO pusheados (push a VPKEngine = 403).
-  Aplicar: `cd vpkengine && git apply ../docs/sesion-2026-10-23/vpkengine-memoryless.patch`, pushear a main ANTES de `[build]`.
+- Parche memoryless pusheado a VPKEngine `fb5829a` (2026-10-25), restringido a MSAA; depth 1x residente.
 - `extractos-logs.txt`: extractos usados (zips en `Visionquestprologs/`, sin versionar).
 
 ## 1. Hecho en este repo (main)
