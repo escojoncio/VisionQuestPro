@@ -22,6 +22,7 @@
 #include "../guest/kl_il2cpp.h"   // kl_il2cpp_method_at, for ovrp_log_chain
 #include "../diag/kl_sample.h"     // kl_sample_snapshot, at the display teardown
 #include "../diag/kl_wait.h"       // kl_game_beat: game-thread silence watcher
+#include "../diag/kl_diagcap.h"     // kl_diagcap_input: hold a button combination to capture a frame
 #include "kl_bg.h"                 // kl_bg_wait: no GPU work while the app is backgrounded
 // kl_glfb_note_eye_texture (the capture's eye-FBO seam) and
 // kl_glfb_last_render_stage (which stage the guest actually drew into — see
@@ -4457,6 +4458,7 @@ void kl_ovrp_set_controller_input(int hand, uint32_t buttons, uint32_t touches,
     g_input[hand].hand_trigger = hand_trigger;
     g_input[hand].stick_x = stick_x;
     g_input[hand].stick_y = stick_y;
+    kl_diagcap_input(hand, buttons);
 
     // RIGHT Options button (PSVR2 Sense) -> a console command, on the press edge.
     // Reaches us as the BACK bit on the right hand (system/click). Default (hl1)

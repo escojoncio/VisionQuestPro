@@ -132,6 +132,9 @@ final class VQSettings: ObservableObject {
     @Published var quest3Profile: Bool { didSet { save() } }
     @Published var forceVulkan: Bool { didSet { save() } }
     @Published var diagCaptures: Bool { didSet { save() } }
+    /// «Incluir capturas»: the .vpcap files of «Captura de frames» (QUEST/capturas) go in the share sheet too. They can
+    /// be large, so off by default.
+    @Published var includeCaptures: Bool { didSet { save() } }
     /// Vulkan driver: VPKEngine's own (VPVulkan) or MoltenVK (to compare, or if VPKEngine fails).
     @Published var useVPKEngine: Bool { didSet { save() } }
     /// Experimental: GLES games through VPKEngine's own OpenGL ES (vpgles in VPVulkan). Off by default:
@@ -199,6 +202,7 @@ final class VQSettings: ObservableObject {
         quest3Profile = d.object(forKey: "vq.quest3v2") as? Bool ?? true  // Quest 3 for every game by default
         forceVulkan = d.object(forKey: "vq.forceVulkan") as? Bool ?? true
         diagCaptures = d.object(forKey: "vq.diagCaptures2") as? Bool ?? false
+        includeCaptures = d.object(forKey: "vq.includeCaptures") as? Bool ?? false
         // Saved as "vq.vpengine" before the engine was renamed VPKEngine.
         useVPKEngine = (d.object(forKey: "vq.vpkengine") ?? d.object(forKey: "vq.vpengine")) as? Bool ?? true
         glesVPK = d.object(forKey: "vq.glesVPK") as? Bool ?? false
@@ -254,6 +258,7 @@ final class VQSettings: ObservableObject {
         d.set(quest3Profile, forKey: "vq.quest3v2")
         d.set(forceVulkan, forKey: "vq.forceVulkan")
         d.set(diagCaptures, forKey: "vq.diagCaptures2")
+        d.set(includeCaptures, forKey: "vq.includeCaptures")
         d.set(useVPKEngine, forKey: "vq.vpkengine")
         d.set(glesVPK, forKey: "vq.glesVPK")
         d.set(vkFullProfile, forKey: "vq.vkFullProfile")
@@ -346,6 +351,22 @@ final class VQSettings: ObservableObject {
             unsetenv("VP_DUMP_DIR")
         }
         VQLog.log("Gráficos: capturas de diagnóstico \(diagCaptures)")
+        // «Captura de frames (diagnóstico)», per game (VQGameCapture): VPKEngine tracks every object from the start
+        // (VPVK_CAPTURE=1, more RAM) and writes the .vpcap to QUEST/capturas/<game>/; Klepton's kl_diagcap asks for one
+        // when the player holds the chosen buttons in the game.
+        let cap = VQGameCapture.load(key: game?.aaKey ?? "")
+        if cap.enabled, let g = game, let dir = VQFolder.shared.captures(for: g.id) {
+            setenv("VPVK_CAPTURE", "1", 1)
+            setenv("VPVK_CAPTURE_DIR", dir.path + "/", 1)
+            setenv("KL_DIAGCAP", "1", 1)
+            setenv("KL_DIAGCAP_BTN", String(cap.button.rawValue), 1)
+            setenv("KL_DIAGCAP_HOLD_MS", String(cap.holdSeconds * 1000), 1)
+            VQLog.log("Captura de frames: activada (\(cap.button.title), \(cap.holdSeconds) s) → \(dir.path)"
+                      + (useVPKEngine ? "" : "; solo funciona con VPKEngine"))
+        } else {
+            for k in ["VPVK_CAPTURE", "VPVK_CAPTURE_DIR", "KL_DIAGCAP", "KL_DIAGCAP_BTN", "KL_DIAGCAP_HOLD_MS"] { unsetenv(k) }
+            if cap.enabled { VQLog.log("Captura de frames: pedida, pero sin carpeta QUEST no se activa") }
+        }
         // Eye texture size the game is told (Klepton's ovrp side) and headset identity:
         // 11 = ovrpSystemHeadset Meta_Quest_3; off: Klepton's per-game default (Quest 2 / Quest).
         setenv("KL_OVRP_POSTURE", posture, 1)
@@ -662,6 +683,44 @@ enum VQGameRCAS {
         guard !key.isEmpty else { return }
         if let value { UserDefaults.standard.set(min(max(value, 0), 1), forKey: "vq.rcas." + key) }
         else { UserDefaults.standard.removeObject(forKey: "vq.rcas." + key) }
+    }
+}
+
+/// «Captura de frames (diagnóstico)» per game, off by default (VPKEngine's .vpcap capture, needs object tracking from the
+/// start: more RAM). `button` is the combination held `holdSeconds` in the game to capture one frame; its raw value is
+/// KL_DIAGCAP_BTN (kl_diagcap.h). Saved by game key: vq.cap.on.<key>, vq.cap.btn.<key>, vq.cap.sec.<key>.
+struct VQGameCapture: Equatable {
+    enum Combo: Int, CaseIterable {
+        case stickL = 0, stickR = 1, sticks = 2, triggers = 3
+        var title: String {
+            switch self {
+            case .stickL: return VQL("Stick izquierdo (pulsado)", "Left stick (clicked)")
+            case .stickR: return VQL("Stick derecho (pulsado)", "Right stick (clicked)")
+            case .sticks: return VQL("Los dos sticks (pulsados)", "Both sticks (clicked)")
+            case .triggers: return VQL("Los dos gatillos / pellizcos", "Both triggers / pinches")
+            }
+        }
+    }
+    var enabled = false
+    var button = Combo.stickL
+    var holdSeconds = 3   // 1...10
+
+    static func load(key: String) -> VQGameCapture {
+        let d = UserDefaults.standard
+        var r = VQGameCapture()
+        guard !key.isEmpty else { return r }
+        r.enabled = d.object(forKey: "vq.cap.on." + key) as? Bool ?? false
+        r.button = Combo(rawValue: d.object(forKey: "vq.cap.btn." + key) as? Int ?? 0) ?? .stickL
+        r.holdSeconds = min(max(d.object(forKey: "vq.cap.sec." + key) as? Int ?? 3, 1), 10)
+        return r
+    }
+
+    func save(key: String) {
+        guard !key.isEmpty else { return }
+        let d = UserDefaults.standard
+        d.set(enabled, forKey: "vq.cap.on." + key)
+        d.set(button.rawValue, forKey: "vq.cap.btn." + key)
+        d.set(holdSeconds, forKey: "vq.cap.sec." + key)
     }
 }
 

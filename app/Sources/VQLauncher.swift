@@ -347,6 +347,11 @@ struct VQSettingsView: View {
                 }
                 Section(VQL("Registros", "Logs")) {
                     ShareLink(items: VQLog.shareable) { Label(VQL("Compartir registros", "Share logs"), systemImage: "square.and.arrow.up") }
+                    Toggle(VQL("Incluir capturas (.vpcap)", "Include captures (.vpcap)"), isOn: $settings.includeCaptures)
+                        .onChange(of: settings.includeCaptures) { _, _ in VQLog.refreshQuestAttachments(force: true) }
+                    Text(VQL("Añade a «Compartir registros» las capturas de frames de QUEST/capturas. Pueden ocupar mucho.",
+                             "Adds the frame captures in QUEST/capturas to “Share logs”. They can be large."))
+                        .font(.caption)
                     VQSaveLogsButton()
                     ScrollView {
                         Text(VQLog.tail(VQLog.appLog)).font(.system(.caption2, design: .monospaced)).textSelection(.enabled)
@@ -555,6 +560,7 @@ struct VQGameSettingsView: View {
     /// nil = the global «Nitidez (RCAS)»; else this game's own 0...1.
     @State private var rcas: Double?
     @State private var seat: VQGameSeat
+    @State private var capture: VQGameCapture
 
     init(game: VQGame) {
         self.game = game
@@ -563,6 +569,7 @@ struct VQGameSettingsView: View {
         _aniso = State(initialValue: VQGameAniso.load(key: game.aaKey) ?? -1)
         _rcas = State(initialValue: VQGameRCAS.load(key: game.aaKey))
         _seat = State(initialValue: VQGameSeat.load(key: game.aaKey))
+        _capture = State(initialValue: VQGameCapture.load(key: game.aaKey))
     }
 
     /// The game's own eye-pass sample count seen on an earlier run (nil: not yet).
@@ -626,9 +633,29 @@ struct VQGameSettingsView: View {
                              "Forces the level on the game's material samplers. «Global» follows Settings; «Game's own» changes nothing."))
                         .font(.caption)
                 }
+                Section(VQL("Captura de frames (diagnóstico)", "Frame capture (diagnostics)")) {
+                    Toggle(VQL("Captura de frames (diagnóstico)", "Frame capture (diagnostics)"), isOn: $capture.enabled)
+                    Text(VQL("Usa más RAM: el motor gráfico guarda desde el arranque todo lo que crea el juego. Apágalo cuando no lo necesites.",
+                             "Uses more RAM: the graphics engine keeps everything the game creates from the start. Turn it off when you do not need it."))
+                        .font(.caption).foregroundStyle(.orange)
+                    if capture.enabled {
+                        Picker(VQL("Para capturar, mantén", "To capture, hold"), selection: $capture.button) {
+                            ForEach(VQGameCapture.Combo.allCases, id: \.self) { Text($0.title).tag($0) }
+                        }
+                        Stepper(VQL("Durante \(capture.holdSeconds) s", "For \(capture.holdSeconds) s"),
+                                value: $capture.holdSeconds, in: 1...10)
+                    }
+                    Text(VQL("En la partida, mantén esa combinación el tiempo elegido: vibran los mandos (fuerte y corto = capturando; largo y suave = no se pudo) y el motor guarda un frame en QUEST/capturas/\(game.id)/. El juego también recibe la pulsación. Solo con VPKEngine. Se aplica al lanzar el juego. Para compartirlas, marca «Incluir capturas» en Ajustes > Registros.",
+                             "In the game, hold that combination for the chosen time: the controllers vibrate (strong and short = capturing; long and soft = it could not start) and the engine saves one frame to QUEST/capturas/\(game.id)/. The game receives the press too. VPKEngine only. Applied when the game launches. To share them, tick “Include captures” in Settings > Logs."))
+                        .font(.caption)
+                }
             }
             .navigationTitle(game.name)
             .toolbar { Button(VQL("Hecho", "Done")) { dismiss() } }
+            .onChange(of: capture) { _, new in
+                new.save(key: game.aaKey)
+                VQLog.log("Ajustes del juego \(game.aaKey): captura de frames \(new.enabled ? "sí, \(new.button.title), \(new.holdSeconds) s" : "no")")
+            }
             .onChange(of: aa) { _, new in
                 var v = new
                 v.stored = true

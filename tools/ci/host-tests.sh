@@ -43,6 +43,7 @@ klepton_tests() {
   cd "$ROOT/klepton" || return 1
   run t_ptw tests/t_ptw.c runtime/gfx/kl_reproject_ptw.c -lm
   run t_bg -rdynamic -Iruntime/gfx tests/t_bg.c runtime/gfx/kl_bg.c -lpthread -ldl
+  run t_diagcap -rdynamic -Iruntime/diag -Iruntime/xr -Iruntime tests/t_diagcap.c runtime/diag/kl_diagcap.c runtime/kl_env.c -lpthread -ldl
   mkdir -p "$T/memdiag"
   awk '/KL-TEST-BEGIN (rate|range|fstat)/{p=1;next} /KL-TEST-END (rate|range|fstat)/{p=0} p' runtime/libc/kl_libc.c > "$T/memdiag/libc_blocks.inc"
   awk '/KL-TEST-BEGIN ent/{p=1;next} /KL-TEST-END ent/{p=0} p' visionos/Sources/kl_app.c > "$T/memdiag/app_blocks.inc"

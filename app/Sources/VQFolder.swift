@@ -4,6 +4,7 @@
 //   QUEST/Juegos/<carpeta>/     the game: its .apk and its data (OBB, bundles)
 //   QUEST/Cache/<carpeta>/      what the app made from it on the headset (converted libraries)
 //   QUEST/Partidas/<carpeta>/   saves and the game's own files
+//   QUEST/capturas/<carpeta>/   frame captures (.vpcap) of the optional «Captura de frames» setting
 //
 // The app keeps a bookmark to it (settings and keychain, which outlives a reinstall), the same
 // scheme as VPKEngine's VPS4 folder.
@@ -18,6 +19,7 @@ final class VQFolder: @unchecked Sendable {
     static let gamesName = "Juegos"
     static let cacheName = "Cache"
     static let savesName = "Partidas"
+    static let capturesName = "capturas"
 
     private static let defaultsKey = "vq.questFolderBookmark"
     private static let keychainService = "visionquestpro.quest"
@@ -100,6 +102,10 @@ final class VQFolder: @unchecked Sendable {
 
     func saves(for game: String) -> URL? {
         sub(Self.savesName, game)
+    }
+
+    func captures(for game: String) -> URL? {
+        sub(Self.capturesName, game)
     }
 
     private func sub(_ name: String, _ game: String) -> URL? {
