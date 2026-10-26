@@ -13,7 +13,7 @@
 - `c6f8362`: carátula tienda: timeouts 30/120 s, backoff net 2/10/30/60 min, respaldo nombre exacto+organización.
 
 ## Current state
-- Última build en verde: run CI 40266094712 (commit af035c0, VPKEngine d695206). Cambios 2026-10-26 posteriores (VPKEngine 5b8432f + VQP kl_bg/kl_ue4) unverified; .mm/Swift no compilados en Linux.
+- Última build en verde: run CI 40308522356 (commit 14f415d, VPKEngine 5b8432f): cambios 2026-10-26 unverified en visor.
 - Pendiente (orden):
   1. Logs build af035c0: untracked Metal plano (~200-256 MiB) → autoreleasepool confirmado; picos: Deadpool 6,3 GB (antes 8,2), Gundam 6,7 GB (antes jetsam), ITR2 4,9 GB; ITR2 `g_tex_live` 56→4071 por vigilar. Gundam: parpadeo sin causa en log (0 skips, 6 rebuilds de capa).
   2. Build nueva: ITR2 leer `skip_by{}`/`vk.skip` → arreglar el motivo; medir tirones (`vk.pipeline_skip`, `hard_waited_ms`); Maestro sin ForceQuit; `[bg] gpu paused/resumed` sin errores BackgroundExecutionNotPermitted.
