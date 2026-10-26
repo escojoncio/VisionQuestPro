@@ -37,11 +37,15 @@ klepton_tests() {
   run pred_frame_offset_test tests/pred_frame_offset_test.c -lm
   run kl_ovrp_eyesize_test -I. tests/kl_ovrp_eyesize_test.c -lm
   run t_ovrp_input -I.. -I../.. tests/t_ovrp_input.c -lm
+  run t_ovrp_render -Wno-unused-function -I.. -I../.. tests/t_ovrp_render.c -lm
   run spatial_test -I.. -I../jni -I../libc -I../gfx -I. -I../media -I../guest -I../diag \
       tests/spatial_test.c kl_spatial.c kl_ovrp_spatial.c -lm -lpthread
   cd "$ROOT/klepton" || return 1
   run t_ptw tests/t_ptw.c runtime/gfx/kl_reproject_ptw.c -lm
   run t_bg -rdynamic -Iruntime/gfx tests/t_bg.c runtime/gfx/kl_bg.c -lpthread -ldl
+  run t_frame_boundary -rdynamic -Iruntime/gfx tests/t_frame_boundary.c runtime/gfx/kl_bg.c -lpthread -ldl
+  run t_frame_boundary_nosym -DNO_SYM -rdynamic -Iruntime/gfx tests/t_frame_boundary.c runtime/gfx/kl_bg.c -lpthread -ldl
+  run t_diagcap -rdynamic -Iruntime/diag -Iruntime/xr -Iruntime tests/t_diagcap.c runtime/diag/kl_diagcap.c runtime/kl_env.c -lpthread -ldl
   mkdir -p "$T/memdiag"
   awk '/KL-TEST-BEGIN (rate|range|fstat)/{p=1;next} /KL-TEST-END (rate|range|fstat)/{p=0} p' runtime/libc/kl_libc.c > "$T/memdiag/libc_blocks.inc"
   awk '/KL-TEST-BEGIN ent/{p=1;next} /KL-TEST-END ent/{p=0} p' visionos/Sources/kl_app.c > "$T/memdiag/app_blocks.inc"
@@ -72,12 +76,20 @@ klepton_tests() {
   run t_media_muxer -Wno-unused-function -I"$T/newt" tests/t_media_muxer.c
   awk '/KL-TEST-BEGIN vktrap/{p=1;next} /KL-TEST-END vktrap/{p=0} p' runtime/gfx/kl_vulkan.c > "$T/newt/vktrap.inc"
   run t_vk_trap -Wno-unused-function -I"$T/newt" -I"$VPK/gpu/vulkan/third_party/vulkan-headers/include" tests/t_vk_trap.c
+  awk '/KL-TEST-BEGIN robust/{p=1;next} /KL-TEST-END robust/{p=0} p' runtime/gfx/kl_vulkan.c > "$T/newt/robust.inc"
+  run t_vk_robust -Wno-unused-function -I"$T/newt" -I"$VPK/gpu/vulkan/third_party/vulkan-headers/include" tests/t_vk_robust.c
   awk '/KL-TEST-BEGIN ue4sig/{p=1;next} /KL-TEST-END ue4sig/{p=0} p' runtime/guest/kl_ue4.c > "$T/newt/ue4sig.inc"
   run t_ue4_sig -Wno-unused-function -I"$T/newt" tests/t_ue4_sig.c
   awk '/KL-TEST-BEGIN ue4cmd/{p=1;next} /KL-TEST-END ue4cmd/{p=0} p' runtime/guest/kl_ue4.c > "$T/newt/ue4cmd.inc"
   run t_ue4_cmdline -Wno-unused-function -I"$T/newt" tests/t_ue4_cmdline.c
   awk '/KL-TEST-BEGIN aswsize/{p=1;next} /KL-TEST-END aswsize/{p=0} p' runtime/xr/kl_ovrp.c > "$T/newt/aswsize.inc"
   run t_asw_size -Wno-unused-function -I"$T/newt" tests/t_asw_size.c
+  awk '/KL-TEST-BEGIN ptscan/{p=1;next} /KL-TEST-END ptscan/{p=0} p' runtime/xr/kl_ovrp.c > "$T/newt/ptscan.inc"
+  run t_pt_scan -Wno-unused-function -I"$T/newt" tests/t_pt_scan.c
+  awk '/KL-TEST-BEGIN bslash/{p=1;next} /KL-TEST-END bslash/{p=0} p' runtime/libc/kl_libc.c > "$T/newt/bslash.inc"
+  run t_bslash -Wno-unused-function -I"$T/newt" tests/t_bslash.c
+  awk '/KL-TEST-BEGIN fqonce/{p=1;next} /KL-TEST-END fqonce/{p=0} p' runtime/kl_fault.c > "$T/newt/fqonce.inc"
+  run t_forcequit -Wno-unused-function -I"$T/newt" tests/t_forcequit.c
   awk '/KL-TEST-BEGIN seatoff/{p=1;next} /KL-TEST-END seatoff/{p=0} p' runtime/xr/kl_ovrp.c > "$T/newt/seatoff.inc"
   run t_seat_offset -Wno-unused-function -I"$T/newt" tests/t_seat_offset.c -lm
   mkdir -p "$T/vmlog"
@@ -85,6 +97,14 @@ klepton_tests() {
   run t_vmgroup -Wno-unused-function -I"$T/vmlog" tests/t_vmgroup.c
   awk '/KL-TEST-BEGIN lring/{p=1;next} /KL-TEST-END lring/{p=0} p' runtime/libc/kl_va_handlers.c > "$T/vmlog/lring.inc"
   run t_lring -I"$T/vmlog" tests/t_lring.c
+  awk '/KL-TEST-BEGIN synthobj/{p=1;next} /KL-TEST-END synthobj/{p=0} p' runtime/kl_jni.c > "$T/newt/synthobj.inc"
+  run t_jni_synth -I"$T/newt" tests/t_jni_synth.c
+  awk '/KL-TEST-BEGIN ue4recv/{p=1;next} /KL-TEST-END ue4recv/{p=0} p' runtime/jni/kl_jni_ue4.c > "$T/newt/ue4recv.inc"
+  run t_ue4_receivers -Wno-unused-function -I"$T/newt" tests/t_ue4_receivers.c
+  awk '/KL-TEST-BEGIN ue4thunk/{p=1;next} /KL-TEST-END ue4thunk/{p=0} p' runtime/jni/kl_jni_ue4.c > "$T/newt/ue4thunk.inc"
+  run t_ue4_thunk -Wno-unused-function -I"$T/newt" tests/t_ue4_thunk.c
+  awk '/KL-TEST-BEGIN noophit/{p=1;next} /KL-TEST-END noophit/{p=0} p' runtime/kl_jni.c > "$T/newt/noophit.inc"
+  run t_noop_hit -Wno-unused-function -I"$T/newt" tests/t_noop_hit.c -lpthread
   return $rc
 }
 

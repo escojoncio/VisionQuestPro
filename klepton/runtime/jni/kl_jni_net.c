@@ -462,6 +462,7 @@ KLJ_SETTINGS_ACCESSORS(System)
 // would read as an answer.
 static klj_val klj_void_noop(void *env, void *self, const klj_val *a, int n) {
     (void)env; (void)self; (void)a; (void)n;
+    klj_noop_hit_current();
     return (klj_val){.j = 0};
 }
 

@@ -22,6 +22,7 @@
 #include "../guest/kl_il2cpp.h"   // kl_il2cpp_method_at, for ovrp_log_chain
 #include "../diag/kl_sample.h"     // kl_sample_snapshot, at the display teardown
 #include "../diag/kl_wait.h"       // kl_game_beat: game-thread silence watcher
+#include "../diag/kl_diagcap.h"     // kl_diagcap_input: hold a button combination to capture a frame
 #include "kl_bg.h"                 // kl_bg_wait: no GPU work while the app is backgrounded
 // kl_glfb_note_eye_texture (the capture's eye-FBO seam) and
 // kl_glfb_last_render_stage (which stage the guest actually drew into — see
@@ -3913,7 +3914,9 @@ static uint64_t klovrp_EndFrame(int guest_frame_index) {
 // No layer list on this path — 1.28's legacy VRDevice hands its eye
     // textures down through ovrp_SetupEyeTexture2 and never describes a layer,
     // so it can only ever have rendered into the whole thing.
-    return klovrp_end_frame_impl(guest_frame_index, NULL, NULL, -1);
+    uint64_t r = klovrp_end_frame_impl(guest_frame_index, NULL, NULL, -1);
+    kl_frame_boundary(KL_FRAME_OVRP);   // the capture's frame boundary (not in the impl: EndFrame4 closes it after its GPU wait)
+    return r;
 }
 
     // ovrp_EndFrame4(frameIndex, layerSubmits, layerSubmitCount, sync) — the 1.40
@@ -4109,6 +4112,7 @@ static uint64_t klovrp_EndFrame4(int guest_frame_index, const void *layer_submit
         kl_vulkan_taa_gles_frame_end(filed, filed >= 0 ? pend_serial : 0);
     }
     klovrp_publish_deferred();   // no-op unless a deferred stage is still pending
+    kl_frame_boundary(KL_FRAME_OVRP);   // the capture's frame boundary: the frame's submits and its GPU wait are done
     ovrp_log_ret("EndFrame4", r, &nr_end);
     return r;
 }
@@ -4457,6 +4461,7 @@ void kl_ovrp_set_controller_input(int hand, uint32_t buttons, uint32_t touches,
     g_input[hand].hand_trigger = hand_trigger;
     g_input[hand].stick_x = stick_x;
     g_input[hand].stick_y = stick_y;
+    kl_diagcap_input(hand, buttons);
 
     // RIGHT Options button (PSVR2 Sense) -> a console command, on the press edge.
     // Reaches us as the BACK bit on the right hand (system/click). Default (hl1)
@@ -6875,11 +6880,12 @@ static void klovrp_probe_submit_tail(const ovrp_layer_submit *s) {
 }
 
 // ovrpShape, from the guest's own enum. The names are in libOculusXRPlugin's
-// string table in this order; UE4's OculusHMD uses Quad for splash screens and
-// for IStereoLayers, Cylinder and Equirect for the rest.
+// string table; UE4's OculusHMD uses Quad for splash screens and for IStereoLayers,
+// Cylinder and Equirect for the rest. Value 6 is not a known shape (unverified).
 static const char *klovrp_shape_name(int shape) {
     static const char *const N[] = { "Quad", "Cylinder", "Cubemap", "EyeFov",
-                                     "OffcenterCubemap", "Equirect", "ReconstructionPassthrough",
+                                     "OffcenterCubemap", "Equirect", "?",
+                                     "ReconstructionPassthrough",
                                      "SurfaceProjectedPassthrough", "Fisheye",
                                      "KeyboardHandsPassthrough", "KeyboardMaskedHandsPassthrough" };
     return (unsigned)shape < sizeof N / sizeof *N ? N[shape] : "?";
@@ -6956,19 +6962,53 @@ static uint64_t klovrp_SetInsightPassthroughStyle(int layer_id, const void *styl
     if (!logged++) fprintf(stderr, "  [pt] SetInsightPassthroughStyle(layer %d): accepted\n", layer_id);
     return OVRP_SUCCESS;
 }
+// Which ovrpShape values are passthrough. OVRPlugin's enum: ReconstructionPassthrough
+// = 7, SurfaceProjectedPassthrough = 8, KeyboardHandsPassthrough = 10,
+// KeyboardMaskedHandsPassthrough = 11 (Fisheye = 9 is video, not passthrough).
+// KL-TEST ptscan.
+// KL-TEST-BEGIN ptscan
+struct klovrp_pt_item { int is_eye, shape; };
+static int klovrp_shape_is_passthrough(int sh) {
+    return sh == 7 || sh == 8 || sh == 10 || sh == 11;
+}
+// Index of the item that makes this frame a passthrough frame, or -1; *eye_idx = the
+// first eye layer (-1 none). Only a passthrough-SHAPED non-eye layer counts, and only
+// when InsightPassthrough is initialised. A paused layer is not submitted, so it is
+// not in the list and does not count.
+static int klovrp_pt_decide(const struct klovrp_pt_item *it, int n, int initialized,
+                            int *eye_idx) {
+    int pt = -1;
+    *eye_idx = -1;
+    for (int i = 0; i < n; i++) {
+        if (it[i].is_eye && *eye_idx < 0) *eye_idx = i;
+        if (!it[i].is_eye && pt < 0 && klovrp_shape_is_passthrough(it[i].shape)) pt = i;
+    }
+    return initialized ? pt : -1;
+}
+// KL-TEST-END ptscan
 static void klovrp_passthrough_scan(const void *layer_submits, int count) {
     const ovrp_layer_submit *const *list = layer_submits;
-    int pt_idx = -1, pt_id = 0, eye_idx = -1;
-    for (int i = 0; list && i < count; i++) {
+    struct klovrp_pt_item it[KLOVRP_MAX_LAYERS];
+    int ids[KLOVRP_MAX_LAYERS], n = 0;
+    for (int i = 0; list && i < count && n < KLOVRP_MAX_LAYERS; i++) {
         const ovrp_layer_submit *s = list[i];
         if (!s) continue;
         struct klovrp_layer *l = klovrp_layer(s->layer_id);
         if (!l) continue;
-        if (l->is_eye) { if (eye_idx < 0) eye_idx = i; continue; }
-        int sh = l->desc.shape;
-        if (pt_idx < 0 && (sh == 6 || sh == 7)) { pt_idx = i; pt_id = s->layer_id; }
+        it[n].is_eye = l->is_eye; it[n].shape = l->desc.shape;
+        ids[n++] = s->layer_id;
+        if (!g_pt_initialized && !l->is_eye && klovrp_shape_is_passthrough(l->desc.shape)) {
+            static int said;
+            if (said++ < 4)
+                fprintf(stderr, "  [pt] passthrough layer %d (shape %d) is submitted but "
+                                "InsightPassthrough was never initialised: not shown\n",
+                        s->layer_id, l->desc.shape);
+        }
     }
-    int present = g_pt_initialized && pt_idx >= 0;
+    int eye_idx;
+    int pt_idx = klovrp_pt_decide(it, n, g_pt_initialized, &eye_idx);
+    int pt_id = pt_idx >= 0 ? ids[pt_idx] : 0;
+    int present = pt_idx >= 0;
     // OVRPlugin eye layers are premultiplied unless the guest asks otherwise.
     kl_passthrough_note_frame(present, pt_id, present && (eye_idx < 0 || pt_idx < eye_idx), 0);
 }
@@ -7600,6 +7640,19 @@ int kl_ovrp_active_eye_layer_size(int *w, int *h) {
     return 1;
 }
 
+// Id of the newest live eye layer (the one kl_ovrp_active_eye_layer_size measures), or 0
+// when none exists yet. ovrp_GetEyeFovLayerId reports it.
+int kl_ovrp_active_eye_layer_id(void) {
+    int best = 0;
+    for (int i = 0; i < KLOVRP_MAX_LAYERS; i++) {
+        const struct klovrp_layer *l = &g_layers[i];
+        if (l->id > best && l->is_eye && l->desc.texture_size.w > 0 &&
+            l->desc.texture_size.h > 0)
+            best = l->id;
+    }
+    return best;
+}
+
 int kl_ovrp_overlay_count(void) {
     pthread_mutex_lock(&g_frames.mu);
     int n = g_overlays.n;
@@ -8010,9 +8063,9 @@ static uint64_t klovrp_SetupLayer(void *device, const ovrp_layer_desc_eyefov *de
     // read as a spare: RE4's splash is a 900x900 Quad and the line said
     // "dummy, 1x1" (the size because ovrp_CalculateLayerDesc answered one it
     // invented — see there).
-    fprintf(stderr, "  [ovrp] SetupLayer(device=%p) -> layer %d, %s, %dx%d "
+    fprintf(stderr, "  [ovrp] SetupLayer(device=%p) -> layer %d, %s (shape %d), %dx%d "
                     "layout=%d fmt=%d samples=%d%s\n",
-            device, l->id, is_eye ? "EYE" : klovrp_shape_name(desc->shape),
+            device, l->id, is_eye ? "EYE" : klovrp_shape_name(desc->shape), desc->shape,
             desc->texture_size.w, desc->texture_size.h, desc->layout,
             desc->format, desc->sample_count,
             reused ? " (reusing the previous layer's textures)" : "");
@@ -9554,7 +9607,7 @@ static uint64_t klovrp_GetHandNodePoseStateLatency(double *out) {
 static uint64_t klovrp_IsLayerShapeSupported(int shape, int32_t *out) {
     ovrp_hit("ovrp_IsLayerShapeSupported");
     if (!out) return OVRP_FAIL_INVALID_PARAM;
-    *out = shape == 0 || shape == 3 || shape == 5 || shape == 6 || shape == 7;
+    *out = shape == 0 || shape == 3 || shape == 5 || klovrp_shape_is_passthrough(shape);
     return OVRP_SUCCESS;
 }
 

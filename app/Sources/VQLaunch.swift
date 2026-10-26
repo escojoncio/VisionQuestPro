@@ -51,7 +51,14 @@ enum VQLaunch {
         // reuse) and log 60 had every archive save fail with MTLCompilerService unreachable from
         // 2 s into the run while blit libraries failed to compile in the same windows — the
         // archive work is the first suspect for overloading the compiler service.
-        if VQConformance.isConformance(game) { unsetenv("VP_PIPELINE_CACHE_DIR") } else { setenv("VP_PIPELINE_CACHE_DIR", psoCache.path, 1) }
+        if VQConformance.isConformance(game) {
+            unsetenv("VP_PIPELINE_CACHE_DIR")
+            unsetenv("VPVK_ROBUST")  // the CTS keeps robustBufferAccess in the translated shaders as before
+        } else {
+            setenv("VP_PIPELINE_CACHE_DIR", psoCache.path, 1)
+            // Before the prewarm below: it must see the same VPVK_ROBUST as the game.
+            VQRobust.prepare(cache: psoCache)
+        }
         // The conformance tests compile their own pipelines; a prewarm of earlier runs' recipes
         // would only slow every vkCreateDevice down (prepareRun turns it off in the driver too).
         if !VQConformance.isConformance(game) { VQPrewarm.run(gameFolder: game.folder, cache: psoCache) }
@@ -132,6 +139,9 @@ final class VQSettings: ObservableObject {
     @Published var quest3Profile: Bool { didSet { save() } }
     @Published var forceVulkan: Bool { didSet { save() } }
     @Published var diagCaptures: Bool { didSet { save() } }
+    /// «Incluir capturas»: the .vpcap files of «Captura de frames» (QUEST/capturas) go in the share sheet too. They can
+    /// be large, so off by default.
+    @Published var includeCaptures: Bool { didSet { save() } }
     /// Vulkan driver: VPKEngine's own (VPVulkan) or MoltenVK (to compare, or if VPKEngine fails).
     @Published var useVPKEngine: Bool { didSet { save() } }
     /// Experimental: GLES games through VPKEngine's own OpenGL ES (vpgles in VPVulkan). Off by default:
@@ -199,6 +209,7 @@ final class VQSettings: ObservableObject {
         quest3Profile = d.object(forKey: "vq.quest3v2") as? Bool ?? true  // Quest 3 for every game by default
         forceVulkan = d.object(forKey: "vq.forceVulkan") as? Bool ?? true
         diagCaptures = d.object(forKey: "vq.diagCaptures2") as? Bool ?? false
+        includeCaptures = d.object(forKey: "vq.includeCaptures") as? Bool ?? false
         // Saved as "vq.vpengine" before the engine was renamed VPKEngine.
         useVPKEngine = (d.object(forKey: "vq.vpkengine") ?? d.object(forKey: "vq.vpengine")) as? Bool ?? true
         glesVPK = d.object(forKey: "vq.glesVPK") as? Bool ?? false
@@ -254,6 +265,7 @@ final class VQSettings: ObservableObject {
         d.set(quest3Profile, forKey: "vq.quest3v2")
         d.set(forceVulkan, forKey: "vq.forceVulkan")
         d.set(diagCaptures, forKey: "vq.diagCaptures2")
+        d.set(includeCaptures, forKey: "vq.includeCaptures")
         d.set(useVPKEngine, forKey: "vq.vpkengine")
         d.set(glesVPK, forKey: "vq.glesVPK")
         d.set(vkFullProfile, forKey: "vq.vkFullProfile")
@@ -346,6 +358,22 @@ final class VQSettings: ObservableObject {
             unsetenv("VP_DUMP_DIR")
         }
         VQLog.log("Gráficos: capturas de diagnóstico \(diagCaptures)")
+        // «Captura de frames (diagnóstico)», per game (VQGameCapture): VPKEngine tracks every object from the start
+        // (VPVK_CAPTURE=1, more RAM) and writes the .vpcap to QUEST/capturas/<game>/; Klepton's kl_diagcap asks for one
+        // when the player holds the chosen buttons in the game.
+        let cap = VQGameCapture.load(key: game?.aaKey ?? "")
+        if cap.enabled, let g = game, let dir = VQFolder.shared.captures(for: g.id) {
+            setenv("VPVK_CAPTURE", "1", 1)
+            setenv("VPVK_CAPTURE_DIR", dir.path + "/", 1)
+            setenv("KL_DIAGCAP", "1", 1)
+            setenv("KL_DIAGCAP_BTN", String(cap.button.rawValue), 1)
+            setenv("KL_DIAGCAP_HOLD_MS", String(cap.holdSeconds * 1000), 1)
+            VQLog.log("Captura de frames: activada (\(cap.button.title), \(cap.holdSeconds) s) → \(dir.path)"
+                      + (useVPKEngine ? "" : "; solo funciona con VPKEngine"))
+        } else {
+            for k in ["VPVK_CAPTURE", "VPVK_CAPTURE_DIR", "KL_DIAGCAP", "KL_DIAGCAP_BTN", "KL_DIAGCAP_HOLD_MS"] { unsetenv(k) }
+            if cap.enabled { VQLog.log("Captura de frames: pedida, pero sin carpeta QUEST no se activa") }
+        }
         // Eye texture size the game is told (Klepton's ovrp side) and headset identity:
         // 11 = ovrpSystemHeadset Meta_Quest_3; off: Klepton's per-game default (Quest 2 / Quest).
         setenv("KL_OVRP_POSTURE", posture, 1)
@@ -468,8 +496,9 @@ final class VQSettings: ObservableObject {
         unsetenv("VPVK_STRICT_FEATURES")
         // «Perfil Vulkan completo»; the conformance runs set it again either way (VQConformance).
         if vkFullProfile { setenv("VPVK_EXTRA_EXTENSIONS", "1", 1) } else { unsetenv("VPVK_EXTRA_EXTENSIONS") }
-        // Async pipelines stay on with the full profile (only an explicit 0 turns them off); the conformance runs set 0 (VQConformance).
-        unsetenv("VPVK_ASYNC_PIPELINES")
+        // The game's vkCreate*Pipelines is synchronous (Quest semantics): VPKEngine is async by default and the synchronous mode is
+        // opt-in with VPVK_ASYNC_PIPELINES=0, read in vkCreateDevice. The conformance runs set 0 too (VQConformance).
+        setenv("VPVK_ASYNC_PIPELINES", "0", 1)
         // VPKEngine 454f7cc dead-store elision (heuristic, risks a corrupted frame) — off until the translator marks samples to keep
         unsetenv("VPVK_MSAA_DEAD_STORE")
         // Games: report geometry/tessellation like Adreno so Unity keeps subshaders that need
@@ -664,6 +693,44 @@ enum VQGameRCAS {
     }
 }
 
+/// «Captura de frames (diagnóstico)» per game, off by default (VPKEngine's .vpcap capture, needs object tracking from the
+/// start: more RAM). `button` is the combination held `holdSeconds` in the game to capture one frame; its raw value is
+/// KL_DIAGCAP_BTN (kl_diagcap.h). Saved by game key: vq.cap.on.<key>, vq.cap.btn.<key>, vq.cap.sec.<key>.
+struct VQGameCapture: Equatable {
+    enum Combo: Int, CaseIterable {
+        case stickL = 0, stickR = 1, sticks = 2, triggers = 3
+        var title: String {
+            switch self {
+            case .stickL: return VQL("Stick izquierdo (pulsado)", "Left stick (clicked)")
+            case .stickR: return VQL("Stick derecho (pulsado)", "Right stick (clicked)")
+            case .sticks: return VQL("Los dos sticks (pulsados)", "Both sticks (clicked)")
+            case .triggers: return VQL("Los dos gatillos / pellizcos", "Both triggers / pinches")
+            }
+        }
+    }
+    var enabled = false
+    var button = Combo.stickL
+    var holdSeconds = 3   // 1...10
+
+    static func load(key: String) -> VQGameCapture {
+        let d = UserDefaults.standard
+        var r = VQGameCapture()
+        guard !key.isEmpty else { return r }
+        r.enabled = d.object(forKey: "vq.cap.on." + key) as? Bool ?? false
+        r.button = Combo(rawValue: d.object(forKey: "vq.cap.btn." + key) as? Int ?? 0) ?? .stickL
+        r.holdSeconds = min(max(d.object(forKey: "vq.cap.sec." + key) as? Int ?? 3, 1), 10)
+        return r
+    }
+
+    func save(key: String) {
+        guard !key.isEmpty else { return }
+        let d = UserDefaults.standard
+        d.set(enabled, forKey: "vq.cap.on." + key)
+        d.set(button.rawValue, forKey: "vq.cap.btn." + key)
+        d.set(holdSeconds, forKey: "vq.cap.sec." + key)
+    }
+}
+
 /// Game language: the system language if the game ships it (APK entries or data files name it),
 /// otherwise English. Klepton answers java.util.Locale and AConfiguration from LANG.
 enum VQLanguage {
@@ -798,6 +865,69 @@ enum VQOVRPluginVersion {
     }
 }
 
+/// robustBufferAccess per game. VPKEngine (55506b0) bakes it into the translated MSL and the recipe key: VPVK_ROBUST unset = on,
+/// "0" = off, "app" = what the game enables at vkCreateDevice (on while no device exists, i.e. in the prewarm). Klepton writes what
+/// the game asked for to <cache>/vq.robust ("0"/"1", kl_vulkan.c); with it known the launch gives "0" to a game that does not
+/// ask (prewarm and game both translate without the checks), else "app" (the prewarm's "on" is the game's own request).
+enum VQRobust {
+    static let learnedFile = "vq.robust"
+    static let migrationStamp = "vq.robustMigrated.v1"
+
+    /// nil = not learned yet (first run of the game, or the cache was wiped).
+    static func learned(cache: URL) -> Bool? {
+        guard let t = try? String(contentsOf: cache.appendingPathComponent(learnedFile), encoding: .utf8) else { return nil }
+        switch t.trimmingCharacters(in: .whitespacesAndNewlines) {
+        case "1": return true
+        case "0": return false
+        default: return nil
+        }
+    }
+
+    /// Value of VPVK_ROBUST for a game with this learned data.
+    static func envValue(learned: Bool?) -> String { learned == false ? "0" : "app" }
+
+    /// VPVK_ROBUST as set for this run ("0", "app" or "default"): part of the warm stamps, so a value learned after the first
+    /// session repeats the precompilation with the right one.
+    static var stampTag: String {
+        guard let e = getenv("VPVK_ROBUST") else { return "rbdefault" }
+        return "rb" + String(cString: e)
+    }
+
+    /// Once per cache folder: recipes, Metal archives and the warm stamps of earlier builds were made without the VPVK_ROBUST
+    /// key, so they go (the next launch rebuilds them). Sealed with the stamp only when every removal and the stamp itself
+    /// succeeded (else it retries next launch). nil = the stamp says it already ran.
+    static func purgeOnce(cache: URL) -> (removed: Int, failed: [String], sealed: Bool)? {
+        let fm = FileManager.default
+        let stamp = cache.appendingPathComponent(migrationStamp)
+        if fm.fileExists(atPath: stamp.path) { return nil }
+        var removed = 0
+        var failed: [String] = []
+        for f in (try? fm.contentsOfDirectory(atPath: cache.path)) ?? [] {
+            let archive = f.hasPrefix("pipelines") && (f.hasSuffix(".metalar") || f.hasSuffix(".keys"))
+            let warm = f.hasPrefix("firstrun.") || f.hasPrefix("aot.")
+            if archive || warm || f == "pipelines.count" || f == "recipes.bin" {
+                do { try fm.removeItem(at: cache.appendingPathComponent(f)); removed += 1 } catch { failed.append("\(f): \(error.localizedDescription)") }
+            }
+        }
+        if !failed.isEmpty { return (removed, failed, false) }
+        try? fm.createDirectory(at: cache, withIntermediateDirectories: true)
+        return (removed, failed, fm.createFile(atPath: stamp.path, contents: Data()))
+    }
+
+    static func prepare(cache: URL) {
+        if let r = purgeOnce(cache: cache) {
+            VQLog.log("Shaders: caché migrada a VPVK_ROBUST, \(r.removed) ficheros borrados (recetas, archivos Metal, sellos de calentamiento)"
+                      + (r.sealed ? "" : ", SIN sellar (se reintenta en el próximo arranque)"))
+            for f in r.failed { VQLog.log("Shaders: no se pudo borrar \(f)") }
+        }
+        let l = learned(cache: cache)
+        let v = envValue(learned: l)
+        setenv("VPVK_ROBUST", v, 1)
+        let shown = l == nil ? "sin aprender" : (l == true ? "1" : "0")
+        VQLog.log("Shaders: robustBufferAccess del juego \(shown) -> VPVK_ROBUST=\(v)")
+    }
+}
+
 /// Shader precompilation before the game boots: VPVulkan rebuilds every pipeline recipe stored by
 /// earlier runs (VP_PIPELINE_CACHE_DIR) on all cores and saves the Metal binary archive, so the
 /// game's own pipeline creation is cache hits instead of 200-400 ms compiles mid-play.
@@ -862,7 +992,7 @@ final class VQPrewarm: ObservableObject {
         }
         try? fm.createDirectory(at: cache, withIntermediateDirectories: true)
         let recipes = vq_prewarm_count()
-        let stamp = cache.appendingPathComponent("aot.\(tag).r\(recipes)")
+        let stamp = cache.appendingPathComponent("aot.\(tag).r\(recipes).\(VQRobust.stampTag)")
         if fm.fileExists(atPath: stamp.path) {
             VQLog.log("Shaders AOT: archivo al día (\(recipes) recetas), se carga al crear el dispositivo")
             return
@@ -901,7 +1031,7 @@ final class VQPrewarm: ObservableObject {
         // Stamp follows the translator's source fingerprint: any translator change re-runs the precompile.
         var tag = "v\(firstRunVersion)"
         if let c = translatorTag() { tag = "v\(firstRunVersion)." + c }
-        let stamp = cache.appendingPathComponent("firstrun.\(tag)")
+        let stamp = cache.appendingPathComponent("firstrun.\(tag).\(VQRobust.stampTag)")
         if fm.fileExists(atPath: stamp.path) { return }
         // Only with VPVulkan loaded (MoltenVK path has no precompiler): avoids re-scanning every launch.
         guard dlsym(UnsafeMutableRawPointer(bitPattern: -2), "vpvk_precompile_spirv") != nil else {

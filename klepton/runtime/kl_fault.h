@@ -31,8 +31,9 @@ void kl_fault_add_reporter(void (*fn)(FILE *));
 // name of the call is already known and the caller is the open question.
 void kl_fault_print_frames(FILE *f, void *fp);
 
-// Dump the guest's last errors ("[fatal] last guest errors:", kl_log_ring_*) to fd 2 and the crash file, the first time
-// only. For the ForceQuit the guest asks for and Klepton ignores; a fatal signal always dumps them by itself.
+// Dump the guest's last errors ("[forcequit]" line, then "[fatal] last guest errors:" + kl_log_ring_*) to fd 2 only, the
+// first time only; it never creates the crash file. For the ForceQuit the guest asks for and Klepton ignores; a fatal
+// signal always dumps them by itself (and into the crash file).
 void kl_fault_guest_errors_once(void);
 
 // Where to write a copy of the fault report, opened by path at fault time and

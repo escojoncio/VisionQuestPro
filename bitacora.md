@@ -1,43 +1,38 @@
 # Bitácora — VisionQuestPro
 
 ## Last done
-- 2026-10-26 VPKEngine `5939c99`: `vkCmdBindPipeline` no pisa viewport/scissor con `*_WITH_COUNT` dinámicos; log `empty_scissor` con `area=`/`fb=`; gles: mips antes del nivel 0 guardados (`Texture::pending`, antes ASTC a cero = magenta, hipótesis Maestro), completitud con sampler object, clear con colorMask/stencil mask por draw, superficies EGL a cero al crear (pantalla morada inicial, hipótesis), `gles.tex fmt=`/`mip_before_base`; frame_compiler: encoder con indirect GPU = heavy sin memoryless (hipótesis Gundam: volcado del tiler); línea `vk.perf` 1/s (frames, submit/translate/backend ms, `gpu_cb`, `pso_wait_ms`, `fence_wait`, `ind{gpu cpu cpu_sec}`).
-- 2026-10-26 VQP: `ovrp_GetLayerTextureSpaceWarp` escribe ovrpSizei en x4/x6 (`klovrp_asw_put_sizes`, ABI unverified; ITR2 creaba fb SpaceWarp 0x0 → ~89 % draws `empty_scissor`). Modo sentado: `KL_OVRP_SEATED`/`KL_OVRP_STAND_HEIGHT` (app: «Modo sentado», global+juego, 1,40–2,00 m) sube floor/stage `max(0, pie − medida)` vía `klovrp_guest_origin_y`; OpenXR STAGE/LOCAL_FLOOR `klxr_stage_origin_y` + evento SPACE_CHANGE_PENDING; conformidad fuerza SEATED=0. Tests `t_asw_size`, `t_seat_offset`. Maestro sí fija origen floor (1): altura baja = altura real sentado.
-- 2026-10-26 VPKEngine `5b8432f`: PSO `Priority::Urgent` (boost real) + creaciones del juego a `Visible` (causa de tirones: backlog del precache UE ~7,4k PSO en Blocking, boost al final de la cola); `skip_by{}` en `vk.submit` (ITR2: ~236/270 draws descartados por ok=false silencioso, motivo por medir); vpgles program binaries (causa Maestro: `PROGRAM_BINARY_LENGTH`=0 → UE fatal "Binary program returned 0 bytes!" en FOpenGLProgramBinaryCache → ForceQuit ×90 → SIGSEGV SceneColor nulo en RenderForward); `vpgpu::BackgroundGate`.
-- 2026-10-26 VQP: `klepton/runtime/gfx/kl_bg.{c,h}`: guest bloqueado en segundo plano (QueueSubmit/Present, SwapBuffers, ovrp Update2/EndFrame4/end_frame_impl, xr WaitFrame/EndFrame; foco VrFocus2/InputFocus=0), Swift `scenePhaseChanged`→`kl_bg_set`, reenvío por dlsym a `vpgpu_set_background`; watchdog silenciado en bg. `kl_ue4.c`: UE4CommandLine.txt en `<files>/<native>/<Proj>/` (antes ruta que UE no leía → sin log UE); extras por target solo con `KL_UE4_TARGET_EXTRAS=1`. Tests `t_bg`, `t_ue4_cmdline`.
-- 2026-10-26 VPKEngine `710574a`: `ScopedPool` (objc_autoreleasePoolPush/Pop, core/include/vpgpu/core/scoped_pool.h) en métodos públicos de MetalBackend, MetalPlatform taa/depthResolve y entradas vk*/vpvk_* de entry.cpp (causa inferida de RAM: MTLTexture autoreleased en hilos guest sin pool = inmortales; attr ≫ ledger en Gundam/Deadpool/ITR2). Texturas `pinned` con retención 1 s + 4 frames (`pinnedHold`/`promotePinned`). `Attachment::keepSamples` (=true en todo StoreAndResolve del traductor; solo DONT_CARE+resolve es memoryless), `msaaColorResolveOnTile` por defecto (`VP_MSAA_TILE`). gles: subidas DEPTH_COMPONENT→D16/D24/D32F. Contadores img_rel_*/tex_created/destroyed/g_tex_live en [vkagg].
-- 2026-10-26 VQP: tamaño de ojo sin bucle: primer push = constante de la partida (`kl_ovrp_set_eye_texture_size` devuelve aceptado; Swift guarda solo si aceptado; espera 500 ms si el guest pregunta antes); `kles_desc_size` cancela escala guest >1 (modo pct), cap `KL_OVRP_EYE_MAX`; `kles_freeze_widen` (ensanche del plugin congelado una vez, >1.02) y `kles_freeze_xr_scale` (OpenXR) en xr/kl_ovrp_eyesize.h. Retire: `g_eye_published`, imagen nunca publicada → quick sin hold; ASW MV/depth quick=2 (0,5 s+3 frames o 2 s); `kl_vulkan_retire_poll` desde `kl_mem_rate_poll` (no_publish). `klvk_forget_cached_mtl` también en `klvk_DestroyImage`. Swift `pruneArrayViews`. `ue4_stdout_default`=1 para todo UE.
-- `07bd8fa` (VPKEngine): vpgles enlaza varyings por location (confirmado en visor: Maestro sin "fragment input not written").
-- `b27c9c7`: DT_NEEDED del entry UE (confirmado en visor: ITR2 0 imports sin resolver).
-- `3280533`: auditoría estática de enlace+JNI de 6 APK: `ovrMessageType_ToString`, `AMediaMuxer_*` fallo limpio, trap Vulkan -7/0 por nombre, nativos UE con firma máxima (`nativeSetWindowInfo` ZII, `nativeSetAndroidVersionInformation` 7 args), Electra/EOS ITR2, `getAppPackageName`, `System.loadLibrary`, EOS cache dirs, `ReflectionHelper.newProxyInstance`, `kl_jni_onload_claim` (JNI_OnLoad único por imagen).
-- `68e5ecb`+`d7f81fc`: `[hb] gpu.attr` (objetos Metal vivos por etiqueta, total/tracked/untracked) y `gpu.bigalloc`/`[mtl] bigalloc` ≥32 MiB.
-- `c61f2cf`: `[hb] vm` (mapa VM por tag, tag 240 = mmap anónimo del guest) y `[fatal] last guest errors` (anillo async-safe).
-- `c6f8362`: carátula tienda: timeouts 30/120 s, backoff net 2/10/30/60 min, respaldo nombre exacto+organización.
+- 2026-10-26 VPKEngine `55506b0` + VQP `VQRobust` (VQLaunch.swift): `VPVK_ROBUST` = `0` si el juego aprendió que no pide robustBufferAccess (`<VP_PIPELINE_CACHE_DIR>/vq.robust`, escrito por `klvk_robust_store` en kl_vulkan.c, OR pegajoso por proceso), si no `app`; aplicado antes del prewarm; sellos `firstrun.*`/`aot.*` llevan `.rb0/.rbapp`; purga única por caché (`vq.robustMigrated.v1`: pipelines*.metalar/.keys/.count, recipes.bin, firstrun.*, aot.*). Test `t_vk_robust`. Conformance sin VPVK_ROBUST.
+- 2026-10-26 VPKEngine `fd90770` (main; `ref:` subido): `VPVK_ASYNC_PIPELINES=0` = vkCreate*Pipelines síncrono (semántica Quest; timeout 60 s, backoff 500 ms/5 s, FAIL_ON_COMPILE_REQUIRED); vpgles async salvo `VPVK_GLES_SYNC_PIPELINES=1`; archive depth-only aparte; RAM: TileLocal entre encoders limpios, `transientViolated`, depth de ojo TAA materializado. Logs nuevos: `vpk.version`, `vk.pso.census`, `vk.pso.fail`, `vk.hitch`, `gles.uniform_err`, `gles.tex`, `gles.pso.recipe`, `gpu.missing`, `gpu.mem.rt`. Captura VPCAP + `vpreplay`/`vpimgdiff` + CI lavapipe vs Metal (detalle: `notas/captura.md`).
+- 2026-10-26 VQP: `VQLaunch.swift` pone `VPVK_ASYNC_PIPELINES=0` para juegos (barra de precache del juego real; antes async: ITR2 >8000 PSO «hechos» sin compilar). `kl_frame_boundary` (kl_bg.c) llama `vpvk_frame_boundary` 1/frame desde EndFrame4/EndFrame/xrEndFrame (dueño de ruta, traspaso 500 ms).
+- 2026-10-26 VQP passthrough ovrp: `klovrp_shape_is_passthrough` = shapes 7/8/10/11 (enum OVRPlugin real; antes 6/7 → Gundam shape 8 SurfaceProjected nunca activaba); `klovrp_shape_name` alineado; aviso si capa passthrough sin InitializeInsightPassthrough. Test `t_pt_scan`.
+- 2026-10-26 VQP libc/JNI: `kl_bs_resolve` (ruta con '\' literal primero, si no '\'→'/'; `[fs] backslash_fallback`); `klj_arr_data` en 13 sitios JNI; cuarentena pthread libera solo si destroy==0; ForceQuit vuelca `[forcequit]` a fd 2 sin crash.log; receptores UE `com/epicgames/unreal/*` (antes solo ue4/* → ITR2 sin batería/volumen); tabla `g_ue4_thunks` (36 filas S/H/O); AudioFocus GRANTED; isFinishing/getDisplay; `[jni] noop_hit`; `GetEyeFovLayerId` real; `createTelemetryHandler` objeto sintético. Tests `t_bslash`, `t_forcequit`, `t_ue4_thunk`, `t_ue4_receivers`, `t_noop_hit`, `t_jni_synth`, `t_ovrp_render`, `t_libc_sem`.
+- 2026-10-26 VQP captura: ajuste por juego «Captura de frames (diagnóstico)» (VPVK_CAPTURE=1, `QUEST/capturas/<juego>/`), gesto pulsación larga (`kl_diagcap.c`, combo/segundos configurables) → `vpvk_capture_request`; «Incluir capturas» en registros. Test `t_diagcap`, `t_frame_boundary`.
+- 2026-10-26 `tools/ci/jni-audit.py --log <klepton-boot.log>`: UNLINKED por juego (Maestro 0, ITR2 6 Sentry, Gundam 2 metrics).
+- Build `d13f9d2`/VPK `5939c99` (medido): ITR2 fb ASW 1116x1129 y 0 `empty_scissor` (arreglo ASW confirmado); ITR2 `missing_resources` ~511/submit; Maestro GLES con INVALID_OPERATION en setUniform; Gundam SIGSEGV en libfmod tras opens de bundles con '\'; pso_wait in-game 0 (archive 6048 PSO).
 
 ## Current state
-- Última build en verde: run CI 40336286679 intento 2 (commit d13f9d2, VPKEngine 5939c99): unverified en visor. Build 14f415d: Maestro sin ForceQuit (llega in-game, personajes morados), ITR2 89 % draws `scissor`, FPS bajo en Maestro/ITR2 sin medida.
+- Rama `wip/diag-vqp` lista (3 revisiones adversariales corregidas, `ref:` = VPKEngine `55506b0`); fusionada a main con `[build]` (run pendiente, unverified). Nada de esta tanda compilado en Mac ni probado en visor; host tests nuevos solo en Linux sin ASan.
 - Pendiente (orden):
-  1. Log nuevo: ITR2 `[asw] framebuffer` ≠0x0 y `skip_by{scissor}`≈0; Maestro `gles.note mip_before_base`, `gles.tex fmt=`, `gles.err clear_*`; Gundam `heavy_indirect=`, `ind{cpu_sec}` (si >0: parchear indirect multiview en secundarios antes de beginRenderPass); FPS: leer `vk.perf` (GPU `gpu_cb sum_ms` vs `submit_ms`/`pso_wait_ms`/`fence_wait`).
-  2. RAM: picos Deadpool 6,3 GB, Gundam 6,7 GB, ITR2 4,9 GB; ITR2 `g_tex_live` 56→4071 por vigilar; heavy indirect sube memoria MSAA (medir).
-  3. Pipelines depth-only no se archivan (metal_backend.mm:5915) y archive sin flush periódico; GLES sin precompilación (pipeline por estado en primer draw).
-  3. Auditoría restante (no aplicada): ovrp que devuelven -1004 donde se espera handle (`ovrp_GetNativeSDKPointer2`, `GetEyeFovLayerId`, `SetupMirrorTexture2`); OpenXR FB/META sin fila (ITR2); 75 thunks `AndroidThunkJava_*` NO-OP; 184 pares Unity sin enlace; `createTelemetryHandler` NULL (Gundam). Detalle: auditoría en sesión (no en repo).
-  5. VPKEngine: fusión con rama AVP pendiente; `msaaResolveOnTile` necesita `Attachment::keepSamples`.
-- Riesgos abiertos: twin render pass depende de marcar imágenes de ojo; draws con `imageBuffer` sin enlazar se saltan; cuarentena cond/mutex por tiempo; `klj_arr(x)->data` sin proteger en `jni/kl_jni_{android,bridge,services,ue4,window}.c`; pausa con la Corona = `_exit(0)`; ForceQuit crea `klepton-crash.log` sin crash (volcado `[fatal]`).
+  1. Log nuevo por juego: ITR2 `gpu.missing` (qué recurso falta) y `vk.pso.census` (created vs >8000 del juego); Maestro `gles.uniform_err` (uniform concreto del morado) y `gles.tex`; Gundam `[pt] passthrough ON`, `[fs] backslash_fallback`, si sigue el crash en libfmod; todos `vk.hitch`, `gpu.mem.rt mat_why=`, `gles.pso.recipe`, `[jni] noop_hit`; tiempo de arranque con PSO síncrono.
+  2. Capturar frame roto (Maestro morado, ITR2) y correr `replay.yml` → primer draw divergente.
+  3. RAM: MSAA `HeavyGeometry` sigue materializando (Gundam ~650 MiB); EXT_multisampled_render_to_texture de GLES crea 1x (decisión pendiente: MSAA real transient o nada).
+  4. -1004 restantes en ovrp son deliberados (lista en kl_ovrp*.c); Unity Choreographer/Swappy sin verificar (falta log Gundam).
+- Riesgos abiertos: twin render pass depende de marcar imágenes de ojo; draws con `imageBuffer` sin enlazar se saltan; pausa con la Corona = `_exit(0)` (justificado en KleptonApp.swift:100-112: ARKit/compositor/FMOD/Unity no reanudables); PSO síncrono puede alargar arranque en juegos de un solo hilo.
 
 ## Decisions
-- Todo global, sin condiciones por juego (salvo ajustes del usuario: AA, resolución, anisótropo, RCAS).
+- Todo global, sin condiciones por juego (salvo ajustes del usuario: AA, resolución, anisótropo, RCAS, captura).
 - Solo offline: `KL_NET_OFFLINE`=1, `KL_PLAT_TOKEN_ERROR`=1; IAP/AssetFile = fallo OFFLINE tipado; solo `Entitle*` DRM aborta.
 - Mandos: Touch 0x3 siempre conectado (Sense real o emulación por pellizco) + bits de mano 0x60; `HandTrackingEnabled` = proveedor de manos y ningún Sense adjunto.
 - Render pass: el guest recibe sus store ops; twin con STORE forzado solo si toca imagen de ojo o framebuffer desconocido (`KL_VK_RESOLVE_STORE=2` = todo forzado).
 - `vkGetInstanceProcAddr` desconocido devuelve stub no-NULL (Wrath2). `VPVK_REPORT_GEOM=1` se mantiene (128 interpoladores Unity).
-- `VPVK_MSAA_DEAD_STORE` (VPKEngine 454f7cc, elisión heurística de stores MSAA) apagado en juegos y conformidad hasta que exista `Attachment::keepSamples`.
-- VPKEngine `main` siempre actualizado con cualquier arreglo del motor de cualquier proyecto.
+- `VPVK_MSAA_DEAD_STORE` apagado en juegos y conformidad. MSAA: STORE del cliente siempre conserva samples (keepSamples).
+- VPKEngine `main` siempre actualizado con cualquier arreglo del motor de cualquier proyecto; VQP fija `ref:` a SHA de main.
+- Pipelines: juegos con `VPVK_ASYNC_PIPELINES=0` (síncrono, como el driver de Quest); el motor es async por defecto (AVP).
 - MSAA del juego mantenido por defecto; Automático: VPKTAA solo si no hay MSAA.
 - `nativeLowMemory` solo en el hilo del juego; no desde `kl_jni_drain_ui_tasks`.
 - `ovrp_GetEyeLayerRecommendedResolution` → -1004 sin capa de ojo viva.
-- Slider de resolución = tamaño final del ojo; render_scale = 1. Tamaño recomendado fijo por partida; nunca reaprender por capa (bucle ITR2).
+- Slider de resolución = tamaño final del ojo; render_scale = 1. Tamaño recomendado fijo por partida; nunca reaprender por capa.
 - Presupuesto anunciado al guest = límite real (6144 ya probado: guests se ahogan). No reintroducir.
-- MSAA: STORE del cliente siempre conserva samples (keepSamples).
 - Fin de frame segmentado apagado (`KL_VK_FRAME_ASYNC=1` lo activa).
 - Calidad del compositor 1.0: no tocar. Ritmo encajado al panel.
 - GLES ES 3.1. Identidad Quest 3 (`KL_QUEST3`, headset 11); mandos Touch de Quest 2; eye tracking Unsupported.
@@ -45,19 +40,24 @@
 - ASW/PTW apagados por defecto (`KL_CP_ASW`=0, `KL_CP_PTW`=0). Frame congelado: 3,0 s.
 - Valores: burst audio 1024 con Wwise; `kMaxArchiveFiles` 512; `VPVK_MAX_DRAWS_PER_CB` 256; anillo TAA 4; máscara UI R8 slot 7; `KL_OVERLAY_SUBMIT_ORDER`=1.
 - Datos de juegos nunca en el repo.
-- Build solo con `[build]`, completa y revisada; VPKEngine fijado a SHA en CI (subir `ref:` en visionos.yml al cambiar de motor).
+- Build solo con `[build]`, completa y revisada.
 - Modo sentado solo eleva origen floor/stage (EyeLevel y XR LOCAL intactos); se cachea al lanzar.
-- Fusión avp-port → VPKEngine main sobre 5939c99: la hace el lado AVP; tras su aviso, subir `ref:` y verificar identidad en log.
-- Identidad Quest/Adreno opt-in en VPKEngine (avp-port d395a50, aún no en main): VQP la activa siempre (`vq_gfx_config_forward` → `vpvk_config_set_quest_identity(1)` + `VPVK_QUEST_IDENTITY=1` en `applyToEnvironment`); al subir `ref:` a un motor con avp-port, verificar en log.
+- Identidad Quest/Adreno: VQP la activa siempre (`vq_gfx_config_forward` → `vpvk_config_set_quest_identity(1)` + `VPVK_QUEST_IDENTITY=1`); verificar en log.
+- Passthrough ovrp: solo por forma de capa (7/8/10/11) con InsightPassthrough inicializado; el estilo no activa.
+- Auriculares UE: `stateChanged(0)` (sin jack, altavoz del visor).
+- `VPVK_ROBUST`: valor aprendido por juego (0 o app) para que prewarm y juego coincidan; GLES siempre app (= robust on, sin cambio).
+- Knockout de shaders de VPKEngine (AVP) no se usa en VQP (no se arma).
 
 ## Files in play
-- `klepton/runtime/xr/{kl_ovrp.c,kl_ovrp_input.c,kl_ovrplat.c}`, `klepton/visionos/Sources/KleptonControllers.swift` (+ bridging header).
-- `klepton/runtime/jni/{kl_jni_lang.c,kl_jni_android.c,kl_jni_ue4.c,kl_jni_window.c,kl_jni_prefs.c}`, `klepton/runtime/kl_jni.c`, `klepton/runtime/kl_dl.c`, `klepton/runtime/diag/kl_mprobe.c`.
-- `klepton/runtime/libc/{kl_libc.c,kl_pthread.c,kl_shim.c}`, `klepton/tests/t_libc_sem.c` (Gate: `tools/ci/host-tests.sh`).
-- `klepton/runtime/gfx/{kl_vulkan.c,kl_mtl_attr.m}`, `klepton/runtime/guest/kl_ue4.c`, `klepton/runtime/kl_fault.c`, `klepton/runtime/libc/kl_va_handlers.c`, `app/Sources/VQCover.swift`.
+- `app/Sources/{VQLaunch,VQLauncher,VQLog,VQFolder}.swift`.
+- `klepton/runtime/xr/{kl_ovrp.c,kl_ovrp_render.c,kl_openxr.c}`, `klepton/runtime/gfx/kl_bg.{c,h}`, `klepton/runtime/diag/kl_diagcap.{c,h}`.
+- `klepton/runtime/jni/{kl_jni_ue4.c,kl_jni_android.c,kl_jni_window.c,kl_jni_display.c,kl_jni_io.c,kl_jni_bridge.c,kl_jni_services.c}`, `klepton/runtime/kl_jni.c`.
+- `klepton/runtime/libc/{kl_libc.c,kl_pthread.c}`, `klepton/runtime/kl_fault.c`.
+- `tools/ci/{host-tests.sh,jni-audit.py}`, `.github/workflows/visionos.yml` (`ref:`).
 
 ## Module index
 - `notas/arquitectura.md`: runtime, app, visor, datos de plataforma, ABI OVRPlugin, resolución.
 - `notas/diagnostico.md`: etiquetas del log y dónde está el log de CI.
 - `notas/juegos.md`: historial por juego, causas demostradas e hipótesis refutadas.
 - `notas/build.md`: CI, Gate, tests, compilación local.
+- `notas/captura.md`: captura VPCAP en visor, reproducción y comparación (vpreplay, vpimgdiff, replay.yml).

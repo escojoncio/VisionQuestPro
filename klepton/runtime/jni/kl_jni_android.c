@@ -236,9 +236,11 @@ static klj_val klj_TimeZone_getAvailableIDs(void *env, void *self, const klj_val
     const char *host = klj_host_tzid();
     int utc = strcmp(host, "UTC") == 0;
     void *arr = klj_new_array('L', KLJ_CLASS_STRING, utc ? 1 : 2);
-    void **d = klj_arr(arr)->data;
-    d[0] = kl_jni_new_string(host);
-    if (!utc) d[1] = kl_jni_new_string("UTC");
+    void **d = klj_arr_data(arr, utc ? 1 : 2);
+    if (d) {
+        d[0] = kl_jni_new_string(host);
+        if (!utc) d[1] = kl_jni_new_string("UTC");
+    }
     KLJ_LOG("TimeZone.getAvailableIDs() -> %s%s", host, utc ? "" : " + UTC");
     return (klj_val){.l = arr};
 }
@@ -1600,7 +1602,8 @@ static klj_val klj_Context_getObbDirs(void *env, void *self, const klj_val *a, i
     static void *dirs;
     if (!dirs) {
         dirs = klj_new_array('L', "java/io/File", 1);
-        ((void **)klj_arr(dirs)->data)[0] = klj_new_file(klj_obb_dir());
+        void **dd = klj_arr_data(dirs, 1);
+        if (dd) dd[0] = klj_new_file(klj_obb_dir());
     }
     return (klj_val){.l = dirs};
 }
@@ -1708,6 +1711,12 @@ const klj_binding klj_bind_android[] = {
     {"java/lang/ClassLoader", "findLibrary", "(Ljava/lang/String;)Ljava/lang/String;", klj_ClassLoader_findLibrary},
 
     {"android/app/Activity",   "getIntent",  "()Landroid/content/Intent;", klj_Activity_getIntent},
+    // The presented Activity is alive for the whole run: it is never finishing, destroyed or being recreated for
+    // a configuration change (the display and window never change). Unbound, these answered the same 0 only
+    // through the "SIMULATED" path.
+    {"android/app/Activity",   "isFinishing", "()Z", klj_false},
+    {"android/app/Activity",   "isDestroyed", "()Z", klj_false},
+    {"android/app/Activity",   "isChangingConfigurations", "()Z", klj_false},
     {"android/app/Activity",   "getApplicationContext", "()Landroid/content/Context;",
      klj_Activity_getApplicationContext},
     // The Application is reached through ActivityThread.getApplication() by

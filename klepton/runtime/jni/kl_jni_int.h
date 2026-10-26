@@ -71,6 +71,7 @@ typedef struct {
     const char *cls;
     char        name[160], sig[224];
     char        kind;   // m=method M=static method f=field F=static field
+    unsigned char noop_seen;   // klj_noop_hit already logged (or refused for a full table) for this id
 } klj_wanted;
 
 // The two object kinds the host constructs rather than merely hands back: a
@@ -162,6 +163,11 @@ kl_jint     klj_ExceptionCheck(void *env);
 // Raise a Java exception of class `cls` (with message) on this thread, for a
 // host binding whose Java original throws; the binding then returns its zero.
 void        klj_throw_new(const char *cls, const char *msg);
+// A call that was answered by doing nothing: logs `[jni] noop_hit name=<cls>.<name><sig>` once per method
+// (at most 128 lines per run) so the next log says which no-ops the game really reaches.
+// klj_noop_hit_current names the binding being run by klj_call_common (for shared no-op handlers).
+void        klj_noop_hit(const klj_wanted *w);
+void        klj_noop_hit_current(void);
 const char *klj_throwable_message(void *obj);
 void       *klj_GetObjectClass(void *env, void *obj);
 kl_jint     klj_PushLocalFrame(void *env, kl_jint cap);
@@ -338,6 +344,8 @@ const char *klj_activity_class(void);
 const char *klj_xml_attr(const char *el, const char *end, const char *attr);
 klj_val klj_Display_getPresentationDeadlineNanos(void *env, void *self, const klj_val *a, int n);
 klj_val klj_Display_getRefreshRate(void *env, void *self, const klj_val *a, int n);
+// kl_jni_ue4.c: the AndroidThunkJava_* table (values + documented no-ops) consulted when no binding row matched.
+int      klj_ue4_thunk_answer(const klj_wanted *w, klj_val *out);
 klj_val klj_UnityPlayer_loadLibrary(void *env, void *self, const klj_val *a, int n);
 unsigned klj_drain_soft_input(void);
 // kl_jni_hostvideo.c: deliver the SurfaceTexture.onFrameAvailable callbacks announced since the last

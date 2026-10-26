@@ -296,11 +296,12 @@ static ovrpResult r_GetEyeFovPremultipliedAlphaMode(int32_t *out) {
     *out = 1;
     return KLOVRP_SUCCESS;
 }
-// The eye layer's id is created by EnqueueSetupLayer*/SetupLayer, not here: 0 = no id.
+// The eye layer's id is created by EnqueueSetupLayer*/SetupLayer, not here: this reports the
+// live eye layer's id, or 0 = no id while the guest has not set one up.
 static ovrpResult r_GetEyeFovLayerId(int32_t *out) {
     FN(GetEyeFovLayerId);
     if (!pok(out)) return KLOVRP_INVALID_PARAM;
-    *out = 0;
+    *out = kl_ovrp_active_eye_layer_id();
     return KLOVRP_SUCCESS;
 }
 

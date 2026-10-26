@@ -1277,9 +1277,58 @@ static int klj_game_void_noop(const klj_wanted *w, char have) {
     return 1;
 }
 
+// A Unity 6 player asks the game's Java for createTelemetryHandler and uses the
+// answer without a null check. Its body (a telemetry sink) lives in the APK's dex, which
+// never runs, and offline nothing may leave the device, so the honest answer is an inert
+// object of the class the call's own signature names: every method later called on it is
+// a no-op (void) or a logged 0/null. Only that name, and only an object return.
+// KL-TEST-BEGIN synthobj
+static int klj_synth_object_class(const char *name, const char *sig, char *cls, size_t cap) {
+    if (strcmp(name, "createTelemetryHandler") != 0) return 0;
+    const char *r = strchr(sig, ')');
+    if (!r || r[1] != 'L') return 0;
+    size_t n = strlen(r + 2);                     // "pkg/Cls;" -> n includes the ';'
+    if (n < 2 || r[1 + n] != ';' || n > cap) return 0;
+    memcpy(cls, r + 2, n - 1);
+    cls[n - 1] = 0;
+    for (char *p = cls; *p; p++) if (*p == '.') *p = '/';
+    return 1;
+}
+// KL-TEST-END synthobj
+
 // Exactly one of `va` / `args` is non-NULL; everything else about a call is
 // identical between the two conventions, so they share this path rather than
 // duplicating the binding lookup and the diagnostics.
+// ---- `[jni] noop_hit`: which no-ops the game really reaches ----------------
+// Every call answered by doing nothing (a shared no-op binding, an APK-owned void with no body, a simulated
+// 0/false/null, a documented UE4 thunk no-op) names its method once, at most 128 per run. The log then says
+// which of the no-ops that remain matter, instead of the ones merely present in a table.
+// KL-TEST-BEGIN noophit
+#define KLJ_NOOP_MAX 128
+// 1 the first time `key` is seen and there is room, 0 for a repeat or once the 128 slots are used.
+static int klj_noop_claim(const void *key) {
+    static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
+    static const void *seen[KLJ_NOOP_MAX];
+    static unsigned nseen;
+    int fresh = 0;
+    pthread_mutex_lock(&lock);
+    unsigned i = 0;
+    for (; i < nseen; i++) if (seen[i] == key) break;
+    if (i == nseen && nseen < KLJ_NOOP_MAX) { seen[nseen++] = key; fresh = 1; }
+    pthread_mutex_unlock(&lock);
+    return fresh;
+}
+// KL-TEST-END noophit
+
+static __thread const klj_wanted *g_klj_cur_call;   // the method klj_call_common is running a binding for
+
+void klj_noop_hit(const klj_wanted *w) {
+    if (!w || w->noop_seen) return;
+    ((klj_wanted *)w)->noop_seen = 1;   // benign race: a lost update only repeats the claim, which refuses it
+    if (klj_noop_claim(w)) KLJ_LOG("noop_hit name=%s.%s%s", w->cls, w->name, w->sig);
+}
+void klj_noop_hit_current(void) { klj_noop_hit(g_klj_cur_call); }
+
 static klj_val klj_call_common(void *env, void *self, void *mid, char want,
                                kl_va *va, const klj_jvalue *args) {
     klj_val zero = {0};
@@ -1344,10 +1393,28 @@ static klj_val klj_call_common(void *env, void *self, void *mid, char want,
             KLJ_LOG("cannot decode signature %s for %s.%s", w->sig, w->cls, w->name);
             kl_fatal_prepare(); abort();
         }
-        return b->fn(env, self, argv, argc);
+        const klj_wanted *prev_call = g_klj_cur_call;
+        g_klj_cur_call = w;
+        klj_val r = b->fn(env, self, argv, argc);
+        g_klj_cur_call = prev_call;
+        return r;
     }
 
+    klj_val thunk;
+    if (klj_ue4_thunk_answer(w, &thunk)) return thunk;
+
+    char synth[256];
+    if (klj_synth_object_class(w->name, w->sig, synth, sizeof synth)) {
+        static const klj_wanted *sseen;
+        if (sseen != w) {
+            sseen = w;
+            KLJ_LOG("%s.%s%s answered with an inert %s (APK-owned, dex not run)",
+                    w->cls, w->name, w->sig, synth);
+        }
+        return (klj_val){.l = kl_jni_new_object(synth)};
+    }
     if (klj_game_void_noop(w, have)) {
+        klj_noop_hit(w);
         if (kl_media_video_trace())
             KLJ_LOG("[vtrace tid=%llu] NO-OP game Java void %s.%s%s (self=%p)",
                     (unsigned long long)klj_tid(), w->cls, w->name, w->sig, self);
@@ -1362,6 +1429,7 @@ static klj_val klj_call_common(void *env, void *self, void *mid, char want,
     // restore the abort): simulate the method — 0 / false / null — and name it
     // once, so one missing Android API is a logged default instead of a dead game.
     if (g_permissive) {
+        klj_noop_hit(w);
         static pthread_mutex_t plock = PTHREAD_MUTEX_INITIALIZER;
         static const klj_wanted *pseen[4096];
         static unsigned npseen;

@@ -85,7 +85,7 @@ enum VQLog {
             let m = (try? FileManager.default.attributesOfItem(atPath: u.path))?[.modificationDate] as? Date
             return m.map { $0 >= sessionStart } ?? true
         }
-        return live + sessions
+        return live + sessions + (VQSettings.shared.includeCaptures ? captureFiles : [])
     }
 
     // MARK: archived sessions
@@ -197,6 +197,42 @@ enum VQLog {
     private static var questAttachments: [URL] = []
     private static var questAttachmentsAt = Date.distantPast
     private static var questAttachmentsBusy = false
+    /// QUEST/capturas/<game>/*.vpcap (the «Captura de frames» files), listed with the attachments.
+    private static var questCaptures: [URL] = []
+    private static var capturesLogged = ""
+
+    static var captureFiles: [URL] {
+        refreshQuestAttachments()
+        attachLock.lock(); defer { attachLock.unlock() }
+        return questCaptures
+    }
+
+    private static func listCaptures(in root: URL) -> [URL] {
+        let fm = FileManager.default
+        let base = root.appendingPathComponent(VQFolder.capturesName, isDirectory: true)
+        return ((try? fm.contentsOfDirectory(at: base, includingPropertiesForKeys: nil)) ?? [])
+            .sorted { $0.lastPathComponent < $1.lastPathComponent }
+            .flatMap { dir in ((try? fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil)) ?? [])
+                .filter { $0.pathExtension == "vpcap" }
+                .sorted { $0.lastPathComponent < $1.lastPathComponent } }
+    }
+
+    /// One log line per capture (name and size) whenever the list or «Incluir capturas» changes.
+    private static func logCaptures(_ files: [URL]) {
+        let include = VQSettings.shared.includeCaptures
+        let sizes = files.map { (try? FileManager.default.attributesOfItem(atPath: $0.path))?[.size] as? UInt64 ?? 0 }
+        let lines = zip(files, sizes).map { "\($0.deletingLastPathComponent().lastPathComponent)/\($0.lastPathComponent) "
+            + String(format: "%.1f MB", Double($1) / 1_048_576) }
+        let signature = files.isEmpty ? "" : "\(include)|" + lines.joined(separator: "|")
+        attachLock.lock()
+        let changed = signature != capturesLogged
+        capturesLogged = signature
+        attachLock.unlock()
+        guard changed else { return }
+        log("Capturas: \(files.count) en QUEST/capturas, \(String(format: "%.1f MB", Double(sizes.reduce(0, +)) / 1_048_576)) en total; "
+            + (include ? "se incluyen al compartir" : "no se incluyen al compartir («Incluir capturas» apagado)"))
+        for l in lines { log("Capturas: \(l)") }
+    }
 
     private static func isCrashAttachment(_ u: URL) -> Bool {
         let n = u.lastPathComponent
@@ -221,11 +257,15 @@ enum VQLog {
         attachLock.unlock()
         DispatchQueue.global(qos: .utility).async {
             var found: [URL] = []
+            var captures: [URL] = []
             if let quest = VQFolder.shared.url {
                 found = attachments(in: quest.appendingPathComponent("Registros", isDirectory: true))
+                captures = listCaptures(in: quest)
             }
+            logCaptures(captures)
             attachLock.lock()
             questAttachments = found
+            questCaptures = captures
             questAttachmentsAt = Date()
             questAttachmentsBusy = false
             attachLock.unlock()
