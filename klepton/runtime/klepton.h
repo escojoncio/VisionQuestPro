@@ -128,6 +128,7 @@ void *kl_trace_stub(const char *name, void *desc, void *tramp);
 void      kl_set_library_path(const char *dir);
 void      kl_register_image(const char *soname, kl_image *img);
 kl_image *kl_find_image(const char *soname);
+int       kl_dl_is_image(const void *h);   // a registered guest image, not a synthetic/shim handle
 // Load an .so plus its DT_NEEDED chain, dependencies first (kl_dl.c).
 kl_image *kl_load_recursive(const char *path);
 // Map and register only the DT_NEEDED of `path` (not `path`), init deferred: the

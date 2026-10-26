@@ -112,6 +112,14 @@ kl_image *kl_find_image(const char *soname) {
     return NULL;
 }
 
+// True only for a handle that is a registered guest image (what klb_dlopen returns for a real
+// library), not a synthetic or shim-served sentinel.
+int kl_dl_is_image(const void *h) {
+    for (int i = 0; h && i < g_nimgs; i++)
+        if ((const void *)g_imgs[i].img == h) return 1;
+    return 0;
+}
+
 // Cross-image export search, used by the loader's relocation-time import
 // binding (kl_image.c) for symbols the shim does not serve. Registration order
 // is dependencies-first, so the first hit is what Android's linker would have
@@ -343,6 +351,7 @@ static void kl_maybe_jni_onload(const char *path, kl_image *img) {
     if (strncmp(b, "libfmod", 7) != 0) return;
     int (*onload)(void *, void *) = (int (*)(void *, void *))kl_sym(img, "JNI_OnLoad");
     if (!onload) return;
+    kl_jni_onload_claim(img);
     int r = onload(kl_jni_vm(), NULL);
     fprintf(stderr, "  [klepton] %s JNI_OnLoad(vm) -> 0x%x (FMOD Android platform "
             "init; without this FMOD::getGlobals fails INTERNAL and audio is silent)\n",

@@ -560,6 +560,7 @@ int kl_ue4_load(FILE *out) {
             int (*fonload)(void *, void *) = (int (*)(void *, void *))
                 kl_sym(fmod, "JNI_OnLoad");
             if (fonload) {
+                kl_jni_onload_claim(fmod);
                 kl_jni_local_frame_push();
                 int fr = fonload(kl_jni_vm(), NULL);
                 kl_jni_local_frame_pop();
@@ -579,6 +580,7 @@ int kl_ue4_load(FILE *out) {
             int (*eonload)(void *, void *) = (int (*)(void *, void *))
                 kl_sym(eos, "JNI_OnLoad");
             if (eonload) {
+                kl_jni_onload_claim(eos);
                 kl_jni_local_frame_push();
                 int er = eonload(kl_jni_vm(), NULL);
                 kl_jni_local_frame_pop();
@@ -604,6 +606,7 @@ int kl_ue4_load(FILE *out) {
         if (out) fprintf(out, "  no JNI_OnLoad — the activity door is the entry\n");
         return 0;
     }
+    kl_jni_onload_claim(g_ue4);
     kl_jni_local_frame_push();
     int version = onload(kl_jni_vm(), NULL);
     kl_jni_local_frame_pop();
@@ -670,7 +673,9 @@ typedef unsigned char ue4_jboolean;
 // macro's), and naming them after the descriptor keeps the call sites checkable
 // against the smali line above each one.
 typedef void (*ue4_fn_v)(void *, void *);
-typedef void (*ue4_fn_ZI)(void *, void *, ue4_jboolean, int);
+typedef void (*ue4_fn_ss)(void *, void *, void *, void *);
+// KL-TEST-BEGIN ue4sig
+typedef void (*ue4_fn_ZII)(void *, void *, ue4_jboolean, int, int);
 typedef void (*ue4_fn_Z)(void *, void *, ue4_jboolean);
 typedef void (*ue4_fn_ZZssZsZ)(void *, void *, ue4_jboolean, ue4_jboolean,
                                void *, void *, ue4_jboolean, void *, ue4_jboolean);
@@ -678,7 +683,11 @@ typedef void (*ue4_fn_sssss)(void *, void *, void *, void *, void *, void *, voi
 typedef void (*ue4_fn_ssIIs)(void *, void *, void *, void *, int, int, void *);
 // UE 4.26+ grew a TargetSDKVersion int as the 2nd arg of
 // nativeSetAndroidVersionInformation: (String, int, String, String, String, String).
-typedef void (*ue4_fn_sIssss)(void *, void *, void *, int, void *, void *, void *, void *);
+// UE5 (libUnreal, Into the Radius 2) appends a 7th parameter, ProductName (Build.PRODUCT):
+// (String, int, String, String, String, String, String). The last String goes on the stack
+// on AArch64 (x2..x7 are taken); this is the longest form and the only one declared for them.
+typedef void (*ue4_fn_sIsssss)(void *, void *, void *, int, void *, void *, void *, void *, void *);
+// KL-TEST-END ue4sig
 
 static void *ue4_native(const char *name) {
     if (!g_ue4) return NULL;
@@ -778,10 +787,16 @@ static void kl_ue4_java_create(FILE *out) {
              // not debuggable.
              (ue4_jboolean)1);
 
-    // nativeSetWindowInfo(bIsPortrait, DepthBufferPreference)
-    UE4_CALL(out, "nativeSetWindowInfo", ue4_fn_ZI,
+    // nativeSetWindowInfo(bIsPortrait, DepthBufferPreference[, PropagateAlpha])
+    // UE4 takes (ZI); UE5 (libUnreal) takes (ZII), the extra int being PropagateAlpha,
+    // read from the manifest like DepthBufferPreference, default 0 (the engine's own
+    // "Did not find PropagateAlpha, using default"). Always passed: a native that takes
+    // two arguments ignores the third (AArch64 passes it in a register nobody reads),
+    // while one that takes three and is called with two reads garbage.
+    UE4_CALL(out, "nativeSetWindowInfo", ue4_fn_ZII,
              (ue4_jboolean)UE4_PORTRAIT,
-             ue4_meta_int("com.epicgames.ue4.GameActivity.DepthBufferPreference", 0));
+             ue4_meta_int("com.epicgames.ue4.GameActivity.DepthBufferPreference", 0),
+             ue4_meta_int("com.epicgames.ue4.GameActivity.PropagateAlpha", 0));
 
     // nativeSetAndroidStartupState(bDebuggerAttached)
     UE4_CALL(out, "nativeSetAndroidStartupState", ue4_fn_Z,
@@ -830,9 +845,13 @@ static void kl_ue4_java_create(FILE *out) {
         UE4_CALL(out, "nativeSetAndroidVersionInformation", ue4_fn_sssss,
                  jrel, jmake, jmodel, jbuild, jloc);
     } else {
-        UE4_CALL(out, "nativeSetAndroidVersionInformation", ue4_fn_sIssss,
+        // UE5 adds a 7th parameter, ProductName (Build.PRODUCT); a UE4.26+ native that takes
+        // six ignores the extra one (the stack slot is never read), so the longest form is
+        // always passed and no engine generation has to be told apart here.
+        void *jprod = kl_jni_new_string(kl_jni_build_string("PRODUCT"));
+        UE4_CALL(out, "nativeSetAndroidVersionInformation", ue4_fn_sIsssss,
                  jrel, 32 /* TargetSDKVersion — informational to the engine */,
-                 jmake, jmodel, jbuild, jloc);
+                 jmake, jmodel, jbuild, jloc, jprod);
     }
 
     // nativeSetObbInfo(ProjectName, PackageName, Version, PatchVersion, AppType)
@@ -847,6 +866,15 @@ static void kl_ue4_java_create(FILE *out) {
     void *jtype = kl_jni_new_string(ue4_meta_str("com.epicgames.ue4.GameActivity.AppType"));
     UE4_CALL(out, "nativeSetObbInfo", ue4_fn_ssIIs,
              jproj, jpkg, (int)version, 0, jtype);
+
+    // nativeSetEOSCacheDirectories(InternalFilesDir, ExternalFilesDir) — only the builds that
+    // bundle the EOS SDK export it (UBOAT); the others are reported as skipped. The Java passes
+    // getFilesDir() and getExternalFilesDir(null), each with a trailing "/", before it
+    // initialises EOS. Both are the one userdata directory here (see nativeSetGlobalActivity).
+    char eosdir[1024];
+    snprintf(eosdir, sizeof eosdir, "%s/", files);
+    void *jeos = kl_jni_new_string(eosdir);
+    UE4_CALL(out, "nativeSetEOSCacheDirectories", ue4_fn_ss, jeos, jeos);
 }
 
 // ...and onResume's half, which is the one that starts the engine: the game
@@ -862,9 +890,10 @@ static void kl_ue4_java_resume(FILE *out) {
 
     if (out) { fprintf(out, "=== GameActivity.onResume (the Java half) ===\n"); fflush(out); }
 
-    UE4_CALL(out, "nativeSetWindowInfo", ue4_fn_ZI,
+    UE4_CALL(out, "nativeSetWindowInfo", ue4_fn_ZII,
              (ue4_jboolean)UE4_PORTRAIT,
-             ue4_meta_int("com.epicgames.ue4.GameActivity.DepthBufferPreference", 0));
+             ue4_meta_int("com.epicgames.ue4.GameActivity.DepthBufferPreference", 0),
+             ue4_meta_int("com.epicgames.ue4.GameActivity.PropagateAlpha", 0));
 
     // The other arm of the Java's `if` is nativeOnInitialDownloadStarted, i.e.
     // "the OBB is not here, go and fetch it". There is no downloader here and

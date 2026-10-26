@@ -501,6 +501,7 @@ int kl_native_load(FILE *out) {
     typedef int (*jni_onload_fn)(void *vm, void *reserved);
     jni_onload_fn onload = (jni_onload_fn)kl_sym(img, "JNI_OnLoad");
     if (onload) {
+        kl_jni_onload_claim(img);
         kl_jni_local_frame_push();
         int v = onload(kl_jni_vm(), NULL);
         kl_jni_local_frame_pop();

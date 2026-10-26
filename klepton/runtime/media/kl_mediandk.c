@@ -2455,6 +2455,36 @@ static bool klm_AMediaDrm_isCryptoSchemeSupported(const uint8_t uuid[16], const 
 static void *klm_AMediaDrm_createByUUID(const uint8_t uuid[16]) { (void)uuid; return NULL; }
 static int klm_AMediaDrm_release(void *drm) { (void)drm; return AMEDIA_OK; }
 
+// ---- AMediaMuxer: recording only, and there is nowhere to record to ----------
+// Gundam's libAVProMovieCaptureNative links all seven strongly (a screen recorder the
+// game never starts). A muxer writes a container file out of encoded samples; this host has
+// no encoder, so the honest answer is "cannot create one": new -> NULL, which is what
+// the NDK itself returns on failure, and every other call is a typed AMEDIA_ERROR_UNSUPPORTED.
+// delete tolerates NULL (the only value new can hand out) and frees nothing.
+// KL-TEST-BEGIN muxer
+static void *klm_AMediaMuxer_new(int fd, int format) {
+    (void)fd; (void)format;
+    KLM_FIRST(said_muxer, "AMediaMuxer_new: no encoder/muxer here (recording unsupported) -> NULL\n");
+    return NULL;
+}
+static int klm_AMediaMuxer_delete(void *muxer) { (void)muxer; return AMEDIA_OK; }
+static ssize_t klm_AMediaMuxer_addTrack(void *muxer, const void *format) {
+    (void)muxer; (void)format;
+    return AMEDIA_ERROR_UNSUPPORTED;
+}
+static int klm_AMediaMuxer_start(void *muxer) { (void)muxer; return AMEDIA_ERROR_UNSUPPORTED; }
+static int klm_AMediaMuxer_stop(void *muxer) { (void)muxer; return AMEDIA_ERROR_UNSUPPORTED; }
+static int klm_AMediaMuxer_writeSampleData(void *muxer, size_t track, const uint8_t *data,
+                                           const AMediaCodecBufferInfo *info) {
+    (void)muxer; (void)track; (void)data; (void)info;
+    return AMEDIA_ERROR_UNSUPPORTED;
+}
+static int klm_AMediaMuxer_setOrientationHint(void *muxer, int degrees) {
+    (void)muxer; (void)degrees;
+    return AMEDIA_ERROR_UNSUPPORTED;
+}
+// KL-TEST-END muxer
+
 // ---- AMediaCodecCryptoInfo: a plain container --------------------------------
 typedef struct {
     uint32_t magic;
@@ -3204,6 +3234,13 @@ static const struct { const char *name; void *fn; } g_media[] = {
     M("AMediaDrm_isCryptoSchemeSupported",           klm_AMediaDrm_isCryptoSchemeSupported),
     M("AMediaDrm_createByUUID",                      klm_AMediaDrm_createByUUID),
     M("AMediaDrm_release",                           klm_AMediaDrm_release),
+    M("AMediaMuxer_new",                             klm_AMediaMuxer_new),
+    M("AMediaMuxer_delete",                          klm_AMediaMuxer_delete),
+    M("AMediaMuxer_addTrack",                        klm_AMediaMuxer_addTrack),
+    M("AMediaMuxer_start",                           klm_AMediaMuxer_start),
+    M("AMediaMuxer_stop",                            klm_AMediaMuxer_stop),
+    M("AMediaMuxer_writeSampleData",                 klm_AMediaMuxer_writeSampleData),
+    M("AMediaMuxer_setOrientationHint",              klm_AMediaMuxer_setOrientationHint),
 
     M("AMediaDataSource_newUri",             klm_AMediaDataSource_newUri),
     M("AMediaDataSource_setGetAvailableSize", klm_AMediaDataSource_setGetAvailableSize),

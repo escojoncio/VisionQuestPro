@@ -33,6 +33,15 @@
 
 #define KLE_H264_CLASS  "com/epicgames/unreal/ElectraVideoDecoderH264"
 #define KLE_H265_CLASS  "com/epicgames/unreal/ElectraVideoDecoderH265"
+// UE 5.3+ (Into the Radius 2) renamed the decoders ElectraDecoderVideo<codec> and added VPx and
+// an AAC audio decoder. The three video ones are the same MediaCodec seam under new names (same
+// method set and nested-class suffixes), so they share the handlers below; VPx has no
+// VideoToolbox mime and AAC is not a video decoder, so those two fail cleanly (see further down).
+#define KLE_VH264_CLASS "com/epicgames/unreal/ElectraDecoderVideoH264"
+#define KLE_VH265_CLASS "com/epicgames/unreal/ElectraDecoderVideoH265"
+#define KLE_VPX_CLASS   "com/epicgames/unreal/ElectraDecoderVideoVPx"
+#define KLE_AAC_CLASS   "com/epicgames/unreal/ElectraDecoderAudioAAC"
+#define KLE_TS_CLASS    "com/epicgames/unreal/ElectraTextureSample"
 
 // UE5's Electra registers a decoder class per codec — H264 and H265 — and the
 // engine probes BOTH at startup (GetDecoderInformation) to enumerate codec
@@ -63,9 +72,23 @@ static const kle_codec KLE_CODEC_H265 = {
     KLE_H265_CLASS "$FOutputBufferInfo", "video/hevc",
 };
 
+#define KLE_CODEC_INIT(C, MIME) \
+    { C, C "$FCreateParameters", C "$FDecoderInformation", C "$FOutputFormatInfo", \
+      C "$FOutputBufferInfo", MIME }
+static const kle_codec KLE_CODEC_VH264 = KLE_CODEC_INIT(KLE_VH264_CLASS, "video/avc");
+static const kle_codec KLE_CODEC_VH265 = KLE_CODEC_INIT(KLE_VH265_CLASS, "video/hevc");
+// kl_vtdec has no VP8/VP9: a NULL mime makes CreateDecoder/ConfigureDecoder answer an error code.
+static const kle_codec KLE_CODEC_VPX   = KLE_CODEC_INIT(KLE_VPX_CLASS, NULL);
+
+static const kle_codec *const KLE_CODECS[] = {
+    &KLE_CODEC_H264, &KLE_CODEC_H265, &KLE_CODEC_VH264, &KLE_CODEC_VH265, &KLE_CODEC_VPX,
+};
+
+// An unknown class keeps the old default (H264), as before.
 static const kle_codec *kle_codec_by_class(const char *cls) {
-    return (cls && strcmp(cls, KLE_H265_CLASS) == 0) ? &KLE_CODEC_H265
-                                                     : &KLE_CODEC_H264;
+    for (size_t i = 0; cls && i < sizeof KLE_CODECS / sizeof KLE_CODECS[0]; i++)
+        if (strcmp(cls, KLE_CODECS[i]->cls) == 0) return KLE_CODECS[i];
+    return &KLE_CODEC_H264;
 }
 
 // COLOR_FormatYUV420SemiPlanar — the MediaCodec constant for NV12, which is what
@@ -93,9 +116,9 @@ typedef struct {
 static kl_electra *kle_of(void *self) {
     klj_object *o = klj_as_object(self);
     if (!o) return NULL;
-    if (strcmp(o->cls, KLE_H264_CLASS) && strcmp(o->cls, KLE_H265_CLASS))
-        return NULL;
-    return o->data;
+    for (size_t i = 0; i < sizeof KLE_CODECS / sizeof KLE_CODECS[0]; i++)
+        if (strcmp(o->cls, KLE_CODECS[i]->cls) == 0) return o->data;
+    return NULL;
 }
 
 // The codec for a handler whose `self` is a decoder instance (every method but
@@ -202,6 +225,10 @@ static klj_val klj_Electra_ctor(void *env, void *self, const klj_val *a, int n) 
 static klj_val klj_Electra_create(void *env, void *self, const klj_val *a, int n) {
     (void)env; (void)a; (void)n;
     kl_electra *e = kle_of(self);
+    if (e && !e->codec->mime) {          // VPx: nothing to decode it with
+        KLJ_LOG_ONCE("%s.CreateDecoder: no decoder for this codec -> error", e->codec->cls);
+        return (klj_val){.j = 1};
+    }
     if (e && !e->dec) {
         e->dec = kl_vtdec_create(e->codec->mime);
         KLJ_LOG("%s.CreateDecoder -> %s", e->codec->cls,
@@ -218,6 +245,7 @@ static klj_val klj_Electra_create(void *env, void *self, const klj_val *a, int n
 static klj_val klj_Electra_configure(void *env, void *self, const klj_val *a, int n) {
     (void)env; (void)a; (void)n;
     kl_electra *e = kle_of(self);
+    if (e && !e->codec->mime) return (klj_val){.j = 1};   // VPx, as in CreateDecoder
     if (e && !e->dec) e->dec = kl_vtdec_create(e->codec->mime);
     return (klj_val){.j = 0};
 }
@@ -443,7 +471,11 @@ static klj_val klj_Electra_releaseOutput(void *env, void *self, const klj_val *a
 // SetOutputSurface support — we decode to byte[] buffers, not a surface.
 static klj_val klj_Electra_decoderInfo(void *env, void *self, const klj_val *a, int n) {
     (void)env; (void)a; (void)n;
-    const char *di = kle_codec_of(self)->decinfo;
+    const kle_codec *c = kle_codec_of(self);
+    // VPx has nothing to decode with: the same "no decoder" answer as before this class was
+    // known (NULL), so the engine skips the codec instead of seeing an available one.
+    if (!c->mime) return (klj_val){.l = NULL};
+    const char *di = c->decinfo;
     void *info = kl_jni_new_object(di);
     kle_set(info, di, "bIsAdaptive", "Z", 0);
     kle_set(info, di, "ApiLevel", "I", 29);
@@ -489,8 +521,99 @@ static klj_val klj_Electra_params_ctor(void *env, void *self, const klj_val *a, 
     {C, "GetDecoderInformation", "()L" C "$FDecoderInformation;", klj_Electra_decoderInfo}, \
     {C "$FCreateParameters", "<init>", "()V", klj_Electra_params_ctor},
 
+// ---- ElectraDecoderAudioAAC: no audio decoder here ---------------------------
+// Every handler answers a typed failure instead of falling to the generic NULL/0 that an unbound
+// class gets: the object-returning ones (constructor, DequeueOutputBuffer, GetOutputFormatInfo)
+// hand back a real, empty object, since the caller dereferences them; the int ones answer a
+// non-zero error from CreateDecoder on, so the engine takes its "no decoder" path before it ever
+// queues. Stop/Flush/ReleaseDecoder reuse the video handlers, which do nothing without a decoder.
+static klj_val klj_ElectraAAC_ctor(void *env, void *self, const klj_val *a, int n) {
+    (void)env; (void)self; (void)a; (void)n;
+    return (klj_val){.l = kl_jni_new_object(KLE_AAC_CLASS)};
+}
+static klj_val klj_ElectraAAC_fail(void *env, void *self, const klj_val *a, int n) {
+    (void)env; (void)self; (void)a; (void)n;
+    KLJ_LOG_ONCE("%s: no AAC decoder here -> error", KLE_AAC_CLASS);
+    return (klj_val){.j = 1};
+}
+static klj_val klj_ElectraAAC_noinput(void *env, void *self, const klj_val *a, int n) {
+    (void)env; (void)self; (void)a; (void)n;
+    return (klj_val){.j = (uint64_t)(int64_t)-1};          // no input buffer to hand out
+}
+static klj_val klj_ElectraAAC_dequeueOutput(void *env, void *self, const klj_val *a, int n) {
+    (void)env; (void)self; (void)a; (void)n;
+    const char *ob = KLE_AAC_CLASS "$FOutputBufferInfo";
+    void *info = kl_jni_new_object(ob);
+    kle_set(info, ob, "BufferIndex", "I", -1);              // INFO_TRY_AGAIN_LATER
+    kle_set(info, ob, "Size", "I", 0);
+    kle_set(info, ob, "PresentationTimestamp", "J", 0);
+    kle_set(info, ob, "bIsEOS", "Z", 0);
+    kle_set(info, ob, "bIsConfig", "Z", 0);
+    return (klj_val){.l = info};
+}
+static klj_val klj_ElectraAAC_getOutputBuffer(void *env, void *self, const klj_val *a, int n) {
+    (void)env; (void)self; (void)a; (void)n;
+    return (klj_val){.l = klj_new_array('B', NULL, 0)};
+}
+static klj_val klj_ElectraAAC_getOutputFormat(void *env, void *self, const klj_val *a, int n) {
+    (void)env; (void)self; (void)a; (void)n;
+    const char *of = KLE_AAC_CLASS "$FOutputFormatInfo";
+    void *info = kl_jni_new_object(of);
+    kle_set(info, of, "BytesPerSample", "I", 0);
+    kle_set(info, of, "NumChannels", "I", 0);
+    kle_set(info, of, "SampleRate", "I", 0);
+    return (klj_val){.l = info};
+}
+
+// ---- ElectraTextureSample: the Surface/ImageReader output path ----------------
+// Our decoders hand frames out as byte[] (FDecoderInformation.bCanUse_SetOutputSurface is false),
+// so this class has nothing to deliver. It still has to be constructible and answer with objects:
+// a placeholder Surface, and a FFrameUpdateInfo that says "no frame ready, none pending".
+static klj_val klj_ElectraTS_ctor(void *env, void *self, const klj_val *a, int n) {
+    (void)env; (void)self; (void)a; (void)n;
+    return (klj_val){.l = kl_jni_new_object(KLE_TS_CLASS)};
+}
+static klj_val klj_ElectraTS_surface(void *env, void *self, const klj_val *a, int n) {
+    (void)env; (void)self; (void)a; (void)n;
+    KLJ_LOG_ONCE("%s.GetCodecSurface: placeholder Surface (decoders output byte[])", KLE_TS_CLASS);
+    return (klj_val){.l = kl_jni_new_object("android/view/Surface")};
+}
+static klj_val klj_ElectraTS_frameInfo(void *env, void *self, const klj_val *a, int n) {
+    (void)env; (void)self; (void)a; (void)n;
+    const char *fi = KLE_TS_CLASS "$FFrameUpdateInfo";
+    void *info = kl_jni_new_object(fi);
+    kle_set(info, fi, "bFrameReady", "Z", 0);
+    kle_set(info, fi, "bRegionChanged", "Z", 0);
+    kle_set(info, fi, "NumPending", "I", 0);
+    kle_set(info, fi, "Timestamp", "J", 0);
+    kle_set(info, fi, "Duration", "J", 0);
+    return (klj_val){.l = info};
+}
+
 const klj_binding klj_bind_electra[] = {
     KLE_TABLE(KLE_H264_CLASS)
     KLE_TABLE(KLE_H265_CLASS)
+    KLE_TABLE(KLE_VH264_CLASS)
+    KLE_TABLE(KLE_VH265_CLASS)
+    KLE_TABLE(KLE_VPX_CLASS)
+    {KLE_VPX_CLASS, "CreateDecoder", "(Z)I", klj_Electra_create},   // VPx: (boolean bIsVP9)
+    {KLE_AAC_CLASS, "<init>", "()V", klj_ElectraAAC_ctor},
+    {KLE_AAC_CLASS, "CreateDecoder", "(II[B)I", klj_ElectraAAC_fail},
+    {KLE_AAC_CLASS, "Start", "()I", klj_ElectraAAC_fail},
+    {KLE_AAC_CLASS, "Stop", "()I", klj_Electra_stop},
+    {KLE_AAC_CLASS, "Flush", "()I", klj_Electra_flush},
+    {KLE_AAC_CLASS, "ReleaseDecoder", "()I", klj_Electra_release},
+    {KLE_AAC_CLASS, "DequeueInputBuffer", "(I)I", klj_ElectraAAC_noinput},
+    {KLE_AAC_CLASS, "QueueInputBuffer", "(IJ[B)I", klj_ElectraAAC_fail},
+    {KLE_AAC_CLASS, "QueueEOSInputBuffer", "(IJ)I", klj_ElectraAAC_fail},
+    {KLE_AAC_CLASS, "DequeueOutputBuffer", "(I)L" KLE_AAC_CLASS "$FOutputBufferInfo;",
+     klj_ElectraAAC_dequeueOutput},
+    {KLE_AAC_CLASS, "GetOutputBufferAndRelease", "(I)[B", klj_ElectraAAC_getOutputBuffer},
+    {KLE_AAC_CLASS, "GetOutputFormatInfo", "(I)L" KLE_AAC_CLASS "$FOutputFormatInfo;",
+     klj_ElectraAAC_getOutputFormat},
+    {KLE_TS_CLASS, "<init>", "()V", klj_ElectraTS_ctor},
+    {KLE_TS_CLASS, "GetCodecSurface", "()Landroid/view/Surface;", klj_ElectraTS_surface},
+    {KLE_TS_CLASS, "GetVideoFrameUpdateInfo", "(IIIZ)L" KLE_TS_CLASS "$FFrameUpdateInfo;",
+     klj_ElectraTS_frameInfo},
     {0}
 };

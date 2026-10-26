@@ -9663,13 +9663,29 @@ static PFN_vkVoidFunction VKAPI_CALL klvk_GetDeviceProcAddr(VkDevice dev,
 // calls them WITHOUT a null-check, so a NULL becomes a jump to 0x0 — which the
 // visionOS crash report flags as CODESIGNING "Invalid Page" (an unmapped, and
 // therefore unsigned, executable page). A named no-op stub is strictly safer:
-// the guest gets a valid pointer, the call returns VK_SUCCESS (0 — also a safe
-// value for a void or pointer-returning entry), and we log the name once so the
-// missing function can be implemented properly if the guest actually depends on
-// it. Same "name it when it's used" contract as the OVRP and JNI shims.
+// the guest gets a valid pointer, the call returns VK_ERROR_EXTENSION_NOT_PRESENT
+// (it was VK_SUCCESS, which left the output parameters of Get*/Create* untouched and
+// told the guest they were valid; for a void entry the value is ignored), and we log
+// the name once so the missing function can be implemented properly if the guest
+// actually depends on it. Same "name it when it's used" contract as the OVRP and JNI shims.
+// KL-TEST-BEGIN vktrap
 static VKAPI_ATTR VkResult VKAPI_CALL klvk_missing_trap(void) {
-    return VK_SUCCESS;
+    return VK_ERROR_EXTENSION_NOT_PRESENT;
 }
+// ...except for the entries that do not return a VkResult: a device address, an opaque capture
+// address, a concurrency count, an image view handle and a VkBool32 (PresentationSupport, where
+// -7 would read as true) all answer 0, which is what the plain no-op used to give them.
+static VKAPI_ATTR uint64_t VKAPI_CALL klvk_missing_trap_zero(void) {
+    return 0;
+}
+static PFN_vkVoidFunction klvk_missing_stub(const char *name) {
+    static const char *const zero[] = { "DeviceAddress", "OpaqueCaptureAddress", "MaxConcurrency",
+                                        "ImageViewHandle", "PresentationSupport" };
+    for (size_t i = 0; i < sizeof zero / sizeof zero[0]; i++)
+        if (strstr(name, zero[i])) return (PFN_vkVoidFunction)klvk_missing_trap_zero;
+    return (PFN_vkVoidFunction)klvk_missing_trap;
+}
+// KL-TEST-END vktrap
 static void klvk_note_missing(const char *name) {
     static char *seen[64];
     static int nseen;
@@ -9693,7 +9709,7 @@ static PFN_vkVoidFunction VKAPI_CALL klvk_GetInstanceProcAddr(VkInstance inst,
     if (m) return m;
     if (!g_avail) return NULL;
     PFN_vkVoidFunction fn = real_gipa(inst ? inst : g_instance, name);
-    if (!fn) { klvk_note_missing(name); return (PFN_vkVoidFunction)klvk_missing_trap; }
+    if (!fn) { klvk_note_missing(name); return klvk_missing_stub(name); }
     return fn;
 }
 
@@ -9707,7 +9723,7 @@ static PFN_vkVoidFunction VKAPI_CALL klvk_GetDeviceProcAddr(VkDevice dev,
     if (m) return m;
     if (!g_avail || !real_gdpa) return NULL;
     PFN_vkVoidFunction fn = real_gdpa(dev, name);
-    if (!fn) { klvk_note_missing(name); return (PFN_vkVoidFunction)klvk_missing_trap; }
+    if (!fn) { klvk_note_missing(name); return klvk_missing_stub(name); }
     return fn;
 }
 

@@ -2702,7 +2702,7 @@ void *kl_shim_lookup(const char *name) {
     // `ovrp_` is OVRPlugin's prefix and a different library (kl_ovrp), so the
     // fourth character is checked: `ovr_` and `ovrID` are the platform's, and
     // `ovrp_` must not be claimed here.
-    if (kl_ovrplat_owns(name))          // ovr_*, ovrID*, ovrKeyValuePair_* (a by-value helper with no ovr_ prefix)
+    if (kl_ovrplat_owns(name))          // ovr_*, ovrID*, ovrKeyValuePair_*, ovrMessageType_* (helpers with no ovr_ prefix)
         return kl_ovrplat_sym(name);
     return NULL;
 }

@@ -416,6 +416,7 @@ int kl_jkxr_load(FILE *out) {
         if (out) fprintf(out, "  no JNI_OnLoad — the exported natives are the entry\n");
         return 0;
     }
+    kl_jni_onload_claim(g_engine);
     kl_jni_local_frame_push();
     int version = onload(kl_jni_vm(), NULL);
     kl_jni_local_frame_pop();

@@ -176,6 +176,7 @@ static int boot_unity(FILE *out) {
     jni_onload_fn onload = (jni_onload_fn)kl_sym(img, "JNI_OnLoad");
     if (!onload) return fail("libmain.so exports no JNI_OnLoad");
 
+    kl_jni_onload_claim(img);
     kl_jni_local_frame_push();          // the JVM would pop each native's local
     int version = onload(kl_jni_vm(), NULL);   // frame on return; the host plays
     kl_jni_local_frame_pop();           // that half (see kl_jni.h)

@@ -1837,6 +1837,10 @@ const klj_binding klj_bind_android[] = {
 
     {"bitter/jnibridge/JNIBridge", "newInterfaceProxy",
      "(J[Ljava/lang/Class;)Ljava/lang/Object;", klj_JNIBridge_newInterfaceProxy},
+    // Unity 6 (Gundam): ReflectionHelper.newProxyInstance(long, Class[]) is the same call as the
+    // JNIBridge one, arguments included.
+    {"com/unity3d/player/ReflectionHelper", "newProxyInstance",
+     "(J[Ljava/lang/Class;)Ljava/lang/Object;", klj_JNIBridge_newInterfaceProxy},
     {"bitter/jnibridge/JNIBridge", "disableInterfaceProxy",
      "(Ljava/lang/Object;)V", klj_JNIBridge_disableInterfaceProxy},
 

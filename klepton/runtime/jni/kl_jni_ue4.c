@@ -478,6 +478,15 @@ static klj_val klj_EOSSDK_launchURL(void *env, void *self, const klj_val *a, int
             n > 0 && klj_str(a[0].l) ? klj_str(a[0].l) : "");
     return (klj_val){.j = 2};
 }
+// PrewarmURL(String): the newer SDK (Into the Radius 2) also asks the browser to preload a page
+// before LaunchURL. There is no browser, so nothing is prewarmed: 5 is the Java's
+// PREWARM_EXCEPTION. (LaunchURL answers 2 in both its int and long forms.)
+static klj_val klj_EOSSDK_prewarmURL(void *env, void *self, const klj_val *a, int n) {
+    (void)env; (void)self;
+    KLJ_LOG("EOSSDK.PrewarmURL(\"%s\") — not available offline (no browser); not prewarmed",
+            n > 0 && klj_str(a[0].l) ? klj_str(a[0].l) : "");
+    return (klj_val){.j = 5};
+}
 // SetNativeDisplayRefreshRate(I)Z: a rate the runtime offers is granted (and is then what the getter
 // above, ovrp and OpenXR all report back); one it does not offer is refused, as the Java's
 // Display.Mode search does when no mode matches.
@@ -550,6 +559,14 @@ static klj_val klj_GA_getFontDirectory(void *env, void *self, const klj_val *a, 
     (void)env; (void)self; (void)a; (void)n;
     pthread_once(&g_ue4_font_once, klj_ue4_font_dir_init);
     return (klj_val){.l = kl_jni_new_string(g_ue4_font_dir)};
+}
+
+// GameActivity.getAppPackageName(): a public static the engine calls for its own package name.
+// The same package the OBB identity (nativeSetObbInfo) is given, never null.
+static klj_val klj_GA_getAppPackageName(void *env, void *self, const klj_val *a, int n) {
+    (void)env; (void)self; (void)a; (void)n;
+    const char *pkg = kl_jni_guest_package();
+    return (klj_val){.l = kl_jni_new_string(pkg ? pkg : "")};
 }
 
 // ---- identity / ads / URLs: what the activity answers for a device with no Google services ----
@@ -1170,6 +1187,8 @@ const klj_binding klj_bind_ue4[] = {
     {"com/epicgames/ue4/MediaPlayer14", "updateVideoFrame",
      "(I)Lcom/epicgames/ue4/MediaPlayer14$FrameUpdateInfo;", klj_MP14_updateVideoFrame},
     {"com/epicgames/ue4/MediaPlayer14", "selectTrack", "(I)V", klj_MP14_selectTrack},
+    {"com/epicgames/ue4/GameActivity", "getAppPackageName",
+     "()Ljava/lang/String;", klj_GA_getAppPackageName},
     {"com/epicgames/ue4/GameActivity", "AndroidThunkJava_IsOculusMobileApplication",
      "()Z", klj_GA_isOculusMobile},
     {"com/epicgames/ue4/GameActivity", "AndroidThunkJava_HasMetaDataKey",
@@ -1206,6 +1225,10 @@ const klj_binding klj_bind_ue4[] = {
      "()Ljava/lang/String;", klj_EOSSDK_getOSVersion},
     {"com/epicgames/mobile/eossdk/EOSSDK", "LaunchURL",
      "(Ljava/lang/String;)I", klj_EOSSDK_launchURL},
+    {"com/epicgames/mobile/eossdk/EOSSDK", "LaunchURL",
+     "(Ljava/lang/String;)J", klj_EOSSDK_launchURL},
+    {"com/epicgames/mobile/eossdk/EOSSDK", "PrewarmURL",
+     "(Ljava/lang/String;)J", klj_EOSSDK_prewarmURL},
     {"com/epicgames/ue4/GameActivity", "AndroidThunkJava_SetNativeDisplayRefreshRate",
      "(I)Z", klj_GA_setNativeDisplayRefreshRate},
     {"com/epicgames/ue4/GameActivity", "AndroidThunkJava_GetSupportedNativeDisplayRefreshRates",

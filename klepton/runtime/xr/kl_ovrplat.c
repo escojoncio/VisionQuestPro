@@ -483,6 +483,7 @@ static uint64_t klplat_Message_IsError(const klplat_msg *m) {
 // types only (the Notification_* push types are not requests). The ones also
 // read out of running guests with KL_PROBE_ENUM agree with this table.
 // KL_PLAT_OFFLINE_ERRORS=0 restores the bare 0.
+// KL-TEST-BEGIN msgtype
 static const struct { const char *name; uint32_t type; } g_plat_msg_types[] = {
     {"AbuseReport_ReportRequestHandled", 0x4B8EFC86},
     {"Achievements_AddCount", 0x03E76231}, {"Achievements_AddFields", 0x14AA2129},
@@ -597,6 +598,18 @@ static uint32_t plat_msg_type_of(const char *name) {
         if (strcmp(g_plat_msg_types[i].name, n) == 0) return g_plat_msg_types[i].type;
     return 0;
 }
+
+// ovrMessageType_ToString(type): the SDK's name for a message type, for logging. A pure
+// lookup in the table above (request types only, name without the "ovr_" prefix); any other
+// value is "Unknown". The result is a constant string, never NULL — callers print it straight
+// into their log (Maestro's libUE4 imports it) and a NULL there would crash.
+static const char *klplat_MessageType_ToString(uint32_t type) {
+    plat_hit("ovrMessageType_ToString");
+    for (size_t i = 0; i < sizeof g_plat_msg_types / sizeof g_plat_msg_types[0]; i++)
+        if (g_plat_msg_types[i].type == type) return g_plat_msg_types[i].name;
+    return "Unknown";
+}
+// KL-TEST-END msgtype
 
 static const char g_plat_offline_text[] =
     "Oculus Platform is offline: no platform service on this device";
@@ -1696,6 +1709,7 @@ static const struct { const char *name; void *fn; } g_plat_impl[] = {
     {"ovrKeyValuePair_makeString", (void *)klplat_kvp_makeString},
     {"ovrKeyValuePair_makeInt",    (void *)klplat_kvp_makeInt},
     {"ovrKeyValuePair_makeDouble", (void *)klplat_kvp_makeDouble},
+    {"ovrMessageType_ToString",    (void *)klplat_MessageType_ToString},
     {"JNI_OnLoad",                (void *)klplat_JNI_OnLoad},
     {"ovr_IsPlatformInitialized", (void *)klplat_IsPlatformInitialized},
     {"ovr_GetLoggedInUserID",     (void *)klplat_GetLoggedInUserID},
@@ -1817,11 +1831,15 @@ void *kl_ovrplat_dlopen(const char *soname) {
 int kl_ovrplat_is_handle(const void *h) { return h == (const void *)g_plat_handle; }
 
 // True for every name kl_ovrplat_sym answers by family: `ovr_*`, `ovrID*` and the SDK's
-// by-value helpers `ovrKeyValuePair_*` (which, unlike the rest, have no `ovr_` prefix).
+// by-value helpers `ovrKeyValuePair_*` and `ovrMessageType_*` (which, unlike the rest, have
+// no `ovr_` prefix).
+// KL-TEST-BEGIN owns
 int kl_ovrplat_owns(const char *name) {
     return name && (!strncmp(name, "ovr_", 4) || !strncmp(name, "ovrID", 5) ||
-                    !strncmp(name, "ovrKeyValuePair_", 16));
+                    !strncmp(name, "ovrKeyValuePair_", 16) ||
+                    !strncmp(name, "ovrMessageType_", 15));
 }
+// KL-TEST-END owns
 
 void *kl_ovrplat_sym(const char *name) {
     if (!name) return NULL;

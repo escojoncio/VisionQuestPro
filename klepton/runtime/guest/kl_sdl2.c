@@ -64,6 +64,7 @@ static int sdl2_onload(FILE *out) {
     if (!sdl) return sdl2_fail("libSDL2.so is not in the image registry");
     int (*onload)(void *, void *) = (int (*)(void *, void *))kl_sym(sdl, "JNI_OnLoad");
     if (!onload) return sdl2_fail("libSDL2.so exports no JNI_OnLoad");
+    kl_jni_onload_claim(sdl);
     kl_jni_local_frame_push();
     int version = onload(kl_jni_vm(), NULL);
     kl_jni_local_frame_pop();

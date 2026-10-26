@@ -62,6 +62,17 @@ klepton_tests() {
   mkdir -p "$T/fence"
   awk '/KL-TEST-BEGIN fence/{p=1;next} /KL-TEST-END fence/{p=0} p' runtime/gfx/kl_vulkan.c > "$T/fence/fence_blocks.inc"
   run t_frame_fence -Wno-unused-function -I"$T/fence" -I"$VPK/gpu/vulkan/third_party/vulkan-headers/include" tests/t_frame_fence.c -lpthread
+  mkdir -p "$T/newt"
+  awk '/KL-TEST-BEGIN msgtype/{p=1;next} /KL-TEST-END msgtype/{p=0} p' runtime/xr/kl_ovrplat.c > "$T/newt/msgtype.inc"
+  awk '/KL-TEST-BEGIN owns/{p=1;next} /KL-TEST-END owns/{p=0} p' runtime/xr/kl_ovrplat.c > "$T/newt/owns.inc"
+  run t_ovrplat_msgtype -Wno-unused-function -I"$T/newt" tests/t_ovrplat_msgtype.c
+  awk '/KL-TEST-BEGIN muxer/{p=1;next} /KL-TEST-END muxer/{p=0} p' runtime/media/kl_mediandk.c > "$T/newt/muxer.inc"
+  awk '/^    M\("AMediaMuxer_/' runtime/media/kl_mediandk.c > "$T/newt/muxer_tab.inc"
+  run t_media_muxer -Wno-unused-function -I"$T/newt" tests/t_media_muxer.c
+  awk '/KL-TEST-BEGIN vktrap/{p=1;next} /KL-TEST-END vktrap/{p=0} p' runtime/gfx/kl_vulkan.c > "$T/newt/vktrap.inc"
+  run t_vk_trap -Wno-unused-function -I"$T/newt" -I"$VPK/gpu/vulkan/third_party/vulkan-headers/include" tests/t_vk_trap.c
+  awk '/KL-TEST-BEGIN ue4sig/{p=1;next} /KL-TEST-END ue4sig/{p=0} p' runtime/guest/kl_ue4.c > "$T/newt/ue4sig.inc"
+  run t_ue4_sig -Wno-unused-function -I"$T/newt" tests/t_ue4_sig.c
   return $rc
 }
 

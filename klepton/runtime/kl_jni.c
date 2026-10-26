@@ -2750,6 +2750,18 @@ void *kl_jni_env(void) {
     return e;
 }
 
+int kl_jni_onload_claim(const void *image) {
+    static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
+    static const void *done[64];
+    static unsigned n;
+    int first = 1;
+    pthread_mutex_lock(&mu);
+    for (unsigned i = 0; i < n; i++) if (done[i] == image) first = 0;
+    if (first && n < sizeof done / sizeof *done) done[n++] = image;
+    pthread_mutex_unlock(&mu);
+    return first;
+}
+
 void *kl_jni_vm(void) {
     pthread_once(&g_init_once, klj_init);
     static void *vm = g_vm_vtable;

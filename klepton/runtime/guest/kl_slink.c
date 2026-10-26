@@ -539,6 +539,7 @@ int kl_slink_sdl_onload(FILE *out) {
     jni_onload_fn onload = (jni_onload_fn)kl_sym(sdl_img, "JNI_OnLoad");
     if (!onload) return slink_fail("libSDL3.so exports no JNI_OnLoad");
 
+    kl_jni_onload_claim(sdl_img);
     kl_jni_local_frame_push();
     int version = onload(kl_jni_vm(), NULL);
     kl_jni_local_frame_pop();

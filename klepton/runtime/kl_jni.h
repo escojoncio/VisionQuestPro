@@ -33,6 +33,11 @@ typedef struct {
 void *kl_jni_vm(void);        // JavaVM*  — hand this to JNI_OnLoad
 void *kl_jni_env(void);       // JNIEnv*  — for the calling thread
 
+// JNI_OnLoad is not idempotent, and several paths run it (the host for the libraries it drives
+// itself, System.loadLibrary for the rest). Each calls this with the library's image just before
+// running it: 1 the first time for that image, 0 once it has been claimed — then the caller skips.
+int kl_jni_onload_claim(const void *image);
+
 // Calling a Java method with no host implementation aborts by default, so a
 // bring-up run stops exactly where the surface ends. Method/field *lookups*
 // never abort — the guest resolves ids it may never call, so only a call proves

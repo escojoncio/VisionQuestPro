@@ -196,6 +196,16 @@ static klj_val klj_ReflectionHelper_newProxyInstance(void *env, void *clazz,
     return (klj_val){.l = obj};
 }
 
+// ...and the same call as Unity 6 spells it: static (long nativePtr, Class iface), without the
+// UnityPlayer in front (Gundam). Same proxy, so the arguments are shifted into the shape above.
+static klj_val klj_ReflectionHelper_newProxyInstance_J(void *env, void *clazz,
+                                                       const klj_val *a, int n) {
+    klj_val b[3] = {{.l = NULL}, {.l = NULL}, {.l = NULL}};
+    if (n > 0) b[1] = a[0];
+    if (n > 1) b[2] = a[1];
+    return klj_ReflectionHelper_newProxyInstance(env, clazz, b, n > 1 ? 3 : n + 1);
+}
+
 static klj_val klj_ReflectionHelper_getFieldSignature(void *env, void *self,
                                                       const klj_val *a, int n) {
     (void)env; (void)self;
@@ -465,6 +475,7 @@ const klj_binding klj_bind_bridge[] = {
     {"com/unity3d/player/ReflectionHelper", "getMethodID", "(Ljava/lang/Class;Ljava/lang/String;Ljava/lang/String;Z)Ljava/lang/reflect/Method;", klj_ReflectionHelper_getMethodID},
     {"com/unity3d/player/ReflectionHelper", "getConstructorID", "(Ljava/lang/Class;Ljava/lang/String;)Ljava/lang/reflect/Constructor;", klj_ReflectionHelper_getConstructorID},
     {"com/unity3d/player/ReflectionHelper", "newProxyInstance", "(Lcom/unity3d/player/UnityPlayer;JLjava/lang/Class;)Ljava/lang/Object;", klj_ReflectionHelper_newProxyInstance},
+    {"com/unity3d/player/ReflectionHelper", "newProxyInstance", "(JLjava/lang/Class;)Ljava/lang/Object;", klj_ReflectionHelper_newProxyInstance_J},
     {"com/unity3d/player/ReflectionHelper", "getFieldSignature", "(Ljava/lang/reflect/Field;)Ljava/lang/String;", klj_ReflectionHelper_getFieldSignature},
     {"java/lang/reflect/Field", "getDeclaringClass", "()Ljava/lang/Class;", klj_Field_getDeclaringClass},
     {"java/lang/reflect/Method", "getName", "()Ljava/lang/String;", klj_Method_getName},

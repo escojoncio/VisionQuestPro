@@ -199,16 +199,15 @@ void *klb_dlsym(void *handle, const char *name); // ...and its dlsym
 // a message about how the .apk was built. Nothing in it points at a load step.
 //
 // Once per image: klb_dlopen returns the existing handle for an already-open
-// library (libil2cpp arrives twice over), and JNI_OnLoad is not idempotent.
+// library (libil2cpp arrives twice over), and JNI_OnLoad is not idempotent. The mark is
+// shared with the host, which runs JNI_OnLoad itself for the libraries it drives
+// (kl_jni_onload_claim), so System.loadLibrary on one of those does not run it a second time.
 static void klj_run_jni_onload(void *handle, const char *what) {
-    if (!handle) return;
-    static void *done[32];
-    static unsigned done_n;
-    for (unsigned i = 0; i < done_n; i++) if (done[i] == handle) return;
+    if (!handle || !kl_dl_is_image(handle)) return;   // shim/synthetic handles: dlsym would hit another image
     typedef int (*onload_fn)(void *vm, void *reserved);
     onload_fn onload = (onload_fn)klb_dlsym(handle, "JNI_OnLoad");
     if (!onload) return;             // most libraries have none; that is normal
-    if (done_n < sizeof done / sizeof *done) done[done_n++] = handle;
+    if (!kl_jni_onload_claim(handle)) return;
     int v = onload(kl_jni_vm(), NULL);
     KLJ_LOG("%s: JNI_OnLoad -> 0x%08x", what, (unsigned)v);
 }
@@ -249,6 +248,14 @@ static klj_val klj_System_load(void *env, void *self, const klj_val *a, int n) {
     void *h = klb_dlopen(path, 0x00002 /* RTLD_NOW */);
     KLJ_LOG("System.load(\"%s\") -> %s", path, h ? "loaded" : "failed");
     klj_run_jni_onload(h, path);
+    return (klj_val){.j = 0};
+}
+
+// System.loadLibrary(name): the same load and JNI_OnLoad as UnityPlayer.loadLibrary (which is
+// Unity's wrapper around it): lib<name>.so from the native library directory. Void, so the
+// result is only logged, like System.load.
+static klj_val klj_System_loadLibrary(void *env, void *self, const klj_val *a, int n) {
+    klj_UnityPlayer_loadLibrary(env, self, a, n);
     return (klj_val){.j = 0};
 }
 
@@ -535,6 +542,7 @@ const klj_binding klj_bind_net[] = {
     {"android/content/Context", "getResources",
      "()Landroid/content/res/Resources;", klj_Context_getResources},
     {"java/lang/System", "load", "(Ljava/lang/String;)V", klj_System_load},
+    {"java/lang/System", "loadLibrary", "(Ljava/lang/String;)V", klj_System_loadLibrary},
     {"com/epicgames/mobile/eossdk/LibraryLoader", "load", "()V", klj_EOS_LibraryLoader_load},
     // EOSSDK.init(activity) — EOS bring-up after the loader ran. Online/account
     // services; a no-op lets the game boot offline (the platform SDKs are all
