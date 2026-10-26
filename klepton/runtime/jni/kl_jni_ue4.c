@@ -1113,7 +1113,163 @@ static klj_val klj_Sentry_init(void *env, void *self, const klj_val *a, int n) {
 // device that is simply online.
 static klj_val klj_GA_void_noop(void *env, void *self, const klj_val *a, int n) {
     (void)env; (void)self; (void)a; (void)n;
+    klj_noop_hit_current();
     return (klj_val){.l = NULL};
+}
+
+// ---- AndroidThunkJava_* that have no binding row of their own ----
+//
+// GameActivity's engine-facing surface is ~100 methods and the engine resolves them in a block at
+// JNI_OnLoad. The ones with a row above are real; the rest used to fall through to the generic
+// "APK-owned void = NO-OP" / "SIMULATED 0/false/null" paths, which is right for most and WRONG for a few
+// whose answer changes what the game does. This table is consulted after the binding rows and before those
+// generic paths, and is matched on NAME + the return type the guest's own signature declares (not on the
+// whole signature), so a parameter list that differs between UE4 4.2x and UE5 does not defeat it.
+//
+// Class: S  state     the engine reads the answer; it is what a Quest 3 (Quest 2 by default) with NO network gives
+//        H  host-owned the Java drives an Android window / vibrator / task stack that the host owns; nothing to do
+//        O  online    ads, IAP, Play Games, notifications: the product is offline-only, so a clean failure by
+//                     signature (false / 0 / "" for a String / null / void)
+// H and O answers are logged once each as `[jni] noop_hit name=...`, S answers once as `[ue4thunk]`.
+// Kind: Z boolean, N int-or-long, S String, V void, * any return type (clean failure by signature).
+// Src (S rows): 0 the fixed value, W Wi-Fi up (false while KL_NET_OFFLINE, the default), C versionCode,
+//        N versionName, D cache dir, X external files dir, M device RAM (kl_mem_budget_bytes: bytes for a
+//        long, MiB for an int -- the same budget ActivityManager.getMemoryInfo reports).
+// The names and kinds below come from UE4 4.27 / UE5 GameActivity (not from this game's smali: no APK is
+// at hand); a name the guest never asks for is inert, and one it asks for with another return type misses
+// the table and falls to the generic paths, where noop_hit names it.
+// KL-TEST-BEGIN ue4thunk
+typedef struct { int offline; long vcode; const char *vname, *cache_dir, *ext_files_dir; uint64_t mem_bytes; } klj_ue4_env;
+typedef struct { const char *name; char kind, cls, src; int64_t ival; const char *sval; } klj_ue4_thunk;
+
+static const klj_ue4_thunk g_ue4_thunks[] = {
+    // S: state the engine acts on.
+    {"IsAllowedRemoteNotifications", 'Z', 'S', 0, 0, NULL},        // no push offline
+    {"HasActiveWiFiConnection",      'Z', 'S', 'W', 0, NULL},      // same answer as GetNetworkConnectionType
+    {"IsWifiConnected",              'Z', 'S', 'W', 0, NULL},
+    {"GetAppVersionName",            'S', 'S', 'N', 0, NULL},
+    {"GetAppVersionCode",            'N', 'S', 'C', 0, NULL},
+    {"GetCacheDir",                  'S', 'S', 'D', 0, NULL},      // = Context.getCacheDir
+    {"GetExternalFilesDir",          'S', 'S', 'X', 0, NULL},      // = Context.getExternalFilesDir(null)
+    {"GetDeviceMemory",              'N', 'S', 'M', 0, NULL},
+    {"GetDeviceTotalMemory",         'N', 'S', 'M', 0, NULL},
+    {"GetCPUFamily",                 'S', 'S', 0, 0, "arm64-v8a"}, // Build.SUPPORTED_ABIS[0]
+    // H: the host owns the window, the vibrator and the task stack.
+    {"Vibrate",                      'V', 'H', 0, 0, NULL},        // no vibrator; haptics come through the XR runtime
+    {"SetOrientation",               'V', 'H', 0, 0, NULL},        // a headset has no rotating panel (GetDeviceOrientation is fixed)
+    {"Minimize",                     'V', 'H', 0, 0, NULL},        // no task stack to move to the back
+    {"ShowConsoleWindow",            'V', 'H', 0, 0, NULL},        // no on-device console
+    {"RestartApplication",           'V', 'H', 0, 0, NULL},        // the launcher owns the process
+    // O: online / commerce / notifications. Clean failure by signature; nothing may leave the device.
+    {"ShowAdBanner",                 '*', 'O', 0, 0, NULL},
+    {"HideAdBanner",                 '*', 'O', 0, 0, NULL},
+    {"CloseAdBanner",                '*', 'O', 0, 0, NULL},
+    {"LoadInterstitialAd",           '*', 'O', 0, 0, NULL},
+    {"IsInterstitialAdAvailable",    '*', 'O', 0, 0, NULL},
+    {"IsInterstitialAdRequested",    '*', 'O', 0, 0, NULL},
+    {"ShowInterstitialAd",           '*', 'O', 0, 0, NULL},
+    {"GooglePlayConnect",            '*', 'O', 0, 0, NULL},
+    {"ResetAchievements",            '*', 'O', 0, 0, NULL},
+    {"IapSetupService",              '*', 'O', 0, 0, NULL},
+    {"IapQueryInAppPurchases",       '*', 'O', 0, 0, NULL},
+    {"IapBeginPurchase",             '*', 'O', 0, 0, NULL},
+    {"IapIsAllowedToMakePurchases",  '*', 'O', 0, 0, NULL},
+    {"IapRestorePurchases",          '*', 'O', 0, 0, NULL},
+    {"IapQueryExistingPurchases",    '*', 'O', 0, 0, NULL},
+    {"IapConsumePurchase",           '*', 'O', 0, 0, NULL},
+    {"LocalNotificationScheduleAtTime",      '*', 'O', 0, 0, NULL},
+    {"LocalNotificationClearAll",            '*', 'O', 0, 0, NULL},
+    {"LocalNotificationGetLaunchNotification", '*', 'O', 0, 0, NULL},
+    {"RegisterForRemoteNotifications",       '*', 'O', 0, 0, NULL},
+    {"UnregisterForRemoteNotifications",     '*', 'O', 0, 0, NULL},
+};
+#define KLJ_UE4_NTHUNKS ((int)(sizeof g_ue4_thunks / sizeof g_ue4_thunks[0]))
+
+// The return type a signature declares: Z B C S I J F D V, 'S' for java/lang/String, 'L' for any other
+// object or an array; 0 when it is not a signature.
+static char klj_ue4_ret(const char *sig) {
+    const char *p = sig ? strchr(sig, ')') : NULL;
+    if (!p) return 0;
+    p++;
+    if (*p == '[') return 'L';
+    if (*p == 'L') return strcmp(p, "Ljava/lang/String;") == 0 || strcmp(p, "Ljava.lang.String;") == 0 ? 'S' : 'L';
+    return strchr("ZBCSIJFDV", *p) && p[1] == 0 ? *p : 0;
+}
+
+static int klj_ue4_thunk_find(const char *name, const char *sig) {
+    static const char pre[] = "AndroidThunkJava_";
+    char rk = klj_ue4_ret(sig);
+    if (!name || !rk || strncmp(name, pre, sizeof pre - 1) != 0) return -1;
+    for (int i = 0; i < KLJ_UE4_NTHUNKS; i++) {
+        const klj_ue4_thunk *t = &g_ue4_thunks[i];
+        if (strcmp(name + sizeof pre - 1, t->name) != 0) continue;
+        int ok = t->kind == '*' || (t->kind == 'Z' && rk == 'Z') || (t->kind == 'N' && (rk == 'I' || rk == 'J'))
+              || (t->kind == 'S' && rk == 'S') || (t->kind == 'V' && rk == 'V');
+        if (ok) return i;
+    }
+    return -1;
+}
+
+// Value of row `i` for a call returning `rk`: *iv for Z/I/J, *sv for a String (never NULL for one: a clean
+// failure is ""), both zero otherwise.
+static void klj_ue4_thunk_value(int i, char rk, const klj_ue4_env *e, int64_t *iv, const char **sv) {
+    const klj_ue4_thunk *t = &g_ue4_thunks[i];
+    *iv = 0; *sv = NULL;
+    switch (t->src) {
+    case 0:   *iv = t->ival; *sv = t->sval; break;
+    case 'W': *iv = !e->offline; break;
+    case 'C': *iv = e->vcode; break;
+    case 'N': *sv = e->vname; break;
+    case 'D': *sv = e->cache_dir; break;
+    case 'X': *sv = e->ext_files_dir; break;
+    case 'M': *iv = (int64_t)(rk == 'J' ? e->mem_bytes : e->mem_bytes >> 20); break;
+    }
+    if (rk == 'S' && !*sv) *sv = "";
+    if (rk != 'S') *sv = NULL;
+    if (rk != 'Z' && rk != 'I' && rk != 'J') *iv = 0;
+}
+// KL-TEST-END ue4thunk
+
+static klj_ue4_env g_ue4_env;
+static pthread_once_t g_ue4_env_once = PTHREAD_ONCE_INIT;
+static void klj_ue4_env_init(void) {
+    static char cache[1024];
+    g_ue4_env.offline = kl_env_on("KL_NET_OFFLINE", 1);
+    klj_guest_version(&g_ue4_env.vcode, &g_ue4_env.vname);
+    snprintf(cache, sizeof cache, "%s/cache", kl_jni_files_dir());
+    klj_mkdir_p(cache);
+    g_ue4_env.cache_dir = cache;
+    kl_guest_mkdirs("/sdcard/files");
+    g_ue4_env.ext_files_dir = "/sdcard/files";
+    g_ue4_env.mem_bytes = kl_mem_budget_bytes();
+}
+
+int klj_ue4_thunk_answer(const klj_wanted *w, klj_val *out) {
+    if ((w->kind != 'm' && w->kind != 'M')
+        || (strcmp(w->cls, "com/epicgames/ue4/GameActivity") != 0
+            && strcmp(w->cls, "com/epicgames/unreal/GameActivity") != 0))
+        return 0;
+    int i = klj_ue4_thunk_find(w->name, w->sig);
+    if (i < 0) return 0;
+    char rk = klj_ue4_ret(w->sig);
+    pthread_once(&g_ue4_env_once, klj_ue4_env_init);
+    int64_t iv; const char *sv;
+    klj_ue4_thunk_value(i, rk, &g_ue4_env, &iv, &sv);
+    const klj_ue4_thunk *t = &g_ue4_thunks[i];
+    if (t->cls == 'S') {
+        static unsigned char said[KLJ_UE4_NTHUNKS];
+        if (!said[i]) {
+            said[i] = 1;
+            if (sv) KLJ_LOG("[ue4thunk] %s -> \"%s\"", w->name, sv);
+            else    KLJ_LOG("[ue4thunk] %s -> %lld", w->name, (long long)iv);
+        }
+    } else {
+        klj_noop_hit(w);
+    }
+    *out = (klj_val){.j = 0};
+    if (rk == 'S') out->l = kl_jni_new_string(sv);
+    else           out->j = (uint64_t)iv;
+    return 1;
 }
 
 // The Electra H264 decoder (com/epicgames/unreal/ElectraVideoDecoderH264) that

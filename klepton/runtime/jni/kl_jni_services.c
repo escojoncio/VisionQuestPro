@@ -87,6 +87,7 @@ static klj_val klj_fmod_void(void *env, void *self, const klj_val *a, int n) {
 // one keeps kl_jni_services.c self-contained.)
 static klj_val klj_void_noop(void *env, void *self, const klj_val *a, int n) {
     (void)env; (void)self; (void)a; (void)n;
+    klj_noop_hit_current();
     return (klj_val){0};
 }
 
