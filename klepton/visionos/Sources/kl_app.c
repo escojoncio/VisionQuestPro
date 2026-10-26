@@ -859,6 +859,7 @@ static void *heartbeat(void *arg) {
                 else
                     gb[0] = 0;
                 kl_mtl_attr_print("[hb]", gb);
+                if (ticks % 256 == 0) kl_mem_vm_print("[hb]");   // every 64 s: the region walk is the costly one
             } else
             fprintf(stderr, "[hb] %02d:%02d:%02d  phase=%s  foot=%lldM avail=%lldM  %s\n",
                     tm.tm_hour, tm.tm_min, tm.tm_sec, phase,
@@ -909,7 +910,7 @@ static void *heartbeat(void *arg) {
             long long jump = (prev_foot >= 0 && foot >= 0) ? (foot - prev_foot) >> 20 : 0;
             if (foot >= 0) prev_foot = foot;
             if (jump > 200 || blocked) {
-                char mb2[512], gb2[4096], rg2[512];
+                char mb2[512], gb2[4096];
                 kl_mem_breakdown(mb2, sizeof mb2);
                 if (jump > 200)
                     fprintf(stderr, "[hb] jump +%lld MiB  phase=%s  foot=%lldM avail=%lldM  %s\n",
@@ -922,8 +923,7 @@ static void *heartbeat(void *arg) {
                 else
                     gb2[0] = 0;
                 kl_mtl_attr_print("[hb]", gb2);
-                if (kl_mem_regions(rg2, sizeof rg2))
-                    fprintf(stderr, "[hb] vm %s\n", rg2);
+                kl_mem_vm_print("[hb]");
                 // First big jump near the ceiling: who is running right now (the guest thread
                 // that is loading), once per process.
                 static int jump_snap_done;

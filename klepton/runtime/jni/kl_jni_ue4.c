@@ -396,6 +396,7 @@ static klj_val klj_GA_forceQuit(void *env, void *self, const klj_val *a, int n) 
     // path no longer triggers it.)
     KLJ_LOG("AndroidThunkJava_ForceQuit() — the guest asked to quit; ignored "
             "(see the log just above for why it wanted to)");
+    kl_fault_guest_errors_once();   // the reason, from the guest's own last error lines
     // Shipping UE builds strip their runtime log, so the "why" often is NOT
     // above — nothing reaches stdout or logcat. Dump the GUEST call stack of
     // whoever called ForceQuit instead: symbolised against libUE4/libUnreal it

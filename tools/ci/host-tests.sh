@@ -73,6 +73,11 @@ klepton_tests() {
   run t_vk_trap -Wno-unused-function -I"$T/newt" -I"$VPK/gpu/vulkan/third_party/vulkan-headers/include" tests/t_vk_trap.c
   awk '/KL-TEST-BEGIN ue4sig/{p=1;next} /KL-TEST-END ue4sig/{p=0} p' runtime/guest/kl_ue4.c > "$T/newt/ue4sig.inc"
   run t_ue4_sig -Wno-unused-function -I"$T/newt" tests/t_ue4_sig.c
+  mkdir -p "$T/vmlog"
+  awk '/KL-TEST-BEGIN vmgroup/{p=1;next} /KL-TEST-END vmgroup/{p=0} p' runtime/libc/kl_libc.c > "$T/vmlog/vmgroup.inc"
+  run t_vmgroup -Wno-unused-function -I"$T/vmlog" tests/t_vmgroup.c
+  awk '/KL-TEST-BEGIN lring/{p=1;next} /KL-TEST-END lring/{p=0} p' runtime/libc/kl_va_handlers.c > "$T/vmlog/lring.inc"
+  run t_lring -I"$T/vmlog" tests/t_lring.c
   return $rc
 }
 

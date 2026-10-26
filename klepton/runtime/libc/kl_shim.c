@@ -1926,7 +1926,7 @@ static int kl_execv(const char *p, char *const argv[]) {
 }
 
 // ---------- small bionic-isms ----------
-static void kl_set_abort_message(const char *m) { fprintf(stderr, "[guest abort] %s\n", m ? m : ""); }
+static void kl_set_abort_message(const char *m) { fprintf(stderr, "[guest abort] %s\n", m ? m : ""); kl_log_ring_note(7, "abort", m); }
 // Real implementation in kl_dl.c — it owns the image registry. This is the
 // guest unwinder's FDE lookup, not a bionic nicety; see the comment there.
 extern int kl_dl_iterate_phdr(int (*cb)(void *, size_t, void *), void *d);
@@ -1945,6 +1945,7 @@ static void kl_android_log_write(int p, const char *t, const char *m) {
     extern void kl_log_keyword_copy(int, const char *, const char *);
     if (!t && kl_log_default_tag) t = kl_log_default_tag;
     kl_log_keyword_copy(p, t, m);   // run-state lines once more, tagged, whichever logger prints them
+    kl_log_ring_note(p, t, m);      // the guest's last errors, for the [fatal] dump (kl_fault.c)
     if (kl_log_custom_logger) {          // the guest replaced liblog's logger: every write goes through it
         // Its logger decides where the line goes and may print nothing of ours: INFO and above are copied to our
         // log first, so a game that installs its own logger does not lose its E/W/I lines (capped, KL_LOG_CUSTOM_MAX; INFO gets a third of it).

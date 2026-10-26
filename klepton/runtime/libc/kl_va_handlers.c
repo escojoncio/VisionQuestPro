@@ -181,6 +181,82 @@ void kl_log_keyword_copy(int prio, const char *tag, const char *msg) {
             n + 1 == g_kw_cap ? " (kw line cap reached)" : "");
 }
 
+/* KL-TEST-BEGIN lring */
+// The guest's last errors, so a fatal can say WHY. UE4's fatal handler ends in AndroidThunkJava_ForceQuit (ignored here)
+// and the game then dies of a SIGSEGV that says nothing; the reason was one log line earlier. Kept: every ERROR/FATAL
+// line, plus the lines of tag UE4 / UE / *Unity* that say "Fatal", "Assertion failed" or "Error:" at any priority.
+// Last KL_LRING_N lines; a line equal to the previous one only bumps its " (xN)" counter, so an error per frame does
+// not push the real reason out. Writers take a tiny spin lock and publish the count AFTER the slot is written; the
+// reader (kl_log_ring_dump, called from the fatal-signal handler) takes no lock and calls no libc formatter: the
+// slots hold the final text and the dump copies bytes. A slot rewritten while it is read shows a mixed line at worst.
+#define KL_LRING_N 32
+#define KL_LRING_LEN 256
+#define KL_LRING_BASE (KL_LRING_LEN - 16)   // room left for " (x4294967295)"
+static struct { char text[KL_LRING_LEN]; unsigned blen, rep; } g_lring[KL_LRING_N];
+static unsigned g_lring_seq;   // lines ever stored
+static char g_lring_lock;
+
+static int kl_lring_tag(const char *tag) {
+    return tag && (!strcmp(tag, "UE4") || !strcmp(tag, "UE") || strstr(tag, "Unity"));
+}
+int kl_log_ring_wants(int prio, const char *tag) { return prio >= 6 || kl_lring_tag(tag); }
+static void kl_lring_suffix(char *text, unsigned blen, unsigned rep) {
+    char d[12];
+    int nd = 0;
+    for (unsigned v = rep; v; v /= 10) d[nd++] = (char)('0' + v % 10);
+    char *p = text + blen;
+    *p++ = ' '; *p++ = '('; *p++ = 'x';
+    while (nd) *p++ = d[--nd];
+    *p++ = ')'; *p = 0;
+}
+void kl_log_ring_note(int prio, const char *tag, const char *msg) {
+    if (!msg || !kl_log_ring_wants(prio, tag)) return;
+    if (prio < 6 && !strstr(msg, "Fatal") && !strstr(msg, "Assertion failed") && !strstr(msg, "Error:")) return;
+    static const char lv[] = "??VDIWEF";
+    char t[KL_LRING_BASE + 1];
+    int n = snprintf(t, sizeof t, "%c/%s: %s", (prio >= 0 && prio < 8) ? lv[prio] : '?', tag ? tag : "", msg);
+    if (n < 0) return;
+    if (n > KL_LRING_BASE) n = KL_LRING_BASE;
+    for (int i = 0; i < n; i++) if (t[i] == '\n' || t[i] == '\r') t[i] = ' ';
+    while (n > 0 && t[n - 1] == ' ') n--;
+    while (__atomic_test_and_set(&g_lring_lock, __ATOMIC_ACQUIRE)) {}
+    unsigned seq = g_lring_seq;
+    if (seq && g_lring[(seq - 1) % KL_LRING_N].blen == (unsigned)n &&
+        !memcmp(g_lring[(seq - 1) % KL_LRING_N].text, t, (size_t)n)) {
+        unsigned r = ++g_lring[(seq - 1) % KL_LRING_N].rep;
+        kl_lring_suffix(g_lring[(seq - 1) % KL_LRING_N].text, (unsigned)n, r);
+    } else {
+        unsigned i = seq % KL_LRING_N;
+        memcpy(g_lring[i].text, t, (size_t)n);
+        g_lring[i].text[n] = 0;
+        g_lring[i].blen = (unsigned)n;
+        g_lring[i].rep = 1;
+        __atomic_store_n(&g_lring_seq, seq + 1, __ATOMIC_RELEASE);
+    }
+    __atomic_clear(&g_lring_lock, __ATOMIC_RELEASE);
+}
+// "[fatal] last guest errors:" and the lines, oldest first, through `emit` (one call per line). Async-signal-safe:
+// byte copies and emit only.
+void kl_log_ring_dump(void (*emit)(const char *, size_t)) {
+    unsigned seq = __atomic_load_n(&g_lring_seq, __ATOMIC_ACQUIRE);
+    unsigned cnt = seq < KL_LRING_N ? seq : KL_LRING_N;
+    char b[KL_LRING_LEN + 4];
+    size_t l = 0;
+    for (const char *h = "[fatal] last guest errors:"; *h; h++) b[l++] = *h;
+    if (!cnt) for (const char *h = " (none logged)"; *h; h++) b[l++] = *h;
+    b[l++] = '\n';
+    emit(b, l);
+    for (unsigned k = 0; k < cnt; k++) {
+        const char *t = g_lring[(seq - cnt + k) % KL_LRING_N].text;
+        l = 0;
+        b[l++] = ' '; b[l++] = ' ';
+        while (l < KL_LRING_LEN + 2 && *t) b[l++] = *t++;
+        b[l++] = '\n';
+        emit(b, l);
+    }
+}
+/* KL-TEST-END lring */
+
 int klh_android_log_print(int prio, const char *tag, const char *fmt, kl_va *va) {
     KL_MARSHAL(fmt, va, KL_VA_PRINTF);
     if (kl_log_keyword_open() && (prio >= 4 || (tag && strstr(tag, "Unity")))) {   // a copy of the run-state lines (see kl_log_keyword_copy)
@@ -190,6 +266,14 @@ int klh_android_log_print(int prio, const char *tag, const char *fmt, kl_va *va)
         vsnprintf(kwtext, sizeof kwtext, fmt, kwcp);
         va_end(kwcp);
         kl_log_keyword_copy(prio, tag, kwtext);
+    }
+    if (kl_log_ring_wants(prio, tag)) {   // the guest's last errors, for the [fatal] dump (kl_fault.c)
+        char rt[KL_LRING_LEN];
+        va_list rcp;
+        va_copy(rcp, _ap);
+        vsnprintf(rt, sizeof rt, fmt, rcp);
+        va_end(rcp);
+        kl_log_ring_note(prio, tag, rt);
     }
     static const char lv[] = "??VDIWEF";
     fprintf(stderr, "%c/%s: ", (prio >= 0 && prio < 8) ? lv[prio] : '?', tag ? tag : "");
@@ -336,10 +420,18 @@ int klh_android_log_buf_print(int buf, int prio, const char *tag, const char *fm
 // __android_log_assert(cond, tag, fmt, ...): logs and aborts, like liblog.
 int klh_android_log_assert(const char *cond, const char *tag, const char *fmt, kl_va *va) {
     fprintf(stderr, "F/%s: assert%s%s: ", tag ? tag : "", cond ? " " : "", cond ? cond : "");
+    char note[KL_LRING_LEN];
+    snprintf(note, sizeof note, "assert %s", cond ? cond : "");
     if (fmt) {
         KL_MARSHAL(fmt, va, KL_VA_PRINTF);
+        size_t nl = strlen(note);
+        va_list ncp;
+        va_copy(ncp, _ap);
+        vsnprintf(note + nl, sizeof note - nl, fmt, ncp);   // "assert <cond>" + the message: the abort that follows is the SIGABRT dump
+        va_end(ncp);
         vfprintf(stderr, fmt, _ap);
     }
+    kl_log_ring_note(7, tag, note);
     fputc('\n', stderr);
     fflush(stderr);
     abort();

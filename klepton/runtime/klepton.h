@@ -199,7 +199,18 @@ void kl_mem_report(void);
 uint64_t kl_mem_budget_bytes(void);
 uint64_t kl_mem_available_bytes(void);
 void kl_mem_breakdown(char *buf, size_t n);   // heap/internal/compressed/file + ledger tags, for [hb]
-int  kl_mem_regions(char *buf, size_t n);     // resident bytes by VM user_tag, top 8; 0 if rate-limited (2 s) or the map is past KL_MEM_REGIONS_MAX
+// One line "<prefix> vm regions=N ... top: TAG/kind=res/dirty/swap" (MiB): the whole region map grouped by VM user_tag and
+// file-backed vs anonymous share mode, top 12 + rest, so the groups add up to the footprint. Rate-limited (2 s), cut at 50 ms / 20000 regions
+// ("vm partial (stopped at N regions / X ms)", orientative top only), skipped if another thread is printing. Any thread; the groups are static, no malloc.
+void kl_mem_vm_print(const char *prefix);
+// Application-range VM tag (240-255) of the guest's anonymous mmap (klb_mmap), so the region map separates it from our own.
+#define KL_VM_TAG_GUEST_MMAP 240
+// Ring of the guest's last errors (kl_va_handlers.c): ERROR/FATAL lines of any tag plus UE4/UE/Unity lines that say
+// Fatal / Assertion failed / Error:. kl_log_ring_wants is the cheap pre-check, _note filters and stores (a repeat of the previous line only counts), _dump
+// passes "[fatal] last guest errors:" and the lines (oldest first) to emit; async-signal-safe.
+int    kl_log_ring_wants(int prio, const char *tag);
+void   kl_log_ring_note(int prio, const char *tag, const char *msg);
+void   kl_log_ring_dump(void (*emit)(const char *, size_t));
 // Memory-jump diagnostics (kl_libc.c), called from the [hb] heartbeat: who owns the IOAccelerator regions (count, size
 // histogram, share mode, the 8 largest, how many lie inside host-visible VkDeviceMemory / VPKEngine buffers); the
 // compressor / free memory from host_statistics64; per-file read statistics (open/pread/close/mmap hooks, aggregated).

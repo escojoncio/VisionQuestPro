@@ -81,6 +81,36 @@ static void klf_emit(const char *b, size_t n) {
     if (g_crash_fd >= 0) { w = write(g_crash_fd, b, n); (void)w; }
 }
 
+// Opened by path at the first report (a crash, or the first guest-error dump); later reports append. Opened once:
+// the first caller opens (O_TRUNC) and writes the header, a simultaneous one (ForceQuit dump + a crash on another
+// thread) waits for it and appends. g_crash_fd is published after the header is in.
+static int g_crash_opening;
+static void klf_open_crash(void) {
+    if (!g_crash_path[0] || __atomic_load_n(&g_crash_fd, __ATOMIC_ACQUIRE) >= 0) return;
+    if (__atomic_exchange_n(&g_crash_opening, 1, __ATOMIC_ACQ_REL)) {
+        for (long spin = 0; spin < 50000000 && __atomic_load_n(&g_crash_fd, __ATOMIC_ACQUIRE) < 0; spin++) {}
+        return;
+    }
+    int fd = open(g_crash_path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (fd >= 0 && g_crash_hdr[0]) {
+        ssize_t hw = write(fd, g_crash_hdr, strlen(g_crash_hdr)); (void)hw;
+    }
+    if (fd < 0) __atomic_store_n(&g_crash_opening, 0, __ATOMIC_RELEASE);   // could not open: the next report tries again
+    else __atomic_store_n(&g_crash_fd, fd, __ATOMIC_RELEASE);
+}
+
+// "[fatal] last guest errors:" + the ring of the guest's last errors (kl_log_ring_*), to fd 2 and the crash file.
+// Async-signal-safe: the ring hands over finished lines, klf_emit is write(2).
+static void klf_guest_errors(void) { kl_log_ring_dump(klf_emit); }
+
+// For the ForceQuit the guest asks for and we ignore: the reason, once per session. A crash always dumps (report_fault).
+void kl_fault_guest_errors_once(void) {
+    static int done;
+    if (__atomic_exchange_n(&done, 1, __ATOMIC_RELAXED)) return;
+    klf_open_crash();
+    klf_guest_errors();
+}
+
 static void (*g_extra[KL_FAULT_MAX_REPORTERS])(FILE *);
 static unsigned g_extra_n;
 
@@ -225,12 +255,7 @@ static void report_fault(int sig, siginfo_t *si, void *uctx) {
     }
     // Before anything else can fail: a report that is written only after the
     // interesting work has succeeded is missing exactly when it is needed.
-    if (g_crash_path[0] && g_crash_fd < 0) {
-        g_crash_fd = open(g_crash_path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-        if (g_crash_fd >= 0 && g_crash_hdr[0]) {
-            ssize_t hw = write(g_crash_fd, g_crash_hdr, strlen(g_crash_hdr)); (void)hw;
-        }
-    }
+    klf_open_crash();
     void *pc = uc ? (void *)uc->uc_mcontext->__ss.__pc : NULL;
     uint64_t tid = 0;
     pthread_threadid_np(NULL, &tid);
@@ -520,6 +545,9 @@ static void report_fault(int sig, siginfo_t *si, void *uctx) {
         fp = next;
     }
 
+    // Why the guest died, in its own words: abort() and __android_log_assert end here (SIGABRT) as well.
+    klf_guest_errors();
+
     // A thread that can abandon its unit of work (the executable door's test runner) goes back
     // to its recovery point now that the report is written; the process lives on.
     if (sig == SIGABRT || sig == SIGSEGV || sig == SIGBUS || sig == SIGTRAP || sig == SIGILL ||
@@ -577,6 +605,7 @@ static void report_fault(int sig, siginfo_t *si, void *uctx) {
         fsync(g_crash_fd);
         close(g_crash_fd);
         g_crash_fd = -1;
+        g_crash_opening = 0;
     }
 
     // Die of the original signal, so whoever is watching still reports it as one.

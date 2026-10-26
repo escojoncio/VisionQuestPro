@@ -1512,6 +1512,7 @@ void kl_mem_pressure_poll(void) {
                     pct, (unsigned long long)(avail >> 20),
                     (unsigned long long)(kl_mem_total() >> 20));
         kl_mtl_attr_print("  [mem]", NULL);
+        kl_mem_vm_print("  [mem]");
         kl_mem_pressure_fire(why);
         if (atomic_load(&g_lowmem_untold)) atomic_store(&g_lowmem_crit_armed, 1);
     }
@@ -1552,6 +1553,7 @@ void kl_mem_pressure_init(void) {
                 crit ? "critical" : "warning",
                 (unsigned long long)(kl_mem_footprint() >> 20), (unsigned long long)(av >> 20));
         kl_mtl_attr_print("  [mem]", NULL);
+        kl_mem_vm_print("  [mem]");
         kl_mem_pressure_fire(crit ? "system critical" : "system warning");
         atomic_store(&g_lowmem_armed, 0);
         if (crit) atomic_store(&g_lowmem_crit_armed, 0);
@@ -1593,7 +1595,7 @@ void kl_mem_breakdown(char *buf, size_t n) {
     // look like a measurement. ledger_iokit_mapped / ledger_alternate_accounting /
     // ledger_page_table are not members of the public task_vm_info_data_t (only of the kernel
     // ledger template), so they cannot be read from user space; the region map below
-    // (kl_mem_regions) is the substitute for IOKit-mapped memory.
+    // (kl_mem_vm_print) is the substitute for IOKit-mapped memory.
 #define KL_TI_HAS(f) (cnt * sizeof(natural_t) >= __builtin_offsetof(task_vm_info_data_t, f) + sizeof ti.f)
 #define KL_TI_ADD(label, f) \
     do { if (KL_TI_HAS(f) && (size_t)w < n) \
@@ -1631,12 +1633,10 @@ int kl_mem_ledger(uint64_t out[4]) {
     return 1;
 }
 
-// Region map by user_tag, for the jump/blocked samples: sums RESIDENT bytes per VM_MEMORY_*
-// tag over every region of the address space (vm_region_recurse_64, descending into
-// submaps), top 8. IOAccelerator / IOSurface / IOKit-tagged residency is the part of the
-// footprint no allocator counter and no MTLDevice.currentAllocatedSize shows. Costs a walk
-// of the whole map (tens of thousands of regions), so it is rate-limited to once per 2 s
-// and meant only for jump / blocked samples. Returns 0 (buf empty) when rate-limited.
+// Names of the VM_MEMORY_* user tags, for the region map (kl_mem_vm_print). NULL = a tag with no name here
+// (printed as tagN). IOAccelerator / IOSurface / IOKit-tagged residency is the part of the footprint no
+// allocator counter and no MTLDevice.currentAllocatedSize shows; guest_mmap is the guest's own anonymous mmap
+// (klb_mmap tags it KL_VM_TAG_GUEST_MMAP), the rest of the anonymous memory is ours.
 static const char *kl_vm_tag_name(unsigned t) {
     switch (t) {
 #ifdef VM_MEMORY_MALLOC
@@ -1647,6 +1647,9 @@ static const char *kl_vm_tag_name(unsigned t) {
 #endif
 #ifdef VM_MEMORY_MALLOC_LARGE
     case VM_MEMORY_MALLOC_LARGE: return "MALLOC_LARGE";
+#endif
+#ifdef VM_MEMORY_MALLOC_HUGE
+    case VM_MEMORY_MALLOC_HUGE: return "MALLOC_HUGE";
 #endif
 #ifdef VM_MEMORY_MALLOC_LARGE_REUSABLE
     case VM_MEMORY_MALLOC_LARGE_REUSABLE: return "MALLOC_LARGE_REUSABLE";
@@ -1723,41 +1726,111 @@ static const char *kl_vm_tag_name(unsigned t) {
 #ifdef VM_MEMORY_JAVASCRIPT_JIT_EXECUTABLE_ALLOCATOR
     case VM_MEMORY_JAVASCRIPT_JIT_EXECUTABLE_ALLOCATOR: return "JIT";
 #endif
+    case KL_VM_TAG_GUEST_MMAP: return "guest_mmap";
     case 0: return "untagged";
     default: return NULL;
     }
 }
 
-// The walk costs time proportional to the region count: a process with 40k regions (the AC Nexus wall: 39k
-// small IOAccelerator allocations in 4 s) spent hundreds of ms in it, on the heartbeat thread, at the worst
-// moment. Past KL_MEM_REGIONS_MAX (10000) regions it stops, says so, and does not walk again for 30 s;
-// kl_mem_ioaccel_dump is the one-off walk that is meant for that case.
-int kl_mem_regions(char *buf, size_t n) {
-    if (!buf || !n) return 0;
-    buf[0] = 0;
-    static _Atomic uint64_t last_ns;
-    static _Atomic int last_cut;
+/* KL-TEST-BEGIN vmgroup */
+// The region map grouped by (user_tag, kind). kind = file-backed (external pager) or the region's share mode
+// (SM_COW 1 .. SM_LARGE_PAGE 8); index = tag * KL_VMG_KINDS + kind. res / dirty / swap are the sums of
+// pages_resident / pages_dirtied / pages_swapped_out in bytes; swapped = compressed. dirty is per VM object, so
+// shared objects can count twice: the groups explain the footprint, they do not add up to it to the byte.
+enum { KL_VMG_KINDS = 10, KL_VMG_N = 256 * KL_VMG_KINDS };
+typedef struct { uint64_t res, dirty, swap; } kl_vmg;
+static const char *const kl_vmg_kind[KL_VMG_KINDS] = {
+    "file", "cow", "priv", "empty", "shared", "tshared", "palias", "salias", "lpage", "other" };
+
+static void kl_vmg_add(kl_vmg *g, unsigned tag, int external, int share_mode,
+                       uint64_t res, uint64_t dirty, uint64_t swap) {
+    int k = external ? 0 : (share_mode >= 1 && share_mode <= 8) ? share_mode : 9;
+    kl_vmg *e = &g[(tag & 0xff) * KL_VMG_KINDS + k];
+    e->res += res;
+    e->dirty += dirty;
+    e->swap += swap;
+}
+
+static int kl_vmg_live(const kl_vmg *e) { return e->res || e->dirty || e->swap; }
+
+// Formats the totals, the `top` biggest groups (by resident + swapped) and the rest. Consumes `g` (zeroes what it prints).
+// `partial` (the walk was cut): no totals and no rest, the groups are only what was scanned, orientative.
+static void kl_vmg_format(kl_vmg *g, unsigned nreg, int top, int partial, char *buf, size_t n) {
+    uint64_t tr = 0, td = 0, ts = 0;
+    unsigned groups = 0;
+    for (int i = 0; i < KL_VMG_N; i++) {
+        if (!kl_vmg_live(&g[i])) continue;
+        tr += g[i].res; td += g[i].dirty; ts += g[i].swap;
+        groups++;
+    }
+    int w = partial
+        ? snprintf(buf, n, "scanned=%u regions, NOT totals; top (orientative) MiB res/dirty/swap:", nreg)
+        : snprintf(buf, n, "regions=%u groups=%u total res=%lluM dirty=%lluM swap=%lluM; MiB res/dirty/swap:",
+                   nreg, groups, (unsigned long long)(tr >> 20), (unsigned long long)(td >> 20),
+                   (unsigned long long)(ts >> 20));
+    for (int k = 0; k < top && w > 0 && (size_t)w < n; k++) {
+        int best = -1;
+        for (int i = 0; i < KL_VMG_N; i++)
+            if (kl_vmg_live(&g[i]) &&
+                (best < 0 || g[i].res + g[i].swap > g[best].res + g[best].swap)) best = i;
+        if (best < 0) break;
+        const char *nm = kl_vm_tag_name((unsigned)(best / KL_VMG_KINDS));
+        char tmp[16];
+        if (!nm) { snprintf(tmp, sizeof tmp, "tag%d", best / KL_VMG_KINDS); nm = tmp; }
+        w += snprintf(buf + w, n - (size_t)w, " %s/%s=%llu/%llu/%llu", nm, kl_vmg_kind[best % KL_VMG_KINDS],
+                      (unsigned long long)(g[best].res >> 20), (unsigned long long)(g[best].dirty >> 20),
+                      (unsigned long long)(g[best].swap >> 20));
+        memset(&g[best], 0, sizeof g[best]);
+    }
+    uint64_t rr = 0, rd = 0, rs = 0;
+    unsigned rn = 0;
+    for (int i = 0; i < KL_VMG_N; i++) {
+        if (!kl_vmg_live(&g[i])) continue;
+        rr += g[i].res; rd += g[i].dirty; rs += g[i].swap;
+        rn++;
+    }
+    if (rn && !partial && w > 0 && (size_t)w < n)
+        snprintf(buf + w, n - (size_t)w, " rest(%u)=%llu/%llu/%llu", rn, (unsigned long long)(rr >> 20),
+                 (unsigned long long)(rd >> 20), (unsigned long long)(rs >> 20));
+}
+/* KL-TEST-END vmgroup */
+
+// The "<prefix> vm" line: the whole region map (vm_region_recurse_64, descending into submaps) grouped by
+// user_tag and kind, so the footprint is accounted for by region type. The walk costs time proportional to the
+// region count (the AC Nexus wall: 39k small IOAccelerator allocations in 4 s), so it runs at most every 2 s and
+// stops after KL_MEM_VM_MS (50) ms or KL_MEM_REGIONS_MAX (20000) regions, whichever comes first. A cut walk prints
+// "vm partial (stopped at N regions / X ms)" with the top as orientation only, never as totals, and the next walk
+// waits 30 s. Static groups and line under a lock (no stack, no malloc in the walk; a busy lock skips the print):
+// it is called from the [mem] pressure notifications too.
+void kl_mem_vm_print(const char *prefix) {
+    static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
+    static kl_vmg g[KL_VMG_N];
+    static char line[1280];
+    static uint64_t last_ns;
+    static int last_cut;
+    static vm_size_t page;
+    if (pthread_mutex_trylock(&mu)) return;
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     uint64_t now = (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
-    uint64_t prev = atomic_load(&last_ns);
-    uint64_t gap = atomic_load(&last_cut) ? 30000000000ull : 2000000000ull;
-    if (prev && now - prev < gap) return 0;
-    if (!atomic_compare_exchange_strong(&last_ns, &prev, now)) return 0;
-
-    uint64_t res[256], virt[256];
-    memset(res, 0, sizeof res);
-    memset(virt, 0, sizeof virt);
-    vm_size_t page = 0;
-    if (host_page_size(mach_host_self(), &page) != KERN_SUCCESS || !page) page = 16384;
+    if (last_ns && now - last_ns < (last_cut ? 30000000000ull : 2000000000ull)) { pthread_mutex_unlock(&mu); return; }
+    last_ns = now;
+    if (!page && (host_page_size(mach_host_self(), &page) != KERN_SUCCESS || !page)) page = 16384;
+    memset(g, 0, sizeof g);
     vm_address_t addr = 0;
     natural_t depth = 0;
     unsigned nreg = 0;
-    uint64_t total_res = 0;
-    const unsigned max_regions = (unsigned)kl_env_int("KL_MEM_REGIONS_MAX", 10000);
+    const unsigned max_regions = (unsigned)kl_env_int("KL_MEM_REGIONS_MAX", 20000);
+    const uint64_t budget_ns = (uint64_t)kl_env_int("KL_MEM_VM_MS", 50) * 1000000ull;
+    uint64_t spent_ns = 0;
     int cut = 0;
     for (;;) {
         if (nreg >= max_regions) { cut = 1; break; }
+        if ((nreg & 63) == 63) {   // clock every 64 regions
+            clock_gettime(CLOCK_MONOTONIC, &ts);
+            spent_ns = (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec - now;
+            if (spent_ns > budget_ns) { cut = 1; break; }
+        }
         vm_size_t size = 0;
         vm_region_submap_info_data_64_t info;
         mach_msg_type_number_t icnt = VM_REGION_SUBMAP_INFO_COUNT_64;
@@ -1765,34 +1838,22 @@ int kl_mem_regions(char *buf, size_t n) {
                                                 (vm_region_recurse_info_t)&info, &icnt);
         if (kr != KERN_SUCCESS) break;
         if (info.is_submap) { depth++; continue; }
-        unsigned tag = info.user_tag & 0xff;
-        uint64_t r = (uint64_t)info.pages_resident * page;
-        res[tag] += r;
-        virt[tag] += size;
-        total_res += r;
+        kl_vmg_add(g, info.user_tag, info.external_pager, info.share_mode, (uint64_t)info.pages_resident * page,
+                   (uint64_t)info.pages_dirtied * page, (uint64_t)info.pages_swapped_out * page);
         nreg++;
         addr += size;
     }
-    atomic_store(&last_cut, cut);
+    last_cut = cut;
+    kl_vmg_format(g, nreg, 12, cut, line, sizeof line);
     if (cut) {
-        // Partial sums over the lowest addresses would mislead: say only that the map is big.
-        snprintf(buf, n, "regions>=%u (walk cut at KL_MEM_REGIONS_MAX, not summed)", nreg);
-        return 1;
-    }
-    int w = snprintf(buf, n, "regions=%u resident=%lluM:", nreg, (unsigned long long)(total_res >> 20));
-    for (int k = 0; k < 8 && w > 0 && (size_t)w < n; k++) {
-        int best = -1;
-        for (int t = 0; t < 256; t++)
-            if (res[t] && (best < 0 || res[t] > res[best])) best = t;
-        if (best < 0) break;
-        const char *nm = kl_vm_tag_name((unsigned)best);
-        char tmp[16];
-        if (!nm) { snprintf(tmp, sizeof tmp, "tag%d", best); nm = tmp; }
-        w += snprintf(buf + w, n - (size_t)w, " %s=%lluM/%lluMv", nm,
-                      (unsigned long long)(res[best] >> 20), (unsigned long long)(virt[best] >> 20));
-        res[best] = 0;
-    }
-    return 1;
+        clock_gettime(CLOCK_MONOTONIC, &ts);
+        spent_ns = (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec - now;
+        fprintf(stderr, "%s vm partial (stopped at %u regions / %llu ms) %s\n", prefix ? prefix : "[hb]", nreg,
+                (unsigned long long)(spent_ns / 1000000ull), line);
+    } else
+        fprintf(stderr, "%s vm %s\n", prefix ? prefix : "[hb]", line);
+    fflush(stderr);
+    pthread_mutex_unlock(&mu);
 }
 
 // ---------- memory-jump diagnostics (one-off dumps, called from the [hb] heartbeat thread) ----------
@@ -4995,7 +5056,10 @@ void *klb_mmap(void *addr, size_t len, int prot, int flags, int fd, off_t off) {
     }
     if (df & MAP_ANON) fd = -1;                  // Darwin insists on -1 for anonymous
     if (klb_refuse_exec("mmap", (df & MAP_ANON) != 0, prot)) return MAP_FAILED;
-    void *p = mmap(addr, len, prot, df, fd, off); // PROT_* match on both sides
+    // Darwin reads the VM tag of an anonymous mapping from the fd argument (VM_MAKE_TAG); the region map
+    // (kl_mem_vm_print) then tells the guest's mappings from ours. Separate from `fd`, which stays -1 below.
+    int mfd = (df & MAP_ANON) ? (int)((unsigned)KL_VM_TAG_GUEST_MMAP << 24) : fd;
+    void *p = mmap(addr, len, prot, df, mfd, off); // PROT_* match on both sides
     if (p != MAP_FAILED && fd >= 0) kl_fstat_mmap(fd, len);
     // __builtin_return_address(0) is the GUEST here: mmap is not variadic, so
     // nothing of ours sits between this frame and the caller's.
