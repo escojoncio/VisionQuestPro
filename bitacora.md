@@ -47,6 +47,7 @@
 - Datos de juegos nunca en el repo.
 - Build solo con `[build]`, completa y revisada; VPKEngine fijado a SHA en CI (subir `ref:` en visionos.yml al cambiar de motor).
 - Modo sentado solo eleva origen floor/stage (EyeLevel y XR LOCAL intactos); se cachea al lanzar.
+- Fusión avp-port → VPKEngine main sobre 5939c99: la hace el lado AVP; tras su aviso, subir `ref:` y verificar identidad en log.
 - Identidad Quest/Adreno opt-in en VPKEngine (avp-port d395a50, aún no en main): VQP la activa siempre (`vq_gfx_config_forward` → `vpvk_config_set_quest_identity(1)` + `VPVK_QUEST_IDENTITY=1` en `applyToEnvironment`); al subir `ref:` a un motor con avp-port, verificar en log.
 
 ## Files in play
