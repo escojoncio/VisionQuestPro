@@ -1,7 +1,7 @@
 # Bitácora — VisionQuestPro
 
 ## Last done
-- 2026-10-26: rama `wip-crashes` → `main` con `[build]`. VPKEngine `main` `07bd8fa`.
+- 2026-10-26: rama `wip-crashes` → `main`; build e2c04e6 en verde (`t_load_needed` necesitaba fake de `kl_jni_onload_claim`).
 - `07bd8fa` (VPKEngine): vpgles enlaza varyings por location; input FS no escrito = 0 (Private+OpConstantNull); reserva de locations explícitas. Causa Maestro (20 programas "fragment input not written" → UE4 Fatal → BindPendingShaderState NULL+0x588).
 - `b27c9c7`: cadena UE carga los DT_NEEDED del entry (`kl_load_needed`, kl_dl.c; kl_ue4.c). Causa ITR2: libUnreal NEEDED libOmniConnectShared (libc++ estática) no cargada → 120 imports sin resolver.
 - `3280533`: auditoría estática de enlace+JNI de 6 APK: `ovrMessageType_ToString`, `AMediaMuxer_*` fallo limpio, trap Vulkan -7/0 por nombre, nativos UE con firma máxima (`nativeSetWindowInfo` ZII, `nativeSetAndroidVersionInformation` 7 args), Electra/EOS ITR2, `getAppPackageName`, `System.loadLibrary`, EOS cache dirs, `ReflectionHelper.newProxyInstance`, `kl_jni_onload_claim` (JNI_OnLoad único por imagen).
@@ -10,7 +10,7 @@
 - `c6f8362`: carátula tienda: timeouts 30/120 s, backoff net 2/10/30/60 min, respaldo nombre exacto+organización.
 
 ## Current state
-- Build en curso con todo lo anterior: unverified en visor.
+- Última build en verde: run CI 40251865387 (commit e2c04e6, VPKEngine main 07bd8fa). Todo lo de arriba: unverified en visor.
 - Logs a5f6bc0 (causas medidas): Maestro = link GLSL (arreglado); ITR2 = DT_NEEDED (arreglado); Gundam y Deadpool = jetsam (foot 8170/8192): RAM CPU ~3,2 GB estable, MTLDevice.currentAllocatedSize 4,2/6,2 GB con solo ~1,8 GB en gauges, crece a saltos (no atribuido); UBOAT funciona ~68 fps pero faltan OBB de parche (dato del usuario) y error de submit GPU en background al salir; carátula Deadpool = timeout búsqueda OculusDB.
 - Pendiente (orden):
   1. Leer en los logs nuevos: `[hb] gpu.attr` (vpk_top/kl_top/untracked) y `gpu.bigalloc` en Gundam/Deadpool → arreglar el origen de la memoria Metal. Si crece `untracked` → no son objetos nuestros.
