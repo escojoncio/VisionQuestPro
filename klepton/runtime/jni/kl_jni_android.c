@@ -1711,6 +1711,12 @@ const klj_binding klj_bind_android[] = {
     {"java/lang/ClassLoader", "findLibrary", "(Ljava/lang/String;)Ljava/lang/String;", klj_ClassLoader_findLibrary},
 
     {"android/app/Activity",   "getIntent",  "()Landroid/content/Intent;", klj_Activity_getIntent},
+    // The presented Activity is alive for the whole run: it is never finishing, destroyed or being recreated for
+    // a configuration change (the display and window never change). Unbound, these answered the same 0 only
+    // through the "SIMULATED" path.
+    {"android/app/Activity",   "isFinishing", "()Z", klj_false},
+    {"android/app/Activity",   "isDestroyed", "()Z", klj_false},
+    {"android/app/Activity",   "isChangingConfigurations", "()Z", klj_false},
     {"android/app/Activity",   "getApplicationContext", "()Landroid/content/Context;",
      klj_Activity_getApplicationContext},
     // The Application is reached through ActivityThread.getApplication() by

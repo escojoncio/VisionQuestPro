@@ -320,6 +320,10 @@ const klj_binding klj_bind_display[] = {
     // ---- display, window and orientation ----
     {"android/hardware/display/DisplayManager", "getDisplay",
      "(I)Landroid/view/Display;", klj_DisplayManager_getDisplay},
+    // The same one display, asked from the Context (API 30) and from the WindowManager (Unity's
+    // getDefaultDisplay); the handler takes no argument.
+    {"android/content/Context", "getDisplay", "()Landroid/view/Display;", klj_DisplayManager_getDisplay},
+    {"android/view/WindowManager", "getDefaultDisplay", "()Landroid/view/Display;", klj_DisplayManager_getDisplay},
     {"android/hardware/display/DisplayManager", "registerDisplayListener",
      "(Landroid/hardware/display/DisplayManager$DisplayListener;Landroid/os/Handler;)V",
      klj_DisplayManager_registerDisplayListener},

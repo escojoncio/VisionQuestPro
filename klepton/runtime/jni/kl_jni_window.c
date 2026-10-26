@@ -367,6 +367,13 @@ static klj_val klj_AudioManager_isBluetoothScoOn(void *env, void *self,
     (void)env; (void)self; (void)a; (void)n;
     return (klj_val){.j = 0};
 }
+// AudioManager.requestAudioFocus / abandonAudioFocus (all four spellings): AUDIOFOCUS_REQUEST_GRANTED is 1 and
+// FAILED is 0. Nothing else on this device plays audio, so focus is always granted -- unbound it answered 0,
+// "refused", and a title that gates its audio on the grant would have stayed silent.
+static klj_val klj_AudioManager_focusGranted(void *env, void *self, const klj_val *a, int n) {
+    (void)env; (void)self; (void)a; (void)n;
+    return (klj_val){.j = 1};
+}
 static klj_val klj_AudioManager_isMusicActive(void *env, void *self,
                                               const klj_val *a, int n) {
     (void)env; (void)self; (void)a; (void)n;
@@ -890,6 +897,14 @@ const klj_binding klj_bind_window[] = {
     {"android/media/AudioManager", "isBluetoothA2dpOn", "()Z", klj_AudioManager_isBluetoothA2dpOn},
     {"android/media/AudioManager", "isBluetoothScoOn", "()Z", klj_AudioManager_isBluetoothScoOn},
     {"android/media/AudioManager", "isMusicActive", "()Z", klj_AudioManager_isMusicActive},
+    {"android/media/AudioManager", "requestAudioFocus",
+     "(Landroid/media/AudioManager$OnAudioFocusChangeListener;II)I", klj_AudioManager_focusGranted},
+    {"android/media/AudioManager", "requestAudioFocus",
+     "(Landroid/media/AudioFocusRequest;)I", klj_AudioManager_focusGranted},
+    {"android/media/AudioManager", "abandonAudioFocus",
+     "(Landroid/media/AudioManager$OnAudioFocusChangeListener;)I", klj_AudioManager_focusGranted},
+    {"android/media/AudioManager", "abandonAudioFocusRequest",
+     "(Landroid/media/AudioFocusRequest;)I", klj_AudioManager_focusGranted},
     // Unity 2018.4 reads the device's audio configuration off the hidden
     // AudioSystem class instead of AudioManager.getProperty(). Same numbers.
     {"android/media/AudioSystem", "getPrimaryOutputSamplingRate", "()I", klj_AudioSystem_getPrimaryOutputSamplingRate},
