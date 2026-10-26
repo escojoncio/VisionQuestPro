@@ -34,6 +34,6 @@ dylibs sin firmar en `QUEST/Cache/<j>/dylibs`, firmadas en `Library/Application 
 
 ## Resolución
 - Slider = tamaño FINAL del ojo: 100 % = Quest 3 (2064x2208), 200 % = densidad Vision Pro (3660x3200), 50–200 %, tope 4096; render_scale = 1. `KL_OVRP_EYE_BASE=quest3`, `KL_OVRP_EYE_SCALE`.
-- Ensanche del plugin aprendido en `klovrp_SetupLayer` (`g_widen_w/h`); OpenXR aprende la escala del guest (`g_xr_game_scale`).
+- Tamaño recomendado FIJO por ejecución (primer push ACEPTADO del host; `kl_ovrp_set_eye_texture_size` devuelve 1/0; los siguientes se ignoran; Swift guarda `vq.eyeSizeFinal` solo si se aceptó; si el guest pregunta antes, espera ≤500 ms una vez). En modo slider (quest3) el desc de capa = recomendado con la escala del guest >1 cancelada y el ensanche del plugin dividido (tope `KL_OVRP_EYE_MAX`, 0 = sin tope); fuera de él, recomendado × escala. El ensanche se congela UNA vez (primera capa de ojo con ratio >1,02 en algún eje y 0,98–1,6 en ambos, `kles_freeze_widen`, `g_widen_*`); ~1,0 es provisional. OpenXR: la escala propia del guest (>1,02 y ≤2, swapchain con forma de ojo) se congela una vez (`kles_freeze_xr_scale`) y recomendado = slider / escala. SetupLayer y xrCreateSwapchain aceptan cualquier tamaño.
 - Ojos colapsados (Thrill 2: ambos ojos a 0,0 3552x2258 sin sub-rect): `klovrp_note_collapsed_rects()` en EndFrame4 → `g_unify_detected`; `klovrp_eye_tan()` da la unión a todos. `KL_OVRP_UNIFY_FRUSTUM=0/1`.
 - OpenXR LOCAL = STAGE elevado por la altura medida de la cabeza (`klxr_local_origin_y`); `KL_XR_LOCAL_LEGACY=1` = LOCAL==STAGE.

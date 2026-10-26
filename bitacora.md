@@ -1,20 +1,22 @@
 # Bitácora — VisionQuestPro
 
 ## Last done
-- 2026-10-26: rama `wip-crashes` → `main`; build e2c04e6 en verde (`t_load_needed` necesitaba fake de `kl_jni_onload_claim`).
-- `07bd8fa` (VPKEngine): vpgles enlaza varyings por location; input FS no escrito = 0 (Private+OpConstantNull); reserva de locations explícitas. Causa Maestro (20 programas "fragment input not written" → UE4 Fatal → BindPendingShaderState NULL+0x588).
-- `b27c9c7`: cadena UE carga los DT_NEEDED del entry (`kl_load_needed`, kl_dl.c; kl_ue4.c). Causa ITR2: libUnreal NEEDED libOmniConnectShared (libc++ estática) no cargada → 120 imports sin resolver.
+- 2026-10-26 VPKEngine `710574a`: `ScopedPool` (objc_autoreleasePoolPush/Pop, core/include/vpgpu/core/scoped_pool.h) en métodos públicos de MetalBackend, MetalPlatform taa/depthResolve y entradas vk*/vpvk_* de entry.cpp (causa inferida de RAM: MTLTexture autoreleased en hilos guest sin pool = inmortales; attr ≫ ledger en Gundam/Deadpool/ITR2). Texturas `pinned` con retención 1 s + 4 frames (`pinnedHold`/`promotePinned`). `Attachment::keepSamples` (=true en todo StoreAndResolve del traductor; solo DONT_CARE+resolve es memoryless), `msaaColorResolveOnTile` por defecto (`VP_MSAA_TILE`). gles: subidas DEPTH_COMPONENT→D16/D24/D32F. Contadores img_rel_*/tex_created/destroyed/g_tex_live en [vkagg].
+- 2026-10-26 VQP: tamaño de ojo sin bucle: primer push = constante de la partida (`kl_ovrp_set_eye_texture_size` devuelve aceptado; Swift guarda solo si aceptado; espera 500 ms si el guest pregunta antes); `kles_desc_size` cancela escala guest >1 (modo pct), cap `KL_OVRP_EYE_MAX`; `kles_freeze_widen` (ensanche del plugin congelado una vez, >1.02) y `kles_freeze_xr_scale` (OpenXR) en xr/kl_ovrp_eyesize.h. Retire: `g_eye_published`, imagen nunca publicada → quick sin hold; ASW MV/depth quick=2 (0,5 s+3 frames o 2 s); `kl_vulkan_retire_poll` desde `kl_mem_rate_poll` (no_publish). `klvk_forget_cached_mtl` también en `klvk_DestroyImage`. Swift `pruneArrayViews`. `ue4_stdout_default`=1 para todo UE.
+- `07bd8fa` (VPKEngine): vpgles enlaza varyings por location (confirmado en visor: Maestro sin "fragment input not written").
+- `b27c9c7`: DT_NEEDED del entry UE (confirmado en visor: ITR2 0 imports sin resolver).
 - `3280533`: auditoría estática de enlace+JNI de 6 APK: `ovrMessageType_ToString`, `AMediaMuxer_*` fallo limpio, trap Vulkan -7/0 por nombre, nativos UE con firma máxima (`nativeSetWindowInfo` ZII, `nativeSetAndroidVersionInformation` 7 args), Electra/EOS ITR2, `getAppPackageName`, `System.loadLibrary`, EOS cache dirs, `ReflectionHelper.newProxyInstance`, `kl_jni_onload_claim` (JNI_OnLoad único por imagen).
 - `68e5ecb`+`d7f81fc`: `[hb] gpu.attr` (objetos Metal vivos por etiqueta, total/tracked/untracked) y `gpu.bigalloc`/`[mtl] bigalloc` ≥32 MiB.
 - `c61f2cf`: `[hb] vm` (mapa VM por tag, tag 240 = mmap anónimo del guest) y `[fatal] last guest errors` (anillo async-safe).
 - `c6f8362`: carátula tienda: timeouts 30/120 s, backoff net 2/10/30/60 min, respaldo nombre exacto+organización.
 
 ## Current state
-- Última build en verde: run CI 40251865387 (commit e2c04e6, VPKEngine main 07bd8fa). Todo lo de arriba: unverified en visor.
-- Logs a5f6bc0 (causas medidas): Maestro = link GLSL (arreglado); ITR2 = DT_NEEDED (arreglado); Gundam y Deadpool = jetsam (foot 8170/8192): RAM CPU ~3,2 GB estable, MTLDevice.currentAllocatedSize 4,2/6,2 GB con solo ~1,8 GB en gauges, crece a saltos (no atribuido); UBOAT funciona ~68 fps pero faltan OBB de parche (dato del usuario) y error de submit GPU en background al salir; carátula Deadpool = timeout búsqueda OculusDB.
+- Build nueva pendiente (VQP con VPKEngine 710574a): todo lo de "Last done" 2026-10-26 unverified en visor; .mm/Swift no compilados en Linux.
+- Logs e2c04e6: Maestro = rosa + SIGSEGV NULL+0x34 (libUE4 +0x7a91b58) tras 70× `AndroidThunkJava_ForceQuit` ignorados (klj_GA_forceQuit, kl_jni_ue4.c:390), motivo desconocido; ITR2 = jetsam por bucle de capa de ojo (29 rebuilds/7 s); Deadpool = salida normal a 7,9/8,2 GB (ASTC destruidas vivas en Metal); Gundam = jetsam, attr tex.color +12/ciclo de vídeo con ledger plano.
 - Pendiente (orden):
-  1. Leer en los logs nuevos: `[hb] gpu.attr` (vpk_top/kl_top/untracked) y `gpu.bigalloc` en Gundam/Deadpool → arreglar el origen de la memoria Metal. Si crece `untracked` → no son objetos nuestros.
-  2. `[hb] vm` (reparto CPU), `[fatal] last guest errors`, `gles.program varying_unwritten`, `[dl] … DT_NEEDED`, carátula ("ficha elegida por …").
+  1. Logs de la build nueva: comparar `[hb] gpu.attr` frente a `ledger` y `g_tex_live`/`tex_destroyed` en [vkagg] (Gundam/Deadpool/ITR2). Si attr sigue ≫ ledger, la hipótesis autoreleasepool es falsa → probar `OBJC_DEBUG_MISSING_POOLS=YES`.
+  2. Maestro: leer el Fatal de UE en el log (stdout UE activado) → causa del ForceQuit.
+  3. ITR2: confirmar 1 sola capa de ojo y sin "allocating fresh".
   3. Auditoría restante (no aplicada): ovrp que devuelven -1004 donde se espera handle (`ovrp_GetNativeSDKPointer2`, `GetEyeFovLayerId`, `SetupMirrorTexture2`); OpenXR FB/META sin fila (ITR2); 75 thunks `AndroidThunkJava_*` NO-OP; 184 pares Unity sin enlace; `createTelemetryHandler` NULL (Gundam). Detalle: auditoría en sesión (no en repo).
   4. Submit GPU en background (UBOAT al salir): parar trabajo GPU al pasar a background.
   5. VPKEngine: fusión con rama AVP pendiente; `msaaResolveOnTile` necesita `Attachment::keepSamples`.
@@ -31,7 +33,9 @@
 - MSAA del juego mantenido por defecto; Automático: VPKTAA solo si no hay MSAA.
 - `nativeLowMemory` solo en el hilo del juego; no desde `kl_jni_drain_ui_tasks`.
 - `ovrp_GetEyeLayerRecommendedResolution` → -1004 sin capa de ojo viva.
-- Slider de resolución = tamaño final del ojo; render_scale = 1.
+- Slider de resolución = tamaño final del ojo; render_scale = 1. Tamaño recomendado fijo por partida; nunca reaprender por capa (bucle ITR2).
+- Presupuesto anunciado al guest = límite real (6144 ya probado: guests se ahogan). No reintroducir.
+- MSAA: STORE del cliente siempre conserva samples (keepSamples).
 - Fin de frame segmentado apagado (`KL_VK_FRAME_ASYNC=1` lo activa).
 - Calidad del compositor 1.0: no tocar. Ritmo encajado al panel.
 - GLES ES 3.1. Identidad Quest 3 (`KL_QUEST3`, headset 11); mandos Touch de Quest 2; eye tracking Unsupported.

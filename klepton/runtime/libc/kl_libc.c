@@ -1303,6 +1303,7 @@ static _Atomic int g_lowmem_untold;   // last attempt found no nativeLowMemory r
 
 void kl_vulkan_trim(const char *why);   // kl_vulkan.c: destroyed OpenXR images, no grace
 void kl_vulkan_idle_drain(unsigned min_idle_ms, const char *why);   // kl_vulkan.c: graveyard of VPKEngine, if idle
+void kl_vulkan_retire_poll(void);   // kl_vulkan.c: free retired images that are due (no frame end needed)
 int kl_na_low_memory(void);   // guest/kl_nativeactivity.c: ANativeActivity.callbacks->onLowMemory
 
 // DECIDE vs DELIVER. nativeLowMemory is managed code (Unity -> IL2CPP), and IL2CPP only
@@ -1448,6 +1449,7 @@ static void kl_mem_rate_poll(void) {
         }
     }
     pthread_mutex_unlock(&mu);
+    kl_vulkan_retire_poll();   // replaced eye / SpaceWarp images free while the guest ends no frames (outside mu)
 }
 
 // The kill line: phys_footprint + os_proc_available_memory() is constant (~8190 MiB on a

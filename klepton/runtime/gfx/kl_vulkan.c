@@ -165,6 +165,7 @@ void kl_vulkan_xr_image_mark_eye(unsigned long long img, int stage, int eye) { (
 void kl_vulkan_trim(const char *why) { (void)why; }
 size_t kl_vulkan_diag(int which, char *out, size_t cap) { (void)which; (void)out; (void)cap; return 0; }
 void kl_vulkan_idle_drain(unsigned min_idle_ms, const char *why) { (void)min_idle_ms; (void)why; }
+void kl_vulkan_retire_poll(void) {}
 size_t kl_vulkan_diag_ranges(int kind, uint64_t (*out)[2], size_t max) { (void)kind; (void)out; (void)max; return 0; }
 
 #else  /* MoltenVK headers present */
@@ -1438,11 +1439,16 @@ static void *eye_mtl_texture(klvk_device *d, VkImage img) {
 // finds the Vulkan eyes through the same accessor it already uses for the GL
 // ones. Under the Array layout one texture serves both eyes and the eye is the
 // SLICE, which is exactly what that table's `slice` field was added for.
+// 1 once the eye image of this slot reached the compositor's table (eye_publish_mtl); cleared when the
+// slot gets a new image. An image replaced while 0 was never seen by the compositor: it needs no hold
+// and is freed quickly (kl_vulkan_layer_image).
+static int g_eye_published[KLVK_EYE_STAGES][2];
 static void eye_publish_mtl(int stage, int eye, int layers) {
     klvk_device *d = g_devs[0];
     VkImage img = g_eye[stage][eye].img;
     void *tex = eye_mtl_texture(d, img);
     if (!tex) return;
+    __atomic_store_n(&g_eye_published[stage][eye], 1, __ATOMIC_RELEASE);
     int w = (int)g_eye[stage][eye].w, h = (int)g_eye[stage][eye].h;
     if (layers > 1) {
         kl_glfb_note_eye_mtl_texture(0, stage, tex, 0, w, h);
@@ -2057,16 +2063,34 @@ unsigned long long kl_vulkan_layer_image(int layer_key, int stage, int eye,
             layer_key, stage, eye ? "eye 1" : "eye 0",
             slot->w, slot->h, slot->layers, w, h, layers,
             retire ? "retired (freed in a few seconds)" : "kept, not freed");
+        // A replaced eye image the compositor never saw (its own replacement came before the guest
+        // wrote it) has nothing to protect: no hold is armed for the new image on its account, and
+        // it is freed quickly instead of waiting for a publication of the stage.
+        const int was_published = !is_eye || __atomic_exchange_n(&g_eye_published[stage][eye], 0, __ATOMIC_ACQ_REL);
         // Hold first, retire second: the retire pump frees the old eye image as soon as the
         // hold of ITS stage is released (the replacement published), so the hold must exist
         // before the entry can be seen.
-        if (is_eye) {
+        if (is_eye && was_published) {
             __atomic_store_n(&g_eye_hold_at[stage][eye], (uint64_t)(klvk_now_s() * 1e9) + 1, __ATOMIC_RELEASE);
             VKI("[vk] eye stage %d: new image held back until the guest's first write\n", stage);
+        } else if (is_eye) {
+            // A -> B -> C with B never published: the hold armed for B now guards C, which the guest
+            // has not written either. Its clock restarts with C (not a new arming: a hold already
+            // released stays released), so the safety timeout can never publish C unwritten sooner
+            // than KLVK_EYE_HOLD_MAX_S after C was created.
+            uint64_t cur = __atomic_load_n(&g_eye_hold_at[stage][eye], __ATOMIC_ACQUIRE);
+            const uint64_t now_ns = (uint64_t)(klvk_now_s() * 1e9) + 1;
+            while (cur != 0 && !__atomic_compare_exchange_n(&g_eye_hold_at[stage][eye], &cur, now_ns, 0,
+                                                            __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) { }
         }
-        if (retire)
-            (void)klvk_retire_image_ex(d, slot->img, slot->mem, "eye image", slot->w, slot->h,
-                                       slot->layers, 0, is_eye ? stage * 2 + eye : -1);
+        if (retire) {
+            if (was_published)
+                (void)klvk_retire_image_ex(d, slot->img, slot->mem, "eye image", slot->w, slot->h,
+                                           slot->layers, 0, is_eye ? stage * 2 + eye : -1);
+            else
+                (void)klvk_retire_image_ex(d, slot->img, slot->mem, "eye image (never published)",
+                                           slot->w, slot->h, slot->layers, 1, -1);
+        }
         slot->img = VK_NULL_HANDLE;
         slot->mem = VK_NULL_HANDLE;
     }
@@ -2260,10 +2284,13 @@ unsigned long long kl_vulkan_spacewarp_image(int stage, int eye, int kind,
             kind == KLVK_ASW_MOTION ? "motion-vector" : "depth", stage, eye,
             slot->w, slot->h, (int)slot->fmt, slot->layers, w, h, (int)fmt, layers,
             retire ? "retired (freed in a few seconds)" : "kept, not freed");
+        // Quick (quick = 2: freed once 0.5 s AND 3 frame ends have passed since the guest's last use,
+        // or after 2 s when no frames end): the compositor never samples these directly, and a resize
+        // loop must not pile them up waiting for the 5 s grace.
         if (retire)
-            klvk_retire_image(d, slot->img, slot->mem,
+            (void)klvk_retire_image_ex(d, slot->img, slot->mem,
                               kind == KLVK_ASW_MOTION ? "SpaceWarp motion-vector image" : "SpaceWarp depth image",
-                              slot->w, slot->h, slot->layers);
+                              slot->w, slot->h, slot->layers, 2, -1);
         slot->img = VK_NULL_HANDLE;
         slot->mem = VK_NULL_HANDLE;
     }
@@ -4616,13 +4643,14 @@ static void klvk_retire_image(klvk_device *d, VkImage img, VkDeviceMemory mem, c
     (void)klvk_retire_image_ex(d, img, mem, what, w, h, layers, 0, -1);
 }
 
-// Every cache keyed by the VkImage handle forgets it before the handle can be
-// reused by a new image (VPVulkan handles are heap addresses).
-static void klvk_retire_forget(klvk_device *d, VkImage img) {
+// The caches that hold a RAW MTLTexture pointer (or a VkImage of ours) for an image that is about to
+// die: kl_glfb's eye table, the TAA colour cache and the eye-depth records. `mtl` = the image's
+// MTLTexture when known (NULL: matched by image handle only). Shared by our own retire and by the
+// guest's vkDestroyImage (VPKEngine textures are really released once destroyed).
+static void klvk_forget_cached_mtl(VkImage img, void *mtl) {
     // kl_glfb's eye table holds a RAW MTLTexture pointer: if it still names this
     // image (the replacement was never published there), empty that entry
     // rather than leave it pointing at a destroyed texture.
-    void *mtl = eye_mtl_texture(d, img);
     for (int st = 0; mtl && st < KLVK_EYE_STAGES; st++)
         for (int e = 0; e < 2; e++) {
             int sl = 0;
@@ -4631,11 +4659,6 @@ static void klvk_retire_forget(klvk_device *d, VkImage img) {
                 VKI("[mem] eye %d stage %d still named the old image — entry cleared\n", e, st);
             }
         }
-    klvk_img_reg_del(img);
-    klvk_xeye_del(img);
-    klvk_img_info_del(img);
-    klvk_depth_info_del(img);
-    klvk_shadow_forget(img);
     pthread_mutex_lock(&g_taa_color_mu);
     for (int st = 0; st < KLVK_EYE_STAGES; st++)
         for (int e = 0; e < 2; e++)
@@ -4647,7 +4670,11 @@ static void klvk_retire_forget(klvk_device *d, VkImage img) {
     pthread_mutex_lock(&g_ed_rec_mu);
     for (int st = 0; st < KLVK_EYE_STAGES; st++)
         for (int e = 0; e < 2; e++) {
-            if (g_ed[st][e].live == img) g_ed[st][e].live = VK_NULL_HANDLE;
+            if (g_ed[st][e].live == img) {
+                g_ed[st][e].live = VK_NULL_HANDLE;
+                // The record names the live image's own texture (no snapshot / resolve copy of ours).
+                if (!g_ed[st][e].info.snapshot) { g_ed[st][e].valid = 0; g_ed[st][e].info.mtl = NULL; }
+            }
             // A filed record (SpaceWarp depth pick) still pointing at its texture.
             if (mtl && g_ed[st][e].info.mtl == mtl) { g_ed[st][e].valid = 0; g_ed[st][e].info.mtl = NULL; }
             if (g_ed[st][e].snap == img) {     // cannot happen (replaced first), belt and braces
@@ -4657,16 +4684,30 @@ static void klvk_retire_forget(klvk_device *d, VkImage img) {
     pthread_mutex_unlock(&g_ed_rec_mu);
 }
 
+// Every cache keyed by the VkImage handle forgets it before the handle can be
+// reused by a new image (VPVulkan handles are heap addresses).
+static void klvk_retire_forget(klvk_device *d, VkImage img) {
+    void *mtl = eye_mtl_texture(d, img);
+    klvk_forget_cached_mtl(img, mtl);
+    klvk_img_reg_del(img);
+    klvk_xeye_del(img);
+    klvk_img_info_del(img);
+    klvk_depth_info_del(img);
+    klvk_shadow_forget(img);
+}
+
 // force_quick (memory pressure): destroyed OpenXR swapchain images go now, grace or not, and
 // every other retired image that nothing still needs goes after 3 frame ends / 0.5 s instead
 // of 5 s. A replaced eye image whose replacement is not published yet is never forced: it is
 // still what the compositor shows.
 // Returns the number of images destroyed.
 static double g_trim_until;   // klvk_now_s() until which retired images are freed as under pressure (10 s after a trim)
-static unsigned klvk_retire_pump_ex(klvk_device *d, int force_quick);
-static void klvk_retire_pump(klvk_device *d) { (void)klvk_retire_pump_ex(d, 0); }
+// no_publish: skip the eye hold timeout (klvk_eye_hold_timeout publishes into kl_glfb's table), for a
+// pump run from a thread that never did that (the ~100 ms memory poll): it only frees retired images.
+static unsigned klvk_retire_pump_ex(klvk_device *d, int force_quick, int no_publish);
+static void klvk_retire_pump(klvk_device *d) { (void)klvk_retire_pump_ex(d, 0, 0); }
 
-static unsigned klvk_retire_pump_ex(klvk_device *d, int force_quick) {
+static unsigned klvk_retire_pump_ex(klvk_device *d, int force_quick, int no_publish) {
     if (!d || !d->DestroyImage) return 0;
     static double after = -1;
     if (after < 0) {
@@ -4676,7 +4717,7 @@ static unsigned klvk_retire_pump_ex(klvk_device *d, int force_quick) {
         // A retired eye image must outlive the hold that keeps it published as the stage's image.
         if (after < KLVK_EYE_HOLD_MAX_S + 1.0) after = KLVK_EYE_HOLD_MAX_S + 1.0;
     }
-    klvk_eye_hold_timeout();
+    if (!no_publish) klvk_eye_hold_timeout();
     double now = klvk_now_s();
     unsigned long long f = __atomic_load_n(&g_frame_issued, __ATOMIC_ACQUIRE);
     struct { VkImage img; VkDeviceMemory mem; const char *what; uint32_t w, h, layers; } go[KLVK_RETIRE_MAX];
@@ -4695,7 +4736,9 @@ static unsigned klvk_retire_pump_ex(klvk_device *d, int force_quick) {
         const int settled = f >= g_retire[i].frame + 3 || age >= 0.5;
         const int hold = g_retire[i].hold;
         int due;
-        if (g_retire[i].quick)
+        if (g_retire[i].quick == 2)   // SpaceWarp motion / depth image
+            due = force_quick || (age >= 0.5 && f >= g_retire[i].frame + 3) || age >= 2.0;
+        else if (g_retire[i].quick)
             due = force_quick || age >= 0.5;
         else if (hold >= 0) {
             // Replaced eye image: free it as soon as the replacement is published (the guest's
@@ -4747,6 +4790,15 @@ static void klvk_retire_timer_fire(void *ctx) {
     if (__atomic_load_n(&g_retire_live, __ATOMIC_ACQUIRE)) klvk_retire_schedule();
 }
 
+// The ~100 ms poll (kl_libc.c kl_mem_rate_poll): the same pump the frame end and the retire timer run,
+// so retired images free while no frames end. Thread-safe like those: the queue is under g_retire_mu and
+// every entry is taken out of it by exactly one pump.
+void kl_vulkan_retire_poll(void) {
+    if (!kl_vulkan_guest_active()) return;
+    klvk_device *d = g_devs[0];
+    if (d) (void)klvk_retire_pump_ex(d, 0, 1);
+}
+
 // Memory pressure (kl_mem_pressure_fire, footprint or the OS's own warning): every destroyed
 // OpenXR swapchain image still in its grace period is freed at once.
 void kl_vulkan_trim(const char *why) {
@@ -4758,7 +4810,7 @@ void kl_vulkan_trim(const char *why) {
         // guest: in a synchronous load nothing else would run in time.
         unsigned before = __atomic_load_n(&g_retire_live, __ATOMIC_ACQUIRE);
         g_trim_until = klvk_now_s() + 10.0;   // images retired during the load go quickly too
-        unsigned freed = klvk_retire_pump_ex(d, 1);
+        unsigned freed = klvk_retire_pump_ex(d, 1, 0);
         unsigned after = __atomic_load_n(&g_retire_live, __ATOMIC_ACQUIRE);
         static double last_log;   // the decider re-arms while the guest is unregistered: no 10 lines/s
         if (freed || klvk_now_s() - last_log >= 1.0) {
@@ -5963,7 +6015,14 @@ static void VKAPI_CALL klvk_DestroyImage(VkDevice dev, VkImage img,
         const VkAllocationCallbacks *alloc) {
     static PFN_vkDestroyImage real;
     if (!real && real_gdpa) real = (PFN_vkDestroyImage)real_gdpa(dev, "vkDestroyImage");
+    // The registry entry first: the overlay resolver (kl_vulkan_mtl_for_handle) answers NULL for an
+    // image it does not find, so no new raw MTLTexture pointer is handed out for a dying image.
     klvk_img_reg_del(img);
+    // Raw MTLTexture pointers already cached for it (eye table, TAA colour, eye-depth records): the
+    // texture is released with the image now, no longer kept alive forever. Only an eye image is
+    // exportable here (eye_mtl_texture); any other image is matched by its handle.
+    klvk_device *dd = g_devs[0];
+    klvk_forget_cached_mtl(img, (dd && img && klvk_is_eye_image(img)) ? eye_mtl_texture(dd, img) : NULL);
     klvk_xeye_del(img);
     klvk_img_info_del(img);
     klvk_depth_info_del(img);

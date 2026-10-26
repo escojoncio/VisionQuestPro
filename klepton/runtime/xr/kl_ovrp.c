@@ -1527,10 +1527,12 @@ static uint64_t klovrp_SetSystemDisplayFrequency(float hz) {
 // measures the display it is actually running on — see kl_ovrp.h.
 static int g_eye_w = (int)KL_OVRP_EYE_W;
 static int g_eye_h = (int)KL_OVRP_EYE_H;
-// 1 once a frontend has pushed the real size (kl_ovrp_set_eye_texture_size). An eye layer set
-// up before that is built at the Quest default and rebuilt at the final size: two full
-// swapchains (+195..400 MiB at 3840x2485 while the first is retired). The host should push the
-// final size (VQLaunch.swift computes it) BEFORE the guest starts so this never happens.
+// 1 once a frontend has pushed the size (kl_ovrp_set_eye_texture_size). The FIRST push is the
+// recommended eye size for the whole run: the guest must never see the recommendation change under
+// it, so later pushes are ignored (logged). The host pushes before the guest starts (VQLaunch.swift
+// with the saved size, else the compositor's first drawable); a guest that asks before any push
+// waits up to 500 ms for it, once (kl_ovrp_eye_texture_size) instead of being handed the Quest default.
+// Written last, with release: a reader that sees it also sees g_eye_w / g_eye_h.
 static int g_eye_size_pushed;
 
 // KL_OVRP_EYE_BASE=quest3 (the app's resolution slider). Read where it is used, not cached: the
@@ -1540,17 +1542,28 @@ static int klovrp_eye_pct_mode(void) {
     return b && !strcmp(b, "quest3");
 }
 // The widening the guest's plugin applies to the desc we hand out (its union of the two canted
-// cones), learned at SetupLayer from the last desc we gave (klovrp_fill_eye_desc). 1 = none/unknown.
-static int   g_fill_w, g_fill_h;
+// cones), measured ONCE per run at the first valid eye layer (kles_freeze_widen) and then frozen:
+// later descs divide it out, it is never re-learned, so the guest's quantised sizes cannot move the
+// desc. g_desc_given_* = the last desc we handed out. 1 = none/unknown. Also read by the union-cone
+// detection (klovrp_note_collapsed_rects).
+static int   g_desc_given_w, g_desc_given_h;
 static float g_widen_w = 1.0f, g_widen_h = 1.0f;
+static int   g_widen_frozen;
 
-void kl_ovrp_set_eye_texture_size(int w, int h) {
+int kl_ovrp_set_eye_texture_size(int w, int h) {
     // A degenerate size is a measurement that went wrong, and it would reach
     // Unity as a swapchain allocation. Keep the Quest default instead: the
     // wrong resolution renders, a zero one does not.
-    if (w <= 0 || h <= 0) return;
+    if (w <= 0 || h <= 0) return 0;
     const int req_w = w, req_h = h;
-    g_eye_size_pushed = 1;
+    if (__atomic_load_n(&g_eye_size_pushed, __ATOMIC_ACQUIRE)) {
+        static int said;
+        if (said++ < 4)
+            fprintf(stderr, "  [ovrp] eye texture size push %dx%d ignored: the recommended size is fixed at "
+                            "%dx%d for this run (the guest must not see it change)\n",
+                    req_w, req_h, g_eye_w, g_eye_h);
+        return 0;
+    }
 
     // Unity applies its own resolution scale on top of whatever we say
     // (measured 1.2x), and allocates stages x eyes of RGBA16F at the result. A
@@ -1605,21 +1618,46 @@ void kl_ovrp_set_eye_texture_size(int w, int h) {
         w = (int)((float)w * k + 0.5f);
         h = (int)((float)h * k + 0.5f);
     }
-    if (w == g_eye_w && h == g_eye_h) return;
-
-    // Logged every change, not once: each one costs the guest a swapchain
-    // rebuild, and how many of those happen is the question. The MiB figure is
-    // the whole swapchain Unity will hold.
-    double mib = (double)w * h * 8.0 * 2.0 * kl_ovrp_stage_count() / (1024 * 1024);
-    fprintf(stderr, "  [ovrp] eye texture size %dx%d -> %dx%d; the display asked "
-                    "for %dx%d (base %s, scale %.2f, cap %d). %.0f MiB of swapchain, "
-                    "before Unity's own ~1.2x\n",
-            g_eye_w, g_eye_h, w, h, req_w, req_h, base ? base : "display", scale, cap, mib);
-    g_eye_w = w;
-    g_eye_h = h;
+    if (w != g_eye_w || h != g_eye_h) {
+        // The MiB figure is the whole swapchain the guest will hold.
+        double mib = (double)w * h * 8.0 * 2.0 * kl_ovrp_stage_count() / (1024 * 1024);
+        fprintf(stderr, "  [ovrp] eye texture size %dx%d -> %dx%d (fixed for the run); the display asked "
+                        "for %dx%d (base %s, scale %.2f, cap %d). %.0f MiB of swapchain, "
+                        "before the guest's own texture scale\n",
+                g_eye_w, g_eye_h, w, h, req_w, req_h, base ? base : "display", scale, cap, mib);
+        g_eye_w = w;
+        g_eye_h = h;
+    }
+    __atomic_store_n(&g_eye_size_pushed, 1, __ATOMIC_RELEASE);
+    return 1;
 }
 
+// How long a guest that asks for the eye size before any push waits for it, once: the host pushes
+// before the guest boots, but the guest can race the first drawable.
+#define KLOVRP_EYE_PUSH_WAIT_MS 500
+
 void kl_ovrp_eye_texture_size(int *w, int *h) {
+    if (!__atomic_load_n(&g_eye_size_pushed, __ATOMIC_ACQUIRE)) {
+        static uint64_t first_ns;
+        struct timespec ts;
+        clock_gettime(CLOCK_MONOTONIC, &ts);
+        const uint64_t now = (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
+        uint64_t zero = 0;
+        __atomic_compare_exchange_n(&first_ns, &zero, now, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE);
+        const uint64_t t0 = __atomic_load_n(&first_ns, __ATOMIC_ACQUIRE);
+        while (!__atomic_load_n(&g_eye_size_pushed, __ATOMIC_ACQUIRE)) {
+            clock_gettime(CLOCK_MONOTONIC, &ts);
+            if ((uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec - t0 >=
+                (uint64_t)KLOVRP_EYE_PUSH_WAIT_MS * 1000000ull) {
+                static int said;
+                if (!__atomic_exchange_n(&said, 1, __ATOMIC_RELAXED))
+                    fprintf(stderr, "  [ovrp] no eye size pushed after %d ms — the guest gets the default %dx%d\n",
+                            KLOVRP_EYE_PUSH_WAIT_MS, g_eye_w, g_eye_h);
+                break;
+            }
+            nanosleep(&(struct timespec){ 0, 5000000 }, NULL);
+        }
+    }
     if (w) *w = g_eye_w;
     if (h) *h = g_eye_h;
 }
@@ -1627,7 +1665,9 @@ void kl_ovrp_eye_texture_size(int *w, int *h) {
 // Packed return: width in the low 32 bits, height in the high (0x9bce58).
 static uint64_t klovrp_GetEyeTextureSize(void) {
     ovrp_hit("ovrp_GetEyeTextureSize");
-    return (uint64_t)(uint32_t)g_eye_w | ((uint64_t)(uint32_t)g_eye_h << 32);
+    int w = 0, h = 0;
+    kl_ovrp_eye_texture_size(&w, &h);
+    return (uint64_t)(uint32_t)w | ((uint64_t)(uint32_t)h << 32);
 }
 
 int kl_ovrp_stage_count(void);
@@ -1752,7 +1792,7 @@ static int klovrp_unify_default(void) {
 }
 
 // The same case, DETECTED instead of listed by name: the guest's plugin widened
-// the eye texture (g_widen_w > 1, learned at SetupLayer: it rendered both eyes
+// the eye texture (g_widen_w > 1, observed at SetupLayer: it rendered both eyes
 // with one union cone, Oculus symmetric projection) and then submitted both eyes
 // at 0,0 full-width — no per-eye sub-rect saying where each eye's own cone sits
 // in that union. The Thrill of the Fight 2 does exactly this (desc 2815x2258 ->
@@ -7488,8 +7528,8 @@ void kl_ovrp_eye_layer_external(int submitted) {
 int kl_ovrp_eye_layer_live(void) { return g_eye_layer_live; }
 
 // Size of the newest live eye layer's textures (what the guest reserved), or 0
-// when none exists yet. ovrp_GetEyeLayerRecommendedResolution answers with it so
-// recommended == reserved and Unity's dynamic resolution stays at 1.0.
+// when none exists yet. ovrp_GetEyeLayerRecommendedResolution only uses it to tell
+// whether an eye layer exists; it answers the fixed recommended size.
 int kl_ovrp_active_eye_layer_size(int *w, int *h) {
     int best = 0, bw = 0, bh = 0;
     for (int i = 0; i < KLOVRP_MAX_LAYERS; i++) {
@@ -7578,38 +7618,36 @@ static int klovrp_submit_viewports(const void *layer_submits, int count, int vp[
 // frustum tangents it measured with it (kl_ovrp_set_eye_frustum).
 //
 // textureScale is the render-scale multiplier Unity carries in its frame setup
-// hints; the real plugin applies it to the recommended size, so we do too, and
-// clamp to at least 1 pixel so a hint of 0 cannot produce a zero-sized layer.
+// hints. The slider is the FINAL eye size, so a scale above 1 is cancelled and one below 1 kept
+// (kles_desc_size; at least 1 pixel so a hint of 0 cannot produce a zero-sized layer). The
+// recommended size is fixed for the run and the widening is frozen once, so this desc depends on
+// inputs only and is a fixed point.
 static void klovrp_fill_eye_desc(ovrp_layer_desc_eyefov *d, int layout,
                                  int mip_levels, int sample_count, int format,
                                  int depth_format, int mv_format,
                                  int mv_depth_format,
                                  int layer_flags, float texture_scale) {
-    int w = 0, h = 0;
-    kl_ovrp_eye_texture_size(&w, &h);
-    if (!(texture_scale > 0.0f)) texture_scale = 1.0f;
+    int rw = 0, rh = 0, w = 0, h = 0;
+    kl_ovrp_eye_texture_size(&rw, &rh);
     if (klovrp_eye_pct_mode()) {
-        // The slider is the FINAL size: the game's scale above 1 (AC Nexus asks 1.3 once it has
-        // loaded) is cancelled instead of multiplied on top, and the widening its plugin
-        // applies after this desc is divided out (learned at SetupLayer).
-        int dw = 0, dh = 0;
-        kles_desc_size(w, h, texture_scale, g_widen_w, g_widen_h, &dw, &dh);
+        // The slider is the FINAL size (see above). The cap is the one the size itself was capped
+        // with (KL_OVRP_EYE_MAX, 0 = none).
+        kles_desc_size(rw, rh, texture_scale, g_widen_w, g_widen_h,
+                       kl_env_int("KL_OVRP_EYE_MAX", KLES_CAP_DFLT), &w, &h);
         static int said_w, said_h;
-        if (texture_scale != 1.0f || g_widen_w != 1.0f || g_widen_h != 1.0f) {
-            if (dw != said_w || dh != said_h)
-                fprintf(stderr, "  [ovrp] eye desc %dx%d for a final %dx%d (game scale %.2f, "
-                                "plugin widening %.3fx%.3f)\n",
-                        dw, dh, w, h, (double)texture_scale, (double)g_widen_w, (double)g_widen_h);
-            said_w = dw; said_h = dh;
-        }
-        w = dw; h = dh;
+        if ((texture_scale != 1.0f || g_widen_w != 1.0f || g_widen_h != 1.0f) && (w != said_w || h != said_h))
+            fprintf(stderr, "  [ovrp] eye desc %dx%d for a final %dx%d (game scale %.2f, plugin widening %.3fx%.3f)\n",
+                    w, h, rw, rh, (double)texture_scale, (double)g_widen_w, (double)g_widen_h);
+        said_w = w; said_h = h;
     } else {
-        w = (int)((float)w * texture_scale);
-        h = (int)((float)h * texture_scale);
+        // Outside the slider mode: the real plugin's behaviour, the recommendation times the scale.
+        if (!(texture_scale > 0.0f)) texture_scale = 1.0f;
+        w = (int)((float)rw * texture_scale);
+        h = (int)((float)rh * texture_scale);
         if (w < 1) w = 1;
         if (h < 1) h = 1;
     }
-    g_fill_w = w; g_fill_h = h;
+    g_desc_given_w = w; g_desc_given_h = h;
 
     memset(d, 0, sizeof *d);
     d->shape        = KLOVRP_SHAPE_EYEFOV;
@@ -7847,22 +7885,18 @@ static uint64_t klovrp_SetupLayer(void *device, const ovrp_layer_desc_eyefov *de
                 desc->texture_size.w, desc->texture_size.h,
                 g_eye_storage_w, g_eye_storage_h);
     int reused = l != NULL;
-    if (is_eye && klovrp_eye_pct_mode()) {
-        float ow = g_widen_w, oh = g_widen_h;
-        kles_learn_widen(g_fill_w, g_fill_h, desc->texture_size.w, desc->texture_size.h,
-                         &g_widen_w, &g_widen_h);
-        if (ow != g_widen_w || oh != g_widen_h)
-            fprintf(stderr, "  [ovrp] eye layer built at %dx%d from a %dx%d desc: plugin widening "
-                            "%.3fx%.3f (next eye descs are divided by it)\n",
-                    desc->texture_size.w, desc->texture_size.h, g_fill_w, g_fill_h,
-                    (double)g_widen_w, (double)g_widen_h);
-    }
+    if (is_eye && klovrp_eye_pct_mode() &&
+        kles_freeze_widen(g_desc_given_w, g_desc_given_h, desc->texture_size.w, desc->texture_size.h,
+                          &g_widen_frozen, &g_widen_w, &g_widen_h))
+        fprintf(stderr, "  [ovrp] eye layer built at %dx%d from a %dx%d desc: plugin widening %.3fx%.3f "
+                        "frozen for the run (next eye descs are divided by it)\n",
+                desc->texture_size.w, desc->texture_size.h, g_desc_given_w, g_desc_given_h,
+                (double)g_widen_w, (double)g_widen_h);
     if (is_eye) {
         static int said;
-        if (!g_eye_size_pushed && said++ < 4)
+        if (!__atomic_load_n(&g_eye_size_pushed, __ATOMIC_ACQUIRE) && said++ < 4)
             fprintf(stderr, "  [ovrp] SetupLayer: eye layer %dx%d built before the display size was "
-                            "pushed (Quest default %dx%d) — it will be rebuilt at the final size, "
-                            "two swapchains alive for a moment\n",
+                            "pushed (default %dx%d) — accepted as it is\n",
                     desc->texture_size.w, desc->texture_size.h, g_eye_w, g_eye_h);
     }
     for (int i = 0; i < KLOVRP_MAX_LAYERS && !l; i++)
@@ -8258,14 +8292,15 @@ static uint64_t klovrp_EnqueueDestroyLayer(int layer_id) {
     // ovrp_GetLayerTextureStageCount(layerId, int* out) — real 0x16e160,
     // -1001 on a NULL second argument.
 // ovrp_GetLayerRecommendedResolution(int layerId, ovrpSizei* out) — signature
-// read from redmatter2's libOVRPlugin (x0=layerId, x1=out). The recommended
-// resolution IS the size we already put in the layer's desc; eye layers fall
-// back to the eye texture size. Red Matter 2 aborts on the missing entry point.
+// read from redmatter2's libOVRPlugin (x0=layerId, x1=out). An eye layer's
+// recommendation is the fixed eye texture size (never the size the guest built:
+// that would feed its own choice back); any other layer answers the size in its
+// desc. Red Matter 2 aborts on the missing entry point.
 static uint64_t klovrp_GetLayerRecommendedResolution(int layer_id, ovrp_sizei *out) {
     ovrp_hit("ovrp_GetLayerRecommendedResolution");
     if (!out) return OVRP_FAIL_INVALID_PARAM;
     struct klovrp_layer *l = klovrp_layer(layer_id);
-    if (l && l->desc.texture_size.w > 0) {
+    if (l && !l->is_eye && l->desc.texture_size.w > 0) {
         *out = l->desc.texture_size;
     } else {
         int w = 0, h = 0; kl_ovrp_eye_texture_size(&w, &h);
@@ -8623,7 +8658,9 @@ static uint64_t klovrp_GetLayerTextureSpaceWarp(int layer_id, int stage, int eye
     int layers = (d->layout == KLOVRP_LAYOUT_ARRAY) ? 2 : 1;
     int w = d->mv_texture_size.w, h = d->mv_texture_size.h;
     const char *size_from = "desc MotionVectorTextureSize";
-    if (w <= 0 || h <= 0 || w > d->texture_size.w * 2 || h > d->texture_size.h * 2) {
+    // Storage only for a layer that asked for SpaceWarp, sized from THIS layer's built desc.
+    if (!(d->layer_flags & KLOVRP_LAYERFLAG_SPACEWARP_ALLOC) ||
+        w <= 0 || h <= 0 || w > d->texture_size.w * 2 || h > d->texture_size.h * 2) {
         // AoT log 40: serving storage the desc did not size makes the provider
         // build its motion-vector render textures at 0x0 (Unity refuses them
         // every frame) and its XR texture set comes out corrupted — the eye

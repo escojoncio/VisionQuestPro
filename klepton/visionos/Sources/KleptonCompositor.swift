@@ -1831,13 +1831,31 @@ final class KleptonCompositor {
     /// cannot be made it says so once and returns the original — which
     /// composites exactly as badly as before, but names the reason rather than
     /// leaving a flat colour to be read as a guest that drew nothing.
-    private var arrayViews: [ObjectIdentifier: MTLTexture] = [:]
+    ///
+    /// A view retains its parent texture, so an entry whose source left the eye table would keep
+    /// that (possibly freed-by-the-guest) texture alive for good: a new entry first drops the ones
+    /// whose source is no longer in the table.
+    private var arrayViews: [ObjectIdentifier: MTLTexture] = [:]   // keyed by the SOURCE texture
     private var saidNoArrayView = false
+
+    private func pruneArrayViews(keeping tex: MTLTexture) {
+        var live: Set<ObjectIdentifier> = [ObjectIdentifier(tex)]
+        for eye in 0..<2 {
+            for stage in 0..<Int(KL_MTL_MAX_STAGES) {
+                var slice: Int32 = 0
+                if let t = kl_glfb_eye_mtl_texture(Int32(eye), Int32(stage), &slice) {
+                    live.insert(ObjectIdentifier(Unmanaged<MTLTexture>.fromOpaque(t).takeUnretainedValue()))
+                }
+            }
+        }
+        arrayViews = arrayViews.filter { live.contains($0.key) }
+    }
 
     private func arrayView(_ tex: MTLTexture) -> MTLTexture {
         if tex.textureType == .type2DArray { return tex }
         let key = ObjectIdentifier(tex)
         if let v = arrayViews[key] { return v }
+        pruneArrayViews(keeping: tex)
         guard let v = tex.makeTextureView(pixelFormat: tex.pixelFormat,
                                           textureType: .type2DArray,
                                           levels: 0..<tex.mipmapLevelCount,
@@ -5190,14 +5208,15 @@ final class KleptonCompositor {
                                  + "(view[0] viewport %.0fx%.0f, %d colour texture(s))",
                          source, w, h, vp.width, vp.height, drawable.colorTextures.count))
         }
-        kl_ovrp_set_eye_texture_size(Int32(w), Int32(h))
+        let accepted = kl_ovrp_set_eye_texture_size(Int32(w), Int32(h)) != 0
         // The size the guest was actually given, kept for the NEXT launch: VQLaunch pushes it before
         // the guest boots (the guest races this first drawable and would otherwise build its eye
-        // layer at the default size and rebuild it here, two swapchains alive). Keyed on the env
-        // that shapes the result; kl_ovrp_set_eye_texture_size ignores a push that changes nothing.
+        // layer at the default size). Keyed on the env that shapes the result. Saved only when THIS
+        // push set the run's size: a push refused because VQLaunch's saved size is already in force
+        // says nothing new, and must not re-save it.
         var fw: Int32 = 0, fh: Int32 = 0
-        kl_ovrp_eye_texture_size(&fw, &fh)
-        if fw > 0, fh > 0 {
+        if accepted { kl_ovrp_eye_texture_size(&fw, &fh) }
+        if accepted, fw > 0, fh > 0 {
             let env = { (k: String) -> String in getenv(k).map { String(cString: $0) } ?? "-" }
             let sig = [env("KL_OVRP_EYE_BASE"), env("KL_OVRP_EYE_SCALE"), env("KL_OVRP_EYE_MAX")].joined(separator: "|")
             UserDefaults.standard.set("\(sig)=\(fw)x\(fh)", forKey: "vq.eyeSizeFinal")

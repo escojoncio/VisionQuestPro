@@ -718,12 +718,12 @@ int   kl_ovrp_boundary(float *width, float *depth);
 // (KL_OVRP_EYE_MAX) and scalable (KL_OVRP_EYE_SCALE) rather than trusted, and
 // what was asked for versus what is being reported is logged once.
 //
-// Unlike the display frequency this MAY be pushed late: Unity re-creates the
-// eye swapchain when the size changes, which a run's logs show it doing three
-// times before the menu is up. Pushing before the guest boots is still better —
-// it is one fewer rebuild, and each one used to leak a whole generation
-//.
-void kl_ovrp_set_eye_texture_size(int w, int h);
+// The FIRST accepted push is the recommended size for the whole run (the guest
+// must never see it change); later ones are ignored. Pushing before the guest
+// boots is best; a guest that asks earlier waits up to 500 ms for it.
+// Returns 1 if this push was accepted (it set the run's size), 0 if it was
+// ignored (a size was already fixed, or w/h <= 0).
+int kl_ovrp_set_eye_texture_size(int w, int h);
 void kl_ovrp_eye_texture_size(int *w, int *h);
 
 // Do we tell the guest the two eyes may be ARRAY LAYERS of one texture rendered

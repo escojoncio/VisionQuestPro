@@ -2043,11 +2043,13 @@ static XrResult klxr_GetSystemProperties(void *instance, XrSystemId system_id,
 }
 
 // The app's resolution slider is the FINAL eye size. An OpenXR guest creates its swapchain at
-// recommendedImageRect x its own scale (Unity's eyeTextureResolutionScale), so the scale seen on
-// the last eye swapchain is divided out of the next recommendation (klxr_CreateSwapchain learns
-// it). The first swapchain of a run is built before anything is known and keeps the game's scale.
+// recommendedImageRect x its own scale (Unity's eyeTextureResolutionScale). The first eye-shaped
+// swapchain with such a scale (> 1.02, <= 2) freezes it ONCE (kles_freeze_xr_scale, never
+// re-learned); the recommendation is then the slider divided by it, so at most one swapchain is
+// rebuilt and the answer is a fixed point whatever sizes the guest picks afterwards.
 static int   g_xr_rec_w, g_xr_rec_h;     // the last recommendation answered
-static float g_xr_game_scale = 1.0f;     // learned guest scale over it (>= 1)
+static float g_xr_game_scale = 1.0f;     // the frozen guest scale over it (>= 1)
+static int   g_xr_scale_frozen;
 static int klxr_eye_pct_mode(void) {
     const char *b = getenv("KL_OVRP_EYE_BASE");
     return b && !strcmp(b, "quest3");
@@ -2071,6 +2073,8 @@ static XrResult klxr_EnumerateViewConfigurationViews(
     int ew = 0, eh = 0;
     kl_ovrp_eye_texture_size(&ew, &eh);
     if (ew <= 0 || eh <= 0) { ew = 2290; eh = 2400; }   // the Quest 2 default
+    // The recommendation is the fixed eye size (kl_ovrp.c); the guest builds its swapchain at
+    // whatever size it likes (up to the max below). Its own scale over it is frozen once.
     int rw = ew, rh = eh;                                // what is recommended; ew/eh stay the target
     if (klxr_eye_pct_mode()) {
         kles_xr_recommended(ew, eh, g_xr_game_scale, &rw, &rh);
@@ -5278,17 +5282,14 @@ static XrResult klxr_CreateSwapchain(void *session, const XrSwapchainCreateInfo 
         }
     }
 
-    // Resolution slider: remember the guest's own scale over what we recommended (an eye-shaped
-    // swapchain only: same factor on both axes), so the next recommendation cancels it.
-    if (klxr_eye_pct_mode()) {
-        float was = g_xr_game_scale;
-        g_xr_game_scale = kles_learn_xr_scale(g_xr_rec_w, g_xr_rec_h, (int)info->width,
-                                              (int)info->height, g_xr_game_scale);
-        if (g_xr_game_scale != was)
-            fprintf(stderr, "  [xr] swapchain %ux%u is %.3fx the recommended %dx%d: the next "
-                            "recommendation is divided by it\n",
-                    info->width, info->height, (double)g_xr_game_scale, g_xr_rec_w, g_xr_rec_h);
-    }
+    // Resolution slider: freeze the guest's own scale over what we recommended (an eye-shaped
+    // swapchain only), once; the next recommendation cancels it.
+    if (klxr_eye_pct_mode() &&
+        kles_freeze_xr_scale(g_xr_rec_w, g_xr_rec_h, (int)info->width, (int)info->height,
+                             &g_xr_scale_frozen, &g_xr_game_scale))
+        fprintf(stderr, "  [xr] swapchain %ux%u is %.3fx the recommended %dx%d: frozen for the run, "
+                        "the next recommendation is divided by it\n",
+                info->width, info->height, (double)g_xr_game_scale, g_xr_rec_w, g_xr_rec_h);
 
     klxr_swapchain *sc = NULL;
     for (int i = 0; i < KLXR_SWAPCHAIN_MAX; i++)

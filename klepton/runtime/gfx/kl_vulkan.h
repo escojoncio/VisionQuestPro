@@ -506,6 +506,8 @@ size_t kl_vulkan_diag(int which, char *out, size_t cap);
 // Releases what the guest destroyed and VPKEngine still holds (graveyard) when no frame is in flight and none was
 // submitted for min_idle_ms. Never blocks; any thread. Logs a line when it freed something.
 void kl_vulkan_idle_drain(unsigned min_idle_ms, const char *why);
+// Frees the retired (replaced) images that are due, without waiting for a frame end. Never blocks long; any thread.
+void kl_vulkan_retire_poll(void);
 size_t kl_vulkan_diag_ranges(int kind, uint64_t (*out)[2], size_t max);   // 0 = VkDeviceMemory host windows, 1 = VPKEngine buffer contents; {addr, size} sorted
 
 #endif
