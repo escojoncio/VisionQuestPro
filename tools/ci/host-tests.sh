@@ -76,6 +76,8 @@ klepton_tests() {
   run t_media_muxer -Wno-unused-function -I"$T/newt" tests/t_media_muxer.c
   awk '/KL-TEST-BEGIN vktrap/{p=1;next} /KL-TEST-END vktrap/{p=0} p' runtime/gfx/kl_vulkan.c > "$T/newt/vktrap.inc"
   run t_vk_trap -Wno-unused-function -I"$T/newt" -I"$VPK/gpu/vulkan/third_party/vulkan-headers/include" tests/t_vk_trap.c
+  awk '/KL-TEST-BEGIN robust/{p=1;next} /KL-TEST-END robust/{p=0} p' runtime/gfx/kl_vulkan.c > "$T/newt/robust.inc"
+  run t_vk_robust -Wno-unused-function -I"$T/newt" -I"$VPK/gpu/vulkan/third_party/vulkan-headers/include" tests/t_vk_robust.c
   awk '/KL-TEST-BEGIN ue4sig/{p=1;next} /KL-TEST-END ue4sig/{p=0} p' runtime/guest/kl_ue4.c > "$T/newt/ue4sig.inc"
   run t_ue4_sig -Wno-unused-function -I"$T/newt" tests/t_ue4_sig.c
   awk '/KL-TEST-BEGIN ue4cmd/{p=1;next} /KL-TEST-END ue4cmd/{p=0} p' runtime/guest/kl_ue4.c > "$T/newt/ue4cmd.inc"

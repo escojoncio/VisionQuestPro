@@ -23,6 +23,7 @@
 #include <objc/runtime.h>
 #endif
 #include <stdio.h>
+#include <sys/stat.h>
 #include <time.h>
 #include <stdlib.h>
 #include <string.h>
@@ -662,6 +663,46 @@ static void dev_resolve(klvk_device *d) {
 #undef R
 }
 
+// VisionQuestPro: robustBufferAccess as the guest asks for it (pEnabledFeatures, or the features of a
+// VkPhysicalDeviceFeatures2 in pNext), kept in the game's pipeline cache as `vq.robust` ("0\n" / "1\n") so the next
+// launch can give VPKEngine an explicit VPVK_ROBUST that matches what the game does (prewarm runs before any device).
+// KL-TEST-BEGIN robust
+static int klvk_requested_robust(const VkDeviceCreateInfo *ci) {
+    if (!ci) return 0;
+    if (ci->pEnabledFeatures && ci->pEnabledFeatures->robustBufferAccess) return 1;
+    for (const VkBaseInStructure *s = (const VkBaseInStructure *)ci->pNext; s; s = s->pNext)
+        if (s->sType == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2 &&
+            ((const VkPhysicalDeviceFeatures2 *)s)->features.robustBufferAccess)
+            return 1;
+    return 0;
+}
+// Sticky within the process: if any vkCreateDevice of the guest asked for it, 1 is kept (a later device that does not
+// must not lower it). *eff = the value stored. Returns 1 = written, 0 = already stored, -1 = no directory / write failed.
+static int klvk_robust_store(const char *dir, int on, int *eff) {
+    static int sticky;
+    if (on) sticky = 1;
+    on = sticky;
+    if (eff) *eff = on;
+    if (!dir || !*dir) return -1;
+    char path[1024], tmp[1040], old[8] = {0};
+    if (snprintf(path, sizeof path, "%s/vq.robust", dir) >= (int)sizeof path) return -1;
+    FILE *f = fopen(path, "r");
+    if (f) {
+        size_t n = fread(old, 1, sizeof old - 1, f);
+        fclose(f);
+        if (n >= 1 && old[0] == (on ? '1' : '0')) return 0;
+    }
+    mkdir(dir, 0755);   // the cache folder may not exist yet on a first run
+    snprintf(tmp, sizeof tmp, "%s.tmp", path);
+    f = fopen(tmp, "w");
+    if (!f) return -1;
+    int ok = fprintf(f, "%d\n", on ? 1 : 0) > 0;
+    ok = fclose(f) == 0 && ok;
+    if (!ok || rename(tmp, path) != 0) { remove(tmp); return -1; }
+    return 1;
+}
+// KL-TEST-END robust
+
 static VkResult klvk_CreateDevice(VkPhysicalDevice phys, const VkDeviceCreateInfo *ci,
                                   const VkAllocationCallbacks *alloc, VkDevice *out) {
     PFN_vkCreateDevice real = (PFN_vkCreateDevice)real_gipa(g_instance, "vkCreateDevice");
@@ -740,6 +781,12 @@ static VkResult klvk_CreateDevice(VkPhysicalDevice phys, const VkDeviceCreateInf
     pthread_mutex_unlock(&g_lock);
 
     VKI("vkCreateDevice ok — %u extension(s), queue family %u\n", keep.n, d->queue_family);
+    {
+        const int robust = klvk_requested_robust(ci);
+        int kept = robust;
+        const int st = klvk_robust_store(getenv("VP_PIPELINE_CACHE_DIR"), robust, &kept);
+        VKI("robustBufferAccess=%d (%s)\n", kept, st > 0 ? "saved" : st == 0 ? "unchanged" : "not saved");
+    }
     return VK_SUCCESS;
 }
 

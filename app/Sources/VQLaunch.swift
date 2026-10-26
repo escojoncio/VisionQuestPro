@@ -51,7 +51,14 @@ enum VQLaunch {
         // reuse) and log 60 had every archive save fail with MTLCompilerService unreachable from
         // 2 s into the run while blit libraries failed to compile in the same windows — the
         // archive work is the first suspect for overloading the compiler service.
-        if VQConformance.isConformance(game) { unsetenv("VP_PIPELINE_CACHE_DIR") } else { setenv("VP_PIPELINE_CACHE_DIR", psoCache.path, 1) }
+        if VQConformance.isConformance(game) {
+            unsetenv("VP_PIPELINE_CACHE_DIR")
+            unsetenv("VPVK_ROBUST")  // the CTS keeps robustBufferAccess in the translated shaders as before
+        } else {
+            setenv("VP_PIPELINE_CACHE_DIR", psoCache.path, 1)
+            // Before the prewarm below: it must see the same VPVK_ROBUST as the game.
+            VQRobust.prepare(cache: psoCache)
+        }
         // The conformance tests compile their own pipelines; a prewarm of earlier runs' recipes
         // would only slow every vkCreateDevice down (prepareRun turns it off in the driver too).
         if !VQConformance.isConformance(game) { VQPrewarm.run(gameFolder: game.folder, cache: psoCache) }
@@ -858,6 +865,69 @@ enum VQOVRPluginVersion {
     }
 }
 
+/// robustBufferAccess per game. VPKEngine (55506b0) bakes it into the translated MSL and the recipe key: VPVK_ROBUST unset = on,
+/// "0" = off, "app" = what the game enables at vkCreateDevice (on while no device exists, i.e. in the prewarm). Klepton writes what
+/// the game asked for to <cache>/vq.robust ("0"/"1", kl_vulkan.c); with it known the launch gives "0" to a game that does not
+/// ask (prewarm and game both translate without the checks), else "app" (the prewarm's "on" is the game's own request).
+enum VQRobust {
+    static let learnedFile = "vq.robust"
+    static let migrationStamp = "vq.robustMigrated.v1"
+
+    /// nil = not learned yet (first run of the game, or the cache was wiped).
+    static func learned(cache: URL) -> Bool? {
+        guard let t = try? String(contentsOf: cache.appendingPathComponent(learnedFile), encoding: .utf8) else { return nil }
+        switch t.trimmingCharacters(in: .whitespacesAndNewlines) {
+        case "1": return true
+        case "0": return false
+        default: return nil
+        }
+    }
+
+    /// Value of VPVK_ROBUST for a game with this learned data.
+    static func envValue(learned: Bool?) -> String { learned == false ? "0" : "app" }
+
+    /// VPVK_ROBUST as set for this run ("0", "app" or "default"): part of the warm stamps, so a value learned after the first
+    /// session repeats the precompilation with the right one.
+    static var stampTag: String {
+        guard let e = getenv("VPVK_ROBUST") else { return "rbdefault" }
+        return "rb" + String(cString: e)
+    }
+
+    /// Once per cache folder: recipes, Metal archives and the warm stamps of earlier builds were made without the VPVK_ROBUST
+    /// key, so they go (the next launch rebuilds them). Sealed with the stamp only when every removal and the stamp itself
+    /// succeeded (else it retries next launch). nil = the stamp says it already ran.
+    static func purgeOnce(cache: URL) -> (removed: Int, failed: [String], sealed: Bool)? {
+        let fm = FileManager.default
+        let stamp = cache.appendingPathComponent(migrationStamp)
+        if fm.fileExists(atPath: stamp.path) { return nil }
+        var removed = 0
+        var failed: [String] = []
+        for f in (try? fm.contentsOfDirectory(atPath: cache.path)) ?? [] {
+            let archive = f.hasPrefix("pipelines") && (f.hasSuffix(".metalar") || f.hasSuffix(".keys"))
+            let warm = f.hasPrefix("firstrun.") || f.hasPrefix("aot.")
+            if archive || warm || f == "pipelines.count" || f == "recipes.bin" {
+                do { try fm.removeItem(at: cache.appendingPathComponent(f)); removed += 1 } catch { failed.append("\(f): \(error.localizedDescription)") }
+            }
+        }
+        if !failed.isEmpty { return (removed, failed, false) }
+        try? fm.createDirectory(at: cache, withIntermediateDirectories: true)
+        return (removed, failed, fm.createFile(atPath: stamp.path, contents: Data()))
+    }
+
+    static func prepare(cache: URL) {
+        if let r = purgeOnce(cache: cache) {
+            VQLog.log("Shaders: caché migrada a VPVK_ROBUST, \(r.removed) ficheros borrados (recetas, archivos Metal, sellos de calentamiento)"
+                      + (r.sealed ? "" : ", SIN sellar (se reintenta en el próximo arranque)"))
+            for f in r.failed { VQLog.log("Shaders: no se pudo borrar \(f)") }
+        }
+        let l = learned(cache: cache)
+        let v = envValue(learned: l)
+        setenv("VPVK_ROBUST", v, 1)
+        let shown = l == nil ? "sin aprender" : (l == true ? "1" : "0")
+        VQLog.log("Shaders: robustBufferAccess del juego \(shown) -> VPVK_ROBUST=\(v)")
+    }
+}
+
 /// Shader precompilation before the game boots: VPVulkan rebuilds every pipeline recipe stored by
 /// earlier runs (VP_PIPELINE_CACHE_DIR) on all cores and saves the Metal binary archive, so the
 /// game's own pipeline creation is cache hits instead of 200-400 ms compiles mid-play.
@@ -922,7 +992,7 @@ final class VQPrewarm: ObservableObject {
         }
         try? fm.createDirectory(at: cache, withIntermediateDirectories: true)
         let recipes = vq_prewarm_count()
-        let stamp = cache.appendingPathComponent("aot.\(tag).r\(recipes)")
+        let stamp = cache.appendingPathComponent("aot.\(tag).r\(recipes).\(VQRobust.stampTag)")
         if fm.fileExists(atPath: stamp.path) {
             VQLog.log("Shaders AOT: archivo al día (\(recipes) recetas), se carga al crear el dispositivo")
             return
@@ -961,7 +1031,7 @@ final class VQPrewarm: ObservableObject {
         // Stamp follows the translator's source fingerprint: any translator change re-runs the precompile.
         var tag = "v\(firstRunVersion)"
         if let c = translatorTag() { tag = "v\(firstRunVersion)." + c }
-        let stamp = cache.appendingPathComponent("firstrun.\(tag)")
+        let stamp = cache.appendingPathComponent("firstrun.\(tag).\(VQRobust.stampTag)")
         if fm.fileExists(atPath: stamp.path) { return }
         // Only with VPVulkan loaded (MoltenVK path has no precompiler): avoids re-scanning every launch.
         guard dlsym(UnsafeMutableRawPointer(bitPattern: -2), "vpvk_precompile_spirv") != nil else {
