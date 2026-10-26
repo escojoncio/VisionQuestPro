@@ -43,7 +43,7 @@
 - ASW/PTW apagados por defecto (`KL_CP_ASW`=0, `KL_CP_PTW`=0). Frame congelado: 3,0 s.
 - Valores: burst audio 1024 con Wwise; `kMaxArchiveFiles` 512; `VPVK_MAX_DRAWS_PER_CB` 256; anillo TAA 4; máscara UI R8 slot 7; `KL_OVERLAY_SUBMIT_ORDER`=1.
 - Datos de juegos nunca en el repo.
-- Build solo con `[build]`, completa y revisada; pushear VPKEngine antes.
+- Build solo con `[build]`, completa y revisada; VPKEngine fijado a SHA en CI (subir `ref:` en visionos.yml al cambiar de motor).
 
 ## Files in play
 - `klepton/runtime/xr/{kl_ovrp.c,kl_ovrp_input.c,kl_ovrplat.c}`, `klepton/visionos/Sources/KleptonControllers.swift` (+ bridging header).
