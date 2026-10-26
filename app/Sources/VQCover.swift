@@ -187,13 +187,15 @@ enum VQCover {
 /// the first that really decodes as ~16:9 is kept. Signed oculuscdn URLs expire: 401/403 on them is an
 /// "expired candidate", not a network failure. With no 16:9 picture, the best square one (>= 256 px) is
 /// kept as the store cover (VQCoverView centres it over a blur). Result file: cover-store.<ext>;
-/// marker cover-store.none = "<unix time> <absent|soon|net> v4"
+/// marker cover-store.none = "<unix time> <absent|soon|net> v4 [<consecutive net failures>]"
 /// (absent: the store does not know the package or has no picture, retry after 3 days; soon: first miss, retry after 12 h
-/// (a second miss becomes absent); net: retry after 1 hour; a marker
+/// (a second miss becomes absent); net: retry after 2 min, then 10, 30 and 60 min (growing with the failure count; a net
+/// marker without a count counts as 1; if the 60 min retry fails too, the marker becomes soon = 12 h); a marker
 /// without the current version tag was written by older code and counts as missing).
 enum VQCoverStore {
     private static let host = "https://oculusdb.rui2015.me"
-    private static let retryAfter: TimeInterval = 3600   // net failure is transient: retry in 1 h (was 7 days, which hid Deadpool's cover)
+    // A net failure is transient (the OculusDB search can take >15 s): short, growing waits instead of a fixed 1 h.
+    private static let retryNetDelays: [TimeInterval] = [120, 600, 1800, 3600]
     private static let retryAbsentAfter: TimeInterval = 3 * 24 * 3600
     private static let retryAfterSoon: TimeInterval = 12 * 3600
     private static let markerVersion = "v4"
@@ -213,12 +215,14 @@ enum VQCoverStore {
             let parts = text.split(separator: " ")
             if parts.count >= 3, parts[2] == markerVersion, let t = TimeInterval(parts[0]) {
                 let age = Date().timeIntervalSince1970 - t
-                let limit = parts[1] == "absent" ? retryAbsentAfter : (parts[1] == "soon" ? retryAfterSoon : retryAfter)
+                let failures = parts.count >= 4 ? (Int(parts[3]) ?? 1) : 1
+                let limit = parts[1] == "absent" ? retryAbsentAfter : (parts[1] == "soon" ? retryAfterSoon
+                            : retryNetDelays[min(max(failures, 1), retryNetDelays.count) - 1])
                 if age < limit {
-                    VQCover.logOnce(game.id, "Carátula de tienda: \(package): omitida, marcador \(parts[1]) de hace \(Int(age / 3600)) h (reintento a las \(Int(limit / 3600)) h)")
+                    VQCover.logOnce(game.id, "Carátula de tienda: \(package): omitida, marcador \(parts[1]) de hace \(Int(age / 60)) min (reintento a los \(Int(limit / 60)) min)")
                     return
                 }
-                VQCover.logOnce(game.id, "Carátula de tienda: \(package): marcador \(parts[1]) caducado (\(Int(age / 3600)) h); se reintenta")
+                VQCover.logOnce(game.id, "Carátula de tienda: \(package): marcador \(parts[1]) caducado (\(Int(age / 60)) min); se reintenta")
             } else {
                 VQCover.logOnce(game.id, "Carátula de tienda: \(package): marcador de una versión anterior ignorado")
             }
@@ -242,12 +246,19 @@ enum VQCoverStore {
 
     private static func run(id: String, package: String, name: String, cache: URL, marker: URL) async {
         let cfg = URLSessionConfiguration.ephemeral
-        cfg.timeoutIntervalForRequest = 15
-        cfg.timeoutIntervalForResource = 40
+        cfg.timeoutIntervalForRequest = 30    // 15 s timed out on OculusDB's search for Deadpool / vulkancts
+        cfg.timeoutIntervalForResource = 120
         let session = URLSession(configuration: cfg)
-        let wasSoon = ((try? String(contentsOf: marker, encoding: .utf8))?.split(separator: " ").dropFirst().first).map { $0 == "soon" } ?? false
+        let started = Date()
+        let oldParts = ((try? String(contentsOf: marker, encoding: .utf8)) ?? "").split(separator: " ")
+        let wasSoon = oldParts.count > 1 && oldParts[1] == "soon"
+        // Consecutive net failures so far (a net marker without a count counts as 1).
+        let netFailures = oldParts.count > 1 && oldParts[1] == "net" ? (oldParts.count >= 4 ? (Int(oldParts[3]) ?? 1) : 1) : 0
         func mark(_ why: String) {
-            try? "\(Int(Date().timeIntervalSince1970)) \(why) \(markerVersion)".write(to: marker, atomically: true, encoding: .utf8)
+            // After the last growing wait (retryNetDelays) fails too, stop the hourly retries: back off 12 h ("soon").
+            let kind = why == "net" && netFailures + 1 > retryNetDelays.count ? "soon" : why
+            let count = kind == "net" ? " \(netFailures + 1)" : ""
+            try? "\(Int(Date().timeIntervalSince1970)) \(kind) \(markerVersion)\(count)".write(to: marker, atomically: true, encoding: .utf8)
         }
         do {
             guard let encoded = package.addingPathComponentEncoded,
@@ -255,16 +266,32 @@ enum VQCoverStore {
                 VQLog.log("Carátula de tienda: \(package): nombre de paquete no válido para la búsqueda")
                 mark("absent"); return
             }
-            let (body, resp) = try await session.data(from: search)
-            guard (resp as? HTTPURLResponse)?.statusCode == 200,
-                  let json = try? JSONSerialization.jsonObject(with: body) else {
-                VQLog.log("Carátula de tienda: \(package): respuesta inesperada de la búsqueda")
-                mark("net"); return
+            var found: [String: Any]?
+            var route = "búsqueda por paquete"
+            do {
+                let (body, resp) = try await session.data(from: search)
+                guard (resp as? HTTPURLResponse)?.statusCode == 200,
+                      let json = try? JSONSerialization.jsonObject(with: body) else {
+                    VQLog.log("Carátula de tienda: \(package): respuesta inesperada de la búsqueda")
+                    throw URLError(.badServerResponse)
+                }
+                let list = searchResults(json)
+                VQLog.log("Carátula de tienda: \(package): búsqueda por paquete: \(list.count) resultado(s)" + describe(list))
+                found = list.first(where: { ($0["packageName"] as? String)?.lowercased() == package.lowercased() })
+            } catch let e as URLError {
+                // The package search failed (timeout/network/bad reply): try once by the exact visible name.
+                // Only an identical normalized name counts; anything less clear is no cover (marker net, retried later).
+                VQLog.log("Carátula de tienda: \(package): búsqueda por paquete fallida tras \(Int(Date().timeIntervalSince(started))) s (\(e.localizedDescription)); se prueba por nombre exacto \"\(name)\"")
+                found = try await searchByName(session, name: name, package: package, exactOnly: true)
+                route = "nombre exacto (respaldo tras fallo de red)"
+                if found == nil { throw e }
             }
-            let list = searchResults(json)
-            VQLog.log("Carátula de tienda: \(package): búsqueda por paquete: \(list.count) resultado(s)" + describe(list))
-            var found = list.first(where: { ($0["packageName"] as? String)?.lowercased() == package.lowercased() })
-            if found == nil { found = await searchByName(session, name: name, package: package) }
+            if found == nil, route == "búsqueda por paquete" {
+                // The package search worked but lists no such package; a network failure here propagates (marker net).
+                found = try await searchByName(session, name: name, package: package, exactOnly: false)
+                route = "búsqueda por nombre"
+            }
+            if found != nil { VQLog.log("Carátula de tienda: \(package): ficha elegida por \(route)") }
             guard let app = found else {
                 VQLog.log("Carátula de tienda: \(package): la tienda no tiene este paquete (ni por nombre \"\(name)\"); marcador " + (wasSoon ? "absent (2.ª vez)" : "soon (12 h)"))
                 mark(wasSoon ? "absent" : "soon"); return
@@ -366,7 +393,7 @@ enum VQCoverStore {
                 mark("absent")
             }
         } catch {
-            VQLog.log("Carátula de tienda: \(package): fallo de red o de escritura: \(error.localizedDescription)")
+            VQLog.log("Carátula de tienda: \(package): fallo de red o de escritura tras \(Int(Date().timeIntervalSince(started))) s: \(error.localizedDescription)")
             mark("net")
         }
     }
@@ -394,16 +421,19 @@ enum VQCoverStore {
         }
     }
 
-    /// Lowercase, no accents, letters/digits only, single spaces.
+    /// Lowercase, no accents, letters/digits only, single spaces; apostrophes vanish ("Marvel's" = "Marvels").
     private static func normalize(_ s: String) -> String {
         let folded = s.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: nil).lowercased()
+            .replacingOccurrences(of: "'", with: "").replacingOccurrences(of: "\u{2019}", with: "")
         return folded.map { $0.isLetter || $0.isNumber ? String($0) : " " }.joined()
             .split(separator: " ").joined(separator: " ")
     }
 
     /// Fallback when the package is not in the search: search by the game's visible name (and the
     /// name cut at ":", " x ", " - "), keep the best name match (+ same organisation: first two package parts).
-    private static func searchByName(_ session: URLSession, name: String, package: String) async -> [String: Any]? {
+    /// `exactOnly`: only the full visible name is searched and only an identical normalized name from the same
+    /// organisation (package prefix) is accepted (score 130). A network failure or bad reply throws (the caller marks net).
+    private static func searchByName(_ session: URLSession, name: String, package: String, exactOnly: Bool) async throws -> [String: Any]? {
         var variants: [String] = []
         for sep in [":", " x ", " - "] {
             if let r = name.range(of: sep) { variants.append(String(name[..<r.lowerBound])) }
@@ -414,14 +444,20 @@ enum VQCoverStore {
             let n = normalize(v)
             if n.count >= 3, !targets.contains(n) { targets.append(n) }
         }
+        if exactOnly { targets = Array(targets.prefix(1)) }
         let org = package.lowercased().split(separator: ".").prefix(2).joined(separator: ".")
         var best: (score: Int, app: [String: Any])?
         for t in targets {
-            guard let enc = t.addingPathComponentEncoded, let url = URL(string: "\(host)/api/v1/search/\(enc)"),
-                  let (body, resp) = try? await session.data(from: url),
-                  (resp as? HTTPURLResponse)?.statusCode == 200,
+            guard let enc = t.addingPathComponentEncoded, let url = URL(string: "\(host)/api/v1/search/\(enc)") else { continue }
+            let body: Data, resp: URLResponse
+            do { (body, resp) = try await session.data(from: url) } catch {
+                VQLog.log("Carátula de tienda: \(package): búsqueda por nombre \"\(t)\": error de red: \(error.localizedDescription)")
+                throw error
+            }
+            guard (resp as? HTTPURLResponse)?.statusCode == 200,
                   let json = try? JSONSerialization.jsonObject(with: body) else {
-                VQLog.log("Carátula de tienda: \(package): búsqueda por nombre \"\(t)\": sin respuesta válida"); continue
+                VQLog.log("Carátula de tienda: \(package): búsqueda por nombre \"\(t)\": sin respuesta válida")
+                throw URLError(.badServerResponse)
             }
             let list = searchResults(json)
             VQLog.log("Carátula de tienda: \(package): búsqueda por nombre \"\(t)\": \(list.count) resultado(s)" + describe(list))
@@ -437,7 +473,7 @@ enum VQCoverStore {
                 if score > (best?.score ?? 0) { best = (score, r) }
             }
         }
-        if let best, best.score >= 50 {
+        if let best, best.score >= (exactOnly ? 130 : 50) {
             VQLog.log("Carátula de tienda: \(package): coincidencia por nombre: \(best.app["packageName"] as? String ?? "?") | \(resultName(best.app) ?? "?") (puntuación \(best.score))")
             return best.app
         }
