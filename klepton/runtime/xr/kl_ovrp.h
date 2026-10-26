@@ -573,6 +573,7 @@ void kl_ovrp_proj_layers_external(const kl_ovrp_proj_layer *v, int n);
 void kl_ovrp_eye_layer_external(int submitted);
 int  kl_ovrp_eye_layer_live(void);
 int  kl_ovrp_active_eye_layer_size(int *w, int *h);   // 1 + size of the live eye layer, 0 if none
+int  kl_ovrp_active_eye_layer_id(void);               // id of the live eye layer, 0 if none
 
 // How many swapchain stages we tell the guest it has (KL_OVRP_STAGES). The
 // answer to ovrp_GetEyeTextureStageCount, so it bounds every (eye, stage) key

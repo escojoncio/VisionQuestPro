@@ -7644,6 +7644,19 @@ int kl_ovrp_active_eye_layer_size(int *w, int *h) {
     return 1;
 }
 
+// Id of the newest live eye layer (the one kl_ovrp_active_eye_layer_size measures), or 0
+// when none exists yet. ovrp_GetEyeFovLayerId reports it.
+int kl_ovrp_active_eye_layer_id(void) {
+    int best = 0;
+    for (int i = 0; i < KLOVRP_MAX_LAYERS; i++) {
+        const struct klovrp_layer *l = &g_layers[i];
+        if (l->id > best && l->is_eye && l->desc.texture_size.w > 0 &&
+            l->desc.texture_size.h > 0)
+            best = l->id;
+    }
+    return best;
+}
+
 int kl_ovrp_overlay_count(void) {
     pthread_mutex_lock(&g_frames.mu);
     int n = g_overlays.n;

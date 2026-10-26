@@ -37,6 +37,7 @@ klepton_tests() {
   run pred_frame_offset_test tests/pred_frame_offset_test.c -lm
   run kl_ovrp_eyesize_test -I. tests/kl_ovrp_eyesize_test.c -lm
   run t_ovrp_input -I.. -I../.. tests/t_ovrp_input.c -lm
+  run t_ovrp_render -Wno-unused-function -I.. -I../.. tests/t_ovrp_render.c -lm
   run spatial_test -I.. -I../jni -I../libc -I../gfx -I. -I../media -I../guest -I../diag \
       tests/spatial_test.c kl_spatial.c kl_ovrp_spatial.c -lm -lpthread
   cd "$ROOT/klepton" || return 1
@@ -91,6 +92,8 @@ klepton_tests() {
   run t_vmgroup -Wno-unused-function -I"$T/vmlog" tests/t_vmgroup.c
   awk '/KL-TEST-BEGIN lring/{p=1;next} /KL-TEST-END lring/{p=0} p' runtime/libc/kl_va_handlers.c > "$T/vmlog/lring.inc"
   run t_lring -I"$T/vmlog" tests/t_lring.c
+  awk '/KL-TEST-BEGIN synthobj/{p=1;next} /KL-TEST-END synthobj/{p=0} p' runtime/kl_jni.c > "$T/newt/synthobj.inc"
+  run t_jni_synth -I"$T/newt" tests/t_jni_synth.c
   return $rc
 }
 

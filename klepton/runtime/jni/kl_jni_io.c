@@ -440,7 +440,8 @@ static klj_val klj_AVPro_SHA256(void *env, void *self, const klj_val *a, int n) 
     (void)env; (void)self;
     klj_array *in = n > 0 ? klj_arr(a[0].l) : NULL;
     void *out = klj_new_array('B', NULL, CC_SHA256_DIGEST_LENGTH);
-    CC_SHA256(in ? in->data : "", in ? (CC_LONG)in->len : 0, klj_arr(out)->data);
+    uint8_t *dst = klj_arr_data(out, CC_SHA256_DIGEST_LENGTH);
+    if (dst) CC_SHA256(in ? in->data : "", in ? (CC_LONG)in->len : 0, dst);
     return (klj_val){.l = out};
 }
 
@@ -503,15 +504,17 @@ static klj_val klj_AVPro_CreateCryptor(void *env, void *self, const klj_val *a, 
     if (n < 3 || (int)a[0].j != 2) return (klj_val){.l = NULL};
     klj_array *key = klj_arr(a[1].l), *iv = klj_arr(a[2].l);
     if (!key || !iv || iv->len != kCCBlockSizeAES128) return (klj_val){.l = NULL};
+    void *keyd = klj_arr_data(a[1].l, key->len), *ivd = klj_arr_data(a[2].l, iv->len);
+    if (!keyd || !ivd) return (klj_val){.l = NULL};
 
     klj_cryptor *c = calloc(1, sizeof *c);
     if (!c) return (klj_val){.l = NULL};
-    memcpy(c->iv, iv->data, sizeof c->iv);
+    memcpy(c->iv, ivd, sizeof c->iv);
     c->has_iv = 1;
     // ccNoPadding: "AES/CBC/NoPadding" says so, and padding is the one option
     // whose effect is invisible until the LAST block of a stream.
     if (CCCryptorCreate(kCCDecrypt, kCCAlgorithmAES, 0 /* no padding */,
-                        key->data, (size_t)key->len, c->iv, &c->ref) != kCCSuccess) {
+                        keyd, (size_t)key->len, c->iv, &c->ref) != kCCSuccess) {
         free(c);
         return (klj_val){.l = NULL};   // Java logs and returns null here too
     }

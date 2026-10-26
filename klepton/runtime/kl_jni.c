@@ -1277,6 +1277,25 @@ static int klj_game_void_noop(const klj_wanted *w, char have) {
     return 1;
 }
 
+// Gundam's Unity 6 player asks the game's Java for createTelemetryHandler and uses the
+// answer without a null check. Its body (a telemetry sink) lives in the APK's dex, which
+// never runs, and offline nothing may leave the device, so the honest answer is an inert
+// object of the class the call's own signature names: every method later called on it is
+// a no-op (void) or a logged 0/null. Only that name, and only an object return.
+// KL-TEST-BEGIN synthobj
+static int klj_synth_object_class(const char *name, const char *sig, char *cls, size_t cap) {
+    if (strcmp(name, "createTelemetryHandler") != 0) return 0;
+    const char *r = strchr(sig, ')');
+    if (!r || r[1] != 'L') return 0;
+    size_t n = strlen(r + 2);                     // "pkg/Cls;" -> n includes the ';'
+    if (n < 2 || r[1 + n] != ';' || n > cap) return 0;
+    memcpy(cls, r + 2, n - 1);
+    cls[n - 1] = 0;
+    for (char *p = cls; *p; p++) if (*p == '.') *p = '/';
+    return 1;
+}
+// KL-TEST-END synthobj
+
 // Exactly one of `va` / `args` is non-NULL; everything else about a call is
 // identical between the two conventions, so they share this path rather than
 // duplicating the binding lookup and the diagnostics.
@@ -1347,6 +1366,16 @@ static klj_val klj_call_common(void *env, void *self, void *mid, char want,
         return b->fn(env, self, argv, argc);
     }
 
+    char synth[256];
+    if (klj_synth_object_class(w->name, w->sig, synth, sizeof synth)) {
+        static const klj_wanted *sseen;
+        if (sseen != w) {
+            sseen = w;
+            KLJ_LOG("%s.%s%s answered with an inert %s (APK-owned, dex not run)",
+                    w->cls, w->name, w->sig, synth);
+        }
+        return (klj_val){.l = kl_jni_new_object(synth)};
+    }
     if (klj_game_void_noop(w, have)) {
         if (kl_media_video_trace())
             KLJ_LOG("[vtrace tid=%llu] NO-OP game Java void %s.%s%s (self=%p)",
