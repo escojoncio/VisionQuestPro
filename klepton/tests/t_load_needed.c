@@ -83,6 +83,13 @@ static kl_image *kl_load_auto(const char *path) {
 static void kl_run_init(kl_image *img) { snprintf(g_init_log[g_ninit++], 128, "%s", img->name); }
 static void *kl_sym(kl_image *img, const char *n) { (void)img; (void)n; return NULL; }
 static void *kl_jni_vm(void) { return NULL; }
+// First claim per image wins, like the real one (kl_jni.c): the one JNI_OnLoad guard kl_dl.c now calls.
+static int kl_jni_onload_claim(const void *image) {
+    static const void *done[16]; static int n;
+    for (int i = 0; i < n; i++) if (done[i] == image) return 0;
+    if (n < 16) done[n++] = image;
+    return 1;
+}
 
 #include "ldeps.inc"
 
