@@ -43,6 +43,8 @@ klepton_tests() {
   cd "$ROOT/klepton" || return 1
   run t_ptw tests/t_ptw.c runtime/gfx/kl_reproject_ptw.c -lm
   run t_bg -rdynamic -Iruntime/gfx tests/t_bg.c runtime/gfx/kl_bg.c -lpthread -ldl
+  run t_frame_boundary -rdynamic -Iruntime/gfx tests/t_frame_boundary.c runtime/gfx/kl_bg.c -lpthread -ldl
+  run t_frame_boundary_nosym -DNO_SYM -rdynamic -Iruntime/gfx tests/t_frame_boundary.c runtime/gfx/kl_bg.c -lpthread -ldl
   run t_diagcap -rdynamic -Iruntime/diag -Iruntime/xr -Iruntime tests/t_diagcap.c runtime/diag/kl_diagcap.c runtime/kl_env.c -lpthread -ldl
   mkdir -p "$T/memdiag"
   awk '/KL-TEST-BEGIN (rate|range|fstat)/{p=1;next} /KL-TEST-END (rate|range|fstat)/{p=0} p' runtime/libc/kl_libc.c > "$T/memdiag/libc_blocks.inc"
@@ -95,6 +97,8 @@ klepton_tests() {
   run t_lring -I"$T/vmlog" tests/t_lring.c
   awk '/KL-TEST-BEGIN synthobj/{p=1;next} /KL-TEST-END synthobj/{p=0} p' runtime/kl_jni.c > "$T/newt/synthobj.inc"
   run t_jni_synth -I"$T/newt" tests/t_jni_synth.c
+  awk '/KL-TEST-BEGIN ue4recv/{p=1;next} /KL-TEST-END ue4recv/{p=0} p' runtime/jni/kl_jni_ue4.c > "$T/newt/ue4recv.inc"
+  run t_ue4_receivers -Wno-unused-function -I"$T/newt" tests/t_ue4_receivers.c
   awk '/KL-TEST-BEGIN ue4thunk/{p=1;next} /KL-TEST-END ue4thunk/{p=0} p' runtime/jni/kl_jni_ue4.c > "$T/newt/ue4thunk.inc"
   run t_ue4_thunk -Wno-unused-function -I"$T/newt" tests/t_ue4_thunk.c
   awk '/KL-TEST-BEGIN noophit/{p=1;next} /KL-TEST-END noophit/{p=0} p' runtime/kl_jni.c > "$T/newt/noophit.inc"

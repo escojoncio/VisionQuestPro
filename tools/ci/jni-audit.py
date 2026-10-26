@@ -73,7 +73,9 @@ def main():
     for c, n, s in sorted(k for k in noop if keep(k[0])):
         why = "unlinked" if (c, n, s) in unl else "STUB row" if (c, n) in bound else "table/other"
         print("  %s.%s%s  [%s]" % (c, n, s, why))
-    bare = sorted({c for c, _, _ in nat if keep(c) and c not in bound_cls})
+    # UE5 com/epicgames/unreal/X is served by the ue4 rows (kl_jni.c klj_resolve_binding aliases it).
+    ue = lambda c: "com/epicgames/ue4/" + c[len("com/epicgames/unreal/"):] if c.startswith("com/epicgames/unreal/") else c
+    bare = sorted({c for c, _, _ in nat if keep(c) and c not in bound_cls and ue(c) not in bound_cls})
     print("== classes with registered natives and NO binding row: %d" % len(bare))
     for c in bare: print("  " + c)
     return 0

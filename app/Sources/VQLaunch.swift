@@ -489,9 +489,9 @@ final class VQSettings: ObservableObject {
         unsetenv("VPVK_STRICT_FEATURES")
         // «Perfil Vulkan completo»; the conformance runs set it again either way (VQConformance).
         if vkFullProfile { setenv("VPVK_EXTRA_EXTENSIONS", "1", 1) } else { unsetenv("VPVK_EXTRA_EXTENSIONS") }
-        // The game's vkCreate*Pipelines is synchronous (VPKEngine default; async is opt-in with VPVK_ASYNC_PIPELINES=1, read in
-        // vkCreateDevice): unset it so nothing inherited turns it on. The conformance runs set 0 (VQConformance).
-        unsetenv("VPVK_ASYNC_PIPELINES")
+        // The game's vkCreate*Pipelines is synchronous (Quest semantics): VPKEngine is async by default and the synchronous mode is
+        // opt-in with VPVK_ASYNC_PIPELINES=0, read in vkCreateDevice. The conformance runs set 0 too (VQConformance).
+        setenv("VPVK_ASYNC_PIPELINES", "0", 1)
         // VPKEngine 454f7cc dead-store elision (heuristic, risks a corrupted frame) — off until the translator marks samples to keep
         unsetenv("VPVK_MSAA_DEAD_STORE")
         // Games: report geometry/tessellation like Adreno so Unity keeps subshaders that need

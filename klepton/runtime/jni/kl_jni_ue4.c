@@ -254,9 +254,17 @@ static klj_val klj_GA_initHMDs(void *env, void *self, const klj_val *a, int n) {
 // static exports), so they are looked up through kl_jni_native and NOT cached:
 // a cache filled by a lookup that beat RegisterNatives would pin a NULL and
 // leave the seam silently dead for the run.
+// KL-TEST-BEGIN ue4recv
 static void klj_ue4_receiver_dispatch(void *env, const char *cls, const char *name,
                                       const char *sig, const klj_val *args, int nargs) {
     void *fn = kl_jni_native(cls, name, sig);
+    // UE5 (ITR2, Wanderer, OLAR) registers the same native on com/epicgames/unreal/<Receiver>; the Java side
+    // (startReceiver) already reaches us aliased from that class (klj_resolve_binding), so this lookup must too.
+    if (!fn && strncmp(cls, "com/epicgames/ue4/", 18) == 0) {
+        char alias[128];
+        snprintf(alias, sizeof alias, "com/epicgames/unreal/%s", cls + 18);
+        fn = kl_jni_native(alias, name, sig);
+    }
     if (!fn) {
         KLJ_LOG("%s.%s: no registered native — the engine never learns this state",
                 cls, name);
@@ -271,6 +279,7 @@ static void klj_ue4_receiver_dispatch(void *env, const char *cls, const char *na
         ((void (*)(void *, void *, int32_t, int32_t, int32_t))fn)(
             env, NULL, (int32_t)args[0].j, (int32_t)args[1].j, (int32_t)args[2].j);
 }
+// KL-TEST-END ue4recv
 
 static klj_val klj_VolumeReceiver_start(void *env, void *self, const klj_val *a, int n) {
     (void)self; (void)a; (void)n;

@@ -3914,7 +3914,9 @@ static uint64_t klovrp_EndFrame(int guest_frame_index) {
 // No layer list on this path — 1.28's legacy VRDevice hands its eye
     // textures down through ovrp_SetupEyeTexture2 and never describes a layer,
     // so it can only ever have rendered into the whole thing.
-    return klovrp_end_frame_impl(guest_frame_index, NULL, NULL, -1);
+    uint64_t r = klovrp_end_frame_impl(guest_frame_index, NULL, NULL, -1);
+    kl_frame_boundary(KL_FRAME_OVRP);   // the capture's frame boundary (not in the impl: EndFrame4 closes it after its GPU wait)
+    return r;
 }
 
     // ovrp_EndFrame4(frameIndex, layerSubmits, layerSubmitCount, sync) — the 1.40
@@ -4110,6 +4112,7 @@ static uint64_t klovrp_EndFrame4(int guest_frame_index, const void *layer_submit
         kl_vulkan_taa_gles_frame_end(filed, filed >= 0 ? pend_serial : 0);
     }
     klovrp_publish_deferred();   // no-op unless a deferred stage is still pending
+    kl_frame_boundary(KL_FRAME_OVRP);   // the capture's frame boundary: the frame's submits and its GPU wait are done
     ovrp_log_ret("EndFrame4", r, &nr_end);
     return r;
 }

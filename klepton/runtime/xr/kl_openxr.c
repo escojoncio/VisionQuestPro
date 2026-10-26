@@ -7519,6 +7519,7 @@ static XrResult klxr_EndFrame(void *session, const XrFrameEndInfo *info) {
     // and a quad shows one or the other, not both at once.
     kl_ovrp_eye_layer_external(proj_layers > 0);
 
+    kl_frame_boundary(KL_FRAME_XR);   // the capture's frame boundary (only an accepted frame reaches here)
     return KLXR_SUCCESS;
 }
 

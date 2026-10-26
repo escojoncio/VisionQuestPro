@@ -16,4 +16,10 @@ int  kl_bg_active(void);
 // Guest submit paths only (never the main/UI thread): returns at once in the foreground.
 void kl_bg_wait(void);
 
+// Frame boundary for VPKEngine's capture (vpvk_frame_boundary in VPVulkan, absent in older engines: then this does
+// nothing). Called once per guest frame at the end of the frame by the route the guest renders through; if a guest
+// uses both routes, the first one to call owns the boundary and the other is ignored while the owner keeps calling.
+enum { KL_FRAME_OVRP = 1, KL_FRAME_XR = 2 };
+void kl_frame_boundary(int route);
+
 #endif
