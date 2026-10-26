@@ -22,6 +22,7 @@
 #include "../guest/kl_il2cpp.h"   // kl_il2cpp_method_at, for ovrp_log_chain
 #include "../diag/kl_sample.h"     // kl_sample_snapshot, at the display teardown
 #include "../diag/kl_wait.h"       // kl_game_beat: game-thread silence watcher
+#include "kl_bg.h"                 // kl_bg_wait: no GPU work while the app is backgrounded
 // kl_glfb_note_eye_texture (the capture's eye-FBO seam) and
 // kl_glfb_last_render_stage (which stage the guest actually drew into — see
 // klovrp_EndFrame). Up here rather than beside SetupEyeTexture2 now that the
@@ -1056,7 +1057,7 @@ static uint64_t klovrp_GetBoundaryConfigured2(int *out) {
 // renders at all), the head present, and the node present.
 static uint64_t klovrp_GetAppHasVrFocus2(int *out) {
     ovrp_hit("ovrp_GetAppHasVrFocus2");
-    if (out) *out = 1;
+    if (out) *out = !kl_bg_active();   // backgrounded: the app no longer has VR focus
     return OVRP_SUCCESS;
 }
 static uint64_t klovrp_GetUserPresent2(int *out) {
@@ -3040,6 +3041,7 @@ static int klovrp_fring_get(int frame, int part, klovrp_pose *out) {
 static uint64_t klovrp_Update2(int step, int frame_index, double prediction) {
     ovrp_hit("ovrp_Update2");
     kl_game_beat(0);          // also covers ovrp_Update3, which calls this
+    kl_bg_wait();             // frame start: a backgrounded app starts no frame (Metal refuses its GPU work)
     { static unsigned n; if (n < 48 || n % 600 == 0)
         fprintf(stderr, "  [ovrp] frameloop Update2 #%u step=%d\n", n, step); n++; }
     (void)prediction;
@@ -3640,6 +3642,7 @@ static void klovrp_record_last_sample(int frame) {
 
 static uint64_t klovrp_end_frame_impl(int guest_frame_index, const int *viewports,
                                       const int *viewport_of, int named_stage) {
+    kl_bg_wait();          // before any GPU work of the frame end
     kl_gles_frame_end();   // gated (kl_gles.h): the frame's GL work is on the GPU before compositing
     klovrp_record_last_sample(guest_frame_index);
     if (!kl_vulkan_guest_active()) klovrp_lat_end(klovrp_mono_ns());
@@ -3893,6 +3896,7 @@ static void klovrp_enq_endframe(void);
 static volatile unsigned g_enq_frames_since = 1000000u;
 static uint64_t klovrp_EndFrame4(int guest_frame_index, const void *layer_submits,
                                  int layer_submit_count, void *sync) {
+    kl_bg_wait();   // first: kl_vulkan_taa_publish below takes VPKEngine locks, so park before it, holding none
     ovrp_hit("ovrp_EndFrame4");
     if (g_enq_frames_since < 1000000u) g_enq_frames_since++;
     klovrp_enq_endframe();   // the Enqueue'd overlay set of this frame is complete
@@ -6185,7 +6189,7 @@ int kl_ovrp_haptics_pull(int hand, float *amplitude, float *seconds) {
 // referenced by both and really is a bare bool, so it stays where it is.
 static uint64_t klovrp_GetAppHasInputFocus(int32_t *out) {  /* ovrpBool is a 4-byte enum */
     ovrp_hit("ovrp_GetAppHasInputFocus");
-    if (out) *out = 1;
+    if (out) *out = !kl_bg_active();
     return OVRP_SUCCESS;
 }
 

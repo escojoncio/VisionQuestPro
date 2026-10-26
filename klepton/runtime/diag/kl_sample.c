@@ -39,6 +39,7 @@
 #include "kl_env.h"
 #include "../xr/kl_ovrplat.h"   // kl_ovrplat_dump_requests
 #include "../gfx/kl_gles.h"     // kl_gles_egl_dump
+#include "../gfx/kl_bg.h"       // kl_bg_active: a parked, backgrounded guest is not a stall
 
 #define KL_SAMPLE_DEPTH 16          // frames walked per thread per sample
 #define KL_MAX_THREADS  128
@@ -831,11 +832,14 @@ static void *game_watch_main(void *arg) {
     (void)arg;
     unsigned thr = kl_env_uint("KL_SNAP_GAME_STALL_S", 10u);
     unsigned second = thr >= 30u ? thr * 3u : 30u;
-    uint64_t seen = 0; int shots = 0;
+    uint64_t seen = 0; int shots = 0; uint64_t bg_ns = 0;
     for (;;) {
         usleep(500000);
+        // Backgrounded, the guest is parked on purpose: no snapshots, and silence counts from the return.
+        if (kl_bg_active()) { bg_ns = mono_ns(); shots = 0; continue; }
         uint64_t b = atomic_load(&g_beat_ns);
         if (b != seen) { seen = b; shots = 0; continue; }
+        if (bg_ns > b) b = bg_ns;
         double silent = (double)(mono_ns() - b) / 1e9;
         if ((shots == 0 && silent >= thr) || (shots == 1 && silent >= second)) {
             char why[96];

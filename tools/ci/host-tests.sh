@@ -41,6 +41,7 @@ klepton_tests() {
       tests/spatial_test.c kl_spatial.c kl_ovrp_spatial.c -lm -lpthread
   cd "$ROOT/klepton" || return 1
   run t_ptw tests/t_ptw.c runtime/gfx/kl_reproject_ptw.c -lm
+  run t_bg -rdynamic -Iruntime/gfx tests/t_bg.c runtime/gfx/kl_bg.c -lpthread -ldl
   mkdir -p "$T/memdiag"
   awk '/KL-TEST-BEGIN (rate|range|fstat)/{p=1;next} /KL-TEST-END (rate|range|fstat)/{p=0} p' runtime/libc/kl_libc.c > "$T/memdiag/libc_blocks.inc"
   awk '/KL-TEST-BEGIN ent/{p=1;next} /KL-TEST-END ent/{p=0} p' visionos/Sources/kl_app.c > "$T/memdiag/app_blocks.inc"
@@ -73,6 +74,8 @@ klepton_tests() {
   run t_vk_trap -Wno-unused-function -I"$T/newt" -I"$VPK/gpu/vulkan/third_party/vulkan-headers/include" tests/t_vk_trap.c
   awk '/KL-TEST-BEGIN ue4sig/{p=1;next} /KL-TEST-END ue4sig/{p=0} p' runtime/guest/kl_ue4.c > "$T/newt/ue4sig.inc"
   run t_ue4_sig -Wno-unused-function -I"$T/newt" tests/t_ue4_sig.c
+  awk '/KL-TEST-BEGIN ue4cmd/{p=1;next} /KL-TEST-END ue4cmd/{p=0} p' runtime/guest/kl_ue4.c > "$T/newt/ue4cmd.inc"
+  run t_ue4_cmdline -Wno-unused-function -I"$T/newt" tests/t_ue4_cmdline.c
   mkdir -p "$T/vmlog"
   awk '/KL-TEST-BEGIN vmgroup/{p=1;next} /KL-TEST-END vmgroup/{p=0} p' runtime/libc/kl_libc.c > "$T/vmlog/vmgroup.inc"
   run t_vmgroup -Wno-unused-function -I"$T/vmlog" tests/t_vmgroup.c

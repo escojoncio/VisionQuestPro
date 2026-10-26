@@ -142,9 +142,10 @@ const char *kl_ue4_error(void) { return g_err; }
 // screen" — a rendering bug with no rendering cause, and the file that caused
 // it appears nowhere in any log.
 //
-// Both places are looked at because the base the engine builds this path from
-// is not ours to restate; naming what is THERE is honest where reimplementing
-// the search would be a second, drifting copy of it.
+// The file is <dir>/<Project>/<name>; the project is not restated here, so every
+// subdirectory of <dir> is looked at — naming what is THERE is honest where
+// reimplementing the search would be a second, drifting copy of it. <dir>/<name>
+// is never opened by the engine and is not reported.
 static void ue4_report_command_line(FILE *out) {
     if (!out) return;
     const char *files = kl_jni_files_dir();
@@ -155,8 +156,6 @@ static void ue4_report_command_line(FILE *out) {
     const char *names[8];
     char        held[8][1024];
     size_t      n = 0;
-    snprintf(held[n], sizeof held[n], "%s/%s", dir, g_cmdline_name);
-    names[n] = held[n]; n++;
     DIR *d = opendir(dir);
     if (d) {
         struct dirent *e;
@@ -188,7 +187,7 @@ static void ue4_report_command_line(FILE *out) {
 // UE4 logs to a FILE (Saved/Logs/<Project>.log) and makes no __android_log
 // calls, so a fatal that ends in ForceQuit leaves nothing in our capture to
 // explain it (TWD2/Vampire quit early with no visible reason). UE4 reads a
-// writable command-line override at <files>/UE4Game/UE4CommandLine.txt before
+// writable command-line override at <files>/UE4Game/<Project>/UE4CommandLine.txt before
 // the packaged one, so this writes that override with the packaged args plus
 // -stdout. Diagnostic only; the file persists, so it is written ONLY under the
 // knob and names itself in the log.
@@ -200,6 +199,25 @@ static void ue4_report_command_line(FILE *out) {
 static int ue4_stdout_default(void) {
     return 1;
 }
+
+// KL-TEST-BEGIN ue4cmd
+// <files>/<native_dir>/<proj> and the command-line file inside it; non-zero if it does not fit.
+static int ue4_cmdline_dir(char *out, size_t n, const char *files, const char *native_dir,
+                           const char *proj) {
+    int w = snprintf(out, n, "%s/%s/%s", files, native_dir, proj);
+    return (w < 0 || (size_t)w >= n) ? 1 : 0;
+}
+static int ue4_cmdline_path(char *out, size_t n, const char *files, const char *native_dir,
+                            const char *proj, const char *name) {
+    int w = snprintf(out, n, "%s/%s/%s/%s", files, native_dir, proj, name);
+    return (w < 0 || (size_t)w >= n) ? 1 : 0;
+}
+// The per-target extras are untested guesses, so the file the engine now really reads must not
+// carry them unless KL_UE4_TARGET_EXTRAS=1: no target name selects no extras block.
+static const char *ue4_extras_target(const char *target, int enabled) {
+    return enabled ? target : NULL;
+}
+// KL-TEST-END ue4cmd
 
 static void ue4_maybe_stdout_cmdline(const char *proj) {
     if (!kl_env_on("KL_UE4_STDOUT", ue4_stdout_default())) return;
@@ -223,12 +241,13 @@ static void ue4_maybe_stdout_cmdline(const char *proj) {
     // intended knob, but staging is keyed on the APK's mtime (see the Makefile),
     // so a loose edit to it never re-stages — this file, which the engine really
     // reads (files_dir/<native>/UECommandLine.txt), is the one place an override
-    // is guaranteed to land. KL_UE4_EXTRA_CVARS works off device; on device the
-    // per-target block below is the lever, self-naming in the log and removable.
+    // is guaranteed to land. KL_UE4_EXTRA_CVARS works off device; the per-target block below
+    // is untested and only applies with KL_UE4_TARGET_EXTRAS=1 (default off).
     const char *extra = getenv("KL_UE4_EXTRA_CVARS");
     char extra_buf[512]; extra_buf[0] = 0;
     if (!extra || !*extra) {
-        const char *t = kl_driver_target_name();
+        const char *t = ue4_extras_target(kl_driver_target_name(),
+                                          kl_env_on("KL_UE4_TARGET_EXTRAS", 0));
         // olar has TWO independent visual bugs; its device-profile cvars are built
         // additively so a test for one does not disturb the other.
         //
@@ -359,9 +378,13 @@ static void ue4_maybe_stdout_cmdline(const char *proj) {
         extra = extra_buf;
     }
 
-    char ov[1024];
-    snprintf(ov, sizeof ov, "%s/%s/%s", kl_jni_files_dir(), g_native_dir, g_cmdline_name);
-    char dir[1024]; snprintf(dir, sizeof dir, "%s/%s", kl_jni_files_dir(), g_native_dir);
+    // The engine reads <files>/<native>/<Project>/<name>; the file one level up
+    // is never opened (log: fopen ".../UE4Game/Maestro/UE4CommandLine.txt" FAILED).
+    char ov[1024], dir[1024];
+    if (ue4_cmdline_path(ov, sizeof ov, kl_jni_files_dir(), g_native_dir, proj, g_cmdline_name) ||
+        ue4_cmdline_dir(dir, sizeof dir, kl_jni_files_dir(), g_native_dir, proj)) return;
+    char root[1024]; snprintf(root, sizeof root, "%s/%s", kl_jni_files_dir(), g_native_dir);
+    mkdir(root, 0777);
     mkdir(dir, 0777);
     FILE *f = fopen(ov, "w");
     if (!f) { fprintf(stderr, "  [ue4] KL_UE4_STDOUT: cannot write %s\n", ov); return; }

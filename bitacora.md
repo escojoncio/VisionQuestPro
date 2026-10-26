@@ -1,6 +1,8 @@
 # Bitácora — VisionQuestPro
 
 ## Last done
+- 2026-10-26 VPKEngine `5b8432f`: PSO `Priority::Urgent` (boost real) + creaciones del juego a `Visible` (causa de tirones: backlog del precache UE ~7,4k PSO en Blocking, boost al final de la cola); `skip_by{}` en `vk.submit` (ITR2: ~236/270 draws descartados por ok=false silencioso, motivo por medir); vpgles program binaries (causa Maestro: `PROGRAM_BINARY_LENGTH`=0 → UE fatal "Binary program returned 0 bytes!" en FOpenGLProgramBinaryCache → ForceQuit ×90 → SIGSEGV SceneColor nulo en RenderForward); `vpgpu::BackgroundGate`.
+- 2026-10-26 VQP: `klepton/runtime/gfx/kl_bg.{c,h}`: guest bloqueado en segundo plano (QueueSubmit/Present, SwapBuffers, ovrp Update2/EndFrame4/end_frame_impl, xr WaitFrame/EndFrame; foco VrFocus2/InputFocus=0), Swift `scenePhaseChanged`→`kl_bg_set`, reenvío por dlsym a `vpgpu_set_background`; watchdog silenciado en bg. `kl_ue4.c`: UE4CommandLine.txt en `<files>/<native>/<Proj>/` (antes ruta que UE no leía → sin log UE); extras por target solo con `KL_UE4_TARGET_EXTRAS=1`. Tests `t_bg`, `t_ue4_cmdline`.
 - 2026-10-26 VPKEngine `710574a`: `ScopedPool` (objc_autoreleasePoolPush/Pop, core/include/vpgpu/core/scoped_pool.h) en métodos públicos de MetalBackend, MetalPlatform taa/depthResolve y entradas vk*/vpvk_* de entry.cpp (causa inferida de RAM: MTLTexture autoreleased en hilos guest sin pool = inmortales; attr ≫ ledger en Gundam/Deadpool/ITR2). Texturas `pinned` con retención 1 s + 4 frames (`pinnedHold`/`promotePinned`). `Attachment::keepSamples` (=true en todo StoreAndResolve del traductor; solo DONT_CARE+resolve es memoryless), `msaaColorResolveOnTile` por defecto (`VP_MSAA_TILE`). gles: subidas DEPTH_COMPONENT→D16/D24/D32F. Contadores img_rel_*/tex_created/destroyed/g_tex_live en [vkagg].
 - 2026-10-26 VQP: tamaño de ojo sin bucle: primer push = constante de la partida (`kl_ovrp_set_eye_texture_size` devuelve aceptado; Swift guarda solo si aceptado; espera 500 ms si el guest pregunta antes); `kles_desc_size` cancela escala guest >1 (modo pct), cap `KL_OVRP_EYE_MAX`; `kles_freeze_widen` (ensanche del plugin congelado una vez, >1.02) y `kles_freeze_xr_scale` (OpenXR) en xr/kl_ovrp_eyesize.h. Retire: `g_eye_published`, imagen nunca publicada → quick sin hold; ASW MV/depth quick=2 (0,5 s+3 frames o 2 s); `kl_vulkan_retire_poll` desde `kl_mem_rate_poll` (no_publish). `klvk_forget_cached_mtl` también en `klvk_DestroyImage`. Swift `pruneArrayViews`. `ue4_stdout_default`=1 para todo UE.
 - `07bd8fa` (VPKEngine): vpgles enlaza varyings por location (confirmado en visor: Maestro sin "fragment input not written").
@@ -11,14 +13,12 @@
 - `c6f8362`: carátula tienda: timeouts 30/120 s, backoff net 2/10/30/60 min, respaldo nombre exacto+organización.
 
 ## Current state
-- Última build en verde: run CI 40266094712 (commit af035c0, VPKEngine d695206): todo lo de "Last done" 2026-10-26 unverified en visor; .mm/Swift no compilados en Linux.
-- Logs e2c04e6: Maestro = rosa + SIGSEGV NULL+0x34 (libUE4 +0x7a91b58) tras 70× `AndroidThunkJava_ForceQuit` ignorados (klj_GA_forceQuit, kl_jni_ue4.c:390), motivo desconocido; ITR2 = jetsam por bucle de capa de ojo (29 rebuilds/7 s); Deadpool = salida normal a 7,9/8,2 GB (ASTC destruidas vivas en Metal); Gundam = jetsam, attr tex.color +12/ciclo de vídeo con ledger plano.
+- Última build en verde: run CI 40266094712 (commit af035c0, VPKEngine d695206). Cambios 2026-10-26 posteriores (VPKEngine 5b8432f + VQP kl_bg/kl_ue4) unverified; .mm/Swift no compilados en Linux.
 - Pendiente (orden):
-  1. Logs de la build nueva: comparar `[hb] gpu.attr` frente a `ledger` y `g_tex_live`/`tex_destroyed` en [vkagg] (Gundam/Deadpool/ITR2). Si attr sigue ≫ ledger, la hipótesis autoreleasepool es falsa → probar `OBJC_DEBUG_MISSING_POOLS=YES`.
-  2. Maestro: leer el Fatal de UE en el log (stdout UE activado) → causa del ForceQuit.
-  3. ITR2: confirmar 1 sola capa de ojo y sin "allocating fresh".
+  1. Logs build af035c0: untracked Metal plano (~200-256 MiB) → autoreleasepool confirmado; picos: Deadpool 6,3 GB (antes 8,2), Gundam 6,7 GB (antes jetsam), ITR2 4,9 GB; ITR2 `g_tex_live` 56→4071 por vigilar. Gundam: parpadeo sin causa en log (0 skips, 6 rebuilds de capa).
+  2. Build nueva: ITR2 leer `skip_by{}`/`vk.skip` → arreglar el motivo; medir tirones (`vk.pipeline_skip`, `hard_waited_ms`); Maestro sin ForceQuit; `[bg] gpu paused/resumed` sin errores BackgroundExecutionNotPermitted.
+  3. Pipelines depth-only no se archivan (metal_backend.mm:5915) y archive sin flush periódico; GLES sin precompilación (pipeline por estado en primer draw).
   3. Auditoría restante (no aplicada): ovrp que devuelven -1004 donde se espera handle (`ovrp_GetNativeSDKPointer2`, `GetEyeFovLayerId`, `SetupMirrorTexture2`); OpenXR FB/META sin fila (ITR2); 75 thunks `AndroidThunkJava_*` NO-OP; 184 pares Unity sin enlace; `createTelemetryHandler` NULL (Gundam). Detalle: auditoría en sesión (no en repo).
-  4. Submit GPU en background (UBOAT al salir): parar trabajo GPU al pasar a background.
   5. VPKEngine: fusión con rama AVP pendiente; `msaaResolveOnTile` necesita `Attachment::keepSamples`.
 - Riesgos abiertos: twin render pass depende de marcar imágenes de ojo; draws con `imageBuffer` sin enlazar se saltan; cuarentena cond/mutex por tiempo; `klj_arr(x)->data` sin proteger en `jni/kl_jni_{android,bridge,services,ue4,window}.c`; pausa con la Corona = `_exit(0)`; ForceQuit crea `klepton-crash.log` sin crash (volcado `[fatal]`).
 

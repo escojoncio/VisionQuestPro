@@ -28,6 +28,7 @@
 #include "kl_env.h"
 #include "kl_sample.h"    // kl_sample_snapshot — the frame-stall watchdog
 #include "kl_vulkan.h"    // kl_vulkan_mem_stats — the heartbeat's GPU line
+#include "kl_bg.h"        // kl_bg_shutdown — release the guest's blocked submit paths before joining it
 #include "kl_mtl_attr.h"  // kl_mtl_attr_print — live Metal objects by creation site
 
 // --- Which guest ------------------------------------------------------------
@@ -886,6 +887,8 @@ static void *heartbeat(void *arg) {
                     last_serial = rp.serial;
                     if (still_ticks >= 32) snaps = 0;   // recovered: arm for the next stall
                     still_ticks = 0;
+                } else if (kl_bg_active()) {
+                    still_ticks = 0;   // backgrounded: the guest is parked on purpose, not stalled
                 } else if (advanced > 30 && g_phase && strcmp(g_phase, "frame pump") == 0) {
                     still_ticks++;
                     blocked = still_ticks >= 2 && (still_ticks - 2) % 16 == 0;   // first at 500 ms, then every 4 s
@@ -1575,6 +1578,7 @@ void kl_app_guest_publish(void) {
 }
 
 void kl_app_guest_stop(void) {
+    kl_bg_shutdown();   // a guest blocked in kl_bg_wait would never reach the join below
     pthread_mutex_lock(&g_guest.mu);
     if (!g_guest.running) { pthread_mutex_unlock(&g_guest.mu); return; }
     g_guest.stop = 1;

@@ -60,6 +60,7 @@
 #include "klepton.h"
 #include "kl_passthrough.h"
 #include "../diag/kl_wait.h"   // kl_game_beat: game-thread silence watcher
+#include "kl_bg.h"             // kl_bg_wait: no GPU work while the app is backgrounded
 
 // ------------------------------------------------------- transcribed from the spec
 // Only what we actually read or write. Every layout below is copied field for
@@ -6202,6 +6203,7 @@ static XrResult klxr_WaitFrame(void *session, const XrFrameWaitInfo *info,
                                XrFrameState *state) {
     KLXR_TRACE("xrWaitFrame");
     kl_game_beat(1);
+    kl_bg_wait();   // like a Quest runtime: the frame loop does not tick while the app is not visible
     // hl2 (KL_HL2_FORCERT): drive the mod's CreateRenderTargets from here — the guest's
     // render/frame thread with its GL context — instead of the log handler (which ran on a
     // worker thread and re-entered logging, faulting). Self-gated: fires once, retries per
@@ -6461,6 +6463,7 @@ static XrResult klxr_validate_layer(const XrCompositionLayerBaseHeader *l) {
 
 static XrResult klxr_EndFrame(void *session, const XrFrameEndInfo *info) {
     KLXR_TRACE("xrEndFrame");
+    kl_bg_wait();
     pthread_mutex_lock(&g_st_mu); g_st_frames++; pthread_mutex_unlock(&g_st_mu);
     klxr_session *s = klxr_sess(session);
     if (!s) KLXR_RET(KLXR_ERROR_HANDLE_INVALID);

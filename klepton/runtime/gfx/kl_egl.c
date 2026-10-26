@@ -36,6 +36,7 @@
 #include "kl_glfb.h"
 #include "kl_mediandk.h"   // what an AHardwareBuffer is, for the image path
 #include "kl_present.h"
+#include "kl_bg.h"        // kl_bg_wait: no GPU work while the app is backgrounded
 #include "kl_openxr.h"   // XR_KHR_android_surface_swapchain: eglSwapBuffers presents it
 #include "kl_gles.h"     // KL_GLES_VPK=1: VPKEngine's own GLES/EGL answers instead
 
@@ -1684,6 +1685,7 @@ unsigned long kl_egl_swap_count(void) { return g_frames; }
 static unsigned klegl_SwapBuffers(EGLDisplay dpy, EGLSurface s) {
     KLEGL_TRACE("eglSwapBuffers");
     (void)dpy;
+    kl_bg_wait();
     g_frames++;
     // XR_KHR_android_surface_swapchain: for a swapchain-bound window this swap is
     // the "release" — the finished frame is in the default framebuffer right now

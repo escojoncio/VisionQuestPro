@@ -128,6 +128,7 @@ enum Lifecycle {
     @MainActor static func engineQuit() async -> Bool {
         guard !quitDispatched else { return true }
         quitDispatched = true
+        kl_bg_shutdown()   // a guest blocked while backgrounded must be free to wind down
         NSLog("[app] the engine asked to end — closing the immersive space: \(String(cString: kl_app_quit_reason()))")
         guard let dismiss = dismissSpace else {
             NSLog("[app] engine quit: no dismiss action captured — the compositor ends its own loop")
@@ -208,6 +209,9 @@ enum Lifecycle {
     static func scenePhaseChanged(to phase: ScenePhase) {
         NSLog("[app] scene phase -> \(phase) at \(Date().formatted(.iso8601)) (immersive open: \(immersiveOpen))")
         lastPhase = phase
+        // Metal refuses every command buffer while backgrounded: the guest's submit paths block
+        // until the app is foreground again (kl_bg.c; thread-safe, never blocks this one).
+        kl_bg_set(phase == .background ? 1 : 0)
         // Coming back is the audio's cue, and it needs one: this OS silently
         // stops calling CoreAudio's render callback across a scene transition —
         // the boot window being closed while the immersive space runs is one,

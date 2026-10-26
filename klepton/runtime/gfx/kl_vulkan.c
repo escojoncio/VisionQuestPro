@@ -28,6 +28,7 @@
 #include <string.h>
 
 #include "kl_vulkan.h"
+#include "kl_bg.h"       // kl_bg_wait: no GPU work while the app is backgrounded
 #include "kl_env.h"
 #include "kl_driver.h"   // kl_driver_target_name() — per-target GPU identity spoof
 #include "klepton.h"       // kl_addr_image() — call-site logging (klvk_who)
@@ -5294,6 +5295,7 @@ int kl_vulkan_taa_gles_frame_end(int stage, unsigned long long rec_serial) {
 }
 
 static VkResult klvk_QueuePresentKHR(VkQueue q, const VkPresentInfoKHR *pi) {
+    kl_bg_wait();
     klvk_device *d = dev_of_queue(q);
     unsigned this_frame = g_presented++;
 
@@ -7757,6 +7759,7 @@ static VkResult VKAPI_CALL klvk_QueueSubmit(VkQueue q, uint32_t n,
         const VkSubmitInfo *si, VkFence fence) {
     static PFN_vkQueueSubmit real;
     if (!real && real_gdpa) real = (PFN_vkQueueSubmit)real_gdpa(g_devs[0]?g_devs[0]->dev:NULL, "vkQueueSubmit");
+    kl_bg_wait();   // before g_qsub_mu: a blocked guest must not hold the queue lock
     if (klvk_trace()) {
         static int c;
         if (c < 40) { c++;

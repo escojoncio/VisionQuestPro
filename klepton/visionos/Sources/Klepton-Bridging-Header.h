@@ -42,6 +42,8 @@
 // where it reads the fence value. The eye TEXTURE still arrives through
 // kl_glfb's own table, so nothing else about this seam widens.
 #import "kl_vulkan.h"
+// ...and the background gate: the scene phase goes in (KleptonApp.swift), the guest's submit paths block on it.
+#import "kl_bg.h"
 // VisionQuestPro: the launcher's C side (APK reader, in-process klepton-ld) and
 // VPKEngine's signature (runtime/vp_codesign.h, vp_pkcs12.h, from VPKEngine at build time).
 #import "vq_apk.h"
