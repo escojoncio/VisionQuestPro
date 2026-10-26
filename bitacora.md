@@ -11,7 +11,7 @@
 - `c6f8362`: carátula tienda: timeouts 30/120 s, backoff net 2/10/30/60 min, respaldo nombre exacto+organización.
 
 ## Current state
-- Build nueva pendiente (VQP con VPKEngine 710574a): todo lo de "Last done" 2026-10-26 unverified en visor; .mm/Swift no compilados en Linux.
+- Build nueva pendiente (VQP con VPKEngine d695206: 710574a + libobjc en Apple): todo lo de "Last done" 2026-10-26 unverified en visor; .mm/Swift no compilados en Linux.
 - Logs e2c04e6: Maestro = rosa + SIGSEGV NULL+0x34 (libUE4 +0x7a91b58) tras 70× `AndroidThunkJava_ForceQuit` ignorados (klj_GA_forceQuit, kl_jni_ue4.c:390), motivo desconocido; ITR2 = jetsam por bucle de capa de ojo (29 rebuilds/7 s); Deadpool = salida normal a 7,9/8,2 GB (ASTC destruidas vivas en Metal); Gundam = jetsam, attr tex.color +12/ciclo de vídeo con ledger plano.
 - Pendiente (orden):
   1. Logs de la build nueva: comparar `[hb] gpu.attr` frente a `ledger` y `g_tex_live`/`tex_destroyed` en [vkagg] (Gundam/Deadpool/ITR2). Si attr sigue ≫ ledger, la hipótesis autoreleasepool es falsa → probar `OBJC_DEBUG_MISSING_POOLS=YES`.
