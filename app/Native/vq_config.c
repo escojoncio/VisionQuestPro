@@ -11,6 +11,10 @@ static vq_gfx_config g_cfg;
 static int g_have;
 
 int vq_gfx_config_forward(void) {
+    // Quest/Adreno 740 identity: always on, independent of the settings and of g_have. Absent in older VPKEngine: no-op.
+    void (*set_identity)(int) = (void (*)(int))dlsym(RTLD_DEFAULT, "vpvk_config_set_quest_identity");
+    if (set_identity) set_identity(1);
+    else fprintf(stderr, "[vqcfg] vpvk_config_set_quest_identity missing (older VPKEngine)\n");
     if (!g_have) return 0;
     void (*set_fov)(const vpvk_foveation *) =
         (void (*)(const vpvk_foveation *))dlsym(RTLD_DEFAULT, "vpvk_config_set_foveation");

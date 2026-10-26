@@ -292,6 +292,7 @@ final class VQSettings: ObservableObject {
 
     /// Klepton's knobs for these settings (and the chosen game's own AA).
     func applyToEnvironment(game: VQGame?) {
+        setenv("VPVK_QUEST_IDENTITY", "1", 0)  // Quest/Adreno 740 identity, always on (before VPVulkan loads; also covers GLES)
         selectDriver()
         setenv("KL_NET_OFFLINE", offline ? "1" : "0", 1)
         setenv("KL_LOG_FILE", guestLog ? "1" : "0", 1)

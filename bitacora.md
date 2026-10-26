@@ -44,6 +44,7 @@
 - Valores: burst audio 1024 con Wwise; `kMaxArchiveFiles` 512; `VPVK_MAX_DRAWS_PER_CB` 256; anillo TAA 4; máscara UI R8 slot 7; `KL_OVERLAY_SUBMIT_ORDER`=1.
 - Datos de juegos nunca en el repo.
 - Build solo con `[build]`, completa y revisada; VPKEngine fijado a SHA en CI (subir `ref:` en visionos.yml al cambiar de motor).
+- Identidad Quest/Adreno opt-in en VPKEngine (avp-port d395a50): VQP la activa siempre (`vq_gfx_config_forward` → `vpvk_config_set_quest_identity(1)` + `VPVK_QUEST_IDENTITY=1` en `applyToEnvironment`); al subir `ref:` a un motor con avp-port, verificar en log.
 
 ## Files in play
 - `klepton/runtime/xr/{kl_ovrp.c,kl_ovrp_input.c,kl_ovrplat.c}`, `klepton/visionos/Sources/KleptonControllers.swift` (+ bridging header).
