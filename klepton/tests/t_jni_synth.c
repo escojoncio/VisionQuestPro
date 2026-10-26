@@ -1,5 +1,5 @@
 // Synthetic object returns of kl_jni.c (KL-TEST synthobj block, cut out at build time).
-// Gundam's Unity 6 player calls createTelemetryHandler and uses the result without a null check:
+// A Unity 6 player calls createTelemetryHandler and uses the result without a null check:
 // the call must answer an inert object of the class its own signature names, never null.
 #include <stdio.h>
 #include <string.h>

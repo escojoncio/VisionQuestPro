@@ -1277,7 +1277,7 @@ static int klj_game_void_noop(const klj_wanted *w, char have) {
     return 1;
 }
 
-// Gundam's Unity 6 player asks the game's Java for createTelemetryHandler and uses the
+// A Unity 6 player asks the game's Java for createTelemetryHandler and uses the
 // answer without a null check. Its body (a telemetry sink) lives in the APK's dex, which
 // never runs, and offline nothing may leave the device, so the honest answer is an inert
 // object of the class the call's own signature names: every method later called on it is

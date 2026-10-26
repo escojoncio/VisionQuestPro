@@ -41,6 +41,9 @@ int main(void) {
     CHECK(ask("AndroidThunkJava_GetAppVersionCode", "()Ljava/lang/String;", &OFFLINE, &iv, &sv) < 0, "int row, string asked");
     CHECK(ask("AndroidThunkJava_HasActiveWiFiConnection", "()I", &OFFLINE, &iv, &sv) < 0, "bool row, int asked");
     CHECK(ask("AndroidThunkJava_GetCacheDir", "()V", &OFFLINE, &iv, &sv) < 0, "string row, void asked");
+    CHECK(ask("AndroidThunkJava_GetCacheDir", "()S", &OFFLINE, &iv, &sv) < 0, "string row, short asked");
+    CHECK(ask("AndroidThunkJava_IapQueryExistingPurchases", "()S", &ONLINE, &iv, &sv) >= 0 && iv == 0 && sv == NULL,
+          "a short clean failure is zero, not a String");
 
     // H: host-owned void
     CHECK(ask("AndroidThunkJava_Vibrate", "(I)V", &OFFLINE, &iv, &sv) >= 0 && iv == 0 && sv == NULL, "vibrate is a void no-op");
@@ -64,6 +67,7 @@ int main(void) {
     CHECK(ask("GetAppVersionName", "()Ljava/lang/String;", &ONLINE, &iv, &sv) < 0, "prefix required");
     CHECK(ask("AndroidThunkJava_GetCacheDir", "no paren", &ONLINE, &iv, &sv) < 0, "not a signature");
     CHECK(ask("AndroidThunkJava_GetCacheDir", "()Q", &ONLINE, &iv, &sv) < 0, "bad return type");
+    CHECK(ask("AndroidThunkJava_Vibrate", "()", &ONLINE, &iv, &sv) < 0, "no return type");
     CHECK(ask(NULL, "()V", &ONLINE, &iv, &sv) < 0 && ask("AndroidThunkJava_Vibrate", NULL, &ONLINE, &iv, &sv) < 0, "NULLs");
     // rows that have their own binding (kl_jni_ue4.c table) must not be shadowed by this one
     CHECK(ask("AndroidThunkJava_GetAndroidId", "()Ljava/lang/String;", &ONLINE, &iv, &sv) < 0, "bound rows stay out of the table");

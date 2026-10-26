@@ -1194,15 +1194,15 @@ static const klj_ue4_thunk g_ue4_thunks[] = {
 };
 #define KLJ_UE4_NTHUNKS ((int)(sizeof g_ue4_thunks / sizeof g_ue4_thunks[0]))
 
-// The return type a signature declares: Z B C S I J F D V, 'S' for java/lang/String, 'L' for any other
-// object or an array; 0 when it is not a signature.
+// The return type a signature declares: Z B C S I J F D V as in JNI ('S' is short), 's' (internal code) for
+// java/lang/String, 'L' for any other object or an array; 0 when it is not a signature.
 static char klj_ue4_ret(const char *sig) {
     const char *p = sig ? strchr(sig, ')') : NULL;
     if (!p) return 0;
     p++;
     if (*p == '[') return 'L';
-    if (*p == 'L') return strcmp(p, "Ljava/lang/String;") == 0 || strcmp(p, "Ljava.lang.String;") == 0 ? 'S' : 'L';
-    return strchr("ZBCSIJFDV", *p) && p[1] == 0 ? *p : 0;
+    if (*p == 'L') return strcmp(p, "Ljava/lang/String;") == 0 || strcmp(p, "Ljava.lang.String;") == 0 ? 's' : 'L';
+    return *p != 0 && strchr("ZBCSIJFDV", *p) && p[1] == 0 ? *p : 0;
 }
 
 static int klj_ue4_thunk_find(const char *name, const char *sig) {
@@ -1213,7 +1213,7 @@ static int klj_ue4_thunk_find(const char *name, const char *sig) {
         const klj_ue4_thunk *t = &g_ue4_thunks[i];
         if (strcmp(name + sizeof pre - 1, t->name) != 0) continue;
         int ok = t->kind == '*' || (t->kind == 'Z' && rk == 'Z') || (t->kind == 'N' && (rk == 'I' || rk == 'J'))
-              || (t->kind == 'S' && rk == 'S') || (t->kind == 'V' && rk == 'V');
+              || (t->kind == 'S' && rk == 's') || (t->kind == 'V' && rk == 'V');
         if (ok) return i;
     }
     return -1;
@@ -1233,8 +1233,8 @@ static void klj_ue4_thunk_value(int i, char rk, const klj_ue4_env *e, int64_t *i
     case 'X': *sv = e->ext_files_dir; break;
     case 'M': *iv = (int64_t)(rk == 'J' ? e->mem_bytes : e->mem_bytes >> 20); break;
     }
-    if (rk == 'S' && !*sv) *sv = "";
-    if (rk != 'S') *sv = NULL;
+    if (rk == 's' && !*sv) *sv = "";
+    if (rk != 's') *sv = NULL;
     if (rk != 'Z' && rk != 'I' && rk != 'J') *iv = 0;
 }
 // KL-TEST-END ue4thunk
@@ -1276,7 +1276,7 @@ int klj_ue4_thunk_answer(const klj_wanted *w, klj_val *out) {
         klj_noop_hit(w);
     }
     *out = (klj_val){.j = 0};
-    if (rk == 'S') out->l = kl_jni_new_string(sv);
+    if (rk == 's') out->l = kl_jni_new_string(sv);
     else           out->j = (uint64_t)iv;
     return 1;
 }
