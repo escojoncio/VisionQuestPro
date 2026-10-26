@@ -2602,11 +2602,61 @@ static int klovrp_eyelevel_zero(void) {
     if (on < 0) on = kl_env_on("KL_OVRP_EYELEVEL_ZERO", 1);
     return on;
 }
-float klovrp_guest_origin_y(void) {
-    if (g_tracking_origin != 0 || !klovrp_eyelevel_zero()) return 0.0f;
+
+// --- "Sentado": a seated user in a floor/stage space ------------------------
+// Under FloorLevel/Stage the guest gets the head's real height over the floor, so
+// a seated user (~1.0 m) stands in a world built for ~1.65 m: far too low. The app
+// setting «Sentado» (KL_OVRP_SEATED=1, KL_OVRP_STAND_HEIGHT, default 1.65) raises
+// the whole guest space by max(0, standing height - measured eye height): head,
+// eyes, hands, boundary floor and OpenXR STAGE / LOCAL_FLOOR all move together, so
+// nothing changes between them. EyeLevel (0) and OpenXR LOCAL are untouched.
+// It is expressed as the guest origin (guest = display - origin), NEGATED, so the
+// compositor's add-back (display = guest + origin, kl_ovrp_guest_origin_y) undoes
+// exactly what the guest was given. Recomputed on every read from the measured
+// height, so a re-latch (posture change, recenter) follows. KL-TEST seatoff.
+// KL-TEST-BEGIN seatoff
+static float klovrp_stand_height_clamp(float h) {
+    return (isfinite(h) && h >= 1.0f && h <= 2.5f) ? h : 1.65f;
+}
+static float klovrp_seat_offset_calc(int seated, int origin, float stand, float measured) {
+    if (!seated || (origin != 1 && origin != 2)) return 0.0f;
+    if (!isfinite(measured) || !(measured > 0.0f) || !isfinite(stand)) return 0.0f;
+    float o = stand - measured;
+    return o > 0.0f ? o : 0.0f;
+}
+static float klovrp_guest_origin_calc(int origin, int eyelevel_zero, int head_set,
+                                      float measured, float seat_off) {
+    if (origin == 1 || origin == 2) return seat_off > 0.0f ? -seat_off : 0.0f;
+    if (origin != 0 || !eyelevel_zero) return 0.0f;
     // No published head yet: the default head is already y = 0 under EyeLevel.
-    if (!__atomic_load_n(&g_head_set, __ATOMIC_ACQUIRE)) return 0.0f;
-    return klovrp_measured_eye_height();
+    return head_set ? measured : 0.0f;
+}
+// KL-TEST-END seatoff
+static int klovrp_seated_on(void) {
+    static int on = -1;
+    if (on < 0) on = kl_env_on("KL_OVRP_SEATED", 0);
+    return on;
+}
+static float klovrp_stand_height(void) {
+    static float h;   // 0 = not read yet
+    if (h <= 0.0f) h = klovrp_stand_height_clamp(kl_env_float("KL_OVRP_STAND_HEIGHT", 1.65f));
+    return h;
+}
+static float klovrp_seat_offset_for(int origin) {
+    if (!klovrp_seated_on()) return 0.0f;
+    return klovrp_seat_offset_calc(1, origin, klovrp_stand_height(),
+                                   kl_ovrp_measured_eye_height_or0());
+}
+// For the guest's current OVRPlugin origin.
+static float klovrp_seat_offset(void) { return klovrp_seat_offset_for(g_tracking_origin); }
+// For OpenXR's STAGE / LOCAL_FLOOR (an OpenXR guest never sets g_tracking_origin).
+float kl_ovrp_seat_offset_stage(void) { return klovrp_seat_offset_for(1); }
+
+float klovrp_guest_origin_y(void) {
+    return klovrp_guest_origin_calc(g_tracking_origin, klovrp_eyelevel_zero(),
+                                    __atomic_load_n(&g_head_set, __ATOMIC_ACQUIRE),
+                                    g_tracking_origin == 0 ? klovrp_measured_eye_height() : 0.0f,
+                                    klovrp_seat_offset());
 }
 float kl_ovrp_guest_origin_y(void) {
     if (!__atomic_load_n(&g_ovrp_space_used, __ATOMIC_ACQUIRE)) return 0.0f;
@@ -4748,7 +4798,8 @@ static uint64_t klovrp_GetTrackingTransformRelativePose(float *out, int origin) 
     if (origin == 0 && cur != 0) {
         // Latched inside klovrp_measured_eye_height only once the headset has
         // reported a real height (1.6 m until then, never frozen at a default).
-        out[5] = klovrp_measured_eye_height();
+        // + the «Sentado» raise: the guest's floor space is lifted by it (0 when off).
+        out[5] = klovrp_measured_eye_height() + klovrp_seat_offset();
     } else if ((origin == 1 || origin == 2) && cur == 0 && klovrp_eyelevel_zero()) {
         // ...and the mirror: under EyeLevel the floor is one eye height BELOW.
         out[5] = -klovrp_measured_eye_height();
@@ -8631,7 +8682,21 @@ static uint64_t klovrp_GetLayerTextureFoveation(int layer_id, int stage, int eye
 // global at +0x53534 — and Unity built its SpaceWarp depth views on that: the
 // "wild handle 0x...03534" substituted by a 4096x4096 scratch in both games,
 // i.e. every motion-vector pass rendered against a depth of the wrong size.
-// x4/x6 are answered 0 (the caller never reads them).
+// **x4 and x6 are the two SIZES** — an ovrpSizei (two ints, 8 bytes) each, motion
+// then depth — which Unity's CreateMotionVectorTexture never reads (it sizes from
+// the layer desc) but UE4's OculusHMD does: it builds its SpaceWarp framebuffer
+// and render area from them, and 0x0 there dropped ~306 of ~330 draws a frame
+// (Into The Radius 2). They carry the size of the images actually served.
+// UNVERIFIED against OVR_Plugin.h (no verificado contra OVR_Plugin.h): inferred from the
+// UE4 symptom and from the layout of Unity's stack slots (8 bytes apart), not read from
+// the header or the binary.
+// KL-TEST-BEGIN aswsize
+static void klovrp_asw_put_sizes(uint64_t *msize, uint64_t *dsize, int w, int h, int has_depth) {
+    ovrp_sizei m = { w, h }, d = { has_depth ? w : 0, has_depth ? h : 0 };
+    memcpy(msize, &m, sizeof m);
+    memcpy(dsize, &d, sizeof d);
+}
+// KL-TEST-END aswsize
 static uint64_t klovrp_GetLayerTextureSpaceWarp(int layer_id, int stage, int eye,
                                                 uint64_t *motion, uint64_t *aux4,
                                                 uint64_t *depth, uint64_t *aux6) {
@@ -8703,6 +8768,7 @@ static uint64_t klovrp_GetLayerTextureSpaceWarp(int layer_id, int stage, int eye
     }
     *motion = mv;
     *depth = dp;
+    klovrp_asw_put_sizes(aux4, aux6, w, h, dp != 0);
     if (n <= 16)
         fprintf(stderr, "  [asw] GetLayerTextureSpaceWarp: eye layer %d stage %d eye %d -> "
                         "motion VkImage %#llx (%dx%d ovrp fmt %d %s -> VkFormat %d), depth "

@@ -296,6 +296,7 @@ struct VQSettingsView: View {
                         Text(VQL("De pie", "Standing")).tag("standing")
                     }
                     .pickerStyle(.segmented)
+                    VQSeatedControls(seated: $settings.seated, height: $settings.standHeight)
                     Picker("Passthrough", selection: $settings.passthrough) {
                         Text(VQL("Automático", "Automatic")).tag("auto")
                         Text(VQL("Siempre VR", "Always VR")).tag("off")
@@ -484,6 +485,23 @@ struct VQVPKTAATuning: View {
     }
 }
 
+/// «Sentado»: raises the guest's floor/stage space so a seated user stands at the chosen height.
+struct VQSeatedControls: View {
+    @Binding var seated: Bool
+    @Binding var height: Double
+
+    var body: some View {
+        Toggle(VQL("Modo sentado", "Seated mode"), isOn: $seated)
+        if seated {
+            Stepper(VQL("Altura de pie: \(height.formatted(.number.precision(.fractionLength(2)).locale(Locale(identifier: "es_ES")))) m", "Standing height: \(String(format: "%.2f", height)) m"),
+                    value: $height, in: 1.40...2.00, step: 0.01)
+        }
+        Text(VQL("Para jugar sentado a juegos pensados para ir de pie: sube todo (cabeza, manos y suelo) lo que falta entre tu altura de ojos medida y la altura de pie elegida, solo en juegos que usan el suelo como origen. Si ya estás más alto, no baja nada. Se aplica al lanzar el juego.",
+                 "To play seated in games made for standing: raises everything (head, hands and floor) by the gap between your measured eye height and the chosen standing height, only in games that use the floor as origin. If you are already taller, nothing is lowered. Applied when the game launches."))
+            .font(.caption)
+    }
+}
+
 /// «Nitidez (RCAS)»: the intensity of the sharpening pass (RCAS, as in FSR), 0–100 %. Applied in every game and
 /// AA mode (VPKTAA, game MSAA, no AA), only to the 3D: menus and text are left untouched. 0 % = off, no cost.
 struct VQRCASSlider: View {
@@ -536,6 +554,7 @@ struct VQGameSettingsView: View {
     @State private var aniso: Int
     /// nil = the global «Nitidez (RCAS)»; else this game's own 0...1.
     @State private var rcas: Double?
+    @State private var seat: VQGameSeat
 
     init(game: VQGame) {
         self.game = game
@@ -543,6 +562,7 @@ struct VQGameSettingsView: View {
         _res = State(initialValue: VQGameRes.load(key: game.aaKey))
         _aniso = State(initialValue: VQGameAniso.load(key: game.aaKey) ?? -1)
         _rcas = State(initialValue: VQGameRCAS.load(key: game.aaKey))
+        _seat = State(initialValue: VQGameSeat.load(key: game.aaKey))
     }
 
     /// The game's own eye-pass sample count seen on an earlier run (nil: not yet).
@@ -587,6 +607,12 @@ struct VQGameSettingsView: View {
                     }
                     Text(eyeResText).font(.caption)
                 }
+                Section(VQL("Modo sentado", "Seated mode")) {
+                    Toggle(VQL("Usar el global", "Use the global one"), isOn: $seat.useGlobal)
+                    if !seat.useGlobal {
+                        VQSeatedControls(seated: $seat.seated, height: $seat.height)
+                    }
+                }
                 Section(VQL("Filtrado anisotrópico", "Anisotropic filtering")) {
                     Picker(VQL("Filtrado anisotrópico", "Anisotropic filtering"), selection: $aniso) {
                         Text(VQL("Global", "Global")).tag(-1)
@@ -612,6 +638,10 @@ struct VQGameSettingsView: View {
             .onChange(of: res) { _, new in
                 new.save(key: game.aaKey)
                 VQLog.log("Ajustes del juego \(game.aaKey): resolución \(new.useGlobal ? "global" : "\(Int(new.pct.rounded())) %")")
+            }
+            .onChange(of: seat) { _, new in
+                new.save(key: game.aaKey)
+                VQLog.log("Ajustes del juego \(game.aaKey): modo sentado \(new.useGlobal ? "global" : (new.seated ? "sí, \(String(format: "%.2f", new.height)) m" : "no"))")
             }
             .onChange(of: rcas) { _, new in
                 VQGameRCAS.save(new, key: game.aaKey)

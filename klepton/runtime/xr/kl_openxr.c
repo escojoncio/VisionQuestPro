@@ -3591,7 +3591,7 @@ static XrPosef klxr_head_predicted(XrPosef p, const klxr_head_delta *d) {
 static int g_xr_local_mm;     // latched LOCAL origin height in mm; 0 = none yet
 static int g_xr_local_served0; // a LOCAL pose was answered with origin 0 before the first measurement
 
-static void klxr_local_changed(float from_y, float to_y) {
+static void klxr_space_changed(int ref_type, float from_y, float to_y) {
     // XrEventDataReferenceSpaceChangePending, from byte 16 on (klxr_push_event
     // writes type/next itself): session, referenceSpaceType, changeTime,
     // poseValid, poseInPreviousSpace. The new origin in the previous one is the
@@ -3602,15 +3602,37 @@ static void klxr_local_changed(float from_y, float to_y) {
     } ev;
     memset(&ev, 0, sizeof ev);
     ev.session = &g_session;
-    ev.type = KLXR_REF_SPACE_LOCAL;
+    ev.type = ref_type;
     ev.change_time = klxr_now();
     ev.pose_valid = 1;
     ev.pose.orientation.w = 1.0f;
     ev.pose.position.y = to_y - from_y;
     klxr_push_event(40 /* XR_TYPE_EVENT_DATA_REFERENCE_SPACE_CHANGE_PENDING */,
                     &ev, sizeof ev);
-    fprintf(stderr, "  [xr] LOCAL recentred: origin %.3f -> %.3f m (change pending posted)\n",
-            (double)from_y, (double)to_y);
+    fprintf(stderr, "  [xr] %s recentred: origin %.3f -> %.3f m (change pending posted)\n",
+            klxr_ref_space_name(ref_type), (double)from_y, (double)to_y);
+}
+
+// STAGE / LOCAL_FLOOR origin under «Sentado»: -(raise), latched in mm (-1 = no pose served yet).
+// The first answer is the baseline (nothing moved yet, no event); a later change of more than
+// 1 cm (first measurement of the eye height, a re-latch) posts the same change-pending event
+// LOCAL does, for both spaces. Not seated: the raise is 0 forever and nothing is ever posted.
+static int g_xr_seat_mm = -1;
+static float klxr_stage_origin_y(void) {
+    int mm = (int)lrintf(kl_ovrp_seat_offset_stage() * 1000.0f);
+    int cur = __atomic_load_n(&g_xr_seat_mm, __ATOMIC_ACQUIRE);
+    if (cur < 0) {
+        int none = -1;
+        if (__atomic_compare_exchange_n(&g_xr_seat_mm, &none, mm, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
+            return -(float)mm / 1000.0f;
+        cur = none;
+    }
+    if (abs(mm - cur) > 10 &&
+        __atomic_compare_exchange_n(&g_xr_seat_mm, &cur, mm, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+        klxr_space_changed(KLXR_REF_SPACE_STAGE, -(float)cur / 1000.0f, -(float)mm / 1000.0f);
+        klxr_space_changed(KLXR_REF_SPACE_LOCAL_FLOOR, -(float)cur / 1000.0f, -(float)mm / 1000.0f);
+    }
+    return -(float)__atomic_load_n(&g_xr_seat_mm, __ATOMIC_ACQUIRE) / 1000.0f;
 }
 
 static float klxr_local_origin_y(void) {
@@ -3635,14 +3657,14 @@ static float klxr_local_origin_y(void) {
             // A pose in LOCAL was already answered with origin 0: the scene jumps by the height, so say it
             // (the same event as a recenter). Nothing served yet = nothing moved = no event.
             if (__atomic_exchange_n(&g_xr_local_served0, 0, __ATOMIC_ACQ_REL))
-                klxr_local_changed(0.0f, (float)mm / 1000.0f);
+                klxr_space_changed(KLXR_REF_SPACE_LOCAL, 0.0f, (float)mm / 1000.0f);
         }
         return (float)__atomic_load_n(&g_xr_local_mm, __ATOMIC_ACQUIRE) / 1000.0f;
     }
     if (abs(mm - cur) >= 10 &&
         __atomic_compare_exchange_n(&g_xr_local_mm, &cur, mm, 0,
                                     __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
-        klxr_local_changed((float)cur / 1000.0f, (float)mm / 1000.0f);
+        klxr_space_changed(KLXR_REF_SPACE_LOCAL, (float)cur / 1000.0f, (float)mm / 1000.0f);
     return (float)__atomic_load_n(&g_xr_local_mm, __ATOMIC_ACQUIRE) / 1000.0f;
 }
 
@@ -3682,6 +3704,12 @@ static XrPosef klxr_space_pose_ex(const klxr_space *sp, int *tracked,
         if (motion_known) *motion_known = kl_ovrp_head_motion(lin, ang);
     } else if (sp->reference_type == KLXR_REF_SPACE_LOCAL) {
         base.position.y = klxr_local_origin_y();
+    } else if (sp->reference_type == KLXR_REF_SPACE_STAGE ||
+               sp->reference_type == KLXR_REF_SPACE_LOCAL_FLOOR) {
+        // «Sentado»: the floor spaces sit LOWER than the tracking space by the raise, so
+        // everything located in them (head, hands, layers) reads that much higher. Same
+        // number as the OVRPlugin guest's origin; 0 unless the setting is on.
+        base.position.y = klxr_stage_origin_y();
     } else if (sp->reference_type == KLXR_REF_SPACE_EXTERNAL) {
         // A spatial-entity space: the owner places it in the tracking space.
         float q[4] = {0, 0, 0, 1}, p[3] = {0, 0, 0};

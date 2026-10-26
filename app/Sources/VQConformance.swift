@@ -461,6 +461,7 @@ enum VQConformance {
     /// (anisotropy forced on samplers, VPKTAA jitter, MSAA forced/overridden, foveation, render
     /// scale) may change what they render. Overrides what applyToEnvironment set for this launch.
     static func neutralGraphics() {
+        setenv("KL_OVRP_SEATED", "0", 1)   // «Sentado» raises STAGE: the self-test expects STAGE == the tracking space
         setenv("VPVK_ANISO", "0", 1)
         setenv("VPVK_FORCE_ANISO", "0", 1)
         setenv("VPVK_TAA_JITTER", "0", 1)

@@ -792,8 +792,15 @@ float kl_ovrp_measured_eye_height_or0(void);
 // while it runs EyeLevel (its poses are served with y ~ 0 there), else 0 — and
 // 0 for a guest that never read an OVRPlugin node (OpenXR). Add it to any
 // position the guest states in its tracking space before placing it in the
-// display's world. KL_OVRP_EYELEVEL_ZERO=0 makes it 0 always.
+// display's world. KL_OVRP_EYELEVEL_ZERO=0 makes the EyeLevel offset 0 (it does not
+// touch the «Sentado» raise: that one is negative and only applies under floor/stage).
+// With «Sentado» (KL_OVRP_SEATED=1) under a floor/stage origin it is NEGATIVE:
+// minus the raise given to the guest (see kl_ovrp_seat_offset_stage).
 float kl_ovrp_guest_origin_y(void);
+// «Sentado»: max(0, KL_OVRP_STAND_HEIGHT - measured eye height) when KL_OVRP_SEATED=1
+// and the eye height has been measured, else 0. The raise OpenXR's STAGE and
+// LOCAL_FLOOR spaces give the guest (LOCAL and VIEW are untouched).
+float kl_ovrp_seat_offset_stage(void);
 
 // ---------------------------------------------------------------------------
 // The read side of the pose seam, for the OTHER XR API

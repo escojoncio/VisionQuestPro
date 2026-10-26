@@ -142,6 +142,10 @@ final class VQSettings: ObservableObject {
     @Published var vkFullProfile: Bool { didSet { save() } }
     /// Initial posture for the OVRPlugin eye height (KL_OVRP_POSTURE); auto re-measure always on.
     @Published var posture: String { didSet { save() } }   // "auto" | "seated" | "standing"
+    /// «Sentado»: raises the guest's floor/stage space by (standing height − measured eye height) so a seated
+    /// user stands at `standHeight` (KL_OVRP_SEATED, KL_OVRP_STAND_HEIGHT). Per game it can be overridden (VQGameSeat).
+    @Published var seated: Bool { didSet { save() } }
+    @Published var standHeight: Double { didSet { save() } }   // 1.40...2.00 m
     /// Passthrough (KL_PASSTHROUGH): "auto" follows the game, "off" always VR, "on" always mixed.
     @Published var passthrough: String { didSet { save() } }
     /// Run the game in the system language when it ships it, else English (LANG for Klepton's Locale/AConfiguration).
@@ -200,6 +204,8 @@ final class VQSettings: ObservableObject {
         glesVPK = d.object(forKey: "vq.glesVPK") as? Bool ?? false
         vkFullProfile = d.object(forKey: "vq.vkFullProfile") as? Bool ?? false
         posture = d.string(forKey: "vq.posture") ?? "auto"
+        seated = d.object(forKey: "vq.seated") as? Bool ?? false
+        standHeight = min(max(d.object(forKey: "vq.standHeight") as? Double ?? 1.65, 1.40), 2.00)
         if let pt = d.string(forKey: "vq.passthrough"), ["auto", "off", "on"].contains(pt) {
             passthrough = pt
         } else { passthrough = "auto" }
@@ -252,6 +258,8 @@ final class VQSettings: ObservableObject {
         d.set(glesVPK, forKey: "vq.glesVPK")
         d.set(vkFullProfile, forKey: "vq.vkFullProfile")
         d.set(posture, forKey: "vq.posture")
+        d.set(seated, forKey: "vq.seated")
+        d.set(standHeight, forKey: "vq.standHeight")
         d.set(passthrough, forKey: "vq.passthrough")
         d.set(systemLanguage, forKey: "vq.sysLang")
         d.set(storeCovers, forKey: "vq.storeCovers")
@@ -344,6 +352,13 @@ final class VQSettings: ObservableObject {
         setenv("KL_PASSTHROUGH", passthrough, 1)
         VQLog.log("Passthrough: \(passthrough)")
         VQLog.log("Gráficos: postura \(posture)")
+        // «Sentado», per game (VQGameSeat) when the game fixes its own, else the global one.
+        let seat = VQGameSeat.load(key: game?.aaKey ?? "")
+        let effSeated = seat.useGlobal ? seated : seat.seated
+        let effStand = seat.useGlobal ? standHeight : seat.height
+        setenv("KL_OVRP_SEATED", effSeated ? "1" : "0", 1)
+        setenv("KL_OVRP_STAND_HEIGHT", String(format: "%.2f", effStand), 1)
+        VQLog.log("Gráficos: modo sentado \(effSeated), altura de pie \(String(format: "%.2f", effStand)) m (\(seat.useGlobal ? "global" : "del juego"))")
         // Per game (VQGameRes) when the game fixes its own, else the global ones.
         let gameKey = game?.aaKey ?? ""
         let res = VQGameRes.load(key: gameKey)
@@ -589,6 +604,32 @@ struct VQGameRes: Equatable {
     static func approxEye(pct: Double) -> (w: Int, h: Int) {
         let f = factor(pct: pct)
         return (Int((2064.0 * f).rounded()), Int((2208.0 * f).rounded()))
+    }
+}
+
+/// «Sentado» per game: when `useGlobal` is false, `seated` and `height` (1.40...2.00 m) replace the global ones.
+/// Saved by game key: vq.seatMode.<key> ("game"; absent = global), vq.seatOn.<key>, vq.seatH.<key>.
+struct VQGameSeat: Equatable {
+    var useGlobal = true
+    var seated = false
+    var height = 1.65
+
+    static func load(key: String) -> VQGameSeat {
+        let d = UserDefaults.standard
+        var r = VQGameSeat()
+        guard !key.isEmpty, d.string(forKey: "vq.seatMode." + key) == "game" else { return r }
+        r.useGlobal = false
+        r.seated = d.object(forKey: "vq.seatOn." + key) as? Bool ?? false
+        r.height = min(max(d.object(forKey: "vq.seatH." + key) as? Double ?? 1.65, 1.40), 2.00)
+        return r
+    }
+
+    func save(key: String) {
+        guard !key.isEmpty else { return }
+        let d = UserDefaults.standard
+        if useGlobal { d.removeObject(forKey: "vq.seatMode." + key) } else { d.set("game", forKey: "vq.seatMode." + key) }
+        d.set(seated, forKey: "vq.seatOn." + key)
+        d.set(height, forKey: "vq.seatH." + key)
     }
 }
 

@@ -76,6 +76,10 @@ klepton_tests() {
   run t_ue4_sig -Wno-unused-function -I"$T/newt" tests/t_ue4_sig.c
   awk '/KL-TEST-BEGIN ue4cmd/{p=1;next} /KL-TEST-END ue4cmd/{p=0} p' runtime/guest/kl_ue4.c > "$T/newt/ue4cmd.inc"
   run t_ue4_cmdline -Wno-unused-function -I"$T/newt" tests/t_ue4_cmdline.c
+  awk '/KL-TEST-BEGIN aswsize/{p=1;next} /KL-TEST-END aswsize/{p=0} p' runtime/xr/kl_ovrp.c > "$T/newt/aswsize.inc"
+  run t_asw_size -Wno-unused-function -I"$T/newt" tests/t_asw_size.c
+  awk '/KL-TEST-BEGIN seatoff/{p=1;next} /KL-TEST-END seatoff/{p=0} p' runtime/xr/kl_ovrp.c > "$T/newt/seatoff.inc"
+  run t_seat_offset -Wno-unused-function -I"$T/newt" tests/t_seat_offset.c -lm
   mkdir -p "$T/vmlog"
   awk '/KL-TEST-BEGIN vmgroup/{p=1;next} /KL-TEST-END vmgroup/{p=0} p' runtime/libc/kl_libc.c > "$T/vmlog/vmgroup.inc"
   run t_vmgroup -Wno-unused-function -I"$T/vmlog" tests/t_vmgroup.c

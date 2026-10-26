@@ -1,6 +1,8 @@
 # Bitácora — VisionQuestPro
 
 ## Last done
+- 2026-10-26 VPKEngine `5939c99`: `vkCmdBindPipeline` no pisa viewport/scissor con `*_WITH_COUNT` dinámicos; log `empty_scissor` con `area=`/`fb=`; gles: mips antes del nivel 0 guardados (`Texture::pending`, antes ASTC a cero = magenta, hipótesis Maestro), completitud con sampler object, clear con colorMask/stencil mask por draw, superficies EGL a cero al crear (pantalla morada inicial, hipótesis), `gles.tex fmt=`/`mip_before_base`; frame_compiler: encoder con indirect GPU = heavy sin memoryless (hipótesis Gundam: volcado del tiler); línea `vk.perf` 1/s (frames, submit/translate/backend ms, `gpu_cb`, `pso_wait_ms`, `fence_wait`, `ind{gpu cpu cpu_sec}`).
+- 2026-10-26 VQP: `ovrp_GetLayerTextureSpaceWarp` escribe ovrpSizei en x4/x6 (`klovrp_asw_put_sizes`, ABI unverified; ITR2 creaba fb SpaceWarp 0x0 → ~89 % draws `empty_scissor`). Modo sentado: `KL_OVRP_SEATED`/`KL_OVRP_STAND_HEIGHT` (app: «Modo sentado», global+juego, 1,40–2,00 m) sube floor/stage `max(0, pie − medida)` vía `klovrp_guest_origin_y`; OpenXR STAGE/LOCAL_FLOOR `klxr_stage_origin_y` + evento SPACE_CHANGE_PENDING; conformidad fuerza SEATED=0. Tests `t_asw_size`, `t_seat_offset`. Maestro sí fija origen floor (1): altura baja = altura real sentado.
 - 2026-10-26 VPKEngine `5b8432f`: PSO `Priority::Urgent` (boost real) + creaciones del juego a `Visible` (causa de tirones: backlog del precache UE ~7,4k PSO en Blocking, boost al final de la cola); `skip_by{}` en `vk.submit` (ITR2: ~236/270 draws descartados por ok=false silencioso, motivo por medir); vpgles program binaries (causa Maestro: `PROGRAM_BINARY_LENGTH`=0 → UE fatal "Binary program returned 0 bytes!" en FOpenGLProgramBinaryCache → ForceQuit ×90 → SIGSEGV SceneColor nulo en RenderForward); `vpgpu::BackgroundGate`.
 - 2026-10-26 VQP: `klepton/runtime/gfx/kl_bg.{c,h}`: guest bloqueado en segundo plano (QueueSubmit/Present, SwapBuffers, ovrp Update2/EndFrame4/end_frame_impl, xr WaitFrame/EndFrame; foco VrFocus2/InputFocus=0), Swift `scenePhaseChanged`→`kl_bg_set`, reenvío por dlsym a `vpgpu_set_background`; watchdog silenciado en bg. `kl_ue4.c`: UE4CommandLine.txt en `<files>/<native>/<Proj>/` (antes ruta que UE no leía → sin log UE); extras por target solo con `KL_UE4_TARGET_EXTRAS=1`. Tests `t_bg`, `t_ue4_cmdline`.
 - 2026-10-26 VPKEngine `710574a`: `ScopedPool` (objc_autoreleasePoolPush/Pop, core/include/vpgpu/core/scoped_pool.h) en métodos públicos de MetalBackend, MetalPlatform taa/depthResolve y entradas vk*/vpvk_* de entry.cpp (causa inferida de RAM: MTLTexture autoreleased en hilos guest sin pool = inmortales; attr ≫ ledger en Gundam/Deadpool/ITR2). Texturas `pinned` con retención 1 s + 4 frames (`pinnedHold`/`promotePinned`). `Attachment::keepSamples` (=true en todo StoreAndResolve del traductor; solo DONT_CARE+resolve es memoryless), `msaaColorResolveOnTile` por defecto (`VP_MSAA_TILE`). gles: subidas DEPTH_COMPONENT→D16/D24/D32F. Contadores img_rel_*/tex_created/destroyed/g_tex_live en [vkagg].
@@ -13,10 +15,10 @@
 - `c6f8362`: carátula tienda: timeouts 30/120 s, backoff net 2/10/30/60 min, respaldo nombre exacto+organización.
 
 ## Current state
-- Última build en verde: run CI 40308522356 (commit 14f415d, VPKEngine 5b8432f): cambios 2026-10-26 unverified en visor.
+- Build nueva con VPKEngine 5939c99: unverified en visor. Build 14f415d: Maestro sin ForceQuit (llega in-game, personajes morados), ITR2 89 % draws `scissor`, FPS bajo en Maestro/ITR2 sin medida.
 - Pendiente (orden):
-  1. Logs build af035c0: untracked Metal plano (~200-256 MiB) → autoreleasepool confirmado; picos: Deadpool 6,3 GB (antes 8,2), Gundam 6,7 GB (antes jetsam), ITR2 4,9 GB; ITR2 `g_tex_live` 56→4071 por vigilar. Gundam: parpadeo sin causa en log (0 skips, 6 rebuilds de capa).
-  2. Build nueva: ITR2 leer `skip_by{}`/`vk.skip` → arreglar el motivo; medir tirones (`vk.pipeline_skip`, `hard_waited_ms`); Maestro sin ForceQuit; `[bg] gpu paused/resumed` sin errores BackgroundExecutionNotPermitted.
+  1. Log nuevo: ITR2 `[asw] framebuffer` ≠0x0 y `skip_by{scissor}`≈0; Maestro `gles.note mip_before_base`, `gles.tex fmt=`, `gles.err clear_*`; Gundam `heavy_indirect=`, `ind{cpu_sec}` (si >0: parchear indirect multiview en secundarios antes de beginRenderPass); FPS: leer `vk.perf` (GPU `gpu_cb sum_ms` vs `submit_ms`/`pso_wait_ms`/`fence_wait`).
+  2. RAM: picos Deadpool 6,3 GB, Gundam 6,7 GB, ITR2 4,9 GB; ITR2 `g_tex_live` 56→4071 por vigilar; heavy indirect sube memoria MSAA (medir).
   3. Pipelines depth-only no se archivan (metal_backend.mm:5915) y archive sin flush periódico; GLES sin precompilación (pipeline por estado en primer draw).
   3. Auditoría restante (no aplicada): ovrp que devuelven -1004 donde se espera handle (`ovrp_GetNativeSDKPointer2`, `GetEyeFovLayerId`, `SetupMirrorTexture2`); OpenXR FB/META sin fila (ITR2); 75 thunks `AndroidThunkJava_*` NO-OP; 184 pares Unity sin enlace; `createTelemetryHandler` NULL (Gundam). Detalle: auditoría en sesión (no en repo).
   5. VPKEngine: fusión con rama AVP pendiente; `msaaResolveOnTile` necesita `Attachment::keepSamples`.
@@ -44,7 +46,8 @@
 - Valores: burst audio 1024 con Wwise; `kMaxArchiveFiles` 512; `VPVK_MAX_DRAWS_PER_CB` 256; anillo TAA 4; máscara UI R8 slot 7; `KL_OVERLAY_SUBMIT_ORDER`=1.
 - Datos de juegos nunca en el repo.
 - Build solo con `[build]`, completa y revisada; VPKEngine fijado a SHA en CI (subir `ref:` en visionos.yml al cambiar de motor).
-- Identidad Quest/Adreno opt-in en VPKEngine (avp-port d395a50): VQP la activa siempre (`vq_gfx_config_forward` → `vpvk_config_set_quest_identity(1)` + `VPVK_QUEST_IDENTITY=1` en `applyToEnvironment`); al subir `ref:` a un motor con avp-port, verificar en log.
+- Modo sentado solo eleva origen floor/stage (EyeLevel y XR LOCAL intactos); se cachea al lanzar.
+- Identidad Quest/Adreno opt-in en VPKEngine (avp-port d395a50, aún no en main): VQP la activa siempre (`vq_gfx_config_forward` → `vpvk_config_set_quest_identity(1)` + `VPVK_QUEST_IDENTITY=1` en `applyToEnvironment`); al subir `ref:` a un motor con avp-port, verificar en log.
 
 ## Files in play
 - `klepton/runtime/xr/{kl_ovrp.c,kl_ovrp_input.c,kl_ovrplat.c}`, `klepton/visionos/Sources/KleptonControllers.swift` (+ bridging header).
