@@ -78,6 +78,12 @@ klepton_tests() {
   run t_ue4_cmdline -Wno-unused-function -I"$T/newt" tests/t_ue4_cmdline.c
   awk '/KL-TEST-BEGIN aswsize/{p=1;next} /KL-TEST-END aswsize/{p=0} p' runtime/xr/kl_ovrp.c > "$T/newt/aswsize.inc"
   run t_asw_size -Wno-unused-function -I"$T/newt" tests/t_asw_size.c
+  awk '/KL-TEST-BEGIN ptscan/{p=1;next} /KL-TEST-END ptscan/{p=0} p' runtime/xr/kl_ovrp.c > "$T/newt/ptscan.inc"
+  run t_pt_scan -Wno-unused-function -I"$T/newt" tests/t_pt_scan.c
+  awk '/KL-TEST-BEGIN bslash/{p=1;next} /KL-TEST-END bslash/{p=0} p' runtime/libc/kl_libc.c > "$T/newt/bslash.inc"
+  run t_bslash -Wno-unused-function -I"$T/newt" tests/t_bslash.c
+  awk '/KL-TEST-BEGIN fqonce/{p=1;next} /KL-TEST-END fqonce/{p=0} p' runtime/kl_fault.c > "$T/newt/fqonce.inc"
+  run t_forcequit -Wno-unused-function -I"$T/newt" tests/t_forcequit.c
   awk '/KL-TEST-BEGIN seatoff/{p=1;next} /KL-TEST-END seatoff/{p=0} p' runtime/xr/kl_ovrp.c > "$T/newt/seatoff.inc"
   run t_seat_offset -Wno-unused-function -I"$T/newt" tests/t_seat_offset.c -lm
   mkdir -p "$T/vmlog"

@@ -332,7 +332,8 @@ static mtx_entry *mtx_find(void *g) {
 // in a FIFO: the thread that let the destroyer through (the last unlock, the last
 // broadcast) may still be inside that host call, and POSIX lets the destroy follow it.
 // Time, not a count, because a burst of destroys must not shorten the delay. When the
-// ring is full the object is leaked rather than freed early. The caller holds g_mtx_insert_mu.
+// ring is full, or the host destroy answers EBUSY at reaping, the object is leaked rather
+// than freed early. The caller holds g_mtx_insert_mu.
 #define GRAVE_N  4096
 #define GRAVE_NS 100000000ull
 static struct { void *p; int cond; uint64_t t; } g_grave[GRAVE_N];
@@ -342,8 +343,9 @@ static void grave_put(void *p, int cond) {
     uint64_t now = cnd_now_ns();
     while (g_grave_cnt && now - g_grave[g_grave_head].t >= GRAVE_NS) {
         void *old = g_grave[g_grave_head].p;
-        if (g_grave[g_grave_head].cond) pthread_cond_destroy(old); else pthread_mutex_destroy(old);
-        free(old);
+        // EBUSY = a thread still holds it / sleeps on it: leaked, never freed under that thread.
+        int rc = g_grave[g_grave_head].cond ? pthread_cond_destroy(old) : pthread_mutex_destroy(old);
+        if (rc == 0) free(old);
         g_grave_head = (g_grave_head + 1) % GRAVE_N; g_grave_cnt--;
     }
     if (g_grave_cnt == GRAVE_N) return;

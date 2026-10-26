@@ -352,8 +352,8 @@ static void *klj_ue4_native(const char *name, const char *sig) {
 
 static void *klj_ue4_float3(const float v[3]) {
     void *arr = klj_new_array('F', NULL, 3);
-    float *d = klj_arr(arr)->data;
-    d[0] = v[0]; d[1] = v[1]; d[2] = v[2];
+    float *d = klj_arr_data(arr, 3);
+    if (d) { d[0] = v[0]; d[1] = v[1]; d[2] = v[2]; }
     return arr;
 }
 
@@ -505,8 +505,8 @@ static klj_val klj_GA_getSupportedRefreshRates(void *env, void *self, const klj_
     int cnt = kl_ovrp_display_frequencies(hz, 16);
     if (cnt <= 0) { hz[0] = (float)klj_ue4_refresh_hz(); cnt = 1; }
     void *arr = klj_new_array('I', NULL, cnt);
-    int32_t *v = klj_arr(arr)->data;
-    for (int i = 0; i < cnt; i++) v[i] = (int32_t)(hz[i] + 0.5f);
+    int32_t *v = klj_arr_data(arr, cnt);
+    for (int i = 0; v && i < cnt; i++) v[i] = (int32_t)(hz[i] + 0.5f);
     return (klj_val){.l = arr};
 }
 

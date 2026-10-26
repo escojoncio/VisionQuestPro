@@ -6620,6 +6620,8 @@ static struct klovrp_layer {
                                                   // before its last destroy — what
                                                   // lets a Vulkan reuse find the
                                                   // old id's images (see SetupLayer)
+    int      pt_styled;                           // the guest set an InsightPassthroughStyle
+                                                  // on this layer (klovrp_passthrough_scan)
 } g_layers[KLOVRP_MAX_LAYERS];
 static int g_next_layer_id = 1;
 // The size the eye storage currently IS, as opposed to what any layer's desc
@@ -6952,23 +6954,65 @@ static uint64_t klovrp_GetPassthroughCapabilities(uint32_t *caps) {
 static uint64_t klovrp_SetInsightPassthroughStyle(int layer_id, const void *style) {
     (void)style;
     ovrp_hit("ovrp_SetInsightPassthroughStyle");
+    struct klovrp_layer *sl = klovrp_layer(layer_id);
+    if (sl) sl->pt_styled = 1;
     static int logged;
     if (!logged++) fprintf(stderr, "  [pt] SetInsightPassthroughStyle(layer %d): accepted\n", layer_id);
     return OVRP_SUCCESS;
 }
+// Which ovrpShape values are passthrough. OVRPlugin's enum: ReconstructionPassthrough
+// = 7, SurfaceProjectedPassthrough = 8, KeyboardHandsPassthrough = 10,
+// KeyboardMaskedHandsPassthrough = 11 (Fisheye = 9 is video, not passthrough).
+// 6 is what klovrp_shape_name's contiguous table calls ReconstructionPassthrough
+// (the numbering this scan used before); kept so a plugin that numbers that way
+// still counts. KL-TEST ptscan.
+// KL-TEST-BEGIN ptscan
+struct klovrp_pt_item { int is_eye, shape, styled; };
+static int klovrp_shape_is_passthrough(int sh) {
+    return sh == 6 || sh == 7 || sh == 8 || sh == 10 || sh == 11;
+}
+// Index of the item that makes this frame a passthrough frame, or -1; *eye_idx = the
+// first eye layer (-1 none). A passthrough-SHAPED non-eye layer wins. Failing that,
+// when InsightPassthrough is initialised, any submitted layer (eye/projection too)
+// the guest set an InsightPassthroughStyle on: a passthrough underlay drawn as
+// part of an ordinary layer, which never has a passthrough shape. A paused layer
+// is not submitted, so it is not in the list and does not count.
+static int klovrp_pt_decide(const struct klovrp_pt_item *it, int n, int initialized,
+                            int *eye_idx) {
+    int pt = -1, styled = -1;
+    *eye_idx = -1;
+    for (int i = 0; i < n; i++) {
+        if (it[i].is_eye && *eye_idx < 0) *eye_idx = i;
+        if (!it[i].is_eye && pt < 0 && klovrp_shape_is_passthrough(it[i].shape)) pt = i;
+        if (styled < 0 && it[i].styled) styled = i;
+    }
+    if (pt >= 0) return initialized ? pt : -1;
+    return initialized ? styled : -1;
+}
+// KL-TEST-END ptscan
 static void klovrp_passthrough_scan(const void *layer_submits, int count) {
     const ovrp_layer_submit *const *list = layer_submits;
-    int pt_idx = -1, pt_id = 0, eye_idx = -1;
-    for (int i = 0; list && i < count; i++) {
+    struct klovrp_pt_item it[KLOVRP_MAX_LAYERS];
+    int ids[KLOVRP_MAX_LAYERS], n = 0;
+    for (int i = 0; list && i < count && n < KLOVRP_MAX_LAYERS; i++) {
         const ovrp_layer_submit *s = list[i];
         if (!s) continue;
         struct klovrp_layer *l = klovrp_layer(s->layer_id);
         if (!l) continue;
-        if (l->is_eye) { if (eye_idx < 0) eye_idx = i; continue; }
-        int sh = l->desc.shape;
-        if (pt_idx < 0 && (sh == 6 || sh == 7)) { pt_idx = i; pt_id = s->layer_id; }
+        it[n].is_eye = l->is_eye; it[n].shape = l->desc.shape; it[n].styled = l->pt_styled;
+        ids[n++] = s->layer_id;
+        if (!g_pt_initialized && !l->is_eye && klovrp_shape_is_passthrough(l->desc.shape)) {
+            static int said;
+            if (said++ < 4)
+                fprintf(stderr, "  [pt] passthrough layer %d (shape %d) is submitted but "
+                                "InsightPassthrough was never initialised: not shown\n",
+                        s->layer_id, l->desc.shape);
+        }
     }
-    int present = g_pt_initialized && pt_idx >= 0;
+    int eye_idx;
+    int pt_idx = klovrp_pt_decide(it, n, g_pt_initialized, &eye_idx);
+    int pt_id = pt_idx >= 0 ? ids[pt_idx] : 0;
+    int present = pt_idx >= 0;
     // OVRPlugin eye layers are premultiplied unless the guest asks otherwise.
     kl_passthrough_note_frame(present, pt_id, present && (eye_idx < 0 || pt_idx < eye_idx), 0);
 }
@@ -7991,6 +8035,7 @@ static uint64_t klovrp_SetupLayer(void *device, const ovrp_layer_desc_eyefov *de
     l->id     = g_next_layer_id++;
     l->desc   = *desc;
     l->is_eye = is_eye;
+    l->pt_styled = 0;
     l->used   = 1;
     l->submit_tick = g_loadvid_tick + 1;   // set-up counts as a submit (kl_loadvid_recount)
     *layer_id = l->id;
@@ -8010,9 +8055,9 @@ static uint64_t klovrp_SetupLayer(void *device, const ovrp_layer_desc_eyefov *de
     // read as a spare: RE4's splash is a 900x900 Quad and the line said
     // "dummy, 1x1" (the size because ovrp_CalculateLayerDesc answered one it
     // invented — see there).
-    fprintf(stderr, "  [ovrp] SetupLayer(device=%p) -> layer %d, %s, %dx%d "
+    fprintf(stderr, "  [ovrp] SetupLayer(device=%p) -> layer %d, %s (shape %d), %dx%d "
                     "layout=%d fmt=%d samples=%d%s\n",
-            device, l->id, is_eye ? "EYE" : klovrp_shape_name(desc->shape),
+            device, l->id, is_eye ? "EYE" : klovrp_shape_name(desc->shape), desc->shape,
             desc->texture_size.w, desc->texture_size.h, desc->layout,
             desc->format, desc->sample_count,
             reused ? " (reusing the previous layer's textures)" : "");
@@ -9554,7 +9599,7 @@ static uint64_t klovrp_GetHandNodePoseStateLatency(double *out) {
 static uint64_t klovrp_IsLayerShapeSupported(int shape, int32_t *out) {
     ovrp_hit("ovrp_IsLayerShapeSupported");
     if (!out) return OVRP_FAIL_INVALID_PARAM;
-    *out = shape == 0 || shape == 3 || shape == 5 || shape == 6 || shape == 7;
+    *out = shape == 0 || shape == 3 || shape == 5 || klovrp_shape_is_passthrough(shape);
     return OVRP_SUCCESS;
 }
 

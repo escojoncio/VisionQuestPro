@@ -109,9 +109,11 @@ static klj_val klj_InputDevice_getDeviceIds(void *env, void *self, const klj_val
     static void *ids;
     if (!ids) {
         ids = klj_new_array('I', NULL, 2);
-        int32_t *v = klj_arr(ids)->data;
-        v[0] = KLJ_INPUT_DEV_LTOUCH;
-        v[1] = KLJ_INPUT_DEV_RTOUCH;
+        int32_t *v = klj_arr_data(ids, 2);
+        if (v) {
+            v[0] = KLJ_INPUT_DEV_LTOUCH;
+            v[1] = KLJ_INPUT_DEV_RTOUCH;
+        }
     }
     KLJ_LOG("InputDevice.getDeviceIds() -> [%d, %d] (the two Touch controllers)",
             KLJ_INPUT_DEV_LTOUCH, KLJ_INPUT_DEV_RTOUCH);

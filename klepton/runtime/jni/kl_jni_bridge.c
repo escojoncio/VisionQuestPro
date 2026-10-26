@@ -183,7 +183,8 @@ static klj_val klj_ReflectionHelper_newProxyInstance(void *env, void *clazz,
     // down to the field, rather than alike: klj_proxy_invoke and the report
     // both read `classes` as an object array.
     void *ifaces = klj_new_array('L', "java/lang/Class", 1);
-    if (n > 2) ((void **)klj_arr(ifaces)->data)[0] = a[2].l;
+    void **idata = n > 2 ? klj_arr_data(ifaces, 1) : NULL;
+    if (idata) idata[0] = a[2].l;
     klj_as_object(ifaces)->pinned = 1;
     p->classes = ifaces;
     KLJ_LOG("ReflectionHelper.newProxyInstance: implements %s (native 0x%llx)",
@@ -330,7 +331,8 @@ static void klj_deliver_message_1(void *message) {
 
     if (cbo && strcmp(cbo->cls, KLJ_CLASS_PROXY) == 0) {
         void *args = klj_new_array('L', "java/lang/Object", 1);
-        ((void **)klj_arr(args)->data)[0] = message;
+        void **ad = klj_arr_data(args, 1);
+        if (ad) ad[0] = message;
         klj_proxy_invoke(cb, "android/os/Handler$Callback", "handleMessage",
                          "(Landroid/os/Message;)Z", args);
         return;
@@ -395,7 +397,8 @@ void kl_jni_tick_choreographer(void) {
         // exhaustion looked like.
         klj_PushLocalFrame(NULL, 0);
         void *args = klj_new_array('L', "java/lang/Object", 1);
-        ((void **)klj_arr(args)->data)[0] = klj_box_long(nanos);
+        void **ad = klj_arr_data(args, 1);
+        if (ad) ad[0] = klj_box_long(nanos);
         klj_proxy_invoke(cb, "android/view/Choreographer$FrameCallback", "doFrame",
                          "(J)V", args);
         klj_PopLocalFrame(NULL, NULL);

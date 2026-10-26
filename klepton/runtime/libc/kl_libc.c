@@ -2614,6 +2614,8 @@ static int kl_fs_rel_sdcard(void) {
     return v == 2 || (v == 1 && !g_guest_chdir);
 }
 
+// Set by kl_guest_path while it asks for the spelling with '\' kept as it is (see kl_bs_resolve).
+static _Thread_local int kl_gp_literal;
 static const char *kl_guest_path_inner(const char *path, char *buf, size_t cap) {
     if (!path) return path;
     // Windows-heritage guests (reVC / GTA Vice City) build paths with '\'
@@ -2624,7 +2626,7 @@ static const char *kl_guest_path_inner(const char *path, char *buf, size_t cap) 
     // return of the normalized string must be copied into the caller's `buf`
     // (KL_GP_PASS); remaps snprintf into `buf` and read from `tmp` — no overlap.
     char tmp[1024];
-    if (strchr(path, '\\')) {
+    if (!kl_gp_literal && strchr(path, '\\')) {
         size_t i = 0;
         for (; path[i] && i + 1 < sizeof tmp; i++) tmp[i] = path[i] == '\\' ? '/' : path[i];
         tmp[i] = '\0';
@@ -2864,8 +2866,44 @@ static const char *kl_gameinfo_synth(const char *resolved, char *buf, size_t cap
     return buf;
 }
 
-const char *kl_guest_path(const char *path, char *buf, size_t cap) {
+// A guest path holding '\' (Unity/Gundam opens "...\gvr_sequences_assets_*.bundle"). Android allows
+// '\' inside a file name, so the spelling as given is tried first and used when that file exists;
+// otherwise the '\' -> '/' one (what kl_guest_path_inner always did), as a fallback. Logged,
+// first 32. KL-TEST bslash.
+// KL-TEST-BEGIN bslash
+static const char *kl_bs_resolve(const char *path, char *buf, size_t cap,
+                                 const char *(*map)(const char *, char *, size_t, int),
+                                 int (*exists)(const char *), int *literal, int *ok) {
+    char lb[1024];
+    *literal = 0; *ok = 0;
+    if (!path || !strchr(path, '\\')) return map(path, buf, cap, 0);
+    const char *lit = map(path, lb, sizeof lb, 1);
+    if (lit && exists(lit)) {
+        snprintf(buf, cap, "%s", lit);
+        *literal = 1; *ok = 1;
+        return buf;
+    }
+    const char *r = map(path, buf, cap, 0);
+    *ok = r && exists(r);
+    return r;
+}
+// KL-TEST-END bslash
+static const char *kl_bs_map(const char *path, char *buf, size_t cap, int literal) {
+    kl_gp_literal = literal;
     const char *r = kl_guest_path_inner(path, buf, cap);
+    kl_gp_literal = 0;
+    return r;
+}
+static int kl_bs_exists(const char *p) { return access(p, F_OK) == 0; }
+const char *kl_guest_path(const char *path, char *buf, size_t cap) {
+    int bs_lit, bs_ok;
+    const char *r = kl_bs_resolve(path, buf, cap, kl_bs_map, kl_bs_exists, &bs_lit, &bs_ok);
+    if (path && strchr(path, '\\')) {
+        static _Atomic int said;
+        if (atomic_fetch_add(&said, 1) < 32)
+            fprintf(stderr, "  [fs] backslash_fallback path=%s ok=%d (%s)\n", path, bs_ok,
+                    bs_lit ? "as given" : "'\\' -> '/'");
+    }
     // A gameinfo.txt the guest names but that isn't staged: serve a synthetic one
     // so an Xash mod (cstrike) registers instead of falling back to valve. Cheap:
     // only fires for paths ending in "gameinfo.txt", which is a handful per boot.

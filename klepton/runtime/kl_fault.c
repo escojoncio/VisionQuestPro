@@ -81,9 +81,9 @@ static void klf_emit(const char *b, size_t n) {
     if (g_crash_fd >= 0) { w = write(g_crash_fd, b, n); (void)w; }
 }
 
-// Opened by path at the first report (a crash, or the first guest-error dump); later reports append. Opened once:
-// the first caller opens (O_TRUNC) and writes the header, a simultaneous one (ForceQuit dump + a crash on another
-// thread) waits for it and appends. g_crash_fd is published after the header is in.
+// Opened by path at the first crash report; later reports append. Opened once: the first caller opens (O_TRUNC)
+// and writes the header, a simultaneous one (two threads crashing) waits for it and appends. g_crash_fd is
+// published after the header is in. Only a crash opens it: a ForceQuit dump (kl_fault_guest_errors_once) is not one.
 static int g_crash_opening;
 static void klf_open_crash(void) {
     if (!g_crash_path[0] || __atomic_load_n(&g_crash_fd, __ATOMIC_ACQUIRE) >= 0) return;
@@ -103,13 +103,20 @@ static void klf_open_crash(void) {
 // Async-signal-safe: the ring hands over finished lines, klf_emit is write(2).
 static void klf_guest_errors(void) { kl_log_ring_dump(klf_emit); }
 
-// For the ForceQuit the guest asks for and we ignore: the reason, once per session. A crash always dumps (report_fault).
+// fd 2 only: the ForceQuit dump is not a crash, so it never reaches (or creates) the crash file.
+static void klf_emit_fd2(const char *b, size_t n) { ssize_t w = write(2, b, n); (void)w; }
+
+// For the ForceQuit the guest asks for and we ignore: the reason, once per session, marked [forcequit] in the normal
+// log (its "[fatal] last guest errors:" lines follow). A crash always dumps (report_fault). KL-TEST fqonce.
+// KL-TEST-BEGIN fqonce
 void kl_fault_guest_errors_once(void) {
     static int done;
     if (__atomic_exchange_n(&done, 1, __ATOMIC_RELAXED)) return;
-    klf_open_crash();
-    klf_guest_errors();
+    static const char h[] = "[forcequit] the guest asked to quit (ignored); its last errors:\n";
+    klf_emit_fd2(h, sizeof h - 1);
+    kl_log_ring_dump(klf_emit_fd2);
 }
+// KL-TEST-END fqonce
 
 static void (*g_extra[KL_FAULT_MAX_REPORTERS])(FILE *);
 static unsigned g_extra_n;

@@ -700,7 +700,8 @@ static klj_val klj_String_getBytes(void *env, void *self, const klj_val *a, int 
         KLJ_LOG("String.getBytes(\"%s\") — returning UTF-8, not transcoded", charset);
     size_t len = s ? strlen(s) : 0;
     void  *obj = klj_new_array('B', NULL, (int)len);
-    if (len) memcpy(klj_arr(obj)->data, s, len);
+    void *bd = len ? klj_arr_data(obj, (int)len) : NULL;
+    if (bd) memcpy(bd, s, len);
     return (klj_val){.l = obj};
 }
 
@@ -857,8 +858,11 @@ static klj_val klj_AlertBuilder_show(void *env, void *self, const klj_val *a, in
             "is the decision already made by launching it",
             d->positive ? d->positive : "the positive button");
     void *args = klj_new_array('L', "java/lang/Object", 2);
-    ((void **)klj_arr(args)->data)[0] = self;            // the DialogInterface
-    ((void **)klj_arr(args)->data)[1] = klj_box_int(KLJ_BUTTON_POSITIVE);
+    void **ad = klj_arr_data(args, 2);
+    if (ad) {
+        ad[0] = self;                                    // the DialogInterface
+        ad[1] = klj_box_int(KLJ_BUTTON_POSITIVE);
+    }
     klj_proxy_invoke(d->on_positive, "android/content/DialogInterface$OnClickListener",
                      "onClick", "(Landroid/content/DialogInterface;I)V", args);
     return (klj_val){.l = self};
@@ -1744,8 +1748,8 @@ static klj_val klj_SDLActivity_getAssetsList(void *env, void *self, const klj_va
     KLJ_LOG("SDLActivity.getAssetsList(\"%s\") -> %zu entr%s", rel ? rel : "", count, count == 1 ? "y" : "ies");
 
     void *arr = klj_new_array('L', KLJ_CLASS_STRING, (int)count);
-    void **out = klj_arr(arr)->data;
-    for (size_t i = 0; i < count; i++) { out[i] = kl_jni_new_string(names[i]); free(names[i]); }
+    void **out = count ? klj_arr_data(arr, (int)count) : NULL;
+    for (size_t i = 0; i < count; i++) { if (out) out[i] = kl_jni_new_string(names[i]); free(names[i]); }
     free(names);
     return (klj_val){.l = arr};
 }

@@ -218,6 +218,15 @@ static void test_mutex_churn(void) {
     pthread_mutex_unlock(hm); pthread_mutex_destroy(hm); t_free(hm);     // the intentional leak, released here
     CHECK(atomic_load(&g_live) == before - 1, "mutex destroy: a held mutex is kept (not freed by destroy)");
     CHECK(mtx_find(g) == NULL, "mutex destroy: the entry is gone");
+    // a host mutex in the graveyard that something locked meanwhile (a thread still inside it after
+    // its guest destroy) is leaked at reaping, never freed under that thread.
+    pthread_mutex_t *late = mtx_make();
+    long live0 = atomic_load(&g_live);
+    grave_put(late, 0);
+    pthread_mutex_lock(late);
+    grave_drain();
+    CHECK(atomic_load(&g_live) == live0, "mutex grave: a mutex locked at reaping is not freed");
+    pthread_mutex_unlock(late); pthread_mutex_destroy(late); t_free(late);
 }
 
 // The churn tests leak by design when the graveyard ring is full.

@@ -468,7 +468,8 @@ final class VQSettings: ObservableObject {
         unsetenv("VPVK_STRICT_FEATURES")
         // «Perfil Vulkan completo»; the conformance runs set it again either way (VQConformance).
         if vkFullProfile { setenv("VPVK_EXTRA_EXTENSIONS", "1", 1) } else { unsetenv("VPVK_EXTRA_EXTENSIONS") }
-        // Async pipelines stay on with the full profile (only an explicit 0 turns them off); the conformance runs set 0 (VQConformance).
+        // The game's vkCreate*Pipelines is synchronous (VPKEngine default; async is opt-in with VPVK_ASYNC_PIPELINES=1, read in
+        // vkCreateDevice): unset it so nothing inherited turns it on. The conformance runs set 0 (VQConformance).
         unsetenv("VPVK_ASYNC_PIPELINES")
         // VPKEngine 454f7cc dead-store elision (heuristic, risks a corrupted frame) — off until the translator marks samples to keep
         unsetenv("VPVK_MSAA_DEAD_STORE")
