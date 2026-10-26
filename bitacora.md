@@ -1,6 +1,7 @@
 # Bitácora — VisionQuestPro
 
 ## Last done
+- 2026-10-26 Build `e8df010` (run 40415405977) falló solo en `gpu_vulkan.stage_keys`: el traductor numeraba `vNN` según el orden de evaluación de argumentos (gcc≠AppleClang). Arreglado en VPKEngine `1c50719` (lower.cpp OpIAdd, texel buffer, killExitCheck; digest 0x9293a3ef024461d7, gcc=clang). `ref:` → `1c50719` (incluye efe0ec5 de AVP: loads row-major, killExit por cadena).
 - 2026-10-26 VPKEngine `55506b0` + VQP `VQRobust` (VQLaunch.swift): `VPVK_ROBUST` = `0` si el juego aprendió que no pide robustBufferAccess (`<VP_PIPELINE_CACHE_DIR>/vq.robust`, escrito por `klvk_robust_store` en kl_vulkan.c, OR pegajoso por proceso), si no `app`; aplicado antes del prewarm; sellos `firstrun.*`/`aot.*` llevan `.rb0/.rbapp`; purga única por caché (`vq.robustMigrated.v1`: pipelines*.metalar/.keys/.count, recipes.bin, firstrun.*, aot.*). Test `t_vk_robust`. Conformance sin VPVK_ROBUST.
 - 2026-10-26 VPKEngine `fd90770` (main; `ref:` subido): `VPVK_ASYNC_PIPELINES=0` = vkCreate*Pipelines síncrono (semántica Quest; timeout 60 s, backoff 500 ms/5 s, FAIL_ON_COMPILE_REQUIRED); vpgles async salvo `VPVK_GLES_SYNC_PIPELINES=1`; archive depth-only aparte; RAM: TileLocal entre encoders limpios, `transientViolated`, depth de ojo TAA materializado. Logs nuevos: `vpk.version`, `vk.pso.census`, `vk.pso.fail`, `vk.hitch`, `gles.uniform_err`, `gles.tex`, `gles.pso.recipe`, `gpu.missing`, `gpu.mem.rt`. Captura VPCAP + `vpreplay`/`vpimgdiff` + CI lavapipe vs Metal (detalle: `notas/captura.md`).
 - 2026-10-26 VQP: `VQLaunch.swift` pone `VPVK_ASYNC_PIPELINES=0` para juegos (barra de precache del juego real; antes async: ITR2 >8000 PSO «hechos» sin compilar). `kl_frame_boundary` (kl_bg.c) llama `vpvk_frame_boundary` 1/frame desde EndFrame4/EndFrame/xrEndFrame (dueño de ruta, traspaso 500 ms).
@@ -11,7 +12,7 @@
 - Build `d13f9d2`/VPK `5939c99` (medido): ITR2 fb ASW 1116x1129 y 0 `empty_scissor` (arreglo ASW confirmado); ITR2 `missing_resources` ~511/submit; Maestro GLES con INVALID_OPERATION en setUniform; Gundam SIGSEGV en libfmod tras opens de bundles con '\'; pso_wait in-game 0 (archive 6048 PSO).
 
 ## Current state
-- Rama `wip/diag-vqp` lista (3 revisiones adversariales corregidas, `ref:` = VPKEngine `55506b0`); fusionada a main con `[build]` (run pendiente, unverified). Nada de esta tanda compilado en Mac ni probado en visor; host tests nuevos solo en Linux sin ASan.
+- Rama `wip/diag-vqp` lista (3 revisiones adversariales corregidas, `ref:` = VPKEngine `1c50719`); fusionada a main con `[build]` (run pendiente, unverified). Nada de esta tanda compilado en Mac ni probado en visor; host tests nuevos solo en Linux sin ASan.
 - Pendiente (orden):
   1. Log nuevo por juego: ITR2 `gpu.missing` (qué recurso falta) y `vk.pso.census` (created vs >8000 del juego); Maestro `gles.uniform_err` (uniform concreto del morado) y `gles.tex`; Gundam `[pt] passthrough ON`, `[fs] backslash_fallback`, si sigue el crash en libfmod; todos `vk.hitch`, `gpu.mem.rt mat_why=`, `gles.pso.recipe`, `[jni] noop_hit`; tiempo de arranque con PSO síncrono.
   2. Capturar frame roto (Maestro morado, ITR2) y correr `replay.yml` → primer draw divergente.
