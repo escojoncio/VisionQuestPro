@@ -1,24 +1,24 @@
 # Bitácora — VisionQuestPro
 
 ## Last done
-- 2026-10-25: rama `wip-auditoria` (sin build, sin pasar a `main`): bloques A–C + conformidad (`52279ac`, `339722e`, `cc7ca88`, `3aa1393`). Detalle abajo.
-- 2026-10-25: VPKEngine `main` `9f5867b` (Load de memoria indefinida → DontCare, pool memoryless con desalojo), `4b20da0` (parches AVP 0025/0033/0034 apagado/0035/0044/0030 core/0050), `cab00a7` (vpgles texture_buffer, draw_buffers_indexed, features no estrictas, gauges de memoria Metal).
-- 2026-10-25: logs de 698fa20 analizados (Maestro, UBOAT, Gundam, Deadpool, RE4) + auditoría de API con los APK de los 5 juegos (libc, GL/EGL/Vulkan, OVRPlugin/Platform, JNI).
-- 2026-10-25: VPKEngine `662a70b`: todo attachment memoryless diferido; build 698fa20.
+- 2026-10-26: rama `wip-crashes` → `main` con `[build]`. VPKEngine `main` `07bd8fa`.
+- `07bd8fa` (VPKEngine): vpgles enlaza varyings por location; input FS no escrito = 0 (Private+OpConstantNull); reserva de locations explícitas. Causa Maestro (20 programas "fragment input not written" → UE4 Fatal → BindPendingShaderState NULL+0x588).
+- `b27c9c7`: cadena UE carga los DT_NEEDED del entry (`kl_load_needed`, kl_dl.c; kl_ue4.c). Causa ITR2: libUnreal NEEDED libOmniConnectShared (libc++ estática) no cargada → 120 imports sin resolver.
+- `3280533`: auditoría estática de enlace+JNI de 6 APK: `ovrMessageType_ToString`, `AMediaMuxer_*` fallo limpio, trap Vulkan -7/0 por nombre, nativos UE con firma máxima (`nativeSetWindowInfo` ZII, `nativeSetAndroidVersionInformation` 7 args), Electra/EOS ITR2, `getAppPackageName`, `System.loadLibrary`, EOS cache dirs, `ReflectionHelper.newProxyInstance`, `kl_jni_onload_claim` (JNI_OnLoad único por imagen).
+- `68e5ecb`+`d7f81fc`: `[hb] gpu.attr` (objetos Metal vivos por etiqueta, total/tracked/untracked) y `gpu.bigalloc`/`[mtl] bigalloc` ≥32 MiB.
+- `c61f2cf`: `[hb] vm` (mapa VM por tag, tag 240 = mmap anónimo del guest) y `[fatal] last guest errors` (anillo async-safe).
+- `c6f8362`: carátula tienda: timeouts 30/120 s, backoff net 2/10/30/60 min, respaldo nombre exacto+organización.
 
 ## Current state
-- Última build en verde: run CI 40236686338 (commit a5f6bc0, VPKEngine main 935621d). Todo lo de la auditoría: unverified en visor.
-- Causas demostradas (APK + logs) y arreglo en `wip-auditoria`/VPKEngine:
-  - Maestro: `GLFuncPointers::glTexBufferEXT`==NULL (vpgles no anunciaba `GL_EXT_texture_buffer`) → VPKEngine `cab00a7`.
-  - UBOAT: EOS `Application.getClassLoader`/`ClassLoader.loadClass` simulados → jmethodID 0 → abort → JNI implementado (bloque A).
-  - Gundam: `HandsQualityFilter` oculta los brazos si connected no tiene 0x20/0x40 → connected 0x63, active 0x3, in-hand, `HandTrackingEnabled` estable (bloque A; Swift publica Sense adjunto).
+- Build en curso con todo lo anterior: unverified en visor.
+- Logs a5f6bc0 (causas medidas): Maestro = link GLSL (arreglado); ITR2 = DT_NEEDED (arreglado); Gundam y Deadpool = jetsam (foot 8170/8192): RAM CPU ~3,2 GB estable, MTLDevice.currentAllocatedSize 4,2/6,2 GB con solo ~1,8 GB en gauges, crece a saltos (no atribuido); UBOAT funciona ~68 fps pero faltan OBB de parche (dato del usuario) y error de submit GPU en background al salir; carátula Deadpool = timeout búsqueda OculusDB.
 - Pendiente (orden):
-  1. Probar la build a5f6bc0 en Maestro, UBOAT, Gundam, Deadpool, RE4 y leer logs. Heap Vulkan de VPKEngine (6 GiB fijo, physical_device.cpp:152): otro proyecto lo hará configurable; VQP debe quedarse en 6 GiB o menos (UE4 dimensiona pool y expulsión con él).
-  2. Deadpool jetsam: `MTLDevice.currentAllocatedSize` crece ~10 MB/s con texturas/buffers planos (no atribuido). Leer en el próximo log `[hb] gpu … held_b views args_b buf_int_b taa_b fov_b` para atribuirlo.
-  3. Verificar en log: `[dlsym] … -> NULL` (traza siempre activa), `[mprobe f1800/f3600]` detalle de escena (Gundam), `loads_dropped=`, `ml_pool=`, `memoryless_attrib`, `image_buffer_unbound`, `device_feature_not_present`.
-  4. Resto auditoría no aplicado: `AMediaMuxer_*` (Gundam, solo grabar); `/proc/stat`, `self/exe`, topology; `ovrp_GetNodePresent`/`PositionTracked` sin sufijo siempre true; 2 tipos de mensaje IAP sin `ovrMessageType` (id 0).
-  5. VPKEngine: fusión completa con la rama AVP (`19a1f44` + 50 parches, ~330 conflictos) pendiente; `msaaResolveOnTile` necesita `Attachment::keepSamples` antes de activarse.
-- Riesgos abiertos: twin render pass depende de marcar imágenes de ojo (OVRP `g_eye`, OpenXR `g_xeye`); draws con `imageBuffer` sin enlazar se saltan; cuarentena de cond/mutex por tiempo (fuga si >40k destroy/s); `klj_arr(x)->data` sin proteger en `jni/kl_jni_{android,bridge,services,ue4,window}.c`; pausa con la Corona = `_exit(0)`.
+  1. Leer en los logs nuevos: `[hb] gpu.attr` (vpk_top/kl_top/untracked) y `gpu.bigalloc` en Gundam/Deadpool → arreglar el origen de la memoria Metal. Si crece `untracked` → no son objetos nuestros.
+  2. `[hb] vm` (reparto CPU), `[fatal] last guest errors`, `gles.program varying_unwritten`, `[dl] … DT_NEEDED`, carátula ("ficha elegida por …").
+  3. Auditoría restante (no aplicada): ovrp que devuelven -1004 donde se espera handle (`ovrp_GetNativeSDKPointer2`, `GetEyeFovLayerId`, `SetupMirrorTexture2`); OpenXR FB/META sin fila (ITR2); 75 thunks `AndroidThunkJava_*` NO-OP; 184 pares Unity sin enlace; `createTelemetryHandler` NULL (Gundam). Detalle: auditoría en sesión (no en repo).
+  4. Submit GPU en background (UBOAT al salir): parar trabajo GPU al pasar a background.
+  5. VPKEngine: fusión con rama AVP pendiente; `msaaResolveOnTile` necesita `Attachment::keepSamples`.
+- Riesgos abiertos: twin render pass depende de marcar imágenes de ojo; draws con `imageBuffer` sin enlazar se saltan; cuarentena cond/mutex por tiempo; `klj_arr(x)->data` sin proteger en `jni/kl_jni_{android,bridge,services,ue4,window}.c`; pausa con la Corona = `_exit(0)`; ForceQuit crea `klepton-crash.log` sin crash (volcado `[fatal]`).
 
 ## Decisions
 - Todo global, sin condiciones por juego (salvo ajustes del usuario: AA, resolución, anisótropo, RCAS).
@@ -45,7 +45,7 @@
 - `klepton/runtime/xr/{kl_ovrp.c,kl_ovrp_input.c,kl_ovrplat.c}`, `klepton/visionos/Sources/KleptonControllers.swift` (+ bridging header).
 - `klepton/runtime/jni/{kl_jni_lang.c,kl_jni_android.c,kl_jni_ue4.c,kl_jni_window.c,kl_jni_prefs.c}`, `klepton/runtime/kl_jni.c`, `klepton/runtime/kl_dl.c`, `klepton/runtime/diag/kl_mprobe.c`.
 - `klepton/runtime/libc/{kl_libc.c,kl_pthread.c,kl_shim.c}`, `klepton/tests/t_libc_sem.c` (Gate: `tools/ci/host-tests.sh`).
-- `klepton/runtime/gfx/kl_vulkan.c` (twin render pass), `app/Sources/{VQConformance.swift,VQLaunch.swift}`.
+- `klepton/runtime/gfx/{kl_vulkan.c,kl_mtl_attr.m}`, `klepton/runtime/guest/kl_ue4.c`, `klepton/runtime/kl_fault.c`, `klepton/runtime/libc/kl_va_handlers.c`, `app/Sources/VQCover.swift`.
 
 ## Module index
 - `notas/arquitectura.md`: runtime, app, visor, datos de plataforma, ABI OVRPlugin, resolución.
