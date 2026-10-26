@@ -15,7 +15,7 @@
 - `c6f8362`: carátula tienda: timeouts 30/120 s, backoff net 2/10/30/60 min, respaldo nombre exacto+organización.
 
 ## Current state
-- Build nueva con VPKEngine 5939c99: unverified en visor. Build 14f415d: Maestro sin ForceQuit (llega in-game, personajes morados), ITR2 89 % draws `scissor`, FPS bajo en Maestro/ITR2 sin medida.
+- Última build en verde: run CI 40336286679 intento 2 (commit d13f9d2, VPKEngine 5939c99): unverified en visor. Build 14f415d: Maestro sin ForceQuit (llega in-game, personajes morados), ITR2 89 % draws `scissor`, FPS bajo en Maestro/ITR2 sin medida.
 - Pendiente (orden):
   1. Log nuevo: ITR2 `[asw] framebuffer` ≠0x0 y `skip_by{scissor}`≈0; Maestro `gles.note mip_before_base`, `gles.tex fmt=`, `gles.err clear_*`; Gundam `heavy_indirect=`, `ind{cpu_sec}` (si >0: parchear indirect multiview en secundarios antes de beginRenderPass); FPS: leer `vk.perf` (GPU `gpu_cb sum_ms` vs `submit_ms`/`pso_wait_ms`/`fence_wait`).
   2. RAM: picos Deadpool 6,3 GB, Gundam 6,7 GB, ITR2 4,9 GB; ITR2 `g_tex_live` 56→4071 por vigilar; heavy indirect sube memoria MSAA (medir).
