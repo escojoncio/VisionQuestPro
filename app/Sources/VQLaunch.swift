@@ -871,7 +871,7 @@ enum VQOVRPluginVersion {
 /// ask (prewarm and game both translate without the checks), else "app" (the prewarm's "on" is the game's own request).
 enum VQRobust {
     static let learnedFile = "vq.robust"
-    static let migrationStamp = "vq.robustMigrated.v1"
+    static let translatorFile = "vq.translator"
 
     /// nil = not learned yet (first run of the game, or the cache was wiped).
     static func learned(cache: URL) -> Bool? {
@@ -893,13 +893,15 @@ enum VQRobust {
         return "rb" + String(cString: e)
     }
 
-    /// Once per cache folder: recipes, Metal archives and the warm stamps of earlier builds were made without the VPVK_ROBUST
-    /// key, so they go (the next launch rebuilds them). Sealed with the stamp only when every removal and the stamp itself
-    /// succeeded (else it retries next launch). nil = the stamp says it already ran.
-    static func purgeOnce(cache: URL) -> (removed: Int, failed: [String], sealed: Bool)? {
+    /// Whenever the translator version (vpvk_translator_tag) differs from the one stored in <cache>/vq.translator, or the
+    /// file is missing (also caches of earlier builds, made without the VPVK_ROBUST key): recipes, Metal archives and the
+    /// warm stamps go (the next launch rebuilds them). The new tag is written only when every removal succeeded (else it
+    /// retries next launch). nil = same translator, nothing to do.
+    static func purgeOnTranslatorChange(cache: URL, tag: String) -> (old: String?, removed: Int, failed: [String], sealed: Bool)? {
         let fm = FileManager.default
-        let stamp = cache.appendingPathComponent(migrationStamp)
-        if fm.fileExists(atPath: stamp.path) { return nil }
+        let stamp = cache.appendingPathComponent(translatorFile)
+        let old = (try? String(contentsOf: stamp, encoding: .utf8))?.trimmingCharacters(in: .whitespacesAndNewlines)
+        if old == tag { return nil }
         var removed = 0
         var failed: [String] = []
         for f in (try? fm.contentsOfDirectory(atPath: cache.path)) ?? [] {
@@ -909,16 +911,20 @@ enum VQRobust {
                 do { try fm.removeItem(at: cache.appendingPathComponent(f)); removed += 1 } catch { failed.append("\(f): \(error.localizedDescription)") }
             }
         }
-        if !failed.isEmpty { return (removed, failed, false) }
+        if !failed.isEmpty { return (old, removed, failed, false) }
         try? fm.createDirectory(at: cache, withIntermediateDirectories: true)
-        return (removed, failed, fm.createFile(atPath: stamp.path, contents: Data()))
+        return (old, removed, failed, fm.createFile(atPath: stamp.path, contents: Data(tag.utf8)))
     }
 
     static func prepare(cache: URL) {
-        if let r = purgeOnce(cache: cache) {
-            VQLog.log("Shaders: caché migrada a VPVK_ROBUST, \(r.removed) ficheros borrados (recetas, archivos Metal, sellos de calentamiento)"
-                      + (r.sealed ? "" : ", SIN sellar (se reintenta en el próximo arranque)"))
-            for f in r.failed { VQLog.log("Shaders: no se pudo borrar \(f)") }
+        if let tag = VQPrewarm.translatorTag() {
+            if let r = purgeOnTranslatorChange(cache: cache, tag: tag) {
+                VQLog.log("Shaders: traductor \(r.old ?? "sin sello") → \(tag), \(r.removed) ficheros borrados"
+                          + (r.sealed ? "" : ", SIN sellar (se reintenta en el próximo arranque)"))
+                for f in r.failed { VQLog.log("Shaders: no se pudo borrar \(f)") }
+            }
+        } else {
+            VQLog.log("Shaders: sin vpvk_translator_tag (VPVulkan no cargado o antiguo), caché sin purgar")
         }
         let l = learned(cache: cache)
         let v = envValue(learned: l)
