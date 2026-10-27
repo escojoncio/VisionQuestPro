@@ -81,9 +81,30 @@ int main(void) {
     kl_diagcap_step(&c, 1, KL_OVRP_RAW_RINDEX_TRIGGER, 0);
     CHECK(kl_diagcap_step(&c, 1, KL_OVRP_RAW_RINDEX_TRIGGER, 3000), "both triggers fire");
 
+    // Hold 0 (the default): fires on the press itself, once per press; the debounce swallows a bounce of the same press.
+    kl_diagcap_init(&c, KL_DIAGCAP_STICK_L, 0);
+    CHECK(c.hold_ms == 0, "hold 0 is kept");
+    CHECK(!kl_diagcap_step(&c, 0, 0, 0), "hold 0: idle");
+    CHECK(kl_diagcap_step(&c, 0, LS, 1000), "hold 0: fires on the press");
+    CHECK(!kl_diagcap_step(&c, 0, LS, 1010), "hold 0: once per press");
+    CHECK(!kl_diagcap_step(&c, 0, LS, 60000), "hold 0: still once much later");
+    kl_diagcap_step(&c, 0, 0, 61000);
+    CHECK(kl_diagcap_step(&c, 0, LS, 62000), "hold 0: the next press fires");
+    kl_diagcap_step(&c, 0, 0, 62050);
+    CHECK(!kl_diagcap_step(&c, 0, LS, 62100), "hold 0: a bounce 100 ms later is the same press");
+    CHECK(!kl_diagcap_step(&c, 0, LS, 62200), "hold 0: and stays swallowed while it is held");
+    kl_diagcap_step(&c, 0, 0, 63000);
+    CHECK(kl_diagcap_step(&c, 0, LS, 63500), "hold 0: a new press after the debounce fires");
+    // Both sticks, hold 0: at the sample where the second one goes down.
+    kl_diagcap_init(&c, KL_DIAGCAP_STICKS, 0);
+    CHECK(!kl_diagcap_step(&c, 0, LS, 0), "hold 0, both: one stick is not enough");
+    CHECK(kl_diagcap_step(&c, 1, RS, 500), "hold 0, both: fires when the second goes down");
+    CHECK(!kl_diagcap_step(&c, 1, RS, 600), "hold 0, both: once");
+
     // Hold time limits; unknown mode falls back to the left stick; a bad hand is ignored.
-    kl_diagcap_init(&c, 99, 1);
-    CHECK(c.hold_ms == KL_DIAGCAP_HOLD_MIN_MS && c.need[0] == LS && c.need[1] == 0, "min hold, default mode");
+    kl_diagcap_init(&c, 99, 0);
+    CHECK(c.hold_ms == KL_DIAGCAP_HOLD_MIN_MS && KL_DIAGCAP_HOLD_MIN_MS == 0 && c.need[0] == LS && c.need[1] == 0,
+          "min hold (0), default mode");
     kl_diagcap_init(&c, 0, 99999999);
     CHECK(c.hold_ms == KL_DIAGCAP_HOLD_MAX_MS, "max hold");
     CHECK(!kl_diagcap_step(&c, 2, LS, 0) && !kl_diagcap_step(&c, -1, LS, 0), "hand out of range");
@@ -114,6 +135,29 @@ int main(void) {
     int st = 0;
     waitpid(pid, &st, 0);
     CHECK(WIFEXITED(st) && WEXITSTATUS(st) == 0, "on case (child)");
+
+    // No KL_DIAGCAP_HOLD_MS: the default is 0, the request goes out at the press (left stick), one per press.
+    fflush(stdout);
+    pid = fork();
+    if (pid == 0) {
+        setenv("KL_DIAGCAP", "1", 1); unsetenv("KL_DIAGCAP_BTN"); unsetenv("KL_DIAGCAP_HOLD_MS");
+        kl_diagcap_input(0, LS);
+        CHECK(req_calls == 1 && req_frames == 1 && req_pathnull, "child2: vpvk_capture_request(1, NULL) at the press");
+        CHECK(hap_calls == 2, "child2: pulse on both hands");
+        kl_diagcap_input(0, LS);
+        CHECK(req_calls == 1, "child2: once per press");
+        kl_diagcap_input(0, 0);
+        kl_diagcap_input(0, LS);   // bounce right after the release
+        CHECK(req_calls == 1, "child2: a bounce is the same press");
+        kl_diagcap_input(0, 0);
+        usleep(350000);
+        kl_diagcap_input(0, LS);
+        CHECK(req_calls == 2, "child2: a new press after the debounce");
+        _exit(fails ? 1 : 0);
+    }
+    st = 0;
+    waitpid(pid, &st, 0);
+    CHECK(WIFEXITED(st) && WEXITSTATUS(st) == 0, "default hold case (child)");
 
     // Off unless KL_DIAGCAP=1.
     unsetenv("KL_DIAGCAP");

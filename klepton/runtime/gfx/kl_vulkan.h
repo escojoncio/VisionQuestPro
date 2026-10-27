@@ -354,8 +354,8 @@ size_t kl_vulkan_mem_stats(char *out, size_t cap);
 // VPKTAA NATIVO (VPKEngine's own pass, vpvk_taa_native_*; the ONLY VPKTAA): 1 when KL_VPKTAA=1
 // and the driver reports it on (the app sets VPVK_TAA_NATIVE=1 whenever VPKTAA is allowed).
 // Then VPKEngine also picks the jitter (its own Halton(2,3)); the inline hook
-// hands it the frame (`frame` = vpvk_taa_native_frame, mirrored in
-// KleptonTAA.swift) inside kl_vulkan_native_submit's callback, and the pass
+// hands it the frame (`frame` = vpvk_taa_native_frame; its Swift adapter was removed
+// with VPKTAA from the app) inside kl_vulkan_native_submit's callback, and the pass
 // is the resolve of that frame (no other resolver exists: without it frames go out untouched).
 // Mirror of VPKEngine's vpvk_taa_native_eye / vpvk_taa_native_frame
 // (gpu/vulkan/include/vpvk/config.h), field for field.
@@ -404,8 +404,7 @@ void *kl_vulkan_eye_color_mtl(int stage, int eye, int *slice, int *w, int *h);
 // table, as an override over the live entry). tex = NULL restores the live
 // image. The override is dropped by itself when the stage's live eye image
 // changes (reallocation, size), and refused when w x h is not the eye's size.
-// Applied at once. (KleptonTAA no longer publishes this way: its output goes to
-// KleptonCompositor with its frame record when the GPU completes it.)
+// Applied at once. (The VPKTAA adapter that used this is gone from the app.)
 void kl_vulkan_taa_publish(int stage, void *tex, int w, int h);
 // The jitter VPKEngine actually applied to the frame that is ending
 // (vpvk_taa_get_applied, which resets its counters — call once per frame).

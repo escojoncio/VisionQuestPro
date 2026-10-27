@@ -107,8 +107,7 @@ Explore.md
 # VisionQuestPro
 
 App para Apple Vision Pro que ejecuta juegos de Quest a partir de sus ficheros descomprimidos
-(APK + carpeta de datos), sin necesitar un Quest. Gráficos con VPKEngine (escojoncio/VPKEngine) y
-antialiasing VPKTAA (escojoncio/PTVisionPro).
+(APK + carpeta de datos), sin necesitar un Quest. Gráficos con VPKEngine (escojoncio/VPKEngine).
 
 ## Flujo
 1. El usuario copia la carpeta de un juego en `QUEST/Juegos` (carpeta elegida con el selector del
@@ -127,21 +126,18 @@ antialiasing VPKTAA (escojoncio/PTVisionPro).
 
 ## Ajustes (todos dentro de la app, nunca en ficheros de texto)
 - Resolución de render.
-- VPKTAA en lugar del AA del juego (porcentaje, nitidez).
+- MSAA: el del juego / x2 / x4 forzado (global y por juego), siempre memoryless.
 - Perfil Quest 3 cuando el juego lo tenga.
 - ASW desactivable: todos los frames reales, sin extrapolar.
-- Nitidez (RCAS): afilado de FSR (RCAS), siempre activo en todos los modos de AA, 0–100 % (global y por juego; 0 = apagado), solo sobre el 3D.
-- Foveado: zona nítida, periferia, presets M2 / M5 / personalizado (como PTVisionPro; M5 solo
-  seleccionable en un Vision Pro M5).
+- Nitidez (RCAS): afilado de FSR (RCAS), siempre activo, 0–100 % (global y por juego; 0 = apagado), solo sobre el 3D.
+- Sin foveado propio (desactivado).
 
 ## Gráficos
 - Traductor propio Vulkan/SPIR-V → Metal dentro de VPKEngine, reutilizando su IR (VPIR), emisor MSL,
   backend Metal y grafo de pases. Código 100 % propio (sin MoltenVK, SPIRV-Cross ni Mesa).
-- Se quita el MSAA del juego y se aplica VPKTAA.
-- Si el juego genera vectores de movimiento (juegos con SpaceWarp), VPKTAA los usa para no dejar
-  estelas en objetos en movimiento.
-- El foveado del juego se conecta con el foveado propio.
-- VPKTAA nativo solo actúa sobre el 3D: la UI/2D dibujada dentro del buffer del ojo (menús, textos, HUD) se
+- Sin VPKTAA. Antialiasing = MSAA (del juego o forzado x2/x4) con muestras memoryless y resolve en tile.
+- Perfil anunciado = el de Quest 3 real (gpuinfo); validado con Vulkan CTS y dEQP GLES.
+- RCAS solo actúa sobre el 3D: la UI/2D dibujada dentro del buffer del ojo (menús, textos, HUD) se
   excluye con una máscara reactiva (R8) que escribe VPKEngine; así el texto no se emborrona.
 
 ## Alcance

@@ -3854,8 +3854,8 @@ static uint64_t klovrp_end_frame_impl(int guest_frame_index, const int *viewport
         g_frames.r[stage] = g_frames.pending;
         // A Vulkan guest's EndFrame4 files the record BEFORE the GPU has drawn the
         // picture (kl_vulkan_frame_done waits right after): the stage is announced to
-        // the compositor — last_complete AND the record's `complete`, which KleptonTAA
-        // scans r[] for — only once that wait is over (klovrp_publish_deferred).
+        // the compositor — last_complete AND the record's `complete`, which the
+        // compositor scans r[] for — only once that wait is over (klovrp_publish_deferred).
         if (t_defer_complete) {
             g_frames.r[stage].complete = 0;
             g_frames.deferred_complete = stage;
@@ -10736,7 +10736,7 @@ void kl_ovrp_report(FILE *f) {
 
 
 // ---------------------------------------------------------------------------
-// VPKTAA sub-pixel jitter (KleptonTAA.swift resolves it)
+// VPKTAA sub-pixel jitter (inert: the app no longer runs VPKTAA, KL_VPKTAA=0)
 //
 // A temporal resolve only adds detail if consecutive frames sample DIFFERENT
 // sub-pixel positions; without that it can only average identical samples

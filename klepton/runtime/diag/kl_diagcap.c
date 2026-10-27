@@ -27,9 +27,12 @@ int kl_diagcap_step(kl_diagcap *c, int hand, uint32_t buttons, uint64_t now_ms) 
     for (int h = 0; h < 2; h++)
         if (c->need[h] && (c->cur[h] & c->need[h]) != c->need[h]) held = 0;
     if (!held) { c->active = 0; c->fired = 0; return 0; }
-    if (!c->active) { c->active = 1; c->since_ms = now_ms; return 0; }
+    if (!c->active) { c->active = 1; c->since_ms = now_ms; }
     if (c->fired || now_ms < c->since_ms + c->hold_ms) return 0;
     c->fired = 1;
+    if (c->has_fired && now_ms < c->last_fire_ms + KL_DIAGCAP_DEBOUNCE_MS) return 0;   // a bounce of the same press
+    c->has_fired = 1;
+    c->last_fire_ms = now_ms;
     return 1;
 }
 
@@ -49,7 +52,7 @@ void kl_diagcap_input(int hand, uint32_t buttons) {
     if (on < 0) {
         on = kl_env_on("KL_DIAGCAP", 0);
         if (on) {
-            kl_diagcap_init(&c, kl_env_int("KL_DIAGCAP_BTN", KL_DIAGCAP_STICK_L), kl_env_uint("KL_DIAGCAP_HOLD_MS", 3000));
+            kl_diagcap_init(&c, kl_env_int("KL_DIAGCAP_BTN", KL_DIAGCAP_STICK_L), kl_env_uint("KL_DIAGCAP_HOLD_MS", 0));
             fprintf(stderr, "[cap] trigger on: buttons %#x/%#x held %u ms\n", c.need[0], c.need[1], c.hold_ms);
         }
     }

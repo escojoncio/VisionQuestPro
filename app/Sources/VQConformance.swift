@@ -458,33 +458,26 @@ enum VQConformance {
     }
 
     /// The conformance tests check the driver itself: none of the game-facing graphics settings
-    /// (anisotropy forced on samplers, VPKTAA jitter, MSAA forced/overridden, foveation, render
+    /// (anisotropy forced on samplers, MSAA forced, RCAS, foveation, render
     /// scale) may change what they render. Overrides what applyToEnvironment set for this launch.
     static func neutralGraphics() {
         setenv("KL_OVRP_SEATED", "0", 1)   // «Sentado» raises STAGE: the self-test expects STAGE == the tracking space
         setenv("VPVK_ANISO", "0", 1)
         setenv("VPVK_FORCE_ANISO", "0", 1)
-        setenv("VPVK_TAA_JITTER", "0", 1)
-        setenv("VPVK_FORCE_1X", "0", 1)
-        setenv("VPVK_MSAA", "0", 1)
-        setenv("KL_VPKTAA", "0", 1)
-        setenv("KL_AA_MODE", "off", 1)
-        setenv("VPVK_TAA_NATIVE", "0", 1)
+        setenv("VPVK_MSAA_FORCE", "0", 1)
         setenv("KL_RCAS", "0", 1)   // the driver tests see the game's picture untouched
         setenv("VPVK_RCAS", "0", 1)
         unsetenv("VPVK_MSAA_DEAD_STORE")   // dead-store elision off (see VQLaunch)
         var c = vq_gfx_config()
         c.foveation_mode = 0
-        c.vpktaa_enabled = 0
         c.render_scale = 1
         c.asw_disabled = 1
         c.quest3_profile = 1
         c.anisotropy = 0
-        c.force_single_sample = 0
-        c.msaa_override = 0
+        c.msaa_force = 0
         c.rcas = 0
         _ = vq_gfx_config_apply(&c)
-        VQLog.log("Conformidad: gráficos neutros (sin anisotrópico forzado, sin VPKTAA, MSAA del test, sin foveado)")
+        VQLog.log("Conformidad: gráficos neutros (sin anisotrópico forzado, sin MSAA forzado, sin RCAS, sin foveado)")
     }
 
     /// Forgets every result (the next launch starts from the first batch).

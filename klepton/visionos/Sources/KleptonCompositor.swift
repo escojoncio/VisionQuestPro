@@ -220,20 +220,8 @@ final class KleptonCompositor {
     // is about the lifecycle rather than the picture.
     private var queue: MTLCommandQueue?
     private var pipeline: MTLRenderPipelineState!
-    /// VPKTAA (KleptonTAA.swift); nil when the setting is off. Per-eye resolved textures for
-    /// the guest frame being composited, filled by prepareTAA before the render pass.
-    private lazy var taa: KleptonTAA? = KleptonTAA(device: device)
-    private var taaOut: [Int: MTLTexture] = [:]
-    private var taaPose: kl_ovrp_render_pose?
-    /// Inline VPKTAA showing an UNRESOLVED frame (KleptonTAA.acquireInline .raw): the stage
-    /// whose live picture belongs to taaPose (may differ from the newest complete stage).
-    private var taaStage: Int?
-    /// Inline VPKTAA: no complete picture yet (KleptonTAA.acquireInline .hide) — the eye quad
-    /// is left out for this composite rather than sample an eye the GPU is still drawing.
-    private var taaHide = false
-    private var taaFlip: [Bool] = [false, false]
-    /// `taaOut` is a real VPKTAA resolve (unsharpened), not an rcas_only frame the engine already sharpened.
-    private var taaResolved = false
+    /// GPU lost (set per composite in encodeComposite): the eye quad is left out rather than sample unwritten memory.
+    private var gpuLostHide = false
     private var depthState: MTLDepthStencilState?
     /// Always-pass, no write — for coplanar draws after the first. See where
     /// `depthState` is built for why the two cannot be one.
@@ -308,7 +296,7 @@ final class KleptonCompositor {
     // the picture on screen is: (age - lead) / interval, lead = EMA of a fresh frame's age at
     // first use, interval = EMA of the guest's submit gap. KL_CP_ASW_MAX (1.5 frames),
     // KL_CP_ASW_CAP (0.08 of the picture per axis), KL_CP_ASW_SIGN (+1 / -1, KL_VPKTAA_MV_SIGN's
-    // meaning; the auto vote lives in KleptonTAA and is NOT shared), KL_CP_ASW_YFLIP,
+    // meaning), KL_CP_ASW_YFLIP,
     // KL_CP_ASW_SCALE (0.5 = NDC delta -> uv, as VPKTAA).
     private let aswRequested = klEnvOn("KL_CP_ASW", default: false)
     private let aswUserOff = klEnvOn("KL_CP_ASW_OFF", default: false)
@@ -612,12 +600,9 @@ final class KleptonCompositor {
     // `[cp] gpu p50/p95/max`. Written from the completion handler under cmdLock.
     private var cpGpuMs: [Double] = []
     private var cpGpuWindowStart = CFAbsoluteTimeGetCurrent()
-    /// RCAS fused into the eye pass (kl_reproject.c kl_rcas) for a VPKTAA-resolved picture: VPKEngine's
-    /// native pass no longer sharpens its output, so this applies even with KL_RCAS_COMPOSITOR=0.
-    private static let rcasConTaa: Float = KleptonTAA.rcasIntensity > 0
-        ? exp2f(-2 * (1 - KleptonTAA.rcasIntensity)) : 0
-    /// Same for the guest's own (unresolved) eye; with KL_RCAS_COMPOSITOR=0 the separate native pass does it.
-    private static let rcasCon: Float = KleptonTAA.rcasInCompositor ? rcasConTaa : 0
+    /// RCAS fused into the eye pass (kl_reproject.c kl_rcas) on the guest's own eye: the only sharpening there is.
+    private static let rcasCon: Float = KleptonRCAS.rcasInCompositor
+        ? exp2f(-2 * (1 - KleptonRCAS.rcasIntensity)) : 0
     private static let rcasDenoise: UInt32 = getenv("VPVK_RCAS_DENOISE").map { String(cString: $0) == "1" } == true ? 1 : 0
     private var loggedRcasComp = false
     private var loggedUiMaskOn = false
@@ -2342,7 +2327,6 @@ final class KleptonCompositor {
                        !eyeTex.contains(where: { $0 === a.texture }) { eyeTex.append(a.texture) }
                 }
                 var extra: [(String, MTLTexture)] = []
-                for (e, t) in taaOut.sorted(by: { $0.key < $1.key }) { extra.append(("vpktaa\(e)", t)) }
                 for (id, t) in overlayCapTex.sorted(by: { $0.key < $1.key }) { extra.append(("layer\(id)", t)) }
                 // Application SpaceWarp storage (VPKTAA phase 1): the guest's motion
                 // vectors (PNG: 0.5 + 32 x NDC delta per channel) and its depth (a
@@ -2446,7 +2430,7 @@ final class KleptonCompositor {
     /// own single-layer rate map, because there is nothing to amplify.
     // MARK: - FPS HUD (KL_FPS_HUD=1, app setting «Mostrar FPS»)
     //
-    // A small head-locked panel: guest frames/s, compositor presents/s, VPKTAA state. Drawn
+    // A small head-locked panel: guest frames/s, compositor presents/s, render resolution. Drawn
     // with the overlay pipeline through kl_overlay_build, like any guest Quad layer, from a
     // CoreGraphics bitmap refreshed twice a second.
     static let fpsHudEnabled: Bool = (getenv("KL_FPS_HUD").map { String(cString: $0) } ?? "0") == "1"
@@ -2475,9 +2459,7 @@ final class KleptonCompositor {
                 ? "\(rendered.viewport_of.0)x\(rendered.viewport_of.1)" : "-"
             var lines: [String] = []
             if Self.fpsHudEnabled {
-                lines.append(String(format: "Juego %.0f fps  Visor %.0f Hz  %@  VPKTAA %@",
-                                    game, comp, res,
-                                    !taaOut.isEmpty || taa?.inlineShowing == true ? "on" : "off"))
+                lines.append(String(format: "Juego %.0f fps  Visor %.0f Hz  %@", game, comp, res))
             }
             if Self.statusHudEnabled {
                 var buf = [CChar](repeating: 0, count: 256)
@@ -2563,8 +2545,10 @@ final class KleptonCompositor {
                                  cmd: MTLCommandBuffer, stage: Int, completeStage: Int,
                                  rendered: kl_ovrp_render_pose, haveRendered: Bool,
                                  originFromHead: simd_float4x4) -> Int {
-        prepareTAA(cmd: cmd, stage: stage, completeStage: completeStage,
-                   rendered: rendered, haveRendered: haveRendered)
+        // GPU lost: the guest renders nothing any more, its eye images are unwritten memory. Black
+        // (gpuLostHide -> no eye allocation), on every path; the run is being ended with a message
+        // (kl_jni_request_quit -> engineQuit -> launcher endMessage).
+        gpuLostHide = kl_vulkan_gpu_lost() != 0
         // KL_CP_AMPLIFY=0 — back to ONE RENDER PASS PER EYE, selecting the
         // slice on the attachment, with no rate map and no amplification.
         //
@@ -2607,56 +2591,6 @@ final class KleptonCompositor {
         return n
     }
 
-    /// VPKTAA (inline, VPKEngine's native pass): picks up the newest COMPLETED resolve, whose pose
-    /// replaces `rendered` for the eye quads (taaPose) so picture and pose always belong to the
-    /// same guest frame. Both eyes or none; anything else composites untouched.
-    private func prepareTAA(cmd: MTLCommandBuffer, stage: Int, completeStage: Int,
-                            rendered: kl_ovrp_render_pose, haveRendered: Bool) {
-        taaOut.removeAll(keepingCapacity: true)
-        taaResolved = false
-        taaPose = nil
-        taaStage = nil
-        taaHide = false
-        // Automatic AA: store the game's detected eye MSAA for the app (whether or not VPKTAA
-        // is on for this game).
-        KleptonTAA.pollAADetection()
-        // GPU lost: the guest renders nothing any more, its eye images are unwritten memory. Black
-        // (taaHide -> no eye allocation), on every path; the run is being ended with a message
-        // (kl_jni_request_quit -> engineQuit -> launcher endMessage).
-        if kl_vulkan_gpu_lost() != 0 {
-            taaHide = true
-            return
-        }
-        guard let taa else { return }
-        // Inline mode (Vulkan guest on VPVulkan): the resolve runs at the guest's frame end on
-        // VPKEngine's queue and is shown once its command buffer has COMPLETED, with its own
-        // frame record (or, while frames go out unresolved, the newest waited-for frame with
-        // its record and stage). Nothing to submit here; the frustum jitter stays off
-        // (VPKEngine jitters).
-        if taa.pollInline() {
-            kl_ovrp_set_taa_active(0)
-            switch taa.acquireInline(for: cmd) {
-            case .resolved(let p)?:
-                taaOut[0] = p.out[0]; taaOut[1] = p.out[1]
-                taaFlip = p.flipY
-                taaResolved = p.taa
-                taaPose = p.pose
-            case .raw(let r, let st)?:
-                taaPose = r
-                taaStage = st
-            case .hide?:
-                taaHide = true
-            case nil:
-                break
-            }
-            return
-        }
-        // No inline hook (GLES/ANGLE guest, MoltenVK, VPKEngine without the native pass): no VPKTAA.
-        // The native pass is the only one, so these guests are shown untouched and the game gets
-        // no frustum jitter.
-        kl_ovrp_set_taa_active(0)
-    }
-
     private func encodeViews(_ viewIndices: [Int],
                              drawable: LayerRenderer.Drawable,
                              layered: Bool,
@@ -2665,12 +2599,6 @@ final class KleptonCompositor {
                              rendered: kl_ovrp_render_pose, haveRendered: Bool,
                              originFromHead: simd_float4x4) -> Int {
         guard let first = viewIndices.first else { return 0 }
-        // VPKTAA picture on screen: reproject it with the pose of the guest frame it was
-        // resolved from (one frame older than `rendered` while the next resolve runs).
-        let rendered = taaPose ?? rendered
-        let haveRendered = taaPose != nil ? true : haveRendered
-        // Inline VPKTAA showing an unresolved frame: that frame's own stage.
-        let stage = taaStage ?? stage
         let firstMap = drawable.views[first].textureMap
 
         let pass = MTLRenderPassDescriptor()
@@ -2813,12 +2741,7 @@ final class KleptonCompositor {
             // menu, out of the SAME swapchains) that is one screen composited
             // twice, full-field underneath its own panel. kl_ovrp.h has the
             // measurement.
-            var alloc = (completeStage < 0 || kl_ovrp_eye_layer_live() == 0 || taaHide || staleHide) ? nil : a
-            // VPKTAA: the resolved picture replaces the guest's, same geometry (slice 0 of its
-            // own array, same flip).
-            if alloc != nil, let t = taaOut[vi] {
-                alloc = EyeAllocation(texture: t, slice: 0, flipY: taaFlip[vi == 0 ? 0 : 1])
-            }
+            let alloc = (completeStage < 0 || kl_ovrp_eye_layer_live() == 0 || gpuLostHide || staleHide) ? nil : a
             var u = withUnsafePointer(to: rendered) { r in
                 kl_reproject_build(haveRendered ? r : nil, Int32(vi),
                                    originFromHead,
@@ -2846,12 +2769,9 @@ final class KleptonCompositor {
                 continue
             }
             u.visible = alloc == nil ? 0 : 1
-            // RCAS fused here, on the guest's own (unresolved) eye and on the VPKTAA-resolved one
-            // (the native pass leaves its output unsharpened). An rcas_only frame (KL_RCAS_COMPOSITOR=0)
-            // arrives as taaOut too, already sharpened by the engine: not again.
-            let rcasCon = taaOut[vi] == nil ? Self.rcasCon : (taaResolved ? Self.rcasConTaa : 0)
-            if alloc != nil, rcasCon > 0 {
-                u.rcas_con = rcasCon
+            // RCAS fused here, on the guest's own eye (3D only: VPKEngine's UI mask below).
+            if alloc != nil, Self.rcasCon > 0 {
+                u.rcas_con = Self.rcasCon
                 u.rcas_flags = Self.rcasDenoise
                 // VPKEngine's UI mask for this eye (same eye texture space, same uv): HUD / text keep
                 // their original pixels. None this frame: plain RCAS, as before.
@@ -2945,7 +2865,7 @@ final class KleptonCompositor {
                               layered: layered, originFromHead: originFromHead)
             if nproj == 0, visible == 0 {
                 let why = staleHide ? "guest frozen"
-                    : taaHide ? "taa hidden"
+                    : gpuLostHide ? "gpu lost"
                     : completeStage < 0 ? "no complete stage"
                     : kl_ovrp_eye_layer_live() == 0 ? "eye layer not live"
                     : !haveEyes ? "no eye texture" : "views not visible"
@@ -3104,8 +3024,8 @@ final class KleptonCompositor {
                 }
                 if !loggedRcasComp {
                     loggedRcasComp = true
-                    NSLog("[cp] RCAS fused into the composite pass (nitidez \(String(format: "%.2f", KleptonTAA.rcasIntensity)), "
-                          + "constante \(String(format: "%.3f", Self.rcasConTaa)), sin pase ni anillo propios; "
+                    NSLog("[cp] RCAS fused into the composite pass (nitidez \(String(format: "%.2f", KleptonRCAS.rcasIntensity)), "
+                          + "constante \(String(format: "%.3f", Self.rcasCon)), sin pase ni anillo propios; "
                           + "máscara UI de VPKEngine donde la haya)")
                 }
             }
@@ -4848,7 +4768,7 @@ final class KleptonCompositor {
     }
 
     /// The motion-vector texture (as a 2D-array view), its slice and why-not, for `eye` of the
-    /// frame in `r`. Same gating as KleptonTAA.motionInput: storage exists and the guest wrote it.
+    /// frame in `r`. Gating: storage exists and the guest wrote it.
     private func aswMotion(_ eye: Int, _ r: kl_ovrp_render_pose) -> (MTLTexture, Int)? {
         guard (r.asw & Int32(KL_OVRP_ASW_STORAGE)) != 0 else { aswMotionWhy = "guest has no SpaceWarp storage"; return nil }
         guard (r.asw & Int32(KL_OVRP_ASW_MV)) != 0 else { aswMotionWhy = "guest wrote no motion vectors this frame"; return nil }
@@ -5010,7 +4930,7 @@ final class KleptonCompositor {
         }
         NSLog(String(format: "[cp] gpu p50/p95/max %.2f/%.2f/%.2f ms (%ld cmdbufs, rcas %@)%@",
                      p50, p95, window[window.count - 1], window.count,
-                     KleptonTAA.rcasInCompositor ? String(format: "fused %.2f", KleptonTAA.rcasIntensity) : "off/native",
+                     KleptonRCAS.rcasInCompositor ? String(format: "fused %.2f", KleptonRCAS.rcasIntensity) : "off",
                      parts))
     }
 

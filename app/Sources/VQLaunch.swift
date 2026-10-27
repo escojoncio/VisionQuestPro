@@ -110,18 +110,19 @@ final class VQSettings: ObservableObject {
     @Published var offline: Bool { didSet { save() } }
     @Published var guestLog: Bool { didSet { save() } }
     @Published var watchdogSeconds: Double { didSet { save() } }
-    // Graphics (VPKEngine). The game's own Quest foveation is always off.
+    // Graphics (VPKEngine). The game's own Quest foveation is always off, and so is the app's own: the setting is
+    // hidden and applyToEnvironment forces it off (the properties below are kept only for the stored values).
     enum Foveation: Int, CaseIterable { case off = 0, m2 = 1, m5 = 2, custom = 3 }
     @Published var foveation: Foveation { didSet { save() } }
     @Published var sharpZone: Double { didSet { save() } }      // 0.05...1
     @Published var periphery: Double { didSet { save() } }      // 0.1...1
     @Published var fovHeight: Double { didSet { save() } }      // -0.5...0.5
-    // The old global AA switches (vq.vpktaa4, vq.gameMSAA) are no longer read: antialiasing
-    // is per game (VQGameAA), automatic by default.
-    @Published var vpktaaPercent: Double { didSet { save() } }  // 0...100
-    /// Global «Nitidez (RCAS)» (0...1, 0 = off): the intensity of the sharpening pass, on in every AA mode.
-    /// Per game it can be overridden (VQGameRCAS). Default 1.0 = what VPKTAA's old sharpening did.
-    @Published var vpktaaSharpness: Double { didSet { save() } }
+    /// Global «MSAA» (0 = the game's own, 2 or 4): MSAA VPKEngine forces on the game's 1x scene passes
+    /// (VPVK_MSAA_FORCE). Per game it can be overridden (VQGameMSAA).
+    @Published var msaaForce: Int { didSet { save() } }
+    /// Global «Nitidez (RCAS)» (0...1, 0 = off): the intensity of the sharpening pass.
+    /// Per game it can be overridden (VQGameRCAS). Default 1.0. Stored as vq.vpktaaSharp3 (kept so the saved value survives).
+    @Published var rcasIntensity: Double { didSet { save() } }
     /// 16x anisotropic filtering on the game's mipmapped linear samplers (VPVulkan).
     /// Forced anisotropic filtering level for material samplers: 0 (off), 2, 4, 8 or 16.
     @Published var anisoLevel: Int { didSet { save() } }
@@ -187,9 +188,9 @@ final class VQSettings: ObservableObject {
         sharpZone = d.object(forKey: "vq.fovSharp") as? Double ?? 0.35
         periphery = d.object(forKey: "vq.fovPeriphery") as? Double ?? 0.5
         fovHeight = d.object(forKey: "vq.fovHeight") as? Double ?? 0
-        vpktaaPercent = d.object(forKey: "vq.vpktaaPercent") as? Double ?? 80
-        vpktaaSharpness = d.object(forKey: "vq.vpktaaSharp3") as? Double ?? 1.0  // 3: reconstruction sharpening (PT default 1.0)
-        d.removeObject(forKey: "vq.vpktaaNative")  // old toggle: the only VPKTAA is VPKEngine's native pass
+        let mf = d.object(forKey: "vq.msaaForce") as? Int ?? 0
+        msaaForce = [0, 2, 4].contains(mf) ? mf : 0
+        rcasIntensity = d.object(forKey: "vq.vpktaaSharp3") as? Double ?? 1.0
         // Older builds stored a bool (vq.aniso16); off there stays off.
         anisoLevel = d.object(forKey: "vq.anisoLevel") as? Int
             ?? ((d.object(forKey: "vq.aniso16") as? Bool) == false ? 0 : 16)
@@ -254,8 +255,8 @@ final class VQSettings: ObservableObject {
         d.set(sharpZone, forKey: "vq.fovSharp")
         d.set(periphery, forKey: "vq.fovPeriphery")
         d.set(fovHeight, forKey: "vq.fovHeight")
-        d.set(vpktaaPercent, forKey: "vq.vpktaaPercent")
-        d.set(vpktaaSharpness, forKey: "vq.vpktaaSharp3")
+        d.set(msaaForce, forKey: "vq.msaaForce")
+        d.set(rcasIntensity, forKey: "vq.vpktaaSharp3")
         d.set(anisoLevel, forKey: "vq.anisoLevel")
         d.set(perfDiag, forKey: "vq.perfDiag")
         d.set(fsDiag, forKey: "vq.fsDiag")
@@ -310,7 +311,7 @@ final class VQSettings: ObservableObject {
         unsetenv("KL_MVK_DYLIB")
     }
 
-    /// Klepton's knobs for these settings (and the chosen game's own AA).
+    /// Klepton's knobs for these settings (and the chosen game's own MSAA / RCAS).
     func applyToEnvironment(game: VQGame?) {
         setenv("VPVK_QUEST_IDENTITY", "1", 0)  // Quest/Adreno 740 identity, always on (before VPVulkan loads; also covers GLES)
         selectDriver()
@@ -368,7 +369,7 @@ final class VQSettings: ObservableObject {
             setenv("KL_DIAGCAP", "1", 1)
             setenv("KL_DIAGCAP_BTN", String(cap.button.rawValue), 1)
             setenv("KL_DIAGCAP_HOLD_MS", String(cap.holdSeconds * 1000), 1)
-            VQLog.log("Captura de frames: activada (\(cap.button.title), \(cap.holdSeconds) s) → \(dir.path)"
+            VQLog.log("Captura de frames: activada (\(cap.button.title), \(cap.holdSeconds == 0 ? "al instante" : "\(cap.holdSeconds) s")) → \(dir.path)"
                       + (useVPKEngine ? "" : "; solo funciona con VPKEngine"))
         } else {
             for k in ["VPVK_CAPTURE", "VPVK_CAPTURE_DIR", "KL_DIAGCAP", "KL_DIAGCAP_BTN", "KL_DIAGCAP_HOLD_MS"] { unsetenv(k) }
@@ -429,38 +430,27 @@ final class VQSettings: ObservableObject {
         // The ASW setting also reaches the compositor's extrapolation (KL_CP_ASW, behind its own gate).
         setenv("KL_CP_ASW_OFF", aswDisabled ? "1" : "0", 1)
         var c = vq_gfx_config()
-        c.foveation_mode = Int32(foveation.rawValue)
-        c.sharp_zone = Float(sharpZone)
-        c.periphery = Float(periphery)
-        c.height = Float(fovHeight)
-        // Antialiasing, per game (VQGameAA): KL_AA_MODE auto|vpktaa|msaa|off, VPVK_MSAA
-        // 0/2/4/8 (only where the game asked for MSAA), VQ_GAME_KEY for the detection
-        // KleptonTAA stores (vq.aaDetected.<key>). VPKTAA is allowed in auto/vpktaa.
-        let aaKey = game?.aaKey ?? ""
-        let aa = VQGameAA.load(key: aaKey)
-        let msaaOverride = aa.effectiveMSAA
-        let detected = VQGameAA.detected(key: aaKey)
-        // Auto on a game already seen rendering its eyes with MSAA: VPKTAA would be switched
-        // off live anyway, so it is off from the start. That also keeps SpaceWarp storage
-        // unserved (KL_VPKTAA=0): the provider turns AppSW off and the game does not render
-        // a motion-vector pass every frame for nothing (AC Nexus 4x, AoT 2x).
-        let msaaGame = (detected ?? 1) > 1
-        let vpktaa = aa.mode == .vpktaa || (aa.mode == .auto && !msaaGame)
-        if aaKey.isEmpty { unsetenv("VQ_GAME_KEY") } else { setenv("VQ_GAME_KEY", aaKey, 1) }
-        setenv("KL_AA_MODE", aa.mode.rawValue, 1)
-        setenv("VPVK_MSAA", String(msaaOverride), 1)
-        c.vpktaa_enabled = vpktaa ? 1 : 0
-        c.msaa_override = Int32(msaaOverride)
-        c.vpktaa_percent = Float(vpktaaPercent)
-        // RCAS (VPKEngine's sharpening pass): always on, any AA mode; per game, else the global one; 0 = off.
-        let effRcas = VQGameRCAS.load(key: gameKey) ?? vpktaaSharpness
-        c.vpktaa_sharpness = Float(effRcas)
+        // Own foveation is removed from the app: always off (VPVK_FOVEATION=0 wins over any config call).
+        c.foveation_mode = 0
+        c.sharp_zone = 0.35
+        c.periphery = 0.5
+        c.height = 0
+        setenv("VPVK_FOVEATION", "0", 1)
+        // VPKTAA is removed from the app: never on, so no resolve hook, no frustum jitter and no SpaceWarp storage.
+        setenv("KL_VPKTAA", "0", 1)
+        setenv("VPVK_TAA_NATIVE", "0", 1)
+        // MSAA, per game (VQGameMSAA), else the global one: 0 = the game's own, 2 / 4 = forced by VPKEngine on the
+        // game's 1x scene passes (a game with its own MSAA keeps it: VPVK_GAME_MSAA_AUTO, default on in the engine).
+        // VQ_GAME_KEY: the per-game key, for the logs.
+        let effMSAA = VQGameMSAA.load(key: gameKey) ?? msaaForce
+        if gameKey.isEmpty { unsetenv("VQ_GAME_KEY") } else { setenv("VQ_GAME_KEY", gameKey, 1) }
+        c.msaa_force = Int32(effMSAA)
+        setenv("VPVK_MSAA_FORCE", String(effMSAA), 1)  // read by VPVulkan even before the forward
+        // RCAS (the sharpening pass, fused in the compositor, 3D only): per game, else the global one; 0 = off.
+        let effRcas = VQGameRCAS.load(key: gameKey) ?? rcasIntensity
         c.rcas = Float(effRcas)
-        setenv("KL_RCAS", String(format: "%.2f", effRcas), 1)   // Klepton's frame-end hook
+        setenv("KL_RCAS", String(format: "%.2f", effRcas), 1)   // Klepton's compositor and frame-end UI mask
         setenv("VPVK_RCAS", String(format: "%.2f", effRcas), 1)  // VPVulkan, even before the forward
-        // The only VPKTAA is VPKEngine's native pass (on whenever VPKTAA is allowed for this game).
-        c.taa_native = vpktaa ? 1 : 0
-        setenv("VPVK_TAA_NATIVE", vpktaa ? "1" : "0", 1)  // read by VPVulkan even before the forward
         // Per game (VQGameAniso): -1 = the global level; 0 = the game's own; 2/4/8/16 forced.
         let effAniso = VQGameAniso.load(key: gameKey) ?? anisoLevel
         c.anisotropy = Int32(effAniso)
@@ -471,20 +461,11 @@ final class VQSettings: ObservableObject {
         if perfDiag { setenv("VP_PASS_TIMING", "90", 1) } else { unsetenv("VP_PASS_TIMING") }
         if fsDiag { setenv("KL_TRACE_FS", "1", 1) } else { unsetenv("KL_TRACE_FS") }
         unsetenv("KL_OVRP_POSE_LAST")  // build 14's "last sample" variant: measured worse, off
-        // Game MSAA forced to 1x ONLY in the explicit VPKTAA mode; auto keeps a game's MSAA
-        // (and turns VPKTAA off for it, live, once VPKEngine sees the eye pass).
-        c.force_single_sample = aa.mode == .vpktaa ? 1 : 0
         setenv("KL_FPS_HUD", showFps ? "1" : "0", 1)
-        setenv("VPVK_FORCE_1X", c.force_single_sample != 0 ? "1" : "0", 1)
         c.render_scale = 1  // eye size comes only from the resolution slider (KL_OVRP_EYE_SCALE)
         c.asw_disabled = aswDisabled ? 1 : 0
         c.quest3_profile = quest3Profile ? 1 : 0
         _ = vq_gfx_config_apply(&c)
-        // VPKTAA = VPKEngine's native pass, driven from Klepton's frame-end hook (KleptonTAA.swift);
-        // percent and sharpness reach it through vq_gfx_config_apply (vpvk_config_set_vpktaa).
-        setenv("KL_VPKTAA", vpktaa ? "1" : "0", 1)
-        setenv("KL_VPKTAA_PCT", String(format: "%.0f", vpktaaPercent), 1)
-        unsetenv("KL_VPKTAA_SHARP")  // replaced by KL_RCAS
         vq_prewarm_set_enabled(precompileShaders ? 1 : 0)
         // Also through the environment: the call above reaches VPVulkan only once it is loaded,
         // and its first vkCreateDevice may come before the app can repeat it.
@@ -496,87 +477,36 @@ final class VQSettings: ObservableObject {
         unsetenv("VPVK_STRICT_FEATURES")
         // «Perfil Vulkan completo»; the conformance runs set it again either way (VQConformance).
         if vkFullProfile { setenv("VPVK_EXTRA_EXTENSIONS", "1", 1) } else { unsetenv("VPVK_EXTRA_EXTENSIONS") }
-        // The game's vkCreate*Pipelines is synchronous (Quest semantics): VPKEngine is async by default and the synchronous mode is
-        // opt-in with VPVK_ASYNC_PIPELINES=0, read in vkCreateDevice. The conformance runs set 0 too (VQConformance).
-        setenv("VPVK_ASYNC_PIPELINES", "0", 1)
+        // Pipelines: VPKEngine's default (asynchronous), no longer forced synchronous. The eye's passes wait up to 4 s for their
+        // pipelines (a user override of the variable wins). The conformance runs set VPVK_ASYNC_PIPELINES=0 themselves (VQConformance).
+        unsetenv("VPVK_ASYNC_PIPELINES")
+        setenv("VPVK_PIPELINE_EYE_HARD_WAIT_MS", "4000", 0)
         // VPKEngine 454f7cc dead-store elision (heuristic, risks a corrupted frame) — off until the translator marks samples to keep
         unsetenv("VPVK_MSAA_DEAD_STORE")
         // Games: report geometry/tessellation like Adreno so Unity keeps subshaders that need
         // them (AC Nexus's magenta UI). The CTS unsets it (VQConformance).
         setenv("VPVK_REPORT_GEOM", "1", 1)
-        unsetenv("VPVK_TAA_JITTER")  // set to 0 by the conformance runs only (VQConformance.neutralGraphics)
-        let detText = detected.map { "\($0)x" } ?? "no"
-        VQLog.log("Gráficos: foveado Quest siempre apagado; foveado propio \(foveation), AA: modo \(aa.mode.rawValue), MSAA override \(msaaOverride), detectado \(detText) (juego \(aaKey.isEmpty ? "?" : aaKey)\(aa.stored ? "" : ", por defecto")), VPKTAA nativo permitido \(vpktaa) \(Int(vpktaaPercent)) %, Nitidez (RCAS) \(Int(effRcas * 100)) % (\(VQGameRCAS.load(key: gameKey) == nil ? "global" : "del juego")), forzar 1x \(c.force_single_sample != 0), anisotrópico x\(anisoLevel), diagnóstico de rendimiento \(perfDiag), diagnóstico de ficheros \(fsDiag), resolución \(Int(effPct.rounded())) %, ASW apagado \(aswDisabled), perfil Quest 3 \(quest3Profile), perfil Vulkan completo \(vkFullProfile), FPS en pantalla \(showFps)")
-        // Effective antialiasing and why (one line, so a log alone explains what the eye pass will be).
-        let aaEffective: String
-        let aaWhy: String
-        switch aa.mode {
-        case .vpktaa:
-            aaEffective = "VPKTAA nativo (MSAA del juego forzado a 1x)"
-            aaWhy = "elegido explícitamente para este juego"
-        case .auto:
-            if msaaGame {
-                aaEffective = "MSAA del juego (\(detected ?? 1)x), sin VPKTAA"
-                aaWhy = "modo automático y el juego ya se vio con MSAA \(detText); para quitarlo y usar VPKTAA, elige «VPKTAA» en los ajustes del juego"
-            } else {
-                aaEffective = "VPKTAA nativo"
-                aaWhy = "modo automático y el juego \(detected == nil ? "aún no se ha visto (se decidirá en vivo)" : "no usa MSAA")"
-            }
-        case .msaa:
-            aaEffective = "MSAA del juego, sin VPKTAA"
-            aaWhy = "elegido explícitamente para este juego"
-        case .off:
-            aaEffective = "sin antialiasing añadido"
-            aaWhy = "elegido explícitamente para este juego"
-        }
-        VQLog.log("Antialiasing efectivo: \(aaEffective) — \(aaWhy)")
+        // The engine's jitter env also switches off the RCAS UI mask (set_jitter still): games never inherit a 0 from an earlier run.
+        unsetenv("VPVK_TAA_JITTER")
+        VQLog.log("Gráficos: foveado Quest y propio siempre apagados, MSAA forzado \(effMSAA == 0 ? "el del juego" : "x\(effMSAA)") (juego \(gameKey.isEmpty ? "?" : gameKey), \(VQGameMSAA.load(key: gameKey) == nil ? "global" : "del juego")), Nitidez (RCAS) \(Int(effRcas * 100)) % (\(VQGameRCAS.load(key: gameKey) == nil ? "global" : "del juego")), anisotrópico x\(effAniso), diagnóstico de rendimiento \(perfDiag), diagnóstico de ficheros \(fsDiag), resolución \(Int(effPct.rounded())) %, ASW apagado \(aswDisabled), perfil Quest 3 \(quest3Profile), perfil Vulkan completo \(vkFullProfile), FPS en pantalla \(showFps)")
         VQLog.log("Ajustes: sin red \(offline), log del juego \(guestLog), vigilante \(Int(watchdogSeconds)) s")
     }
 }
 
-/// Antialiasing chosen per game (the contract with Klepton/VPKEngine, via environment):
-///   KL_AA_MODE  auto (default): VPKTAA on a game whose eye pass is 1x, the game's own MSAA
-///               (VPKTAA off) on one that uses MSAA — decided live once VPKEngine sees it.
-///               vpktaa: game MSAA forced to 1x (VPVK_FORCE_1X=1) + VPKTAA. msaa: never VPKTAA.
-///               off: neither VPKTAA nor an MSAA override.
-///   VPVK_MSAA   0 = the game's own sample count, else 2/4/8 where the game asked for MSAA
-///               (VPKEngine clamps to what the chip supports).
-/// Saved by game key (package, else folder name): vq.aaMode.<key>, vq.aaMSAA.<key>.
-/// Read-only here, written by KleptonTAA: vq.aaDetected.<key> (1/2/4/8) and vq.msaaDeviceMax.
-struct VQGameAA: Equatable {
-    enum Mode: String, CaseIterable { case auto, vpktaa, msaa, off }
-    var mode: Mode = .auto
-    var msaa: Int = 0          // 0 (original) | 2 | 4 | 8
-    var stored = false         // false: default (no per-game setting saved yet)
-
-    /// The override actually sent: none in vpktaa (forced 1x) and off modes.
-    var effectiveMSAA: Int { (mode == .auto || mode == .msaa) ? msaa : 0 }
-
-    static func load(key: String) -> VQGameAA {
-        let d = UserDefaults.standard
-        var aa = VQGameAA()
-        if !key.isEmpty, let m = d.string(forKey: "vq.aaMode." + key), let mode = Mode(rawValue: m) {
-            aa.mode = mode
-            aa.stored = true
-        }
-        if !key.isEmpty, let n = d.object(forKey: "vq.aaMSAA." + key) as? Int, [0, 2, 4, 8].contains(n) {
-            aa.msaa = n
-        }
-        return aa
-    }
-
-    func save(key: String) {
-        guard !key.isEmpty else { return }
-        let d = UserDefaults.standard
-        d.set(mode.rawValue, forKey: "vq.aaMode." + key)
-        d.set(msaa, forKey: "vq.aaMSAA." + key)
-    }
-
-    /// The game's own eye-pass sample count seen on an earlier run (1 = no MSAA), nil if never seen.
-    static func detected(key: String) -> Int? {
-        guard !key.isEmpty, let n = UserDefaults.standard.object(forKey: "vq.aaDetected." + key) as? Int,
-              n >= 1 else { return nil }
+/// MSAA per game: nil = follow the global one (VQSettings.msaaForce); 0 = the game's own; 2 / 4 = forced by VPKEngine on the
+/// game's 1x scene passes (VPVK_MSAA_FORCE; the engine clamps it to what the chip supports and keeps the MSAA a game
+/// already has). Saved as vq.msaaForce.<key>.
+enum VQGameMSAA {
+    static func load(key: String) -> Int? {
+        guard !key.isEmpty, let n = UserDefaults.standard.object(forKey: "vq.msaaForce." + key) as? Int,
+              [0, 2, 4].contains(n) else { return nil }
         return n
+    }
+
+    static func save(_ level: Int?, key: String) {
+        guard !key.isEmpty else { return }
+        if let level { UserDefaults.standard.set(level, forKey: "vq.msaaForce." + key) }
+        else { UserDefaults.standard.removeObject(forKey: "vq.msaaForce." + key) }
     }
 }
 
@@ -678,7 +608,7 @@ enum VQGameAniso {
     }
 }
 
-/// «Nitidez (RCAS)» per game: nil = follow the global value (VQSettings.vpktaaSharpness); else 0...1
+/// «Nitidez (RCAS)» per game: nil = follow the global value (VQSettings.rcasIntensity); else 0...1
 /// (0 = off). Saved as vq.rcas.<key>.
 enum VQGameRCAS {
     static func load(key: String) -> Double? {
@@ -694,8 +624,9 @@ enum VQGameRCAS {
 }
 
 /// «Captura de frames (diagnóstico)» per game, off by default (VPKEngine's .vpcap capture, needs object tracking from the
-/// start: more RAM). `button` is the combination held `holdSeconds` in the game to capture one frame; its raw value is
-/// KL_DIAGCAP_BTN (kl_diagcap.h). Saved by game key: vq.cap.on.<key>, vq.cap.btn.<key>, vq.cap.sec.<key>.
+/// start: more RAM). `button` is the combination pressed in the game to capture the next frame (held `holdSeconds`, 0 =
+/// at the press itself); its raw value is KL_DIAGCAP_BTN (kl_diagcap.h). Saved by game key: vq.cap.on.<key>,
+/// vq.cap.btn.<key>, vq.cap.hold.<key> (the old vq.cap.sec.<key> defaulted to 3 s and is no longer read).
 struct VQGameCapture: Equatable {
     enum Combo: Int, CaseIterable {
         case stickL = 0, stickR = 1, sticks = 2, triggers = 3
@@ -710,7 +641,7 @@ struct VQGameCapture: Equatable {
     }
     var enabled = false
     var button = Combo.stickL
-    var holdSeconds = 3   // 1...10
+    var holdSeconds = 0   // 0...10
 
     static func load(key: String) -> VQGameCapture {
         let d = UserDefaults.standard
@@ -718,7 +649,7 @@ struct VQGameCapture: Equatable {
         guard !key.isEmpty else { return r }
         r.enabled = d.object(forKey: "vq.cap.on." + key) as? Bool ?? false
         r.button = Combo(rawValue: d.object(forKey: "vq.cap.btn." + key) as? Int ?? 0) ?? .stickL
-        r.holdSeconds = min(max(d.object(forKey: "vq.cap.sec." + key) as? Int ?? 3, 1), 10)
+        r.holdSeconds = min(max(d.object(forKey: "vq.cap.hold." + key) as? Int ?? 0, 0), 10)
         return r
     }
 
@@ -727,7 +658,7 @@ struct VQGameCapture: Equatable {
         let d = UserDefaults.standard
         d.set(enabled, forKey: "vq.cap.on." + key)
         d.set(button.rawValue, forKey: "vq.cap.btn." + key)
-        d.set(holdSeconds, forKey: "vq.cap.sec." + key)
+        d.set(holdSeconds, forKey: "vq.cap.hold." + key)
     }
 }
 
@@ -943,7 +874,7 @@ final class VQPrewarm: ObservableObject {
     @Published var done: UInt32 = 0
     @Published var total: UInt32 = 0
     @Published var active = false
-    @Published var compiling = false  // first run: harvested SPIR-V being compiled ("Compilando shaders")
+    @Published var compiling = false  // harvested SPIR-V or stored recipes being compiled ("Compilando shaders")
 
     /// Bump when the harvest or the SPIR-V -> MSL translator changes: the first-run precompile repeats.
     static let firstRunVersion = 2  // 2: VPKEngine per-variable private slots (new MSL)
@@ -963,13 +894,15 @@ final class VQPrewarm: ObservableObject {
             VQLog.log("Shaders: nada que precompilar (primera vez con este juego o sin VPVulkan)")
             return
         }
-        DispatchQueue.main.async { shared.total = count; shared.done = 0; shared.active = true }
+        // Blocking: the game does not boot until vq_prewarm_run returns. "Compilando N / M" on every run (the engine reports
+        // no hit/miss count, so a run with misses cannot be told apart beforehand).
+        DispatchQueue.main.async { shared.total = count; shared.done = 0; shared.compiling = true; shared.active = true }
         let start = Date()
         let n = vq_prewarm_run({ done, total, _ in
             DispatchQueue.main.async { VQPrewarm.shared.done = done; VQPrewarm.shared.total = total }
         }, nil)
         let ms = Int(Date().timeIntervalSince(start) * 1000)
-        DispatchQueue.main.async { shared.active = false }
+        DispatchQueue.main.async { shared.compiling = false; shared.active = false }
         VQLog.log("Shaders: precompilados \(n) pipelines en \(ms) ms")
     }
 

@@ -9,17 +9,12 @@ typedef struct vq_gfx_config {
     float sharp_zone;         // custom: 0.05..1
     float periphery;          // custom: 0.1..1
     float height;             // custom: -0.5..0.5
-    int32_t vpktaa_enabled;
-    float vpktaa_percent;     // 0..100
-    float vpktaa_sharpness;   // 0..1
     float render_scale;       // 0.5..1.5
     int32_t asw_disabled;
     int32_t quest3_profile;
     int32_t anisotropy;       // 0 = game's own; 16 = force 16x on mipmapped linear samplers
-    int32_t force_single_sample; // 1 = render the game's MSAA targets at 1x (VPKTAA does the AA)
-    int32_t msaa_override;    // 0 = the game's own sample count; 2/4/8 where the game asked for MSAA
-    int32_t taa_native;       // 1 = «VPKTAA nativo»: VPKEngine's own pass (also env VPVK_TAA_NATIVE)
-    float rcas;               // 0..1: «Nitidez (RCAS)», always on in every AA mode (0 = off). Appended field.
+    int32_t msaa_force;       // 0 = the game's own; 2 / 4 = MSAA forced on the game's 1x scene passes (also env VPVK_MSAA_FORCE)
+    float rcas;               // 0..1: «Nitidez (RCAS)» (0 = off). Appended field.
 } vq_gfx_config;
 
 // Stores the config and pushes it to VPVulkan if loaded (returns 1 if forwarded).

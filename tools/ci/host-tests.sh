@@ -74,6 +74,8 @@ klepton_tests() {
   awk '/KL-TEST-BEGIN muxer/{p=1;next} /KL-TEST-END muxer/{p=0} p' runtime/media/kl_mediandk.c > "$T/newt/muxer.inc"
   awk '/^    M\("AMediaMuxer_/' runtime/media/kl_mediandk.c > "$T/newt/muxer_tab.inc"
   run t_media_muxer -Wno-unused-function -I"$T/newt" tests/t_media_muxer.c
+  awk '/KL-TEST-BEGIN retiredue/{p=1;next} /KL-TEST-END retiredue/{p=0} p' runtime/gfx/kl_vulkan.c > "$T/newt/retiredue.inc"
+  run t_retire_due -Wno-unused-function -I"$T/newt" tests/t_retire_due.c
   awk '/KL-TEST-BEGIN vktrap/{p=1;next} /KL-TEST-END vktrap/{p=0} p' runtime/gfx/kl_vulkan.c > "$T/newt/vktrap.inc"
   run t_vk_trap -Wno-unused-function -I"$T/newt" -I"$VPK/gpu/vulkan/third_party/vulkan-headers/include" tests/t_vk_trap.c
   awk '/KL-TEST-BEGIN robust/{p=1;next} /KL-TEST-END robust/{p=0} p' runtime/gfx/kl_vulkan.c > "$T/newt/robust.inc"

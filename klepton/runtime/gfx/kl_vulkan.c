@@ -2332,9 +2332,9 @@ unsigned long long kl_vulkan_spacewarp_image(int stage, int eye, int kind,
             kind == KLVK_ASW_MOTION ? "motion-vector" : "depth", stage, eye,
             slot->w, slot->h, (int)slot->fmt, slot->layers, w, h, (int)fmt, layers,
             retire ? "retired (freed in a few seconds)" : "kept, not freed");
-        // Quick (quick = 2: freed once 0.5 s AND 3 frame ends have passed since the guest's last use,
-        // or after 2 s when no frames end): the compositor never samples these directly, and a resize
-        // loop must not pile them up waiting for the 5 s grace.
+        // Quick (quick = 2, klvk_retire_due: freed once 3 frame ends have passed since the guest's last use
+        // and the GPU has completed them, or after 2 s when no frames end): the compositor never samples
+        // these directly, and a resize loop must not pile them up.
         if (retire)
             (void)klvk_retire_image_ex(d, slot->img, slot->mem,
                               kind == KLVK_ASW_MOTION ? "SpaceWarp motion-vector image" : "SpaceWarp depth image",
@@ -3998,7 +3998,7 @@ static void klvk_eye_fb_note(VkImage img, uint32_t w, uint32_t h) {
 // says what it applied, and the resolve is encoded at the frame end on
 // VPKEngine's own queue: ordered after the frame and before the next one (so it
 // reads the depth before the next frame can touch it), and NOT waited for on the
-// CPU — the serial advances when its command buffer completes (KleptonTAA,
+// CPU — the serial advances when its command buffer completes (the removed VPKTAA adapter,
 // kl_vulkan_taa_frame_complete), with at most 2 resolves in flight.
 // ---------------------------------------------------------------------------
 
@@ -4416,15 +4416,31 @@ int kl_vulkan_taa_native_on(void) {
     return 0;   // driver without the native pass (MoltenVK, older VPKEngine)
 }
 
-// RCAS (the sharpening pass, VPKEngine taa_native.h): KL_RCAS = intensity 0..1 from the app (0 = off, no pass,
-// no hook, no cost) and a driver whose native pass knows RCAS-only frames (vpvk_rcas_intensity).
-int kl_vulkan_rcas_on(void) {
+// KL_RCAS > 0 (the app's «Nitidez (RCAS)»; the compositor applies it, 3D only).
+static int klvk_rcas_env(void) {
     static int env = -2;
     if (env == -2) {
         const char *e = getenv("KL_RCAS");
         env = e && *e ? (kl_env_float("KL_RCAS", 0.0f) > 0.0f ? 1 : 0) : 0;
     }
-    if (!env) return 0;
+    return env;
+}
+
+// The still jitter (eye size to the engine, no offset) is needed by RCAS (UI mask) and by forced MSAA
+// (VPVK_MSAA_FORCE > 0: the non-multiview eye passes are identified by the eye size).
+static int klvk_still_wanted(void) {
+    static int v = -1;
+    if (v < 0) {
+        const char *e = getenv("VPVK_MSAA_FORCE");
+        v = (e && atoi(e) > 0) ? 1 : 0;
+    }
+    return v || klvk_rcas_env();
+}
+
+// RCAS (the sharpening pass, VPKEngine taa_native.h): KL_RCAS = intensity 0..1 from the app (0 = off, no pass,
+// no hook, no cost) and a driver whose native pass knows RCAS-only frames (vpvk_rcas_intensity).
+int kl_vulkan_rcas_on(void) {
+    if (!klvk_rcas_env()) return 0;
     // RCAS is fused into the compositor's composite pass (kl_reproject.c, KleptonCompositor.swift):
     // no hook, no output ring, no native command buffers for RCAS-only frames. The native pass no longer
     // sharpens VPKTAA frames either: the compositor does. KL_RCAS_COMPOSITOR=0 brings the separate pass
@@ -4536,7 +4552,7 @@ void *kl_vulkan_eye_color_mtl(int stage, int eye, int *slice, int *w, int *h) {
 
 // kl_vulkan_taa_publish: an override applied at once (any thread). The inline
 // resolve no longer goes through it — its output reaches the compositor with
-// its own frame record once the GPU has completed it (KleptonTAA) — but the
+// its own frame record once the GPU has completed it (the removed VPKTAA adapter) — but the
 // clears (kl_ovrp's EndFrame4, hook removal) still do.
 static int klvk_taa_apply_publish(int stage, void *tex, int w, int h) {
     int ok0 = kl_glfb_set_eye_mtl_override(0, stage, tex, w, h);
@@ -4605,11 +4621,12 @@ unsigned long long kl_vulkan_taa_raw_record(void) {
 // Deferred destruction of OUR replaced images (eye, SpaceWarp, depth snapshots).
 // They used to be kept forever, because a compositor or the VPKTAA resolve may
 // be sampling one on another thread at the moment it is replaced. Instead they
-// wait here for KL_VK_FREE_AFTER_S seconds (default 5) AND 8 frame ends — far
-// longer than any composite or resolve command buffer lives — and are then
+// wait here until the GPU is done with them (klvk_retire_due: the completed-frame
+// serial has passed the frame they were retired in, plus 3 frame ends; KL_VK_FREE_AFTER_S
+// x 4 seconds, default 20, when the guest ends no frames) and are then
 // destroyed on the guest's frame thread. VPVulkan itself releases the MTLTexture
 // only when the frame slot that last used it is reused, and a texture view still
-// cached somewhere (compositor, VPKTAA) keeps its storage alive by retaining it,
+// cached somewhere (compositor) keeps its storage alive by retaining it,
 // so a late reader never reads freed memory. KL_VK_FREE_OLD=0 keeps them.
 // ---------------------------------------------------------------------------
 #define KLVK_RETIRE_MAX 256
@@ -4756,6 +4773,24 @@ static double g_trim_until;   // klvk_now_s() until which retired images are fre
 static unsigned klvk_retire_pump_ex(klvk_device *d, int force_quick, int no_publish);
 static void klvk_retire_pump(klvk_device *d) { (void)klvk_retire_pump_ex(d, 0, 0); }
 
+// KL-TEST-BEGIN retiredue (extracted by tools/ci/host-tests.sh into klepton/tests/t_retire_due.c)
+// Is a retired image due for destruction? quick: 0 normal, 1 destroyed OpenXR image / never-published eye image,
+// 2 SpaceWarp image. hold: -1 none, 0 a replaced eye image whose replacement is published, 1 not yet published.
+// `frame` = frames issued when it was retired (or last used by the guest), `issued` = frames issued now,
+// `gpu_serial` = newest frame the GPU has completed (kl_vulkan_frame_serial: fence based). The GPU is done with
+// it once the frame in progress at retirement (frame + 1) has completed and 3 more frame ends have passed; a
+// guest that ends no frames (synchronous load) falls back to the wall clock.
+static int klvk_retire_due(int quick, int hold, double age, unsigned long long issued, unsigned long long frame,
+                           unsigned long long gpu_serial, double after, int force_quick, int trimming) {
+    const int gpu_done = issued >= frame + 3 && gpu_serial >= frame + 1;
+    const int settled = gpu_done || age >= 0.5;
+    if (quick == 2) return force_quick || gpu_done || age >= 2.0;
+    if (quick) return force_quick || age >= 0.5;
+    if (hold >= 0) return hold ? age >= after * 4 : settled;
+    return (force_quick || trimming) ? settled : (gpu_done || age >= after * 4);
+}
+// KL-TEST-END retiredue
+
 static unsigned klvk_retire_pump_ex(klvk_device *d, int force_quick, int no_publish) {
     if (!d || !d->DestroyImage) return 0;
     static double after = -1;
@@ -4769,37 +4804,23 @@ static unsigned klvk_retire_pump_ex(klvk_device *d, int force_quick, int no_publ
     if (!no_publish) klvk_eye_hold_timeout();
     double now = klvk_now_s();
     unsigned long long f = __atomic_load_n(&g_frame_issued, __ATOMIC_ACQUIRE);
-    struct { VkImage img; VkDeviceMemory mem; const char *what; uint32_t w, h, layers; } go[KLVK_RETIRE_MAX];
+    const unsigned long long gpu_serial = kl_vulkan_frame_serial();   // before g_retire_mu: it polls the frame fences
+    struct { VkImage img; VkDeviceMemory mem; const char *what; uint32_t w, h, layers; double age; } go[KLVK_RETIRE_MAX];
     unsigned n = 0;
     pthread_mutex_lock(&g_retire_mu);
     for (unsigned i = 0; i < g_retire_n;) {
         // Quick entries (destroyed OpenXR swapchain images: the app has let go of them and
-        // no frame end may come to count) wait 0.5 s only.
-        // Replaced images also go after 4x the grace without frame ends: a guest that stops
-        // ending frames (OpenXR CTS between sessions) left 253 of them queued until the system
-        // was in critical memory pressure (log 62).
+        // no frame end may come to count) wait 0.5 s only. Replaced images also go after 4x the grace
+        // without frame ends: a guest that stops ending frames (OpenXR CTS between sessions) left 253 of
+        // them queued until the system was in critical memory pressure (log 62). The rest is klvk_retire_due.
         const double age = now - g_retire[i].at;
-        // Settled = no frame in flight can still name it (frame ends since it was retired or last
-        // used by the guest), or half a second on the wall clock when the guest ends no frames
-        // (a synchronous load). The compositor's own command buffers retain the texture.
-        const int settled = f >= g_retire[i].frame + 3 || age >= 0.5;
-        const int hold = g_retire[i].hold;
-        int due;
-        if (g_retire[i].quick == 2)   // SpaceWarp motion / depth image
-            due = force_quick || (age >= 0.5 && f >= g_retire[i].frame + 3) || age >= 2.0;
-        else if (g_retire[i].quick)
-            due = force_quick || age >= 0.5;
-        else if (hold >= 0) {
-            // Replaced eye image: free it as soon as the replacement is published (the guest's
-            // first write), not after a fixed wait. Until then it stays the stage's picture.
-            const int held = __atomic_load_n(&g_eye_hold_at[hold >> 1][hold & 1], __ATOMIC_ACQUIRE) != 0;
-            due = held ? age >= after * 4 : settled;
-        } else
-            due = (force_quick || now < g_trim_until) ? settled
-                              : ((age >= after && f >= g_retire[i].frame + 8) || age >= after * 4);
+        const int due = klvk_retire_due(g_retire[i].quick, g_retire[i].hold < 0 ? -1
+                            : __atomic_load_n(&g_eye_hold_at[g_retire[i].hold >> 1][g_retire[i].hold & 1], __ATOMIC_ACQUIRE) != 0,
+                            age, f, g_retire[i].frame, gpu_serial, after, force_quick, now < g_trim_until);
         if (due) {
             go[n].img = g_retire[i].img; go[n].mem = g_retire[i].mem; go[n].what = g_retire[i].what;
-            go[n].w = g_retire[i].w; go[n].h = g_retire[i].h; go[n].layers = g_retire[i].layers; n++;
+            go[n].w = g_retire[i].w; go[n].h = g_retire[i].h; go[n].layers = g_retire[i].layers;
+            go[n].age = age; n++;
             g_retire[i] = g_retire[--g_retire_n];
         } else i++;
     }
@@ -4813,8 +4834,8 @@ static unsigned klvk_retire_pump_ex(klvk_device *d, int force_quick, int no_publ
         g_retired_bytes_est += (unsigned long long)w * h * go[i].layers * 4ull;   // ~4 B/texel
         static unsigned said;
         if (said++ < 32)
-            VKI("[mem] freed old %s %p (%ux%u) after %.0f s — ~%llu MiB of replaced images freed so far\n",
-                go[i].what, (void *)go[i].img, w, h, after, g_retired_bytes_est >> 20);
+            VKI("[mem] freed old %s %p (%ux%u) after %.2f s — ~%llu MiB of replaced images freed so far\n",
+                go[i].what, (void *)go[i].img, w, h, go[i].age, g_retired_bytes_est >> 20);
     }
     return n;
 }
@@ -4950,8 +4971,8 @@ static void klvk_taa_next_jitter(unsigned eye_w, unsigned eye_h, int resolving, 
     if (j.enabled != last && (j.enabled || want)) {
         static unsigned said_on;
         if (j.enabled && (said_on++ < 16 || said_on % 600 == 0))
-            VKI("[taa-inline] jitter ON: Halton(2,3) x8 for %ux%u eye targets (tag %llu, #%u)\n",
-                j.width, j.height, n, said_on);
+            VKI("[taa-inline] jitter ON: %s for %ux%u eye targets (tag %llu, #%u)\n",
+                still ? "still (no offset)" : "Halton(2,3) x8", j.width, j.height, n, said_on);
         else if (last == 1 || last < 0) {
             static unsigned said_off;
             if (said_off++ < 16)
@@ -5297,6 +5318,13 @@ void kl_vulkan_frame_done(int stage) {
         unsigned ew, eh;
         klvk_eye_wh(stage, &ew, &eh);
         klvk_taa_next_jitter(ew, eh, committed, hook_on, gate, rcas_frame);
+    } else if (klvk_still_wanted()) {
+        // RCAS in the compositor / forced MSAA, VPKTAA gone: no hook and no sub-pixel offset. Only tell VPKEngine the eye
+        // size (set_jitter still=1) so it identifies the eye passes, writes the R8 UI mask (RCAS leaves HUD / text
+        // alone) and applies the forced MSAA.
+        unsigned ew, eh;
+        klvk_eye_wh(stage, &ew, &eh);
+        klvk_taa_next_jitter(ew, eh, 1, 1, 1, 1);   // the only way off: eye size unknown
     }
 }
 
@@ -5304,7 +5332,16 @@ void kl_vulkan_frame_done(int stage) {
 // without the Vulkan bits. The caller has waited for the guest's GL work (kl_gles_frame_end), so
 // an unresolved frame's live picture is already complete.
 int kl_vulkan_taa_gles_frame_end(int stage, unsigned long long rec_serial) {
-    if (kl_vulkan_guest_active() || !kl_gles_vpk_up() || !kl_vulkan_taa_inline()) return 0;
+    if (kl_vulkan_guest_active() || !kl_gles_vpk_up()) return 0;
+    if (!kl_vulkan_taa_inline()) {
+        // No hook (RCAS in the compositor / forced MSAA): only the still-jitter request, as at the end of kl_vulkan_frame_done.
+        if (klvk_still_wanted()) {
+            unsigned ew, eh;
+            klvk_eye_wh(stage, &ew, &eh);
+            klvk_taa_next_jitter(ew, eh, 1, 1, 1, 1);   // the only way off: eye size unknown
+        }
+        return 0;
+    }
     kl_vulkan_taa_hook_fn fn;
     void *user;
     pthread_mutex_lock(&g_taa_hook_mu);
