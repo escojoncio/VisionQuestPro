@@ -17,7 +17,8 @@
   1. Log nuevo por juego: ITR2 `gpu.missing` (qué recurso falta) y `vk.pso.census` (created vs >8000 del juego); Maestro `gles.uniform_err` (uniform concreto del morado) y `gles.tex`; Gundam `[pt] passthrough ON`, `[fs] backslash_fallback`, si sigue el crash en libfmod; todos `vk.hitch`, `gpu.mem.rt mat_why=`, `gles.pso.recipe`, `[jni] noop_hit`; tiempo de arranque con PSO síncrono.
   2. Capturar frame roto (Maestro morado, ITR2) y correr `replay.yml` → primer draw divergente.
   3. RAM: MSAA `HeavyGeometry` sigue materializando (Gundam ~650 MiB); EXT_multisampled_render_to_texture de GLES crea 1x (decisión pendiente: MSAA real transient o nada).
-  4. -1004 restantes en ovrp son deliberados (lista en kl_ovrp*.c); Unity Choreographer/Swappy sin verificar (falta log Gundam).
+  4. Próximo `ref:` VPKEngine ≥ `2994d15` (kEmitVersion 3 ⇒ retraducción): purga automática de pipelines*.metalar/.keys/.count/recipes.bin al cambiar la versión del traductor (en vez de sellos únicos `vq.robustMigrated.v1`). `VPVK_SPLIT_VIEWS=1` (pase por ojo) candidato para MSAA HeavyGeometry multiview; con foveado propio exige mapa VRR de 1 capa por vista (ref. AVP `kl_gpu_time.m`). unverified.
+  5. -1004 restantes en ovrp son deliberados (lista en kl_ovrp*.c); Unity Choreographer/Swappy sin verificar (falta log Gundam).
 - Riesgos abiertos: twin render pass depende de marcar imágenes de ojo; draws con `imageBuffer` sin enlazar se saltan; pausa con la Corona = `_exit(0)` (justificado en KleptonApp.swift:100-112: ARKit/compositor/FMOD/Unity no reanudables); PSO síncrono puede alargar arranque en juegos de un solo hilo.
 
 ## Decisions
