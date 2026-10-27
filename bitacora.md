@@ -11,7 +11,7 @@
 - Build `d67eb28`/VPK `5cf5c80` (medido): ITR2 fb ASW 1116x1129 y 0 `empty_scissor` (arreglo ASW confirmado); ITR2 `missing_resources` ~511/submit; Maestro GLES con INVALID_OPERATION en setUniform; Gundam SIGSEGV en libfmod tras opens de bundles con '\'; pso_wait in-game 0 (archive 6048 PSO).
 
 ## Current state
-- Última build verde: run 40420398660 (VQP `bb687de`, VPK `74b2d52`), sin probar en visor. Pendiente de build: `ref:` → VPK `6181b91` (kEmitVersion 3, gpu.tex, split views opt-in, tileMaxVertices en caliente) + purga por versión de traductor.
+- Última build verde: run 40484119476 (VQP `bb2524a`, VPK `6181b91`: kEmitVersion 3, gpu.tex, split views opt-in apagado, tileMaxVertices en caliente, purga por versión de traductor), sin probar en visor.
 - Pendiente (orden):
   1. Log nuevo por juego: ITR2 `gpu.missing` (qué recurso falta) y `vk.pso.census` (created vs >8000 del juego); Maestro `gles.uniform_err` (uniform concreto del morado) y `gles.tex`; Gundam `[pt] passthrough ON`, `[fs] backslash_fallback`, si sigue el crash en libfmod; todos `vk.hitch`, `gpu.mem.rt mat_why=`, `gles.pso.recipe`, `[jni] noop_hit`; tiempo de arranque con PSO síncrono.
   2. Capturar frame roto (Maestro morado, ITR2) y correr `replay.yml` → primer draw divergente.
