@@ -37,7 +37,7 @@
 ## Resident Evil 4 (UE4 4.25, Vulkan, `com.Armature.VR4`)
 - "does not support Vulkan": el target es "Resident Evil 4" (carpeta) → firma 4.26 de `nativeSetAndroidVersionInformation`. Fix: `is_425` por paquete. Además parche `re4-force-vulkan-available` (`IsVulkanAvailable` → `mov w0,#1; ret`).
 - Stack smashing en `cCard::saveFileCheck` (ruta de guardado larga) → symlink corto `<Documents>/.f`. Riesgo: `realpath()` del guest.
-- Jetsam (log 9bbdbde, ~157 s, al abrir el inventario tras cambiar de zona): memoria GPU no contabilizada 0,2→3,7 GB; `[vkagg]` memtype0 +94 allocs vivas / +2,3 GB; img_create 2422 vs destroy 1023. `tex_msaa` 275–551 MiB con `msaa_freed_total=0`. `onLowMemory` entregado (x7) sin liberar.
+- Jetsam (log b27f425, ~157 s, al abrir el inventario tras cambiar de zona): memoria GPU no contabilizada 0,2→3,7 GB; `[vkagg]` memtype0 +94 allocs vivas / +2,3 GB; img_create 2422 vs destroy 1023. `tex_msaa` 275–551 MiB con `msaa_freed_total=0`. `onLowMemory` entregado (x7) sin liberar.
 
 ## Deadpool (UE4, libUE4 270 MB)
 - Veneers: 4138 sitios x18 en 120,4–122,3 MB → pool bajo alcanza.
