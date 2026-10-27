@@ -57,11 +57,18 @@ int main(void) {
     CHECK(atomic_load(&out) == 0, "blocked again after a second background");
     kl_bg_shutdown();
     CHECK(wait_out(1), "shutdown releases the waiter");
-    CHECK(vp_down == 1, "VPKEngine gate shut down");
+    // VPKEngine's gate is released (foreground), not shut down for good: it can be closed again.
+    CHECK(vp_down == 0 && vp_last == 0, "VPKEngine gate released, not shut down");
     pthread_join(t[2], NULL);
+    int sets = vp_sets;
     kl_bg_set(1);
     CHECK(!kl_bg_active(), "no background after shutdown");
+    CHECK(vp_sets == sets && vp_last == 0, "late background callback not forwarded to VPKEngine");
     kl_bg_wait();                      // must not block
+    // The run is over and the process is about to exit while backgrounded: whatever still commits parks.
+    kl_bg_engine_park();
+    CHECK(vp_last == 1, "VPKEngine gate closed again after shutdown");
+    CHECK(!kl_bg_active(), "our own waiters stay released");
 
     if (fails) return 1;
     printf("t_bg ok\n");

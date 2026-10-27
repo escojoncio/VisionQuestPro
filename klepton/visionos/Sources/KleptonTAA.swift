@@ -78,6 +78,7 @@ final class KleptonTAA {
         let pose: kl_ovrp_render_pose
         let out: [MTLTexture]         // per eye, 2D array slice 0, rgba8 sRGB
         let flipY: [Bool]
+        let taa: Bool                 // a real VPKTAA resolve (unsharpened); false = rcas_only (already sharpened by the engine)
     }
     private let lock = NSLock()
     // Stats / diagnostics.
@@ -228,8 +229,9 @@ final class KleptonTAA {
         let pose: kl_ovrp_render_pose
         let vkSerial: UInt64
         var ok = false                     // both eyes encoded
-        init(k: Int, gen: Int, pose: kl_ovrp_render_pose, vkSerial: UInt64) {
-            self.k = k; self.gen = gen; self.pose = pose; self.vkSerial = vkSerial
+        let taa: Bool                      // a VPKTAA resolve (rcas_only = 0), not an RCAS-only frame
+        init(k: Int, gen: Int, pose: kl_ovrp_render_pose, vkSerial: UInt64, taa: Bool) {
+            self.k = k; self.gen = gen; self.pose = pose; self.vkSerial = vkSerial; self.taa = taa
         }
     }
     /// What the compositor shows this frame in inline mode.
@@ -573,9 +575,9 @@ final class KleptonTAA {
             inputs.append(inp)
         }
 
-        let job = InlineJob(k: k, gen: gen, pose: r, vkSerial: vkSerial)
+        let job = InlineJob(k: k, gen: gen, pose: r, vkSerial: vkSerial, taa: taaFrame)
         let committedAt = Date()
-        // VPKTAA nativo: VPKEngine's own pass (its jitter, both eyes in one dispatch, RCAS, UI mask).
+        // VPKTAA nativo: VPKEngine's own pass (its jitter, both eyes in one dispatch, UI mask; RCAS only on rcas_only frames).
         // The only resolver: without it the frame goes out unresolved.
         guard (taaFrame ? kl_vulkan_taa_native_on() : kl_vulkan_rcas_on()) != 0 else {
             return taaFrame ? "VPKTAA nativo off" : "RCAS off"
@@ -594,7 +596,7 @@ final class KleptonTAA {
             inRcasSaid = true
             inRcasTaa = taaFrame
             NSLog("%@", "RCAS activo (nitidez \(String(format: "%.2f", KleptonTAA.rcasIntensity)), máscara UI \(maskS), "
-                  + "ruta \(route) + gancho de fin de frame ovrp/OpenXR, \(taaFrame ? "tras VPKTAA" : "sin VPKTAA: solo RCAS"), ojo \(w)x\(h))")
+                  + "ruta \(route) + gancho de fin de frame ovrp/OpenXR, \(taaFrame ? "VPKTAA; el RCAS de estos frames lo aplica el compositor" : "sin VPKTAA: solo RCAS"), ojo \(w)x\(h))")
         }
         let box = InlineEncode { [self] cmd in
             // First: whatever is encoded, the command buffer now owns slot and semaphore.
@@ -684,7 +686,7 @@ final class KleptonTAA {
             if job.ok && done && job.pose.serial > (inPublished?.pose.serial ?? 0) {
                 let o = inOuts[job.k]
                 inPublished = Published(slot: job.k, pose: job.pose, out: o.reads, flipY: [kl_vulkan_eye_color_top_left(Int32(job.pose.stage), 0) != 0,
-                                                             kl_vulkan_eye_color_top_left(Int32(job.pose.stage), 1) != 0])
+                                                             kl_vulkan_eye_color_top_left(Int32(job.pose.stage), 1) != 0], taa: job.taa)
             }
         }
         if !done { inGpuErrors += 1 }

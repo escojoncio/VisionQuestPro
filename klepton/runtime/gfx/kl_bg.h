@@ -9,8 +9,11 @@
 // Swift, from the scene phase: 1 = background, 0 = foreground. Never blocks; repeats are ignored.
 void kl_bg_set(int background);
 // Release every waiter for good (the run is ending; a join on a blocked guest thread must not hang).
-// A later kl_bg_set(1) no longer blocks.
+// A later kl_bg_set(1) no longer blocks (ours, nor VPKEngine's gate: it is released too).
 void kl_bg_shutdown(void);
+// After kl_bg_shutdown, the app backgrounded and about to exit: parks VPKEngine's Metal commits again, so
+// nothing still running reaches Metal (BackgroundExecutionNotPermitted). Main thread.
+void kl_bg_engine_park(void);
 // 1 while backgrounded and not shutting down.
 int  kl_bg_active(void);
 // Guest submit paths only (never the main/UI thread): returns at once in the foreground.

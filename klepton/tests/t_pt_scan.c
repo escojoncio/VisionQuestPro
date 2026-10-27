@@ -38,6 +38,44 @@ int main(void) {
     CHECK(klovrp_pt_decide(a, 1, 1, &eye) == -1, "eye layer shape ignored");
     CHECK(klovrp_pt_decide(a, 0, 1, &eye) == -1 && eye == -1, "empty list");
 
+    // Enqueue route (Unity): EndFrame4 carries the eye layer only (list_idx -1).
+    struct klovrp_pt_enq s = { 0 };
+    int id, under;
+    // Initialised + shape 7 enqueued, flags 0x4 (no OnTop): passthrough ON, underlay.
+    klovrp_pt_enq_note(&s, 1, 0, 7, 4, 0x4);
+    CHECK(klovrp_pt_enq_frame(&s, -1, 0, 0, &id, &under) == 1 && id == 4 && under == 1, "enqueued shape 7 -> on, underlay");
+    // Re-enqueued every frame: stays on far beyond the idle limit.
+    for (int i = 0; i < 20; i++) {
+        klovrp_pt_enq_note(&s, 1, 0, 7, 4, 0x4);
+        CHECK(klovrp_pt_enq_frame(&s, -1, 0, 0, &id, &under) == 1, "re-enqueued every frame stays on");
+    }
+    // OnTop flag: overlay.
+    klovrp_pt_enq_note(&s, 1, 0, 7, 4, 0x5);
+    CHECK(klovrp_pt_enq_frame(&s, -1, 0, 0, &id, &under) == 1 && under == 0, "OnTop -> overlay");
+    // No re-enqueue: off after KLOVRP_PT_ENQ_IDLE EndFrame4s.
+    int still = 1;
+    for (int i = 0; i < KLOVRP_PT_ENQ_IDLE; i++) still = klovrp_pt_enq_frame(&s, -1, 0, 0, &id, &under);
+    CHECK(still == 0 && id == 0, "no re-enqueue -> off");
+    // Not initialised: never on.
+    struct klovrp_pt_enq u = { 0 };
+    klovrp_pt_enq_note(&u, 0, 0, 7, 4, 0x4);
+    CHECK(klovrp_pt_enq_frame(&u, -1, 0, 0, &id, &under) == 0, "enqueued but uninitialised -> off");
+    // Eye layer, or a non-passthrough shape, enqueued: off.
+    klovrp_pt_enq_note(&u, 1, 1, 7, 4, 0x4);
+    klovrp_pt_enq_note(&u, 1, 0, 0, 5, 0x4);
+    CHECK(klovrp_pt_enq_frame(&u, -1, 0, 0, &id, &under) == 0, "eye / plain quad enqueued -> off");
+    // Destroy of another layer keeps it on; destroy of its own turns it off at once.
+    klovrp_pt_enq_note(&u, 1, 0, 8, 6, 0x4);
+    klovrp_pt_enq_destroy(&u, 9);
+    CHECK(klovrp_pt_enq_frame(&u, -1, 0, 0, &id, &under) == 1 && id == 6, "other layer destroyed -> still on");
+    klovrp_pt_enq_destroy(&u, 6);
+    CHECK(klovrp_pt_enq_frame(&u, -1, 0, 0, &id, &under) == 0, "destroy -> off");
+    // The EndFrame4 list still works on its own and wins: eye 1, passthrough 0 -> underlay; after -> overlay.
+    struct klovrp_pt_enq z = { 0 };
+    CHECK(klovrp_pt_enq_frame(&z, 0, 7, 1, &id, &under) == 1 && id == 7 && under == 1, "list underlay");
+    CHECK(klovrp_pt_enq_frame(&z, 1, 7, 0, &id, &under) == 1 && under == 0, "list overlay");
+    CHECK(klovrp_pt_enq_frame(&z, -1, 0, 0, &id, &under) == 0, "empty list, nothing enqueued -> off");
+
     printf(fails ? "FAILED (%d)\n" : "all ok\n", fails);
     return fails != 0;
 }

@@ -42,16 +42,25 @@ void kl_bg_set(int background) {
     pthread_mutex_lock(&g_mu);
     g_want_bg = background != 0;
     apply_locked();
+    int down = g_down;
     pthread_mutex_unlock(&g_mu);
-    vpgpu_call("vpgpu_set_background", background != 0, 1);   // the caller (Swift main thread) is the gate's "main"
+    // After shutdown the guest is winding down: a late background phase must not park its joined threads.
+    if (!down) vpgpu_call("vpgpu_set_background", background != 0, 1);   // the caller (Swift main thread) is the gate's "main"
 }
 
+// VPKEngine's gate is released with set_background(0), not vpgpu_shutdown_background: that one is
+// permanent, and the commits that still run after the guest was stopped (wind-down, a wedged guest
+// thread) would then reach Metal while backgrounded. kl_bg_engine_park closes it again.
 void kl_bg_shutdown(void) {
     pthread_mutex_lock(&g_mu);
     g_down = 1;
     apply_locked();
     pthread_mutex_unlock(&g_mu);
-    vpgpu_call("vpgpu_shutdown_background", 0, 0);
+    vpgpu_call("vpgpu_set_background", 0, 1);
+}
+
+void kl_bg_engine_park(void) {
+    vpgpu_call("vpgpu_set_background", 1, 1);
 }
 
 int kl_bg_active(void) { return atomic_load(&g_bg); }

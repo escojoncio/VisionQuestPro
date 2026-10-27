@@ -4426,8 +4426,9 @@ int kl_vulkan_rcas_on(void) {
     }
     if (!env) return 0;
     // RCAS is fused into the compositor's composite pass (kl_reproject.c, KleptonCompositor.swift):
-    // no hook, no output ring, no native command buffers for RCAS-only frames. The native pass keeps
-    // its own RCAS for VPKTAA frames. KL_RCAS_COMPOSITOR=0 brings the separate pass back.
+    // no hook, no output ring, no native command buffers for RCAS-only frames. The native pass no longer
+    // sharpens VPKTAA frames either: the compositor does. KL_RCAS_COMPOSITOR=0 brings the separate pass
+    // back for non-VPKTAA frames only.
     if (kl_env_on("KL_RCAS_COMPOSITOR", 1)) return 0;
     klvk_vpvk_resolve();
     return g_vpvk.rcas_intensity && g_vpvk.taa_native_encode && g_vpvk.rcas_intensity() > 0.0f;

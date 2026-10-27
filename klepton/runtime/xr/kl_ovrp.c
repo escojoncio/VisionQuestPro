@@ -6909,10 +6909,15 @@ static const char *klovrp_shape_name(int shape) {
 // .mixed immersive space, so the guest's passthrough is honoured by telling the
 // host (kl_passthrough_active) to show the eye layer over the room with its alpha.
 // Init succeeds; capabilities say colour, no depth. "Active" is decided per frame
-// from what the guest SUBMITS: a Reconstruction/SurfaceProjected passthrough layer
-// in the ovrp_EndFrame4 list (a paused/hidden OVRPassthroughLayer is simply not
-// submitted). Index before the eye layer = underlay.
+// from what the guest SUBMITS, by either of two routes: a Reconstruction/
+// SurfaceProjected passthrough layer in the ovrp_EndFrame4 list (index before the eye
+// layer = underlay), or — Unity/OVRPlugin, where EndFrame4 carries the eye layer only —
+// a passthrough layer sent through ovrp_EnqueueSubmitLayer2 (underlay unless the
+// submit flags say OnTop). The enqueued one stays live while it is re-enqueued
+// (klovrp_pt_enq_frame) and ends with its ovrp_EnqueueDestroyLayer; a paused/hidden
+// OVRPassthroughLayer is simply not submitted.
 static int g_pt_initialized;
+static pthread_mutex_t g_pt_enq_mu = PTHREAD_MUTEX_INITIALIZER;   // enqueue thread vs EndFrame4 thread
 static uint64_t klovrp_InitializeInsightPassthrough(void) {
     ovrp_hit("ovrp_InitializeInsightPassthrough");
     if (kl_passthrough_mode() == 1)
@@ -6985,7 +6990,36 @@ static int klovrp_pt_decide(const struct klovrp_pt_item *it, int n, int initiali
     }
     return initialized ? pt : -1;
 }
+// The Enqueue route (Unity: the EndFrame4 list holds the eye layer only). A passthrough-shaped
+// non-eye layer enqueued while InsightPassthrough is initialised goes live; the flag bit 0
+// (OnTop) makes it an overlay, otherwise underlay (Enqueue flag bits OnTop=1, HeadLocked=2,
+// NoDepth=4 are inferred from the Unity wrapper, unverified). It stays live until its destroy, or until
+// KLOVRP_PT_ENQ_IDLE EndFrame4s pass without a re-enqueue (as g_enq_idle_endframes does).
+#define KLOVRP_PT_ENQ_IDLE 3
+struct klovrp_pt_enq { int live, id, underlay, idle; };
+static void klovrp_pt_enq_note(struct klovrp_pt_enq *s, int initialized, int is_eye, int shape,
+                               int layer_id, unsigned flags) {
+    if (!initialized || is_eye || !klovrp_shape_is_passthrough(shape)) return;
+    s->live = 1; s->id = layer_id; s->underlay = !(flags & 1u); s->idle = 0;
+}
+static void klovrp_pt_enq_destroy(struct klovrp_pt_enq *s, int layer_id) {
+    if (s->live && s->id == layer_id) s->live = 0;
+}
+// One EndFrame4. list_idx = klovrp_pt_decide's answer (-1 none); the list wins over the
+// enqueued layer. Fills the layer id and the underlay flag; returns whether it is a
+// passthrough frame.
+static int klovrp_pt_enq_frame(struct klovrp_pt_enq *s, int list_idx, int list_id, int eye_idx,
+                               int *id, int *underlay) {
+    if (s->live && ++s->idle >= KLOVRP_PT_ENQ_IDLE) s->live = 0;
+    if (list_idx >= 0) {
+        *id = list_id; *underlay = eye_idx < 0 || list_idx < eye_idx;
+        return 1;
+    }
+    *id = s->live ? s->id : 0; *underlay = s->live ? s->underlay : 0;
+    return s->live;
+}
 // KL-TEST-END ptscan
+static struct klovrp_pt_enq g_pt_enq;   // under g_pt_enq_mu
 static void klovrp_passthrough_scan(const void *layer_submits, int count) {
     const ovrp_layer_submit *const *list = layer_submits;
     struct klovrp_pt_item it[KLOVRP_MAX_LAYERS];
@@ -7007,10 +7041,22 @@ static void klovrp_passthrough_scan(const void *layer_submits, int count) {
     }
     int eye_idx;
     int pt_idx = klovrp_pt_decide(it, n, g_pt_initialized, &eye_idx);
-    int pt_id = pt_idx >= 0 ? ids[pt_idx] : 0;
-    int present = pt_idx >= 0;
+    int pt_id, underlay;
+    pthread_mutex_lock(&g_pt_enq_mu);
+    int was_live = g_pt_enq.live, was_id = g_pt_enq.id;
+    int present = klovrp_pt_enq_frame(&g_pt_enq, pt_idx, pt_idx >= 0 ? ids[pt_idx] : 0, eye_idx,
+                                      &pt_id, &underlay);
+    int expired = was_live && !g_pt_enq.live && !present;   // not a destroy: that clears it before this
+    pthread_mutex_unlock(&g_pt_enq_mu);
+    if (expired) {
+        // ON -> OFF because the guest stopped re-enqueuing: a flicker would show up here.
+        static int n_exp;
+        if (n_exp++ < 8)
+            fprintf(stderr, "  [pt] enqueued passthrough layer %d expired (no re-enqueue for %d "
+                            "EndFrame4s): OFF (#%d)\n", was_id, KLOVRP_PT_ENQ_IDLE, n_exp);
+    }
     // OVRPlugin eye layers are premultiplied unless the guest asks otherwise.
-    kl_passthrough_note_frame(present, pt_id, present && (eye_idx < 0 || pt_idx < eye_idx), 0);
+    kl_passthrough_note_frame(present, pt_id, present && underlay, 0);
 }
 
 static void klovrp_census_submits(const void *layer_submits, int count) {
@@ -8256,6 +8302,24 @@ static uint64_t klovrp_EnqueueSubmitLayer2(uint32_t flags, void *texL, void *tex
         // an eye layer enqueued every frame must not keep an emptied set alive forever.
         struct klovrp_layer *el = klovrp_layer(layer_id);
         if (!el || !el->is_eye) g_enq_frames_since = 0;
+        // Unity sends its OVRPassthroughLayer this way, never in the EndFrame4 list.
+        if (el && !el->is_eye && klovrp_shape_is_passthrough(el->desc.shape)) {
+            static int said;
+            if (!g_pt_initialized) {
+                if (said++ < 4)
+                    fprintf(stderr, "  [pt] passthrough layer %d (shape %d) is enqueued but "
+                                    "InsightPassthrough was never initialised: not shown\n",
+                            layer_id, el->desc.shape);
+            } else {
+                pthread_mutex_lock(&g_pt_enq_mu);
+                if (!g_pt_enq.live && said++ < 4)
+                    fprintf(stderr, "  [pt] passthrough layer %d (shape %d) enqueued, flags=%#x: %s\n",
+                            layer_id, el->desc.shape, flags, (flags & 1u) ? "overlay" : "underlay");
+                klovrp_pt_enq_note(&g_pt_enq, g_pt_initialized, el->is_eye, el->desc.shape,
+                                   layer_id, flags);
+                pthread_mutex_unlock(&g_pt_enq_mu);
+            }
+        }
     }
     // Log the SUBMITTED texture handles per layer (once each): if texL differs
     // from the VkImage we handed out via GetLayerTexture2 for this layer, the
@@ -8394,6 +8458,9 @@ static uint64_t klovrp_DestroyLayer(int layer_id) {
 // textures are kept for reuse, only the id is cleared).
 static uint64_t klovrp_EnqueueDestroyLayer(int layer_id) {
     ovrp_hit("ovrp_EnqueueDestroyLayer");
+    pthread_mutex_lock(&g_pt_enq_mu);
+    klovrp_pt_enq_destroy(&g_pt_enq, layer_id);
+    pthread_mutex_unlock(&g_pt_enq_mu);
     return klovrp_DestroyLayer(layer_id);
 }
 

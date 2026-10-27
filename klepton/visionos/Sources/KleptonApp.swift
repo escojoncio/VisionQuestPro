@@ -146,6 +146,9 @@ enum Lifecycle {
     @MainActor static func immersiveEnded() {
         immersiveOpen = false
         NSLog("[app] immersive space ended (phase \(lastPhase))")
+        // The guest was stopped (kl_bg_shutdown released VPKEngine's background gate for its wind-down):
+        // backgrounded, nothing may reach Metal any more — Metal refuses every command buffer.
+        if lastPhase == .background { kl_bg_engine_park() }
         VQSession.end()   // the run ended through the normal path (also before the _exit(0) below)
         // The game's logs, complete, to QUEST/Registros before anything else can end the process
         // (waited for only on the path that _exit()s below).

@@ -232,6 +232,8 @@ final class KleptonCompositor {
     /// is left out for this composite rather than sample an eye the GPU is still drawing.
     private var taaHide = false
     private var taaFlip: [Bool] = [false, false]
+    /// `taaOut` is a real VPKTAA resolve (unsharpened), not an rcas_only frame the engine already sharpened.
+    private var taaResolved = false
     private var depthState: MTLDepthStencilState?
     /// Always-pass, no write — for coplanar draws after the first. See where
     /// `depthState` is built for why the two cannot be one.
@@ -610,9 +612,12 @@ final class KleptonCompositor {
     // `[cp] gpu p50/p95/max`. Written from the completion handler under cmdLock.
     private var cpGpuMs: [Double] = []
     private var cpGpuWindowStart = CFAbsoluteTimeGetCurrent()
-    /// RCAS fused into the eye pass (kl_reproject.c kl_rcas) for frames VPKTAA did not resolve.
-    private static let rcasCon: Float = KleptonTAA.rcasInCompositor
+    /// RCAS fused into the eye pass (kl_reproject.c kl_rcas) for a VPKTAA-resolved picture: VPKEngine's
+    /// native pass no longer sharpens its output, so this applies even with KL_RCAS_COMPOSITOR=0.
+    private static let rcasConTaa: Float = KleptonTAA.rcasIntensity > 0
         ? exp2f(-2 * (1 - KleptonTAA.rcasIntensity)) : 0
+    /// Same for the guest's own (unresolved) eye; with KL_RCAS_COMPOSITOR=0 the separate native pass does it.
+    private static let rcasCon: Float = KleptonTAA.rcasInCompositor ? rcasConTaa : 0
     private static let rcasDenoise: UInt32 = getenv("VPVK_RCAS_DENOISE").map { String(cString: $0) == "1" } == true ? 1 : 0
     private var loggedRcasComp = false
     private var loggedUiMaskOn = false
@@ -2608,6 +2613,7 @@ final class KleptonCompositor {
     private func prepareTAA(cmd: MTLCommandBuffer, stage: Int, completeStage: Int,
                             rendered: kl_ovrp_render_pose, haveRendered: Bool) {
         taaOut.removeAll(keepingCapacity: true)
+        taaResolved = false
         taaPose = nil
         taaStage = nil
         taaHide = false
@@ -2633,6 +2639,7 @@ final class KleptonCompositor {
             case .resolved(let p)?:
                 taaOut[0] = p.out[0]; taaOut[1] = p.out[1]
                 taaFlip = p.flipY
+                taaResolved = p.taa
                 taaPose = p.pose
             case .raw(let r, let st)?:
                 taaPose = r
@@ -2839,10 +2846,12 @@ final class KleptonCompositor {
                 continue
             }
             u.visible = alloc == nil ? 0 : 1
-            // RCAS fused here for the guest's own (unresolved) eye; a VPKTAA-resolved picture was
-            // already sharpened inside the native pass.
-            if alloc != nil, Self.rcasCon > 0, taaOut[vi] == nil {
-                u.rcas_con = Self.rcasCon
+            // RCAS fused here, on the guest's own (unresolved) eye and on the VPKTAA-resolved one
+            // (the native pass leaves its output unsharpened). An rcas_only frame (KL_RCAS_COMPOSITOR=0)
+            // arrives as taaOut too, already sharpened by the engine: not again.
+            let rcasCon = taaOut[vi] == nil ? Self.rcasCon : (taaResolved ? Self.rcasConTaa : 0)
+            if alloc != nil, rcasCon > 0 {
+                u.rcas_con = rcasCon
                 u.rcas_flags = Self.rcasDenoise
                 // VPKEngine's UI mask for this eye (same eye texture space, same uv): HUD / text keep
                 // their original pixels. None this frame: plain RCAS, as before.
@@ -3096,7 +3105,7 @@ final class KleptonCompositor {
                 if !loggedRcasComp {
                     loggedRcasComp = true
                     NSLog("[cp] RCAS fused into the composite pass (nitidez \(String(format: "%.2f", KleptonTAA.rcasIntensity)), "
-                          + "constante \(String(format: "%.3f", Self.rcasCon)), sin pase ni anillo propios; "
+                          + "constante \(String(format: "%.3f", Self.rcasConTaa)), sin pase ni anillo propios; "
                           + "máscara UI de VPKEngine donde la haya)")
                 }
             }
