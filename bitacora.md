@@ -10,6 +10,12 @@
 - 2026-10-27 `872ffa3`: fuera VPKTAA y foveado propio; ajuste MSAA Juego/x2/x4 (`VPVK_MSAA_FORCE`, global y por juego, siempre memoryless); captura instantánea (`vq.cap.hold.*`, defecto 0).
 - 2026-10-27 Build `7f66ae7` (run 40562139335): causas medidas de ITR2/Gundam/captura; detalle en `notas/juegos.md`.
 
+## EN CURSO (2026-10-28, build VQP `40eb08a`) — retomar aquí si se corta la sesión
+Logs nuevos: Registros_18 (ITR2, Gundam x2, Maestro, Attack on Titan VR). Sospecha del usuario: el MSAA forzado x2/x4 NO se aplica.
+Plan: 1) lector (Haiku) analiza los logs: MSAA forzado (`VPVK_MSAA_FORCE`, msaa_materialized, samples), ITR2 shaders/kill, Gundam `[sp-call]`/`[sp-ev]`/`[pt] expire detail`, Maestro `gles.uniform_err prog=`, AoT crash.
+2) Anotar aquí causas demostradas. 3) coder (Sonnet) arregla solo causas demostradas; revisión adversarial (Sonnet); UNA build `[build]`.
+Reglas del usuario: sin CTS/dEQP; no gastar cuota en pruebas; avisar antes de pushes/permisos no pedidos.
+
 ## Current state
 - Última build verde: run 40694850720 (VQP `81136fc`, VPK `8c21013`); sin probar en visor.
 - Pendiente (orden):
