@@ -34,6 +34,12 @@ Logs en `QUEST/Registros/` (compartibles desde la app); línea 1 = hash de build
 | `[ctrl] vel hand`, `[ctrl] vel swing`, `[ctrl] menu transition`, `[mprobe fN]`, `[xr-ctrl]` | Mandos |
 | `[unity-kw]` | Logcat de estado de partida |
 | `[ovrp] layer N blend:` | Blend por capa |
+| `gles.uloc prog= name= ret=`, `gles.uniform_err … prog=<id>` | Uniformes GLES: localización de los empaquetados (1 vez por (prog,nombre), tope 1024) y glUniform* rechazado (1 vez por (prog,nombre,tipo llamado), tope 512; `prog=` al final de la línea) |
+| `[sp-call] fn=ovrp_X n=k <args> ret=<código>` | Primeras 20 llamadas de cada ovrp_* espacial (anclas, consultas, componentes, malla/room/boundary, RequestSceneCapture, Discover) con argumentos clave y código devuelto; `req=` = requestId devuelto |
+| `[sp-ev] push type= req= result= queued=` / `[sp-ev] polled via=PollEvent2\|PollEvent type= len= req=` | Cada evento encolado (50 por tipo; `queued=0` = cola llena) y cuándo el juego lo recoge en PollEvent; casar por `req=` |
+| `[pt] expire detail #N: layer= idle= ef4= last_enq_ef4= ago= last_enq_flags= calls_last3=` | Con `[pt] enqueued passthrough layer N expired` (máx. 8): frames idle, EndFrame4 del último re-encolado y llamadas ovrp_* del juego en los últimos 3 EndFrame4 (`nombre xN`) |
+| `[diag] budget exhausted lines=2000` | Tope de líneas de `[sp-call]`/`[sp-ev]`/`[pt] expire detail` por sesión (compartido) |
+| `[fatal] last log lines:` + 8 líneas | En `klepton-crash.log` y fd 2 tras `last guest errors`: las 8 últimas líneas de `klepton-boot.log` tal como están en disco (lo que siga en búfer stdio no aparece) |
 | `libEOSSDK JNI_OnLoad -> …` | EOS de UE4 cargado |
 | `[plat] game version string for language-pack metadata` | Packs de idioma (Deadpool) |
 | `[path] … -> obb dir` | Redirección de `.lang` al obb |

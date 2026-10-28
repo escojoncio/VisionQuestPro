@@ -103,6 +103,38 @@ static void klf_open_crash(void) {
 // Async-signal-safe: the ring hands over finished lines, klf_emit is write(2).
 static void klf_guest_errors(void) { kl_log_ring_dump(klf_emit); }
 
+// "[fatal] last log lines:" + the last 8 lines of the boot log as they are on disk (the breadcrumbs just before the
+// fault). There is no in-process copy of the log: the file is read back with open/pread, which are async-signal-safe.
+// Lines held back in a stdio buffer are not in the file yet and so are not shown.
+static char g_log_path[1024];
+void kl_fault_set_log_path(const char *path) {
+    snprintf(g_log_path, sizeof g_log_path, "%s", path ? path : "");
+}
+static void klf_log_tail(void) {
+    if (!g_log_path[0]) return;
+    int fd = open(g_log_path, O_RDONLY);
+    if (fd < 0) return;
+    char b[2048];
+    off_t end = lseek(fd, 0, SEEK_END);
+    off_t off = end > (off_t)sizeof b ? end - (off_t)sizeof b : 0;
+    ssize_t n = end > 0 ? pread(fd, b, sizeof b, off) : 0;
+    close(fd);
+    if (n <= 0) return;
+    size_t e = (size_t)n, s;
+    while (e && b[e - 1] == '\n') e--;
+    int lines = 0;
+    for (s = e; s > 0; s--)
+        if (b[s - 1] == '\n' && ++lines == 8) break;
+    if (s == 0 && off > 0) {                      // the first line is cut by the read window: drop it
+        while (s < e && b[s] != '\n') s++;
+        if (s < e) s++;
+    }
+    static const char h[] = "[fatal] last log lines:\n";
+    klf_emit(h, sizeof h - 1);
+    klf_emit(b + s, e - s);
+    klf_emit("\n", 1);
+}
+
 // fd 2 only: the ForceQuit dump is not a crash, so it never reaches (or creates) the crash file.
 static void klf_emit_fd2(const char *b, size_t n) { ssize_t w = write(2, b, n); (void)w; }
 
@@ -554,6 +586,7 @@ static void report_fault(int sig, siginfo_t *si, void *uctx) {
 
     // Why the guest died, in its own words: abort() and __android_log_assert end here (SIGABRT) as well.
     klf_guest_errors();
+    klf_log_tail();
 
     // A thread that can abandon its unit of work (the executable door's test runner) goes back
     // to its recovery point now that the report is written; the process lives on.

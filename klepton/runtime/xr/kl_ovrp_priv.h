@@ -112,6 +112,9 @@ void kl_ovrp_misc_register(void);      // kl_ovrp_misc.c
 // ---- helpers over kl_ovrp.c internals ---------------------------------------
 // Call accounting + first-call log; call first in every served function.
 void kl_ovrp_hit(const char *name);
+// Budget of permanent diagnostic lines (spatial call/event traces, passthrough expiry detail): 1 while the session
+// total is under KL_OVRP_DIAG_LINES, else 0 (and one "[diag] budget exhausted" line when it runs out). Call once per line.
+int  kl_ovrp_diag_ok(void);
 // The shared handlers' bodies, for a function that wants the same answer
 // without a table entry of its own: returns 0 / -1004 after kl_ovrp_hit(name).
 ovrpResult kl_ovrp_ok(const char *name);

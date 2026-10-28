@@ -16,6 +16,7 @@ float kl_ovrp_guest_origin_y(void) { return g_oy; }
 static char g_dir[256];
 const char *kl_jni_files_dir(void) { return g_dir; }
 void kl_ovrp_hit(const char *n) { (void)n; }
+int kl_ovrp_diag_ok(void) { return 1; }
 ovrpResult kl_ovrp_ok(const char *n) { (void)n; return 0; }
 ovrpResult kl_ovrp_unsupported(const char *n) { (void)n; return -1004; }
 static struct { int type; unsigned char d[256]; size_t len; } g_ev[64];

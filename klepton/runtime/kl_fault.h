@@ -48,6 +48,9 @@ void kl_fault_guest_errors_once(void);
 // still goes to fd 2 either way.
 void kl_fault_set_crash_path(const char *path);
 
+// The boot log: its last 8 lines are appended to the crash report ("[fatal] last log lines:"). NULL disables.
+void kl_fault_set_log_path(const char *path);
+
 // Per-thread recovery point (a sigjmp_buf *, or NULL to clear). While set, a fatal signal or a
 // Klepton fatal path (kl_fatal_prepare) on THIS thread writes its crash report and then
 // siglongjmps there (value = the signal) instead of ending the process. For runners that can

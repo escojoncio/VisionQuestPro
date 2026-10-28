@@ -195,6 +195,7 @@ int kl_app_configure(const char *resources, const char *container) {
     static char crash[1024];
     snprintf(crash, sizeof crash, "%s/klepton-crash.log", container);
     kl_fault_set_crash_path(crash);
+    kl_fault_set_log_path(g_log);
 
     return configure_rest(container);
 }
@@ -276,6 +277,7 @@ int kl_app_configure_game(const char *name, const char *tree, const char *apk,
     static char crash[1024];
     snprintf(crash, sizeof crash, "%s/klepton-crash.log", container);
     kl_fault_set_crash_path(crash);
+    kl_fault_set_log_path(g_log);
     return configure_rest(container);
 }
 

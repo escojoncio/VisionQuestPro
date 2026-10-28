@@ -24,6 +24,7 @@
 #include "kl_envdepth.h"
 #include <math.h>
 #include <pthread.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -31,6 +32,30 @@
 #include <unistd.h>
 
 #define ONCE(msg) do { static int _o; if (!_o) { _o = 1; fprintf(stderr, "  [ovrp-spatial] %s\n", (msg)); } } while (0)
+
+// Permanent traces, counted against the shared diagnostic budget (kl_ovrp_diag_ok); nothing per frame.
+//   [sp-call] fn=<ovrp_*> n=<k> <key args/outs> ret=<ovrpResult>   the first SP_PER_FN calls of each function
+//   [sp-ev] push|polled type=<ovrpEventType> req=<requestId> ...   every event pushed / handed to the guest (SP_PER_EV per type)
+// A function's body is sp_<Name> (always inlined, so the frame the guest-caller lookup in kl_ovrp_hit walks is the
+// wrapper's, as before); the table entry klovrp_<Name> calls it and logs the arguments and the code returned.
+#define SP_PER_FN 20
+#define SP_PER_EV 50
+#define SP_IMPL static inline __attribute__((always_inline)) ovrpResult
+#define ULL(x) ((unsigned long long)(x))
+#define SPT(fn, ret, ...) do { \
+        static unsigned _c; \
+        unsigned _k = __atomic_add_fetch(&_c, 1, __ATOMIC_RELAXED); \
+        if (_k <= SP_PER_FN && kl_ovrp_diag_ok()) sp_emit(fn, _k, ret, __VA_ARGS__); \
+    } while (0)
+static void sp_emit(const char *fn, unsigned k, int32_t ret, const char *fmt, ...) __attribute__((format(printf, 4, 5)));
+static void sp_emit(const char *fn, unsigned k, int32_t ret, const char *fmt, ...) {
+    char b[200];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(b, sizeof b, fmt, ap);
+    va_end(ap);
+    fprintf(stderr, "  [sp-call] fn=%s n=%u %s ret=%d\n", fn, k, b, (int)ret);
+}
 
 // ---- ovrp constants ---------------------------------------------------------
 enum {
@@ -59,6 +84,11 @@ enum {
 #define PTR_MIN 0x100000000ull
 static int isptr(uint64_t a) { return a >= PTR_MIN; }
 static uint64_t U(uint64_t a) { return isptr(a) ? *(const uint64_t *)(uintptr_t)a : a; }
+static uint64_t sp_h(uint64_t a) { return a ? U(a) : 0; }                     // a space handle as logged
+static uint64_t sp_out(uint64_t a2, uint64_t a3) {                              // SaveSpaces: the requestId it wrote
+    uint64_t o = isptr(a3) ? a3 : (isptr(a2) ? a2 : 0);
+    return o ? *(const uint64_t *)(uintptr_t)o : 0;
+}
 static int space_of(uint64_t arg, kl_uuid *id, int *kind) {
     if (!arg) return 0;
     int k = 0;
@@ -89,8 +119,21 @@ typedef struct { float x, y, w, h; } rectf;
 typedef struct { float x, y, z, w, h, d; } boundsf;
 typedef struct { uint64_t flags; ovrpPosef pose; } space_location;                                             // 40
 
+// Every event starts with its u64 requestId; the i32 result follows it, except EV_QUERY_RESULTS (no result) and
+// EV_SAVE_COMPLETE (after the space handle).
 static void push(int type, const void *p, size_t n) {
-    if (kl_ovrp_push_event(type, p, n) != 0) ONCE("event queue full: a spatial event was dropped");
+    int rc = kl_ovrp_push_event(type, p, n);
+    static unsigned cnt[128];
+    if (__atomic_add_fetch(&cnt[type & 127], 1, __ATOMIC_RELAXED) <= SP_PER_EV && kl_ovrp_diag_ok()) {
+        uint64_t req = 0;
+        int32_t res = 0;
+        size_t ro = type == EV_SAVE_COMPLETE ? 16 : 8;
+        if (n >= 8) memcpy(&req, p, 8);
+        int has = type != EV_QUERY_RESULTS && n >= ro + 4;
+        if (has) memcpy(&res, (const char *)p + ro, 4);
+        fprintf(stderr, "  [sp-ev] push type=%d req=%llu result=%d queued=%d\n", type, ULL(req), has ? (int)res : 0, rc == 0);
+    }
+    if (rc != 0) ONCE("event queue full: a spatial event was dropped");
 }
 
 // ---- matrices <-> poses -----------------------------------------------------
@@ -230,7 +273,7 @@ static void ensure_listener(void) {
 }
 
 // ---- spaces: anchors ---------------------------------------------------------------
-static ovrpResult klovrp_CreateSpatialAnchor(const ci_anchor *info, uint64_t *req_out) {
+SP_IMPL sp_CreateSpatialAnchor(const ci_anchor *info, uint64_t *req_out) {
     kl_ovrp_hit("ovrp_CreateSpatialAnchor");
     if (!info || !req_out) return KLOVRP_INVALID_PARAM;
     *req_out = 0;
@@ -244,8 +287,13 @@ static ovrpResult klovrp_CreateSpatialAnchor(const ci_anchor *info, uint64_t *re
     *req_out = req;
     return KLOVRP_SUCCESS;
 }
+static ovrpResult klovrp_CreateSpatialAnchor(const ci_anchor *info, uint64_t *req_out) {
+    ovrpResult r = sp_CreateSpatialAnchor(info, req_out);
+    SPT("ovrp_CreateSpatialAnchor", r, "req=%llu", ULL(req_out ? *req_out : 0));
+    return r;
+}
 
-static ovrpResult klovrp_DestroySpace(uint64_t space) {
+SP_IMPL sp_DestroySpace(uint64_t space) {
     kl_ovrp_hit("ovrp_DestroySpace");
     kl_uuid id; int kind = 0;
     if (!space_of(space, &id, &kind)) return KLOVRP_SUCCESS;       // already gone: nothing to free
@@ -257,6 +305,11 @@ static ovrpResult klovrp_DestroySpace(uint64_t space) {
         (void)kl_spatial_remove_anchor(kl_spatial_new_request(), id);
     }
     return KLOVRP_SUCCESS;
+}
+static ovrpResult klovrp_DestroySpace(uint64_t space) {
+    ovrpResult r = sp_DestroySpace(space);
+    SPT("ovrp_DestroySpace", r, "space=0x%llx", ULL(sp_h(space)));
+    return r;
 }
 
 static void save_one_event(uint64_t req, kl_uuid id, int ok) {
@@ -270,7 +323,7 @@ static int save_space(kl_uuid id, int kind, int32_t location) {
     kl_spatial_anchor_set_saved(id, 1);          // WorldAnchors persist by themselves; this records "this game's"
     return 1;
 }
-static ovrpResult klovrp_SaveSpace(uint64_t space, int32_t location, int32_t mode, uint64_t *req_out) {
+SP_IMPL sp_SaveSpace(uint64_t space, int32_t location, int32_t mode, uint64_t *req_out) {
     kl_ovrp_hit("ovrp_SaveSpace");
     (void)mode;
     if (!req_out) return KLOVRP_INVALID_PARAM;
@@ -281,6 +334,11 @@ static ovrpResult klovrp_SaveSpace(uint64_t space, int32_t location, int32_t mod
     save_one_event(req, id, save_space(id, kind, location));
     *req_out = req;
     return KLOVRP_SUCCESS;
+}
+static ovrpResult klovrp_SaveSpace(uint64_t space, int32_t location, int32_t mode, uint64_t *req_out) {
+    ovrpResult r = sp_SaveSpace(space, location, mode, req_out);
+    SPT("ovrp_SaveSpace", r, "space=0x%llx loc=%d mode=%d req=%llu", ULL(sp_h(space)), location, mode, ULL(req_out ? *req_out : 0));
+    return r;
 }
 static ovrpResult save_list(const uint64_t *spaces, uint32_t n, int32_t location, uint64_t *req_out) {
     if (!spaces || !req_out || n > 1024) return KLOVRP_INVALID_PARAM;
@@ -298,17 +356,27 @@ static ovrpResult save_list(const uint64_t *spaces, uint32_t n, int32_t location
     return KLOVRP_SUCCESS;
 }
 // ovrp_SaveSpaceList(spaces*, n, location, out requestId)
-static ovrpResult klovrp_SaveSpaceList(const uint64_t *spaces, uint32_t n, int32_t location, uint64_t *req_out) {
+SP_IMPL sp_SaveSpaceList(const uint64_t *spaces, uint32_t n, int32_t location, uint64_t *req_out) {
     kl_ovrp_hit("ovrp_SaveSpaceList");
     return save_list(spaces, n, location, req_out);
 }
+static ovrpResult klovrp_SaveSpaceList(const uint64_t *spaces, uint32_t n, int32_t location, uint64_t *req_out) {
+    ovrpResult r = sp_SaveSpaceList(spaces, n, location, req_out);
+    SPT("ovrp_SaveSpaceList", r, "n=%u loc=%d req=%llu", n, location, ULL(req_out ? *req_out : 0));
+    return r;
+}
 // ovrp_SaveSpaces(n, spaces*, [location,] out requestId): the out pointer is the last
 // pointer-sized argument (the optional location is a small int, never a pointer).
-static ovrpResult klovrp_SaveSpaces(uint32_t n, const uint64_t *spaces, uint64_t a2, uint64_t a3) {
+SP_IMPL sp_SaveSpaces(uint32_t n, const uint64_t *spaces, uint64_t a2, uint64_t a3) {
     kl_ovrp_hit("ovrp_SaveSpaces");
     uint64_t *out = isptr(a3) ? (uint64_t *)(uintptr_t)a3 : (isptr(a2) ? (uint64_t *)(uintptr_t)a2 : NULL);
     int32_t loc = isptr(a2) ? STORAGE_LOCAL : (int32_t)a2;
     return save_list(spaces, n, loc, out);
+}
+static ovrpResult klovrp_SaveSpaces(uint32_t n, const uint64_t *spaces, uint64_t a2, uint64_t a3) {
+    ovrpResult r = sp_SaveSpaces(n, spaces, a2, a3);
+    SPT("ovrp_SaveSpaces", r, "n=%u req=%llu", n, ULL(sp_out(a2, a3)));
+    return r;
 }
 
 static ovrpResult erase_one(kl_uuid id, int kind, int32_t location, uint64_t req) {
@@ -328,7 +396,7 @@ static ovrpResult erase_one(kl_uuid id, int kind, int32_t location, uint64_t req
     }
     return KLOVRP_SUCCESS;
 }
-static ovrpResult klovrp_EraseSpace(uint64_t space, int32_t location, uint64_t *req_out) {
+SP_IMPL sp_EraseSpace(uint64_t space, int32_t location, uint64_t *req_out) {
     kl_ovrp_hit("ovrp_EraseSpace");
     if (!req_out) return KLOVRP_INVALID_PARAM;
     *req_out = 0;
@@ -338,10 +406,15 @@ static ovrpResult klovrp_EraseSpace(uint64_t space, int32_t location, uint64_t *
     *req_out = req;
     return erase_one(id, kind, location, req);
 }
+static ovrpResult klovrp_EraseSpace(uint64_t space, int32_t location, uint64_t *req_out) {
+    ovrpResult r = sp_EraseSpace(space, location, req_out);
+    SPT("ovrp_EraseSpace", r, "space=0x%llx loc=%d req=%llu", ULL(sp_h(space)), location, ULL(req_out ? *req_out : 0));
+    return r;
+}
 // ovrp_EraseSpaces(spaceCount, spaces*, uuidCount, uuids*, out requestId). The older
 // shape (n, spaces*, uuids*, location, out) is recognised by a pointer in a2.
 // One request, one completion event (for the first target).
-static ovrpResult klovrp_EraseSpaces(uint32_t ns, const uint64_t *spaces, uint64_t a2, uint64_t a3, uint64_t a4) {
+SP_IMPL sp_EraseSpaces(uint32_t ns, const uint64_t *spaces, uint64_t a2, uint64_t a3, uint64_t a4) {
     kl_ovrp_hit("ovrp_EraseSpaces");
     uint64_t *out = (uint64_t *)(uintptr_t)a4;
     if (!isptr(a4)) return KLOVRP_INVALID_PARAM;
@@ -368,6 +441,11 @@ static ovrpResult klovrp_EraseSpaces(uint32_t ns, const uint64_t *spaces, uint64
             (void)kl_spatial_remove_anchor(kl_spatial_new_request(), uu[i]);
     *out = req;
     return erase_one(first, kind, loc, req);
+}
+static ovrpResult klovrp_EraseSpaces(uint32_t ns, const uint64_t *spaces, uint64_t a2, uint64_t a3, uint64_t a4) {
+    ovrpResult r = sp_EraseSpaces(ns, spaces, a2, a3, a4);
+    SPT("ovrp_EraseSpaces", r, "spaces=%u req=%llu", ns, ULL(isptr(a4) ? *(const uint64_t *)(uintptr_t)a4 : 0));
+    return r;
 }
 
 // ---- spaces: locate / identity ------------------------------------------------------
@@ -398,13 +476,18 @@ static ovrpResult klovrp_LocateSpace2(uint64_t a0, uint64_t a1, uint64_t a2) {
     kl_ovrp_hit("ovrp_LocateSpace2");
     return locate(a0, a1, a2, 1);
 }
-static ovrpResult klovrp_GetSpaceUuid(uint64_t space, kl_uuid *out) {
+SP_IMPL sp_GetSpaceUuid(uint64_t space, kl_uuid *out) {
     kl_ovrp_hit("ovrp_GetSpaceUuid");
     if (!out) return KLOVRP_INVALID_PARAM;
     kl_uuid id;
     if (!space_of(space, &id, NULL)) { memset(out, 0, sizeof *out); return KLOVRP_INVALID_PARAM; }
     *out = id;
     return KLOVRP_SUCCESS;
+}
+static ovrpResult klovrp_GetSpaceUuid(uint64_t space, kl_uuid *out) {
+    ovrpResult r = sp_GetSpaceUuid(space, out);
+    SPT("ovrp_GetSpaceUuid", r, "space=0x%llx", ULL(sp_h(space)));
+    return r;
 }
 
 // Space users: opaque, no accounts (no network).
@@ -439,7 +522,7 @@ static ovrpResult klovrp_DestroySpaceUser(uint64_t user) {
 }
 
 // ---- components -------------------------------------------------------------------
-static ovrpResult klovrp_EnumerateSpaceSupportedComponents(uint64_t space, uint32_t cap, uint32_t *count, int32_t *types) {
+SP_IMPL sp_EnumerateSpaceSupportedComponents(uint64_t space, uint32_t cap, uint32_t *count, int32_t *types) {
     kl_ovrp_hit("ovrp_EnumerateSpaceSupportedComponents");
     if (!count) return KLOVRP_INVALID_PARAM;
     *count = 0;
@@ -452,7 +535,12 @@ static ovrpResult klovrp_EnumerateSpaceSupportedComponents(uint64_t space, uint3
     if (cap && (uint32_t)n > cap) *count = cap;
     return KLOVRP_SUCCESS;
 }
-static ovrpResult klovrp_GetSpaceComponentStatus(uint64_t space, int32_t type, ovrpBool *enabled, ovrpBool *pending) {
+static ovrpResult klovrp_EnumerateSpaceSupportedComponents(uint64_t space, uint32_t cap, uint32_t *count, int32_t *types) {
+    ovrpResult r = sp_EnumerateSpaceSupportedComponents(space, cap, count, types);
+    SPT("ovrp_EnumerateSpaceSupportedComponents", r, "space=0x%llx cap=%u count=%u", ULL(sp_h(space)), cap, count ? *count : 0u);
+    return r;
+}
+SP_IMPL sp_GetSpaceComponentStatus(uint64_t space, int32_t type, ovrpBool *enabled, ovrpBool *pending) {
     kl_ovrp_hit("ovrp_GetSpaceComponentStatus");
     if (enabled) *enabled = 0;
     if (pending) *pending = 0;
@@ -461,8 +549,13 @@ static ovrpResult klovrp_GetSpaceComponentStatus(uint64_t space, int32_t type, o
     if (enabled) *enabled = comp_supported(id, kind, type) ? 1 : 0;      // everything supported is always on
     return KLOVRP_SUCCESS;
 }
+static ovrpResult klovrp_GetSpaceComponentStatus(uint64_t space, int32_t type, ovrpBool *enabled, ovrpBool *pending) {
+    ovrpResult r = sp_GetSpaceComponentStatus(space, type, enabled, pending);
+    SPT("ovrp_GetSpaceComponentStatus", r, "space=0x%llx comp=%d enabled=%d", ULL(sp_h(space)), type, enabled ? (int)*enabled : -1);
+    return r;
+}
 // (space, type, enable, double timeout, out requestId): the double travels in d0.
-static ovrpResult klovrp_SetSpaceComponentStatus(uint64_t space, int32_t type, ovrpBool enable, double timeout, uint64_t *req_out) {
+SP_IMPL sp_SetSpaceComponentStatus(uint64_t space, int32_t type, ovrpBool enable, double timeout, uint64_t *req_out) {
     kl_ovrp_hit("ovrp_SetSpaceComponentStatus");
     (void)timeout;
     if (!req_out) return KLOVRP_INVALID_PARAM;
@@ -480,6 +573,11 @@ static ovrpResult klovrp_SetSpaceComponentStatus(uint64_t space, int32_t type, o
     *req_out = req;
     return KLOVRP_SUCCESS;
 }
+static ovrpResult klovrp_SetSpaceComponentStatus(uint64_t space, int32_t type, ovrpBool enable, double timeout, uint64_t *req_out) {
+    ovrpResult r = sp_SetSpaceComponentStatus(space, type, enable, timeout, req_out);
+    SPT("ovrp_SetSpaceComponentStatus", r, "space=0x%llx comp=%d enable=%d req=%llu", ULL(sp_h(space)), type, (int)enable, ULL(req_out ? *req_out : 0));
+    return r;
+}
 
 // ---- queries ------------------------------------------------------------------------
 #define QRES_MAX 2048
@@ -487,6 +585,14 @@ static ovrpResult klovrp_SetSpaceComponentStatus(uint64_t space, int32_t type, o
 typedef struct { uint64_t req; uint32_t n; qresult *r; } qslot;
 static qslot g_q[QSLOTS];
 static unsigned g_qnext;
+// Results held for request `req`, or -1 when none is stored (a trace helper).
+static int sp_qcount(uint64_t req) {
+    int n = -1;
+    pthread_mutex_lock(&g_mu);
+    for (int i = 0; i < QSLOTS; i++) if (g_q[i].req == req && g_q[i].r) n = (int)g_q[i].n;
+    pthread_mutex_unlock(&g_mu);
+    return n;
+}
 
 static int in_ids(kl_uuid id, const kl_uuid *ids, int n) {
     for (int i = 0; i < n; i++) if (!memcmp(ids[i].b, id.b, 16)) return 1;
@@ -533,7 +639,7 @@ static void query_events(uint64_t req) {
 }
 static int plausible_array(const void *p, int n) { return p && isptr((uint64_t)(uintptr_t)p) && n > 0 && n <= 4096; }
 
-static ovrpResult klovrp_QuerySpaces(const qinfo *q, uint64_t *req_out) {
+SP_IMPL sp_QuerySpaces(const qinfo *q, uint64_t *req_out) {
     kl_ovrp_hit("ovrp_QuerySpaces");
     if (!q || !req_out) return KLOVRP_INVALID_PARAM;
     *req_out = 0;
@@ -546,12 +652,17 @@ static ovrpResult klovrp_QuerySpaces(const qinfo *q, uint64_t *req_out) {
     query_events(req);
     return KLOVRP_SUCCESS;
 }
+static ovrpResult klovrp_QuerySpaces(const qinfo *q, uint64_t *req_out) {
+    ovrpResult r = sp_QuerySpaces(q, req_out);
+    SPT("ovrp_QuerySpaces", r, "req=%llu max=%d filter=%d loc=%d results=%d", ULL(req_out ? *req_out : 0), q ? q->MaxQuerySpaces : -1, q ? q->FilterType : -1, q ? q->Location : -1, req_out ? sp_qcount(*req_out) : -1);
+    return r;
+}
 // SpaceQueryInfo2 {QueryType, Max, Timeout, Location, Action, Filter*, ExcludeFilter*}: the
 // filter structs are not documented here; `{i32 type; i32 count; void *items}` is tried and
 // anything implausible falls back to "everything".
 typedef struct { int32_t QueryType, MaxQuerySpaces; double Timeout; int32_t Location, ActionType; void *Filter; void *Exclude; } qinfo2;
 typedef struct { int32_t type, count; void *items; } qfilter2;
-static ovrpResult klovrp_QuerySpaces2(const qinfo2 *q, uint64_t *req_out) {
+SP_IMPL sp_QuerySpaces2(const qinfo2 *q, uint64_t *req_out) {
     kl_ovrp_hit("ovrp_QuerySpaces2");
     if (!q || !req_out) return KLOVRP_INVALID_PARAM;
     *req_out = 0;
@@ -568,6 +679,11 @@ static ovrpResult klovrp_QuerySpaces2(const qinfo2 *q, uint64_t *req_out) {
     query_events(req);
     return KLOVRP_SUCCESS;
 }
+static ovrpResult klovrp_QuerySpaces2(const qinfo2 *q, uint64_t *req_out) {
+    ovrpResult r = sp_QuerySpaces2(q, req_out);
+    SPT("ovrp_QuerySpaces2", r, "req=%llu max=%d loc=%d results=%d", ULL(req_out ? *req_out : 0), q ? q->MaxQuerySpaces : -1, q ? q->Location : -1, req_out ? sp_qcount(*req_out) : -1);
+    return r;
+}
 static ovrpResult retrieve(uint64_t req_arg, int32_t cap, int32_t *count, qresult *out) {
     if (!count) return KLOVRP_INVALID_PARAM;
     uint64_t req = U(req_arg);
@@ -581,12 +697,17 @@ static ovrpResult retrieve(uint64_t req_arg, int32_t cap, int32_t *count, qresul
     pthread_mutex_unlock(&g_mu);
     return KLOVRP_SUCCESS;
 }
-static ovrpResult klovrp_RetrieveSpaceQueryResults(uint64_t req, int32_t cap, int32_t *count, qresult *out) {
+SP_IMPL sp_RetrieveSpaceQueryResults(uint64_t req, int32_t cap, int32_t *count, qresult *out) {
     kl_ovrp_hit("ovrp_RetrieveSpaceQueryResults");
     return retrieve(req, cap, count, out);
 }
+static ovrpResult klovrp_RetrieveSpaceQueryResults(uint64_t req, int32_t cap, int32_t *count, qresult *out) {
+    ovrpResult r = sp_RetrieveSpaceQueryResults(req, cap, count, out);
+    SPT("ovrp_RetrieveSpaceQueryResults", r, "req=%llu cap=%d count=%d", ULL(U(req)), cap, count ? *count : -1);
+    return r;
+}
 // Discovery (XR_META_spatial_entity_discovery): same store, filters ignored.
-static ovrpResult klovrp_DiscoverSpaces(const void *filters, uint32_t n, uint64_t *req_out) {
+SP_IMPL sp_DiscoverSpaces(const void *filters, uint32_t n, uint64_t *req_out) {
     kl_ovrp_hit("ovrp_DiscoverSpaces");
     (void)filters; (void)n;
     if (!req_out) return KLOVRP_INVALID_PARAM;
@@ -602,13 +723,23 @@ static ovrpResult klovrp_DiscoverSpaces(const void *filters, uint32_t n, uint64_
     ONCE("DiscoverSpaces: event type numbers are unverified guesses");
     return KLOVRP_SUCCESS;
 }
-static ovrpResult klovrp_RetrieveSpaceDiscoveryResults(uint64_t req, int32_t cap, int32_t *count, qresult *out) {
+static ovrpResult klovrp_DiscoverSpaces(const void *filters, uint32_t n, uint64_t *req_out) {
+    ovrpResult r = sp_DiscoverSpaces(filters, n, req_out);
+    SPT("ovrp_DiscoverSpaces", r, "n=%u req=%llu results=%d", n, ULL(req_out ? *req_out : 0), req_out ? sp_qcount(*req_out) : -1);
+    return r;
+}
+SP_IMPL sp_RetrieveSpaceDiscoveryResults(uint64_t req, int32_t cap, int32_t *count, qresult *out) {
     kl_ovrp_hit("ovrp_RetrieveSpaceDiscoveryResults");
     return retrieve(req, cap, count, out);
 }
+static ovrpResult klovrp_RetrieveSpaceDiscoveryResults(uint64_t req, int32_t cap, int32_t *count, qresult *out) {
+    ovrpResult r = sp_RetrieveSpaceDiscoveryResults(req, cap, count, out);
+    SPT("ovrp_RetrieveSpaceDiscoveryResults", r, "req=%llu cap=%d count=%d", ULL(U(req)), cap, count ? *count : -1);
+    return r;
+}
 
 // ---- per-space data -------------------------------------------------------------
-static ovrpResult klovrp_GetSpaceBoundingBox2D(uint64_t space, rectf *out) {
+SP_IMPL sp_GetSpaceBoundingBox2D(uint64_t space, rectf *out) {
     kl_ovrp_hit("ovrp_GetSpaceBoundingBox2D");
     if (!out) return KLOVRP_INVALID_PARAM;
     memset(out, 0, sizeof *out);
@@ -618,7 +749,12 @@ static ovrpResult klovrp_GetSpaceBoundingBox2D(uint64_t space, rectf *out) {
     out->x = -w * 0.5f; out->y = -h * 0.5f; out->w = w; out->h = h;     // offset = the corner, as XrRect2Df
     return KLOVRP_SUCCESS;
 }
-static ovrpResult klovrp_GetSpaceBoundingBox3D(uint64_t space, boundsf *out) {
+static ovrpResult klovrp_GetSpaceBoundingBox2D(uint64_t space, rectf *out) {
+    ovrpResult r = sp_GetSpaceBoundingBox2D(space, out);
+    SPT("ovrp_GetSpaceBoundingBox2D", r, "space=0x%llx w=%.3f h=%.3f", ULL(sp_h(space)), out ? out->w : 0.0f, out ? out->h : 0.0f);
+    return r;
+}
+SP_IMPL sp_GetSpaceBoundingBox3D(uint64_t space, boundsf *out) {
     kl_ovrp_hit("ovrp_GetSpaceBoundingBox3D");
     if (!out) return KLOVRP_INVALID_PARAM;
     memset(out, 0, sizeof *out);
@@ -631,7 +767,12 @@ static ovrpResult klovrp_GetSpaceBoundingBox3D(uint64_t space, boundsf *out) {
     out->x = -w * 0.5f; out->y = -h * 0.5f; out->z = -depth; out->w = w; out->h = h; out->d = depth;
     return KLOVRP_SUCCESS;
 }
-static ovrpResult klovrp_GetSpaceSemanticLabels(uint64_t space, cap_list *out) {
+static ovrpResult klovrp_GetSpaceBoundingBox3D(uint64_t space, boundsf *out) {
+    ovrpResult r = sp_GetSpaceBoundingBox3D(space, out);
+    SPT("ovrp_GetSpaceBoundingBox3D", r, "space=0x%llx w=%.3f h=%.3f d=%.3f", ULL(sp_h(space)), out ? out->w : 0.0f, out ? out->h : 0.0f, out ? out->d : 0.0f);
+    return r;
+}
+SP_IMPL sp_GetSpaceSemanticLabels(uint64_t space, cap_list *out) {
     kl_ovrp_hit("ovrp_GetSpaceSemanticLabels");
     if (!out) return KLOVRP_INVALID_PARAM;
     kl_uuid id; int kind;
@@ -642,7 +783,12 @@ static ovrpResult klovrp_GetSpaceSemanticLabels(uint64_t space, cap_list *out) {
     else out->count = n;
     return KLOVRP_SUCCESS;
 }
-static ovrpResult klovrp_GetSpaceBoundary2D(uint64_t space, cap_list *out) {
+static ovrpResult klovrp_GetSpaceSemanticLabels(uint64_t space, cap_list *out) {
+    ovrpResult r = sp_GetSpaceSemanticLabels(space, out);
+    SPT("ovrp_GetSpaceSemanticLabels", r, "space=0x%llx cap=%d count=%d", ULL(sp_h(space)), out ? out->cap : -1, out ? out->count : -1);
+    return r;
+}
+SP_IMPL sp_GetSpaceBoundary2D(uint64_t space, cap_list *out) {
     kl_ovrp_hit("ovrp_GetSpaceBoundary2D");
     if (!out) return KLOVRP_INVALID_PARAM;
     kl_uuid id; int kind; uint32_t np = 0;
@@ -656,7 +802,12 @@ static ovrpResult klovrp_GetSpaceBoundary2D(uint64_t space, cap_list *out) {
     }
     return KLOVRP_SUCCESS;
 }
-static ovrpResult klovrp_GetSpaceRoomLayout(uint64_t space, room_layout *out) {
+static ovrpResult klovrp_GetSpaceBoundary2D(uint64_t space, cap_list *out) {
+    ovrpResult r = sp_GetSpaceBoundary2D(space, out);
+    SPT("ovrp_GetSpaceBoundary2D", r, "space=0x%llx cap=%d count=%d", ULL(sp_h(space)), out ? out->cap : -1, out ? out->count : -1);
+    return r;
+}
+SP_IMPL sp_GetSpaceRoomLayout(uint64_t space, room_layout *out) {
     kl_ovrp_hit("ovrp_GetSpaceRoomLayout");
     if (!out) return KLOVRP_INVALID_PARAM;
     kl_uuid id; int kind; uint32_t nw = 0;
@@ -666,7 +817,12 @@ static ovrpResult klovrp_GetSpaceRoomLayout(uint64_t space, room_layout *out) {
     out->wcount = (int32_t)(cap && nw > cap ? cap : nw);
     return KLOVRP_SUCCESS;
 }
-static ovrpResult klovrp_GetSpaceContainer(uint64_t space, cap_list *out) {
+static ovrpResult klovrp_GetSpaceRoomLayout(uint64_t space, room_layout *out) {
+    ovrpResult r = sp_GetSpaceRoomLayout(space, out);
+    SPT("ovrp_GetSpaceRoomLayout", r, "space=0x%llx wcap=%d wcount=%d", ULL(sp_h(space)), out ? out->wcap : -1, out ? out->wcount : -1);
+    return r;
+}
+SP_IMPL sp_GetSpaceContainer(uint64_t space, cap_list *out) {
     kl_ovrp_hit("ovrp_GetSpaceContainer");
     if (!out) return KLOVRP_INVALID_PARAM;
     kl_uuid id; int kind; uint32_t nm = 0;
@@ -676,9 +832,14 @@ static ovrpResult klovrp_GetSpaceContainer(uint64_t space, cap_list *out) {
     out->count = (int32_t)(cap && nm > cap ? cap : nm);
     return KLOVRP_SUCCESS;
 }
+static ovrpResult klovrp_GetSpaceContainer(uint64_t space, cap_list *out) {
+    ovrpResult r = sp_GetSpaceContainer(space, out);
+    SPT("ovrp_GetSpaceContainer", r, "space=0x%llx cap=%d count=%d", ULL(sp_h(space)), out ? out->cap : -1, out ? out->count : -1);
+    return r;
+}
 // ovrp_GetSpaceTriangleMesh(space, vertexCap, out vertexCount, vertices*, indexCap, out indexCount, indices*)
 // (the OpenXR-style two-call shape; indices are triangle corners, 3 per triangle).
-static ovrpResult klovrp_GetSpaceTriangleMesh(uint64_t space, int32_t vcap, int32_t *vcount, float *verts,
+SP_IMPL sp_GetSpaceTriangleMesh(uint64_t space, int32_t vcap, int32_t *vcount, float *verts,
                                               int32_t icap, int32_t *icount, uint32_t *indices) {
     kl_ovrp_hit("ovrp_GetSpaceTriangleMesh");
     if (vcount) *vcount = 0;
@@ -690,6 +851,12 @@ static ovrpResult klovrp_GetSpaceTriangleMesh(uint64_t space, int32_t vcap, int3
     if (vcount) *vcount = (int32_t)(vc && nv > vc ? vc : nv);
     if (icount) *icount = (int32_t)(tc && nt > tc ? tc * 3u : nt * 3u);
     return KLOVRP_SUCCESS;
+}
+static ovrpResult klovrp_GetSpaceTriangleMesh(uint64_t space, int32_t vcap, int32_t *vcount, float *verts,
+                                              int32_t icap, int32_t *icount, uint32_t *indices) {
+    ovrpResult r = sp_GetSpaceTriangleMesh(space, vcap, vcount, verts, icap, icount, indices);
+    SPT("ovrp_GetSpaceTriangleMesh", r, "space=0x%llx vcap=%d vcount=%d icap=%d icount=%d", ULL(sp_h(space)), vcap, vcount ? *vcount : -1, icap, icount ? *icount : -1);
+    return r;
 }
 
 // ---- scene capture ------------------------------------------------------------------
@@ -714,7 +881,7 @@ static void *capture_thread(void *arg) {
             (unsigned long long)req, waited, kl_spatial_count(KLSP_PLANE), kl_spatial_count(KLSP_ROOM), kl_spatial_count(KLSP_MESH));
     return NULL;
 }
-static ovrpResult klovrp_RequestSceneCapture(const void *request, uint64_t *req_out) {
+SP_IMPL sp_RequestSceneCapture(const void *request, uint64_t *req_out) {
     kl_ovrp_hit("ovrp_RequestSceneCapture");
     (void)request;
     if (!req_out) return KLOVRP_INVALID_PARAM;
@@ -733,6 +900,11 @@ static ovrpResult klovrp_RequestSceneCapture(const void *request, uint64_t *req_
     }
     *req_out = req;
     return KLOVRP_SUCCESS;
+}
+static ovrpResult klovrp_RequestSceneCapture(const void *request, uint64_t *req_out) {
+    ovrpResult r = sp_RequestSceneCapture(request, req_out);
+    SPT("ovrp_RequestSceneCapture", r, "req=%llu", ULL(req_out ? *req_out : 0));
+    return r;
 }
 
 // ---- app space / stationary reference ---------------------------------------------------

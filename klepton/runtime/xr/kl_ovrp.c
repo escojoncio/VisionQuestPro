@@ -2180,12 +2180,24 @@ static int klovrp_ev_pop(int32_t *type, uint8_t *out) {
     return rc;
 }
 
+// "[sp-ev] polled": the moment the guest takes an event off the queue (first 50 per type; the push side is
+// "[sp-ev] push" in kl_ovrp_spatial.c). req = the event's leading u64 requestId, when it has one.
+static void klovrp_ev_log_polled(const char *via, int32_t t, const uint8_t *d, int n) {
+    static unsigned cnt[128];
+    if (__atomic_add_fetch(&cnt[t & 127], 1, __ATOMIC_RELAXED) > 50 || !kl_ovrp_diag_ok()) return;
+    uint64_t req = 0;
+    if (n >= 8) memcpy(&req, d, 8);
+    fprintf(stderr, "  [sp-ev] polled via=%s type=%d len=%d req=%llu\n", via, (int)t, n, (unsigned long long)req);
+}
+
 static uint64_t klovrp_PollEvent2(uint32_t *type, void **data) {
     ovrp_hit("ovrp_PollEvent2");
     kl_game_beat(0);
     if (!type || !data) return OVRP_FAIL_INVALID_PARAM;
     int32_t t = 0;
-    if (klovrp_ev_pop(&t, g_ev_cur) < 0) return OVRP_FAIL_OPERATION;   // empty
+    int pn = klovrp_ev_pop(&t, g_ev_cur);
+    if (pn < 0) return OVRP_FAIL_OPERATION;   // empty
+    klovrp_ev_log_polled("PollEvent2", t, g_ev_cur, pn);
     *type = (uint32_t)t;
     *data = g_ev_cur;
     return OVRP_SUCCESS;
@@ -2231,6 +2243,7 @@ static uint64_t klovrp_PollEvent(void *buf) {
     int32_t t = 0;
     int n = klovrp_ev_pop(&t, tmp);
     if (n < 0) return OVRP_FAIL_OPERATION;
+    klovrp_ev_log_polled("PollEvent", t, tmp, n);
     size_t cap = klovrp_pollevent_cap();
     size_t room = cap > 4 ? cap - 4 : 0;
     size_t put = (size_t)n < room ? (size_t)n : room;
@@ -3281,6 +3294,14 @@ static klovrp_pose klovrp_step_hand(int step, int hand) {
 
 // ---- the batch seam (kl_ovrp_priv.h) ---------------------------------------
 void kl_ovrp_hit(const char *name) { ovrp_hit(name); }
+#define KL_OVRP_DIAG_LINES 2000
+int kl_ovrp_diag_ok(void) {
+    static unsigned n;
+    unsigned k = __atomic_add_fetch(&n, 1, __ATOMIC_RELAXED);
+    if (k == KL_OVRP_DIAG_LINES + 1)
+        fprintf(stderr, "  [diag] budget exhausted lines=%d: no more spatial/passthrough traces this session\n", KL_OVRP_DIAG_LINES);
+    return k <= KL_OVRP_DIAG_LINES;
+}
 ovrpResult kl_ovrp_ok(const char *name) { return (ovrpResult)klovrp_ok(name); }
 ovrpResult kl_ovrp_unsupported(const char *name) { return (ovrpResult)klovrp_unsupported(name); }
 int kl_ovrp_is_initialized(void) { return g_ovrp_initialized != 0; }
@@ -7020,6 +7041,10 @@ static int klovrp_pt_enq_frame(struct klovrp_pt_enq *s, int list_idx, int list_i
 }
 // KL-TEST-END ptscan
 static struct klovrp_pt_enq g_pt_enq;   // under g_pt_enq_mu
+// Expiry diagnostics: EndFrame4s seen by the scan, the one in which a passthrough layer was last (re-)enqueued (under
+// g_pt_enq_mu), and g_ovrp[].calls at the entry of each of the last 4 scans (valid while g_pt_snap_ef matches).
+static unsigned g_pt_ef4, g_pt_last_enq_ef4, g_pt_last_enq_flags;
+static unsigned g_pt_snap[4][KL_OVRP_MAX], g_pt_snap_n[4], g_pt_snap_ef[4];
 static void klovrp_passthrough_scan(const void *layer_submits, int count) {
     const ovrp_layer_submit *const *list = layer_submits;
     struct klovrp_pt_item it[KLOVRP_MAX_LAYERS];
@@ -7042,11 +7067,21 @@ static void klovrp_passthrough_scan(const void *layer_submits, int count) {
     int eye_idx;
     int pt_idx = klovrp_pt_decide(it, n, g_pt_initialized, &eye_idx);
     int pt_id, underlay;
+    unsigned ef = __atomic_add_fetch(&g_pt_ef4, 1, __ATOMIC_RELAXED);
+    if (g_pt_initialized) {   // calls at the entry of this EndFrame4: the expiry line diffs against the one 3 frames back
+        unsigned nn = __atomic_load_n(&g_novrp, __ATOMIC_ACQUIRE);
+        if (nn > KL_OVRP_MAX) nn = KL_OVRP_MAX;
+        for (unsigned i = 0; i < nn; i++) g_pt_snap[ef & 3][i] = g_ovrp[i].calls;
+        g_pt_snap_n[ef & 3] = nn;
+        g_pt_snap_ef[ef & 3] = ef;
+    }
     pthread_mutex_lock(&g_pt_enq_mu);
     int was_live = g_pt_enq.live, was_id = g_pt_enq.id;
     int present = klovrp_pt_enq_frame(&g_pt_enq, pt_idx, pt_idx >= 0 ? ids[pt_idx] : 0, eye_idx,
                                       &pt_id, &underlay);
     int expired = was_live && !g_pt_enq.live && !present;   // not a destroy: that clears it before this
+    int idle_now = g_pt_enq.idle;
+    unsigned last_enq = g_pt_last_enq_ef4, last_flags = g_pt_last_enq_flags;
     pthread_mutex_unlock(&g_pt_enq_mu);
     if (expired) {
         // ON -> OFF because the guest stopped re-enqueuing: a flicker would show up here.
@@ -7054,6 +7089,30 @@ static void klovrp_passthrough_scan(const void *layer_submits, int count) {
         if (n_exp++ < 8)
             fprintf(stderr, "  [pt] enqueued passthrough layer %d expired (no re-enqueue for %d "
                             "EndFrame4s): OFF (#%d)\n", was_id, KLOVRP_PT_ENQ_IDLE, n_exp);
+        // ...and what led to it, in one line: the idle count, the EndFrame4 that last re-enqueued the layer, and the
+        // ovrp_* calls (name xN) the game made over the last 3 EndFrame4s (this one included).
+        static int n_det;
+        if (n_det < 8 && kl_ovrp_diag_ok()) {
+            n_det++;
+            char buf[700];
+            size_t o = 0;
+            buf[0] = 0;
+            unsigned r = (ef - 3) & 3;
+            if (ef >= 3 && g_pt_snap_ef[r] == ef - 3) {
+                unsigned nn = __atomic_load_n(&g_novrp, __ATOMIC_ACQUIRE);
+                if (nn > KL_OVRP_MAX) nn = KL_OVRP_MAX;
+                for (unsigned i = 0; i < nn && o + 80 < sizeof buf; i++) {
+                    const char *nm = g_ovrp[i].name;
+                    unsigned d = i < g_pt_snap_n[r] ? g_ovrp[i].calls - g_pt_snap[r][i] : 0;
+                    if (!nm || !d) continue;
+                    o += (size_t)snprintf(buf + o, sizeof buf - o, " %s x%u",
+                                          nm + (strncmp(nm, "ovrp_", 5) == 0 ? 5 : 0), d);
+                }
+            }
+            fprintf(stderr, "  [pt] expire detail #%d: layer=%d idle=%d ef4=%u last_enq_ef4=%u ago=%u "
+                            "last_enq_flags=%#x calls_last3=%s\n",
+                    n_det, was_id, idle_now, ef, last_enq, ef - last_enq, last_flags, o ? buf : " (none/unavailable)");
+        }
     }
     // OVRPlugin eye layers are premultiplied unless the guest asks otherwise.
     kl_passthrough_note_frame(present, pt_id, present && underlay, 0);
@@ -8317,6 +8376,8 @@ static uint64_t klovrp_EnqueueSubmitLayer2(uint32_t flags, void *texL, void *tex
                             layer_id, el->desc.shape, flags, (flags & 1u) ? "overlay" : "underlay");
                 klovrp_pt_enq_note(&g_pt_enq, g_pt_initialized, el->is_eye, el->desc.shape,
                                    layer_id, flags);
+                g_pt_last_enq_ef4 = __atomic_load_n(&g_pt_ef4, __ATOMIC_RELAXED);
+                g_pt_last_enq_flags = flags;
                 pthread_mutex_unlock(&g_pt_enq_mu);
             }
         }
