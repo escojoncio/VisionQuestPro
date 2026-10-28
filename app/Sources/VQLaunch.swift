@@ -420,9 +420,9 @@ final class VQSettings: ObservableObject {
         } else {
             unsetenv("KL_QUEST3"); unsetenv("KL_OVRP_HEADSET"); unsetenv("KL_XR_SYSTEM_NAME")
         }
-        // ASW: Klepton never hands out SpaceWarp textures (ovrp_GetLayerTextureSpaceWarp
-        // -> unsupported), so every frame is real; the setting is passed on for VPVulkan.
-        // The ASW setting also reaches the compositor's extrapolation (KL_CP_ASW, behind its own gate).
+        // ASW: Klepton serves SpaceWarp storage (ovrp_GetLayerTextureSpaceWarp, KL_VPKTAA_ASW default on; a game
+        // that enables SpaceWarp fails without it), whatever KL_VPKTAA is. The setting is passed on for VPVulkan and
+        // reaches the compositor's extrapolation (KL_CP_ASW, behind its own gate) as KL_CP_ASW_OFF.
         setenv("KL_CP_ASW_OFF", aswDisabled ? "1" : "0", 1)
         var c = vq_gfx_config()
         // Own foveation is removed from the app: always off (VPVK_FOVEATION=0 wins over any config call).
@@ -431,7 +431,7 @@ final class VQSettings: ObservableObject {
         c.periphery = 0.5
         c.height = 0
         setenv("VPVK_FOVEATION", "0", 1)
-        // VPKTAA is removed from the app: never on, so no resolve hook, no frustum jitter and no SpaceWarp storage.
+        // VPKTAA is removed from the app: never on, so no resolve hook and no frustum jitter (SpaceWarp storage does not depend on it).
         setenv("KL_VPKTAA", "0", 1)
         setenv("VPVK_TAA_NATIVE", "0", 1)
         // MSAA, per game (VQGameMSAA), else the global one: 0 = the game's own, 2 / 4 = forced by VPKEngine on the

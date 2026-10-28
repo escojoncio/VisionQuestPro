@@ -23,7 +23,7 @@ typedef struct { unsigned target; int used; } fake_fence;
 static fake_fence g_ff[16];
 
 typedef struct {
-    VkDevice dev; VkQueue queue; int gq_multi;
+    VkDevice dev; VkQueue queue; int nused; VkQueue only;   // nused: queues the guest used this frame, only: the first
     PFN_vkCreateFence CreateFence; PFN_vkGetFenceStatus GetFenceStatus;
     PFN_vkWaitForFences WaitForFences; PFN_vkResetFences ResetFences;
 } klvk_device;
@@ -63,12 +63,16 @@ static void klvk_slow_wait_note(const char *w, double t0) { (void)w; (void)t0; }
 static int kl_env_on(const char *n, int d) { const char *e = getenv(n); return e && *e ? atoi(e) != 0 : d; }
 static int kl_env_int(const char *n, int d) { const char *e = getenv(n); return e && *e ? atoi(e) : d; }
 // The empty fence submit: the fence is ordered after everything submitted so far.
+static VkQueue g_marker_q, g_fenced_q;
 static VkResult klvk_qsubmit(klvk_device *d, VkQueue q, uint32_t n, const VkSubmitInfo *si, VkFence f) {
-    (void)d; (void)q; assert(n == 0 && !si);
+    (void)d; assert(n == 0 && !si);
+    g_marker_q = q;
     ((fake_fence *)(uintptr_t)f)->target = g_submitted;
     return VK_SUCCESS;
 }
 static VkQueue klvk_wq(klvk_device *d) { return d->queue; }
+static int klvk_used_queues(klvk_device *d, VkQueue *only) { *only = d->only; return d->nused; }
+static void klvk_queue_fenced(klvk_device *d, VkQueue q) { g_fenced_q = q; d->nused = 0; d->only = NULL; }
 static void klvk_gpu_mark_lost(const char *why);
 
 #include "fence_blocks.inc"
@@ -82,7 +86,8 @@ static void reset_world(int stages) {
     g_fe_lat_sum = g_fe_lat_max = 0; g_fe_lat_n = 0; g_native_n = 0; g_fe_native_seen = 0; g_fe_cfg_n = -1;
     memset(g_eye, 0, sizeof g_eye);
     for (int i = 0; i < stages; i++) g_eye[i][0].img = 1;
-    g_dev0.dev = (VkDevice)(uintptr_t)0x1000; g_dev0.queue = (VkQueue)(uintptr_t)0x2000; g_dev0.gq_multi = 0;
+    g_dev0.dev = (VkDevice)(uintptr_t)0x1000; g_dev0.queue = (VkQueue)(uintptr_t)0x2000; g_dev0.nused = 0; g_dev0.only = NULL;
+    g_marker_q = g_fenced_q = NULL;
     g_dev0.CreateFence = f_create; g_dev0.GetFenceStatus = f_status; g_dev0.WaitForFences = f_wait; g_dev0.ResetFences = f_reset;
 }
 
@@ -154,13 +159,22 @@ int main(void) {
       assert(one_frame(2, &w, &infl, &fmax) == 0);                    // caller does the queue wait
       assert(one_frame(3, &w, &infl, &fmax) == 1); }
 
-    // 5b. Guest work on more than one VkQueue: an empty submit orders after one queue only, so the caller waits (returns 0).
+    // 5b. Guest work on more than one VkQueue this frame: an empty submit orders after one queue only, so the caller waits
+    //     (returns 0). It is not sticky: the next frame on a single queue is fenced again.
     reset_world(3);
-    g_dev0.gq_multi = 1;
+    g_dev0.nused = 2; g_dev0.only = (VkQueue)(uintptr_t)0x3000;
     { double w = 0; unsigned infl = 0, fmax = 0;
       assert(one_frame(1, &w, &infl, &fmax) == 0);
-      assert(g_fe_n == 0); }
-    g_dev0.gq_multi = 0;
+      assert(g_fe_n == 0 && g_marker_q == NULL);
+      g_dev0.nused = 0; g_dev0.only = NULL;                               // the caller's wait took the flags
+      assert(one_frame(2, &w, &infl, &fmax) == 1);
+      assert(g_marker_q == g_dev0.queue); }
+    // 5c. Guest work on one queue that is not klepton's own: the marker goes on that queue (the fence is device-wide).
+    reset_world(3);
+    g_dev0.nused = 1; g_dev0.only = (VkQueue)(uintptr_t)0x3000;
+    { double w = 0; unsigned infl = 0, fmax = 0;
+      assert(one_frame(1, &w, &infl, &fmax) == 1);
+      assert(g_marker_q == (VkQueue)(uintptr_t)0x3000 && g_fenced_q == g_marker_q); }
 
     // 6. The ring never overruns and recycles fences (many frames, GPU always far behind).
     reset_world(4);

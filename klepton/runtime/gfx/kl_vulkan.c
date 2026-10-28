@@ -333,6 +333,7 @@ typedef struct {
     uint32_t w, h;
 } klvk_surface;
 #define KLVK_SURF_MAGIC 0x4b565355u   /* 'KVSU' */
+#define KLVK_GQ_MAX 8                 /* guest queues tracked (the engine exposes 4) */
 
 // Everything a capture needs, resolved once per device. Held rather than
 // re-resolved because vkQueuePresentKHR is on the frame path.
@@ -341,8 +342,9 @@ typedef struct {
     VkPhysicalDevice  phys;
     uint32_t          queue_family;
     VkQueue           queue;          // for the acquire signal + the capture submit (queue 0 of the family)
-    VkQueue           gq;             // the queue the guest first submitted/presented on (klvk_note_guest_queue)
-    int               gq_multi;       // the guest has used more than one VkQueue (the engine exposes 4)
+    VkQueue           gq;             // the queue klepton's own submits go on (klvk_wq): fixed at its first use
+    VkQueue           gqs[KLVK_GQ_MAX];     // every queue the guest has submitted/presented on (klvk_note_guest_queue)
+    int               gq_used[KLVK_GQ_MAX]; // ...and whether it did since the last frame-end wait (klvk_frame_wait_idle)
     PFN_vkGetDeviceQueue              GetDeviceQueue;
     PFN_vkCreateImage                 CreateImage;
     PFN_vkDestroyImage                DestroyImage;
@@ -391,7 +393,8 @@ typedef struct {
 // game thread allocating an OVROverlay quad (GetLayerTexturePtr -> clear) while
 // Unity's render thread submitted — and that thread never came back (game frozen
 // at serial 10300, music on). Every submit, ours and the guest's, goes through
-// this one lock. Held only for the submit call itself, never across a wait.
+// this one lock. Held for the submit call itself and for the frame-end queue waits
+// (klvk_frame_wait_idle): vkQueueWaitIdle needs the same external synchronisation.
 static pthread_mutex_t g_qsub_mu = PTHREAD_MUTEX_INITIALIZER;
 static VkResult klvk_qsubmit(klvk_device *d, VkQueue q, uint32_t n,
                              const VkSubmitInfo *si, VkFence f) {
@@ -439,30 +442,64 @@ static klvk_device *dev_of_queue(VkQueue q) {
     return g_ndev ? g_devs[0] : NULL;
 }
 // VPKEngine exposes 4 VkQueues in one family, each with its own submission order and no order between
-// them. Everything klepton submits itself (frame-end fence marker, shadow/capture copies, clears) is only
-// ordered after the guest's work when it goes on the guest's queue, so follow the first queue the guest
-// submits or presents on (queue 0 until then). A guest that uses several queues has no single queue that
-// orders after all its work: the frame end then waits for the whole device (klvk_frame_wait_idle).
+// them. Everything klepton submits itself (frame-end fence marker, clears, acquire signals) goes on one
+// queue, fixed at its first use (queue 0): switching queues later would leave those submits unordered
+// with the earlier ones. The shadow copies follow the queue the guest just submitted on
+// (klvk_shadow_pump). The frame end waits for every queue the guest used since the last wait
+// (klvk_frame_wait_idle), or, pipelined, fences the one queue it used (klvk_frame_fence).
 static VkQueue klvk_wq(klvk_device *d) {
     VkQueue g = __atomic_load_n(&d->gq, __ATOMIC_ACQUIRE);
+    if (g || !d->queue) return g ? g : d->queue;
+    __atomic_compare_exchange_n(&d->gq, &g, d->queue, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE);
     return g ? g : d->queue;
 }
 static void klvk_note_guest_queue(VkQueue q) {
     klvk_device *d = dev_of_queue(q);
     if (!d || !q) return;
-    VkQueue cur = __atomic_load_n(&d->gq, __ATOMIC_ACQUIRE);
-    if (!cur) {
-        VkQueue none = NULL;
-        if (__atomic_compare_exchange_n(&d->gq, &none, q, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) return;
-        cur = none;
+    for (int i = 0; i < KLVK_GQ_MAX; i++) {
+        VkQueue cur = __atomic_load_n(&d->gqs[i], __ATOMIC_ACQUIRE);
+        if (!cur) {
+            VkQueue none = NULL;
+            cur = __atomic_compare_exchange_n(&d->gqs[i], &none, q, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE) ? q : none;
+        }
+        if (cur == q) { __atomic_store_n(&d->gq_used[i], 1, __ATOMIC_RELEASE); return; }
     }
-    if (cur != q && !__atomic_exchange_n(&d->gq_multi, 1, __ATOMIC_ACQ_REL))
-        VKI("the guest submits on more than one VkQueue: frame end waits for the whole device\n");
 }
+// How many distinct queues the guest used since the last frame-end wait; *only = the first of them.
+static int klvk_used_queues(klvk_device *d, VkQueue *only) {
+    int n = 0;
+    *only = NULL;
+    for (int i = 0; i < KLVK_GQ_MAX; i++)
+        if (__atomic_load_n(&d->gq_used[i], __ATOMIC_ACQUIRE)) {
+            if (!n++) *only = __atomic_load_n(&d->gqs[i], __ATOMIC_ACQUIRE);
+        }
+    return n;
+}
+// The frame-end fence on `q` covers the work the guest did there: its "used" flag restarts.
+static void klvk_queue_fenced(klvk_device *d, VkQueue q) {
+    for (int i = 0; i < KLVK_GQ_MAX; i++)
+        if (__atomic_load_n(&d->gqs[i], __ATOMIC_ACQUIRE) == q) __atomic_store_n(&d->gq_used[i], 0, __ATOMIC_RELEASE);
+}
+// Waits for klepton's queue and for each queue the guest used since the last call (at most KLVK_GQ_MAX),
+// under g_qsub_mu: a VkQueue is externally synchronized.
 static VkResult klvk_frame_wait_idle(klvk_device *d) {
-    if (__atomic_load_n(&d->gq_multi, __ATOMIC_ACQUIRE) && d->DeviceWaitIdle) return d->DeviceWaitIdle(d->dev);
-    return d->QueueWaitIdle ? d->QueueWaitIdle(klvk_wq(d))
-         : d->DeviceWaitIdle ? d->DeviceWaitIdle(d->dev) : VK_SUCCESS;
+    VkQueue wq = klvk_wq(d);
+    VkResult r = VK_SUCCESS;
+    pthread_mutex_lock(&g_qsub_mu);
+    if (d->QueueWaitIdle) {
+        r = d->QueueWaitIdle(wq);
+        for (int i = 0; i < KLVK_GQ_MAX; i++) {
+            VkQueue q = __atomic_load_n(&d->gqs[i], __ATOMIC_ACQUIRE);
+            if (!q || !__atomic_exchange_n(&d->gq_used[i], 0, __ATOMIC_ACQ_REL) || q == wq) continue;
+            VkResult rq = d->QueueWaitIdle(q);
+            if (r == VK_SUCCESS) r = rq;
+        }
+    } else if (d->DeviceWaitIdle) {
+        r = d->DeviceWaitIdle(d->dev);
+        for (int i = 0; i < KLVK_GQ_MAX; i++) __atomic_store_n(&d->gq_used[i], 0, __ATOMIC_RELEASE);
+    }
+    pthread_mutex_unlock(&g_qsub_mu);
+    return r;
 }
 
 // ---------------------------------------------------------------------------
@@ -3297,14 +3334,14 @@ static VkImage klvk_shadow_for_copy(VkImage live) {
     return sh;
 }
 
-// The submit-side pump, called right after the guest's own vkQueueSubmit on the
-// guest's thread. Creates shadow images on demand and records+submits ONE
-// command buffer copying every wanted live image into its shadow. Layouts are
+// The submit-side pump, called right after the guest's own vkQueueSubmit (on `q`) on the
+// guest's thread. Creates shadow images on demand and records+submits ONE command buffer copying
+// every wanted live image into its shadow, on `q` itself so it is ordered after the work just submitted. Layouts are
 // GENERAL both sides: MoltenVK does not act on Vulkan layouts (Metal has none),
 // and Metal's hazard tracking orders these copies after the guest's renders on
 // the same queue. A private pool+cmdbuf+fence, reused; if the previous copy has
 // not retired yet this round is skipped rather than blocked on.
-static void klvk_shadow_pump(void) {
+static void klvk_shadow_pump(VkQueue q) {
     static int on = -1;
     if (on < 0) on = kl_env_on("KL_OVERLAY_SHADOW", 1);
     if (!on) return;
@@ -3392,7 +3429,7 @@ static void klvk_shadow_pump(void) {
         .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
         .commandBufferCount = 1, .pCommandBuffers = &cmd,
     };
-    if (klvk_qsubmit(d, klvk_wq(d), 1, &si, fence) == VK_SUCCESS) {
+    if (klvk_qsubmit(d, q, 1, &si, fence) == VK_SUCCESS) {
         pending = 1;
         pthread_mutex_lock(&g_shadow_lock);
         for (int i = 0; i < nwork; i++)
@@ -4653,7 +4690,8 @@ unsigned long long kl_vulkan_taa_raw_record(void) {
 // They used to be kept forever, because a compositor or the VPKTAA resolve may
 // be sampling one on another thread at the moment it is replaced. Instead they
 // wait here until the GPU is done with them (klvk_retire_due: the completed-frame
-// serial has passed the frame they were retired in, plus 3 frame ends; KL_VK_FREE_AFTER_S
+// serial has passed the frame they were retired in, plus 3 frame ends, and for a normal image also
+// KL_VK_FREE_AFTER_S seconds (default 5) and 8 frame ends; KL_VK_FREE_AFTER_S
 // x 4 seconds, default 20, when the guest ends no frames) and are then
 // destroyed on the guest's frame thread. VPVulkan itself releases the MTLTexture
 // only when the frame slot that last used it is reused, and a texture view still
@@ -4810,7 +4848,10 @@ static void klvk_retire_pump(klvk_device *d) { (void)klvk_retire_pump_ex(d, 0, 0
 // `frame` = frames issued when it was retired (or last used by the guest), `issued` = frames issued now,
 // `gpu_serial` = newest frame the GPU has completed (kl_vulkan_frame_serial: fence based). The GPU is done with
 // it once the frame in progress at retirement (frame + 1) has completed and 3 more frame ends have passed; a
-// guest that ends no frames (synchronous load) falls back to the wall clock.
+// guest that ends no frames (synchronous load) falls back to the wall clock. A normal image (a depth snapshot) keeps
+// a floor on top of that: `after` seconds (default 5) and 8 frame ends, because a compositor thread may still
+// sample it after the guest let go (the engine only holds the textures it handed out for 1 s); memory pressure
+// and the trim window skip the floor.
 static int klvk_retire_due(int quick, int hold, double age, unsigned long long issued, unsigned long long frame,
                            unsigned long long gpu_serial, double after, int force_quick, int trimming) {
     const int gpu_done = issued >= frame + 3 && gpu_serial >= frame + 1;
@@ -4818,7 +4859,8 @@ static int klvk_retire_due(int quick, int hold, double age, unsigned long long i
     if (quick == 2) return force_quick || gpu_done || age >= 2.0;
     if (quick) return force_quick || age >= 0.5;
     if (hold >= 0) return hold ? age >= after * 4 : settled;
-    return (force_quick || trimming) ? settled : (gpu_done || age >= after * 4);
+    return (force_quick || trimming) ? settled
+           : ((age >= after && issued >= frame + 8 && gpu_serial >= frame + 1) || age >= after * 4);
 }
 // KL-TEST-END retiredue
 
@@ -5106,8 +5148,10 @@ static int klvk_fe_recycle(klvk_device *d) {
 // before (no fence available, native command buffers in the picture, submit failed, device lost).
 static int klvk_frame_fence(klvk_device *d, uint64_t issued, double *waited_s, unsigned *inflight, unsigned *fmax_out) {
     if (!d || !d->queue || !d->CreateFence || !d->GetFenceStatus || !d->WaitForFences || !d->ResetFences) return 0;
-    // An empty submit orders after one queue only: with guest work on several, the caller waits for the device.
-    if (__atomic_load_n(&d->gq_multi, __ATOMIC_ACQUIRE)) return 0;
+    // An empty submit orders after one queue only: a frame with guest work on several is waited for by the caller.
+    // VPVulkan's Fence::frames counts frames device-wide, so the one queue the guest used is the one to fence.
+    VkQueue fq;
+    if (klvk_used_queues(d, &fq) > 1) return 0;
     static int broken;
     if (broken) return 0;
     // Native command buffers (VPKEngine's own queue work: the MSAA depth resolve, a VPKTAA resolve) are not
@@ -5137,7 +5181,9 @@ static int klvk_frame_fence(klvk_device *d, uint64_t issued, double *waited_s, u
     }
     // The marker: an empty submit with the fence, ordered after everything the guest has submitted.
     unsigned slot = (g_fe_head + g_fe_n) % KLVK_FE_RING;
-    VkResult r = klvk_qsubmit(d, klvk_wq(d), 0, NULL, g_fe[slot].f);
+    if (!fq) fq = klvk_wq(d);
+    VkResult r = klvk_qsubmit(d, fq, 0, NULL, g_fe[slot].f);
+    if (r == VK_SUCCESS) klvk_queue_fenced(d, fq);
     if (r != VK_SUCCESS) {
         static int said;
         if (!said++) VKI("[frame-end] fence submit answered %d — the frame end waits for the queue\n", (int)r);
@@ -7853,7 +7899,7 @@ static VkResult VKAPI_CALL klvk_QueueSubmit(VkQueue q, uint32_t n,
     if (r == VK_ERROR_DEVICE_LOST) return klvk_lost("vkQueueSubmit", r);
     // Same thread, same queue, right after the guest's work: copy every wanted
     // overlay texture into its persistent shadow (see klvk_shadow_pump).
-    if (r == VK_SUCCESS) klvk_shadow_pump();
+    if (r == VK_SUCCESS) klvk_shadow_pump(q);
     // KL_VK_TEXELBUF_PROBE: after enough submits that the guest is well past its
     // resource uploads, dump the backing bytes of the first few texel buffers
     // once. Deferred to a submit count (not frame 0) so device-local uploads
@@ -7868,14 +7914,23 @@ static VkResult VKAPI_CALL klvk_QueueSubmit(VkQueue q, uint32_t n,
 }
 // vkQueueSubmit2 / vkQueueSubmit2KHR (synchronization2, advertised by the engine): a guest that submits only through
 // it must still be seen by the queue tracking (klvk_note_guest_queue) and get the same lock and shadow pump.
-static VkResult VKAPI_CALL klvk_QueueSubmit2(VkQueue q, uint32_t n,
-        const VkSubmitInfo2 *si, VkFence fence) {
+static PFN_vkQueueSubmit2 klvk_real_submit2(void) {
     static PFN_vkQueueSubmit2 real;
     if (!real && real_gdpa) {
         VkDevice dv = g_devs[0]?g_devs[0]->dev:NULL;
         real = (PFN_vkQueueSubmit2)real_gdpa(dv, "vkQueueSubmit2");
         if (!real) real = (PFN_vkQueueSubmit2)real_gdpa(dv, "vkQueueSubmit2KHR");
     }
+    return real;
+}
+// Without a real vkQueueSubmit2 / KHR the guest gets NULL for them (it then falls back to vkQueueSubmit),
+// not a wrapper that can only fail. Only once a device exists: before it the real entry cannot be probed.
+static int klvk_submit2_missing(const char *name) {
+    return g_ndev && (!strcmp(name, "vkQueueSubmit2") || !strcmp(name, "vkQueueSubmit2KHR")) && !klvk_real_submit2();
+}
+static VkResult VKAPI_CALL klvk_QueueSubmit2(VkQueue q, uint32_t n,
+        const VkSubmitInfo2 *si, VkFence fence) {
+    PFN_vkQueueSubmit2 real = klvk_real_submit2();
     kl_bg_wait();   // before g_qsub_mu, as in klvk_QueueSubmit
     klvk_note_guest_queue(q);
     VkResult r = VK_ERROR_INITIALIZATION_FAILED;
@@ -7885,7 +7940,7 @@ static VkResult VKAPI_CALL klvk_QueueSubmit2(VkQueue q, uint32_t n,
         pthread_mutex_unlock(&g_qsub_mu);
     }
     if (r == VK_ERROR_DEVICE_LOST) return klvk_lost("vkQueueSubmit2", r);
-    if (r == VK_SUCCESS) klvk_shadow_pump();
+    if (r == VK_SUCCESS) klvk_shadow_pump(q);
     return r;
 }
 // UE4's Variable Rate Shading / foveation probe. Two-call enumeration:
@@ -9867,6 +9922,7 @@ static PFN_vkVoidFunction VKAPI_CALL klvk_GetInstanceProcAddr(VkInstance inst,
         return (PFN_vkVoidFunction)klvk_GetInstanceProcAddr;
     if (!strcmp(name, "vkGetDeviceProcAddr"))
         return (PFN_vkVoidFunction)klvk_GetDeviceProcAddr;
+    if (klvk_submit2_missing(name)) return NULL;
     PFN_vkVoidFunction m = ours(name);
     if (m) return m;
     if (!g_avail) return NULL;
@@ -9881,6 +9937,7 @@ static PFN_vkVoidFunction VKAPI_CALL klvk_GetDeviceProcAddr(VkDevice dev,
     if (!name) return NULL;
     if (!strcmp(name, "vkGetDeviceProcAddr"))
         return (PFN_vkVoidFunction)klvk_GetDeviceProcAddr;
+    if (klvk_submit2_missing(name)) return NULL;
     PFN_vkVoidFunction m = ours(name);
     if (m) return m;
     if (!g_avail || !real_gdpa) return NULL;
@@ -9931,6 +9988,7 @@ void *kl_vulkan_sym(const char *name) {
     if (!name || !g_avail) return NULL;
     if (!strcmp(name, "vkGetInstanceProcAddr")) return (void *)klvk_GetInstanceProcAddr;
     if (!strcmp(name, "vkGetDeviceProcAddr")) return (void *)klvk_GetDeviceProcAddr;
+    if (klvk_submit2_missing(name)) return NULL;
     PFN_vkVoidFunction m = ours(name);
     if (m) return (void *)m;
     // MoltenVK exports the whole API statically, so a guest that resolves entry

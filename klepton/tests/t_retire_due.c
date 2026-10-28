@@ -1,5 +1,6 @@
 // Host test of klvk_retire_due (kl_vulkan.c, KL-TEST retiredue block): when a retired image (replaced eye / SpaceWarp /
-// depth-snapshot set) is destroyed. Fence-and-frame based (the GPU's completed-frame serial), not a fixed 5 s wait.
+// depth-snapshot set) is destroyed. Fence-and-frame based (the GPU's completed-frame serial); a normal image (depth
+// snapshot) also keeps a floor of 5 s and 8 frame ends, since a compositor thread may still sample it.
 // Build: tools/ci/host-tests.sh (ASan + UBSan); the block is extracted into retiredue.inc.
 #include <stdio.h>
 
@@ -15,8 +16,13 @@ int main(void) {
     CHECK(!klvk_retire_due(0, -1, 0.05, 102, 100, 102, AFTER, 0, 0), "2 frame ends later is not enough");
     CHECK(!klvk_retire_due(0, -1, 0.05, 103, 100, 100, AFTER, 0, 0),
           "3 frame ends but the GPU has not completed the frame in progress at retirement (serial 100 < 101)");
-    CHECK(klvk_retire_due(0, -1, 0.05, 103, 100, 101, AFTER, 0, 0), "3 frame ends and the GPU done: freed in 50 ms, not 5 s");
-    CHECK(klvk_retire_due(0, -1, 0.05, 103, 100, 103, AFTER, 0, 0), "...and with the GPU further ahead");
+    CHECK(!klvk_retire_due(0, -1, 0.05, 103, 100, 101, AFTER, 0, 0),
+          "3 frame ends and the GPU done: a normal image still keeps its floor (5 s and 8 frame ends)");
+    CHECK(!klvk_retire_due(0, -1, 4.9, 108, 100, 108, AFTER, 0, 0), "floor: 8 frame ends but 4.9 s");
+    CHECK(!klvk_retire_due(0, -1, 5.0, 107, 100, 107, AFTER, 0, 0), "floor: 5 s but only 7 frame ends");
+    CHECK(!klvk_retire_due(0, -1, 5.0, 108, 100, 100, AFTER, 0, 0), "floor: 5 s and 8 frame ends but the GPU has not completed the frame");
+    CHECK(klvk_retire_due(0, -1, 5.0, 108, 100, 101, AFTER, 0, 0), "floor: 5 s, 8 frame ends and the GPU done");
+    CHECK(klvk_retire_due(0, -1, 5.0, 108, 100, 108, AFTER, 0, 0), "...and with the GPU further ahead");
     // A guest that ends no frames (synchronous load): wall clock only, the 4x grace.
     CHECK(!klvk_retire_due(0, -1, 5.5, 100, 100, 100, AFTER, 0, 0), "no frame ends: 5 s is not enough any more than 0.5 s");
     CHECK(klvk_retire_due(0, -1, 20.0, 100, 100, 100, AFTER, 0, 0), "no frame ends: 4x the grace frees it");
@@ -47,7 +53,7 @@ int main(void) {
     CHECK(klvk_retire_due(0, 0, 0.5, 100, 100, 100, AFTER, 0, 0), "eye published: 0.5 s with no frame ends");
 
     // Touched again by the guest (retire_touch moves `frame` forward): the count restarts from there.
-    CHECK(!klvk_retire_due(0, -1, 0.05, 110, 108, 110, AFTER, 0, 0), "touched in frame 108: 2 frames are not enough");
-    CHECK(klvk_retire_due(0, -1, 0.05, 111, 108, 109, AFTER, 0, 0), "touched in frame 108: 3 frames and the GPU done");
+    CHECK(!klvk_retire_due(0, -1, 5.0, 115, 108, 115, AFTER, 0, 0), "touched in frame 108: 7 frames are not enough");
+    CHECK(klvk_retire_due(0, -1, 5.0, 116, 108, 109, AFTER, 0, 0), "touched in frame 108: 8 frames, 5 s and the GPU done");
     return fails ? 1 : (printf("t_retire_due ok\n"), 0);
 }

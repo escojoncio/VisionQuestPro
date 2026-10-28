@@ -6503,9 +6503,9 @@ static uint32_t klovrp_gl_format(int ovrp_fmt, const char **name) {
 // The likely reason the provider never asked: our desc leaves
 // MotionVectorTextureSize (+0x74) at 0x0 — the real plugin fills it with the
 // runtime's recommended motion-vector size, and a provider sizing its Unity
-// render textures from it has nothing to make. So, with KL_VPKTAA=1 only, the
-// desc now carries a size, and GetLayerTextureSpaceWarp serves real storage.
-// With KL_VPKTAA off every answer here is byte-identical to before.
+// render textures from it has nothing to make. So the desc now carries a size,
+// and GetLayerTextureSpaceWarp serves real storage (klovrp_asw_on: independent
+// of KL_VPKTAA, which the app keeps at 0).
 //
 // **Correction (AoT log 40).** Attack on Titan (Unity 2021.3, OVRPlugin 1.89,
 // a title that really uses AppSW: it CALLS GetLayerTextureSpaceWarp for all
@@ -7126,7 +7126,7 @@ static void klovrp_census_submits(const void *layer_submits, int count) {
 // A guest whose eye layer did not ask for SpaceWarp storage, with VPKTAA off,
 // returns at the first test — no log, no record change.
 static void klovrp_asw_frame(const void *layer_submits, int count, int named_stage) {
-    if (!klovrp_asw_on()) return;     // VPKTAA off: exactly the old path
+    if (!klovrp_asw_on()) return;     // KL_VPKTAA_ASW=0: exactly the old path
     const ovrp_layer_submit *const *list = layer_submits;
     const ovrp_layer_submit *eye = NULL;
     struct klovrp_layer *el = NULL;
@@ -8775,9 +8775,8 @@ static uint64_t klovrp_GetLayerTextureFoveation(int layer_id, int stage, int eye
 // answer, flagging the descriptor as space-warped against texture id 0. Same
 // story we already tell for foveation and ovrp_GetTiledMultiResSupported.
 //
-// **VPKTAA phase 1 changes the answer, and only under KL_VPKTAA=1.** Then the
-// motion vectors DO have a consumer — VPKTAA's history reprojection — so the
-// Vulkan path hands out real storage: per stage, a motion-vector colour image
+// **VPKTAA phase 1 changes the answer (KL_VPKTAA_ASW, default on; independent of
+// KL_VPKTAA).** The Vulkan path hands out real storage: per stage, a motion-vector colour image
 // and a depth image, allocated like the eye images (kl_vulkan_spacewarp_image;
 // one two-layer image per stage under the Array/multiview layout, both eyes get
 // the same handle, the eye is the slice), 64-bit VkImage handles exactly as

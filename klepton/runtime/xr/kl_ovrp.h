@@ -315,7 +315,7 @@ typedef struct {
     // 2 = no jitter (guest does not, or jitter not requested).
     int      jitter_mode;
     // Application SpaceWarp (VPKTAA phase 1). Bit flags, 0 for every guest
-    // that never asked for SpaceWarp storage and whenever KL_VPKTAA is off:
+    // that never asked for SpaceWarp storage and whenever KL_VPKTAA_ASW=0:
     //   KL_OVRP_ASW_STORAGE  motion-vector (+ depth) images exist for `stage`
     //                        (kl_vulkan_spacewarp_mtl answers for it)
     //   KL_OVRP_ASW_MV       the guest recorded a write into this stage's
