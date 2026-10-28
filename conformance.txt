@@ -1,4 +1,48 @@
-# conformance - 621d10261671431fe67581428a3600a94cff119a - 2026-10-14T18:56:15Z
+# conformance - c5fc945e604f944362e4ca5b238ea57b687ac6ce - 2026-10-28T00:57:01Z
+
+## fetch.log: 40 lines
+### errors
+### end
+
+Or undo this operation with:
+
+  git switch -
+
+Turn off this advice by setting config variable advice.detachedHead to false
+
+HEAD is now at aaf915a release: create v0.3.9
+Cloning into '/home/runner/work/VisionQuestPro/VisionQuestPro/cts/external/video_generator/src'...
+Note: switching to '426300e12a5cc5d4676807039a1be237a2b68187'.
+
+You are in 'detached HEAD' state. You can look around, make experimental
+changes and commit them, and you can discard any commits you make in this
+state without impacting any branches by switching back to a branch.
+
+If you want to create a new branch to retain commits you create, you may
+do so (now or later) by using -c with the switch command. Example:
+
+  git switch -c <new-branch-name>
+
+Or undo this operation with:
+
+  git switch -
+
+Turn off this advice by setting config variable advice.detachedHead to false
+
+HEAD is now at 426300e libs: fix warnings from CTS bot ubuntu 20.04 release
+Fetching https://github.com/madler/zlib/releases/download/v1.2.13/zlib-1.2.13.tar.gz
+Extracting zlib-1.2.13.tar.gz to zlib/src
+Fetching https://github.com/pnggroup/libpng/archive/refs/tags/v1.6.50.tar.gz
+Extracting v1.6.50.tar.gz to libpng/src
+Fetching https://raw.githubusercontent.com/baldurk/renderdoc/v1.1/renderdoc/api/app/renderdoc_app.h
+Directory: /home/runner/work/VisionQuestPro/VisionQuestPro/cts/external/spirv-tools/src
+Directory: /home/runner/work/VisionQuestPro/VisionQuestPro/cts/external/glslang/src
+Directory: /home/runner/work/VisionQuestPro/VisionQuestPro/cts/external/spirv-headers/src
+Directory: /home/runner/work/VisionQuestPro/VisionQuestPro/cts/external/vulkan-docs/src
+Directory: /home/runner/work/VisionQuestPro/VisionQuestPro/cts/external/amber/src
+Directory: /home/runner/work/VisionQuestPro/VisionQuestPro/cts/external/jsoncpp/src
+Directory: /home/runner/work/VisionQuestPro/VisionQuestPro/cts/external/vulkan-video-samples/src
+Directory: /home/runner/work/VisionQuestPro/VisionQuestPro/cts/external/video_generator/src
 
 ## configure.log: 60 lines
 ### errors
@@ -60,15 +104,15 @@ This warning is for project developers.  Use -Wno-dev to suppress it.
 -- Looking for C++ include /home/runner/work/VisionQuestPro/VisionQuestPro/cts/external/renderdoc/src/renderdoc_app.h
 -- Looking for C++ include /home/runner/work/VisionQuestPro/VisionQuestPro/cts/external/renderdoc/src/renderdoc_app.h - found
 -- Vulkan Video Tests: DISABLED (tests will report NotSupported)
--- Configuring done (15.1s)
--- Generating done (0.6s)
+-- Configuring done (23.9s)
+-- Generating done (0.8s)
 -- Build files have been written to: /home/runner/work/VisionQuestPro/VisionQuestPro/build
 
 ## build.log: 102 lines
 ### errors
 ### end
-[15/1424] Linking C static library framework/delibs/debase/libdebase.a
-[25/1424] Linking C static library framework/delibs/depool/libdepool.a
+[14/1424] Linking C static library framework/delibs/debase/libdebase.a
+[24/1424] Linking C static library framework/delibs/depool/libdepool.a
 [38/1424] Linking C static library framework/delibs/dethread/libdethread.a
 [40/1424] Generate grammar tables
 [61/1424] Generate language specific header for DebugInfo.
@@ -76,8 +120,8 @@ This warning is for project developers.  Use -Wno-dev to suppress it.
 [63/1424] Generate language specific header for NonSemanticShaderDebugInfo100.
 [64/1424] Generate tables based on the SPIR-V XML registry.
 [65/1424] Linking C static library framework/delibs/deutil/libdeutil.a
-[94/1424] Generating qpReleaseInfo.inl
 [95/1424] Linking C static library external/libpng/libpng.a
+[96/1424] Generating qpReleaseInfo.inl
 [97/1424] Update build-version.inc in the SPIRV-Tools build directory (if necessary).
 [100/1424] Linking CXX static library framework/delibs/decpp/libdecpp.a
 [194/1424] Linking CXX static library execserver/libxscore.a
@@ -91,18 +135,18 @@ This warning is for project developers.  Use -Wno-dev to suppress it.
 [448/1424] Linking CXX static library framework/opengl/libglutil.a
 [491/1424] Linking CXX static library external/glslang/src/SPIRV/libSPIRV.a
 [492/1424] Linking CXX static library external/glslang/src/glslang/libglslang.a
-[564/1424] Linking CXX static library external/amber/src/src/vulkan/libamberenginevulkan.a
-[565/1424] Linking CXX static library framework/referencerenderer/libreferencerenderer.a
-[571/1424] Linking CXX static library external/vulkancts/framework/vulkan/libvkutilnoshader.a
-[572/1424] Linking CXX static library external/vulkancts/framework/vulkan/libvkutil.a
+[565/1424] Linking CXX static library external/amber/src/src/vulkan/libamberenginevulkan.a
+[566/1424] Linking CXX static library framework/referencerenderer/libreferencerenderer.a
+[576/1424] Linking CXX static library external/vulkancts/framework/vulkan/libvkutilnoshader.a
+[577/1424] Linking CXX static library external/vulkancts/framework/vulkan/libvkutil.a
 [589/1424] Running utility command for deqp-vk-amber-data
 [590/1424] Linking CXX static library external/amber/src/src/libamber.a
 [631/1424] Linking CXX static library external/vulkancts/modules/vulkan/image/libdeqp-vk-image-util.a
 [653/1424] Linking CXX static library external/vulkancts/modules/vulkan/util/libdeqp-vk-util.a
 [675/1424] Linking CXX static library framework/egl/wrapper/libeglwrapper.a
-[677/1424] Running utility command for deqp-vk-data
+[678/1424] Running utility command for deqp-vk-data
 [735/1424] Linking CXX static library external/vulkancts/modules/vulkan/pipeline/libdeqp-vk-pipeline-util.a
-[777/1424] Linking CXX static library external/vulkancts/modules/vulkan/shaderexecutor/libdeqp-vk-shaderexecutor.a
+[760/1424] Linking CXX static library external/vulkancts/modules/vulkan/shaderexecutor/libdeqp-vk-shaderexecutor.a
 [944/1424] Linking CXX static library external/vulkancts/modules/vulkan/draw/libdeqp-vk-draw.a
 [1050/1424] Linking CXX static library external/vulkancts/modules/vulkan/synchronization/libdeqp-vk-synchronization.a
 [1149/1424] Linking CXX static library external/vulkancts/modules/vulkan/ycbcr/libdeqp-vk-ycbcr-util.a
@@ -143,32 +187,32 @@ This warning is for project developers.  Use -Wno-dev to suppress it.
 [1401/1424] Linking CXX static library external/vulkancts/modules/vulkan/descriptor_indexing/libdeqp-vk-descriptor-indexing.a
 [1402/1424] Linking CXX static library external/vulkancts/modules/vulkan/fragment_shader_interlock/libdeqp-vk-fragment-shader-interlock.a
 [1403/1424] Linking CXX static library external/vulkancts/modules/vulkan/modifiers/libdeqp-vk-modifiers.a
-[1404/1424] Linking CXX static library external/vulkancts/modules/vulkan/ray_tracing/libdeqp-vk-ray-tracing.a
 [1405/1424] Linking CXX static library external/vulkancts/modules/vulkan/ray_query/libdeqp-vk-ray-query.a
 [1406/1424] Linking CXX static library external/vulkancts/modules/vulkan/postmortem/libdeqp-vk-postmortem.a
-[1407/1424] Linking CXX static library external/vulkancts/modules/vulkan/fragment_shading_rate/libdeqp-vk-fragment-shading-rate.a
+[1407/1424] Linking CXX static library external/vulkancts/modules/vulkan/ray_tracing/libdeqp-vk-ray-tracing.a
 [1408/1424] Linking CXX static library external/vulkancts/modules/vulkan/reconvergence/libdeqp-vk-reconvergence.a
-[1409/1424] Linking CXX static library external/vulkancts/modules/vulkan/mesh_shader/libdeqp-vk-mesh-shader.a
+[1409/1424] Linking CXX static library external/vulkancts/modules/vulkan/fragment_shading_rate/libdeqp-vk-fragment-shading-rate.a
 [1410/1424] Linking CXX static library external/vulkancts/modules/vulkan/fragment_shading_barycentric/libdeqp-vk-fragment-shading-barycentric.a
 [1411/1424] Linking CXX static library external/vulkancts/modules/vulkan/video/libdeqp-vk-video.a
-[1412/1424] Linking CXX static library external/vulkancts/modules/vulkan/shader_object/libdeqp-vk-shader-object.a
-[1413/1424] Linking CXX static library external/vulkancts/modules/vulkan/device_generated_commands/libdeqp-vk-dgc.a
+[1412/1424] Linking CXX static library external/vulkancts/modules/vulkan/mesh_shader/libdeqp-vk-mesh-shader.a
+[1413/1424] Linking CXX static library external/vulkancts/modules/vulkan/shader_object/libdeqp-vk-shader-object.a
 [1414/1424] Linking CXX static library external/vulkancts/modules/vulkan/cooperative_vector/libdeqp-vk-cooperative_vector.a
 [1415/1424] Linking CXX static library external/vulkancts/modules/vulkan/tensor/libdeqp-vk-tensor.a
-[1416/1424] Linking CXX static library external/vulkancts/modules/vulkan/data_graph/libdeqp-vk-data-graph.a
+[1416/1424] Linking CXX static library external/vulkancts/modules/vulkan/device_generated_commands/libdeqp-vk-dgc.a
 [1417/1424] Linking CXX static library framework/platform/libtcutil-platform.a
+[1418/1424] Linking CXX static library external/vulkancts/modules/vulkan/data_graph/libdeqp-vk-data-graph.a
 [1423/1424] Linking CXX static library external/vulkancts/modules/vulkan/libdeqp-vk-package.a
 [1424/1424] Linking CXX executable external/vulkancts/modules/vulkan/deqp-vk
-Cacheable calls:   5132 / 5328 (96.32%)
-  Hits:            2573 / 5132 (50.14%)
-    Direct:        2569 / 2573 (99.84%)
-    Preprocessed:     4 / 2573 ( 0.16%)
-  Misses:          2559 / 5132 (49.86%)
-Uncacheable calls:  196 / 5328 ( 3.68%)
+Cacheable calls:   1283 / 1332 (96.32%)
+  Hits:               4 / 1283 ( 0.31%)
+    Direct:           2 /    4 (50.00%)
+    Preprocessed:     2 /    4 (50.00%)
+  Misses:          1279 / 1283 (99.69%)
+Uncacheable calls:   49 / 1332 ( 3.68%)
 Local storage:
-  Cache size (GB):  0.7 /  3.0 (24.97%)
-  Hits:            2573 / 5132 (50.14%)
-  Misses:          2559 / 5132 (49.86%)
+  Cache size (GB):  0.4 /  3.0 (12.49%)
+  Hits:               4 / 1283 ( 0.31%)
+  Misses:          1279 / 1283 (99.69%)
 
 ## package.log: 21 lines
 ### errors
@@ -187,10 +231,10 @@ Local storage:
   0x0000000000000001 (NEEDED)          Shared library: [libc.so]
 rapida: 36087 cases, completa: 0 cases, 106 batch files
 files in data: 1826
--rw-r--r-- 1 runner runner 68503457 Oct 14 18:56 VulkanCTS.apk
+-rw-r--r-- 1 runner runner 68503457 Oct 28 00:57 VulkanCTS.apk
 
 pkg/lib/arm64-v8a:
-total 62568
-drwxr-xr-x 2 runner runner     4096 Oct 14 18:56 .
-drwxr-xr-x 3 runner runner     4096 Oct 14 18:56 ..
--rwxr-xr-x 1 runner runner 64055584 Oct 14 18:56 libdeqp-vk.so
+total 62564
+drwxr-xr-x 2 runner runner     4096 Oct 28 00:56 .
+drwxr-xr-x 3 runner runner     4096 Oct 28 00:56 ..
+-rwxr-xr-x 1 runner runner 64055584 Oct 28 00:56 libdeqp-vk.so
