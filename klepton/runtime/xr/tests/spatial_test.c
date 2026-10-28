@@ -209,7 +209,9 @@ int main(void) {
     CK(((fq)F("ovrp_QuerySpaces"))(&q, &req) == 0 && ((fr)F("ovrp_RetrieveSpaceQueryResults"))(&req, 16, &cnt, res) == 0 && cnt == 1);
     want[0] = 424242;                                                                              // nonexistent component
     CK(((fq)F("ovrp_QuerySpaces"))(&q, &req) == 0 && ((fr)F("ovrp_RetrieveSpaceQueryResults"))(&req, 16, &cnt, res) == 0 && cnt == 0);
-    want[0] = 3; q.loc = 0;                                                                        // Invalid storage location
+    want[0] = 3; q.loc = 0;                                                                        // Invalid/unfilled storage location: served as Local
+    CK(((fq)F("ovrp_QuerySpaces"))(&q, &req) == 0 && ((fr)F("ovrp_RetrieveSpaceQueryResults"))(&req, 16, &cnt, res) == 0 && cnt == 7);
+    want[0] = 3; q.loc = 2;                                                                        // Cloud: not served
     CK(((fq)F("ovrp_QuerySpaces"))(&q, &req) == 0 && ((fr)F("ovrp_RetrieveSpaceQueryResults"))(&req, 16, &cnt, res) == 0 && cnt == 0);
 
     // handle by value works too

@@ -76,6 +76,7 @@ enum {
     C_LABELS = 5, C_ROOMLAYOUT = 6, C_CONTAINER = 7, C_TRIMESH = 1000269000, C_TRIMESH_ALT = 8,
 };
 #define STORAGE_LOCAL 1                   // ovrpSpaceStorageLocation: 0 Invalid, 1 Local, 2 Cloud (as XR_SPACE_STORAGE_LOCATION_LOCAL_FB)
+#define IS_LOCAL_LOC(l) ((l) == STORAGE_LOCAL || (l) == 0)  // loc 0 (Invalid / unfilled struct) is served from the local store as before; only Cloud (2) is refused
 #define FILTER_IDS 1
 #define FILTER_COMPONENTS 2
 #define OVRP_APP_SPACE 0x0A55ACEull       // ovrp_GetAppSpace handle (never a kl_spatial handle)
@@ -319,7 +320,7 @@ static void save_one_event(uint64_t req, kl_uuid id, int ok) {
     push(EV_SAVE_COMPLETE, &e, sizeof e);
 }
 static int save_space(kl_uuid id, int kind, int32_t location) {
-    if (kind != KLSP_ANCHOR || location != STORAGE_LOCAL) return 0;
+    if (kind != KLSP_ANCHOR || !IS_LOCAL_LOC(location)) return 0;
     kl_spatial_anchor_set_saved(id, 1);          // WorldAnchors persist by themselves; this records "this game's"
     return 1;
 }
@@ -381,7 +382,7 @@ static ovrpResult klovrp_SaveSpaces(uint32_t n, const uint64_t *spaces, uint64_t
 
 static ovrpResult erase_one(kl_uuid id, int kind, int32_t location, uint64_t req) {
     ensure_listener();
-    if (kind != KLSP_ANCHOR || location != STORAGE_LOCAL) {
+    if (kind != KLSP_ANCHOR || !IS_LOCAL_LOC(location)) {
         ev_erase e; memset(&e, 0, sizeof e);
         e.requestId = req; e.result = KLOVRP_UNSUPPORTED; e.uuid = id; e.location = location;
         push(EV_ERASE_COMPLETE, &e, sizeof e);
@@ -608,7 +609,7 @@ static void run_query(uint64_t req, int maxn, const kl_uuid *ids, int nids, cons
     uint32_t n = 0;
     if (maxn <= 0 || maxn > QRES_MAX) maxn = QRES_MAX;
     static const int kinds[4] = {KLSP_ANCHOR, KLSP_ROOM, KLSP_PLANE, KLSP_MESH};
-    if (r && location == STORAGE_LOCAL)
+    if (r && IS_LOCAL_LOC(location))
         for (int ki = 0; ki < 4; ki++) {
             int kind = kinds[ki];
             uint32_t cnt = kl_spatial_count(kind);
