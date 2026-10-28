@@ -75,7 +75,7 @@ enum {
     C_LOCATABLE = 0, C_STORABLE = 1, C_SHARABLE = 2, C_BOUNDED2D = 3, C_BOUNDED3D = 4,
     C_LABELS = 5, C_ROOMLAYOUT = 6, C_CONTAINER = 7, C_TRIMESH = 1000269000, C_TRIMESH_ALT = 8,
 };
-#define STORAGE_LOCAL 0
+#define STORAGE_LOCAL 1                   // ovrpSpaceStorageLocation: 0 Invalid, 1 Local, 2 Cloud (as XR_SPACE_STORAGE_LOCATION_LOCAL_FB)
 #define FILTER_IDS 1
 #define FILTER_COMPONENTS 2
 #define OVRP_APP_SPACE 0x0A55ACEull       // ovrp_GetAppSpace handle (never a kl_spatial handle)
@@ -652,8 +652,26 @@ SP_IMPL sp_QuerySpaces(const qinfo *q, uint64_t *req_out) {
     query_events(req);
     return KLOVRP_SUCCESS;
 }
+// Filter actually requested by a QuerySpaces/QuerySpaces2 call, plus the first 64 bytes of the info struct
+// (QuerySpaces2: only its sizeof; first SP_QDUMP calls of each function): what the guest asked for, as opposed to what we answered.
+#define SP_QDUMP 6
+static void sp_qlog(const char *fn, unsigned *cnt, const void *info, int len, int ft, const void *items, int n, int xt, int xn) {
+    if (__atomic_add_fetch(cnt, 1, __ATOMIC_RELAXED) > SP_QDUMP || !kl_ovrp_diag_ok() || !info) return;
+    char c[96] = "";
+    if (ft == FILTER_COMPONENTS && plausible_array(items, n))
+        for (int i = 0, o = 0; i < n && i < 8 && o < (int)sizeof c - 12; i++) o += snprintf(c + o, sizeof c - (size_t)o, "%s%d", i ? "," : "", ((const int32_t *)items)[i]);
+    fprintf(stderr, "  [sp-call] fn=%s q#%u filterType=%d %s=%d%s%s excludeFilterType=%d exclude_n=%d\n", fn, *cnt, ft,
+            ft == FILTER_IDS ? "ids" : "comps", n, c[0] ? " types=" : "", c, xt, xn);
+    const unsigned char *b = (const unsigned char *)info;
+    char h[64 * 3 + 1] = "";
+    for (int i = 0; i < len && i < 64; i++) snprintf(h + i * 3, 4, "%02x ", b[i]);
+    fprintf(stderr, "  [sp-call] fn=%s q#%u info64=%s\n", fn, *cnt, h);
+}
 static ovrpResult klovrp_QuerySpaces(const qinfo *q, uint64_t *req_out) {
     ovrpResult r = sp_QuerySpaces(q, req_out);
+    static unsigned qn;
+    if (q) sp_qlog("ovrp_QuerySpaces", &qn, q, 64, q->FilterType, q->FilterType == FILTER_IDS ? q->Ids : q->Components,
+                   q->FilterType == FILTER_IDS ? q->NumIds : q->NumComponents, -1, -1);   // exclude fields: not in this layout (see info64)
     SPT("ovrp_QuerySpaces", r, "req=%llu max=%d filter=%d loc=%d results=%d", ULL(req_out ? *req_out : 0), q ? q->MaxQuerySpaces : -1, q ? q->FilterType : -1, q ? q->Location : -1, req_out ? sp_qcount(*req_out) : -1);
     return r;
 }
@@ -681,6 +699,12 @@ SP_IMPL sp_QuerySpaces2(const qinfo2 *q, uint64_t *req_out) {
 }
 static ovrpResult klovrp_QuerySpaces2(const qinfo2 *q, uint64_t *req_out) {
     ovrpResult r = sp_QuerySpaces2(q, req_out);
+    static unsigned qn;
+    if (q) {
+        const qfilter2 *f = isptr((uint64_t)(uintptr_t)q->Filter) ? (const qfilter2 *)q->Filter : NULL;
+        const qfilter2 *x = isptr((uint64_t)(uintptr_t)q->Exclude) ? (const qfilter2 *)q->Exclude : NULL;
+        sp_qlog("ovrp_QuerySpaces2", &qn, q, (int)sizeof *q, f ? f->type : -1, f ? f->items : NULL, f ? f->count : -1, x ? x->type : -1, x ? x->count : -1);
+    }
     SPT("ovrp_QuerySpaces2", r, "req=%llu max=%d loc=%d results=%d", ULL(req_out ? *req_out : 0), q ? q->MaxQuerySpaces : -1, q ? q->Location : -1, req_out ? sp_qcount(*req_out) : -1);
     return r;
 }

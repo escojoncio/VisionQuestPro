@@ -101,7 +101,7 @@ int main(void) {
     // --- query by component Bounded2D (3): 7 planes + 1 room? room has no Bounded2D
     typedef struct { int32_t qt, mx; double to; int32_t loc, act, ft; void *ids; int32_t nids; void *comps; int32_t ncomps; } qi;
     int32_t want[1] = {3};
-    qi q = {0, 100, 0, 0, 0, 2, NULL, 0, want, 1};
+    qi q = {0, 100, 0, 1, 0, 2, NULL, 0, want, 1};
     g_nev = 0;
     CK(((int32_t(*)(const qi *, uint64_t *))F("ovrp_QuerySpaces"))(&q, &req) == 0 && req);
     CK(g_nev == 2 && g_ev[0].type == 51 && g_ev[1].type == 52);
@@ -176,7 +176,7 @@ int main(void) {
     CK(((int32_t(*)(const qi *, uint64_t *))F("ovrp_QuerySpaces"))(&q, &req) == 0);
     CK(((int32_t(*)(uint64_t *, int32_t, int32_t *, void *))F("ovrp_RetrieveSpaceQueryResults"))(&req, 16, &cnt, res) == 0 && cnt == 0);
     g_nev = 0; uint64_t sreq = 0;
-    CK(((int32_t(*)(uint64_t *, int32_t, int32_t, uint64_t *))F("ovrp_SaveSpace"))(&ah, 0, 0, &sreq) == 0 && g_nev == 1 && g_ev[0].type == 53);
+    CK(((int32_t(*)(uint64_t *, int32_t, int32_t, uint64_t *))F("ovrp_SaveSpace"))(&ah, 1, 0, &sreq) == 0 && g_nev == 1 && g_ev[0].type == 53);
     int32_t sres; memcpy(&sres, g_ev[0].d + 16, 4); CK(sres == 0 && g_ev[0].len == 40);
     CK(((int32_t(*)(const qi *, uint64_t *))F("ovrp_QuerySpaces"))(&q, &req) == 0);
     CK(((int32_t(*)(uint64_t *, int32_t, int32_t *, void *))F("ovrp_RetrieveSpaceQueryResults"))(&req, 16, &cnt, res) == 0 && cnt == 1);
@@ -186,7 +186,7 @@ int main(void) {
     // Destroy keeps a saved anchor; Erase removes it with an event
     CK(((int32_t(*)(uint64_t *))F("ovrp_DestroySpace"))(&ah) == 0 && kl_spatial_count(KLSP_ANCHOR) == 1);
     g_nev = 0;
-    CK(((int32_t(*)(uint64_t *, int32_t, uint64_t *))F("ovrp_EraseSpace"))(&ah, 0, &sreq) == 0);
+    CK(((int32_t(*)(uint64_t *, int32_t, uint64_t *))F("ovrp_EraseSpace"))(&ah, 1, &sreq) == 0);
     CK(g_nev == 1 && g_ev[0].type == 54 && kl_spatial_count(KLSP_ANCHOR) == 0 && !kl_spatial_anchor_saved(a1));
     // an unsaved anchor dies with DestroySpace
     kl_uuid a2 = U16(51); g_next_anchor = a2;
@@ -199,6 +199,18 @@ int main(void) {
     CK(((int32_t(*)(const void *, uint64_t *))F("ovrp_RequestSceneCapture"))(NULL ? NULL : &info, &req) == 0 && req);
     for (int i = 0; i < 40 && g_nev == 0; i++) usleep(100000);
     CK(g_nev == 1 && g_ev[0].type == 100);
+
+    // right after the capture: query by components with loc=1 (OVRPlugin Local) finds what has the component
+    typedef int32_t (*fq)(const qi *, uint64_t *);
+    typedef int32_t (*fr)(uint64_t *, int32_t, int32_t *, void *);
+    want[0] = 3; q.loc = 1;
+    CK(((fq)F("ovrp_QuerySpaces"))(&q, &req) == 0 && ((fr)F("ovrp_RetrieveSpaceQueryResults"))(&req, 16, &cnt, res) == 0 && cnt == 7);
+    want[0] = 1000269000;                                                                          // TriangleMesh: the mesh from above
+    CK(((fq)F("ovrp_QuerySpaces"))(&q, &req) == 0 && ((fr)F("ovrp_RetrieveSpaceQueryResults"))(&req, 16, &cnt, res) == 0 && cnt == 1);
+    want[0] = 424242;                                                                              // nonexistent component
+    CK(((fq)F("ovrp_QuerySpaces"))(&q, &req) == 0 && ((fr)F("ovrp_RetrieveSpaceQueryResults"))(&req, 16, &cnt, res) == 0 && cnt == 0);
+    want[0] = 3; q.loc = 0;                                                                        // Invalid storage location
+    CK(((fq)F("ovrp_QuerySpaces"))(&q, &req) == 0 && ((fr)F("ovrp_RetrieveSpaceQueryResults"))(&req, 16, &cnt, res) == 0 && cnt == 0);
 
     // handle by value works too
     kl_uuid ou;
