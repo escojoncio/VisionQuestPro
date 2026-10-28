@@ -7685,6 +7685,9 @@ static void VKAPI_CALL klvk_GetPhysicalDeviceMemoryProperties(
     pd = KLVK_PHYS_OR_SUB(pd, "GetPhysicalDeviceMemoryProperties");
     if (real) real(pd, m);
 }
+// LDR ASTC block formats occupy VK_FORMAT_ASTC_4x4_UNORM_BLOCK(157) ..
+// VK_FORMAT_ASTC_12x12_SRGB_BLOCK(184) contiguously.
+static int klvk_is_astc(VkFormat f) { return (int)f >= 157 && (int)f <= 184; }
 static void VKAPI_CALL klvk_GetPhysicalDeviceFormatProperties(
         VkPhysicalDevice pd, VkFormat fmt, VkFormatProperties *p) {
     static PFN_vkGetPhysicalDeviceFormatProperties real; static int t;
