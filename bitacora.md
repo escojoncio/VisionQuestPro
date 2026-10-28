@@ -1,61 +1,49 @@
 # Bitácora — VisionQuestPro
 
 ## Last done
-- 2026-10-27 Build `7f66ae7` (run 40562139335, VPK `3e27ccd`), sin probar en visor. Causas medidas en registros de `bb2524a`: (a) `gpu.hang` = solo errores `BackgroundExecutionNotPermitted` al cerrar, no cuelgues; (b) coste en frío = `newLibraryWithSource` ~190 ms bajo carga (6-17 ms aislado), PSO ~15 ms; prewarm en 2 colas seriales UTILITY + espera en `functionReady` = inversión de prioridad; harvest de archive recompila 0,4-0,6 s/32 entradas; ITR2 88,6 s en compilador, 80 % frames negros por hilo UE bloqueado; (c) VPKTAA 100→44 fps; (d) captura escribía en "."; (e) Gundam usa `EnqueueSubmitLayer2` para passthrough; (f) crash Gundam strlen(NULL) en Metal con `.metalar.tmp` serializando a la vez que open.
-- 2026-10-27 VQP: passthrough desde `klovrp_EnqueueSubmitLayer2`/`EnqueueDestroyLayer` (kl_ovrp.c; caduca tras 3 EndFrame4 sin re-enqueue, log `[pt] … expired`; bits OnTop/HeadLocked/NoDepth inferidos, unverified); RCAS del compositor también sobre `taaOut` solo si frame TAA real (`Published.taa`, KleptonTAA/KleptonCompositor); `kl_bg_shutdown` → `vpgpu_set_background(0)` + `kl_bg_engine_park()` en `immersiveEnded` si fase background (kl_bg.c, KleptonApp.swift). Tests `t_pt_scan`, `t_bg`.
-- 2026-10-27 VQP `VQRobust.purgeOnTranslatorChange` (VQLaunch.swift ~896-934): purga de la caché del juego (pipelines*.metalar/.keys/.count, recipes.bin, firstrun.*, aot.*; no spirv/ ni vq.robust) cuando `vpvk_translator_tag()` difiere de `<cache>/vq.translator`; sella solo si todos los borrados salen bien. Sustituye al sello único `vq.robustMigrated.v1` (queda huérfano). `ref:` → VPKEngine `6181b91`.
-- 2026-10-26 VPKEngine `d0ff957` + VQP `VQRobust` (VQLaunch.swift): `VPVK_ROBUST` = `0` si el juego aprendió que no pide robustBufferAccess (`<VP_PIPELINE_CACHE_DIR>/vq.robust`, escrito por `klvk_robust_store` en kl_vulkan.c, OR pegajoso por proceso), si no `app`; aplicado antes del prewarm; sellos `firstrun.*`/`aot.*` llevan `.rb0/.rbapp`; purga única por caché (ahora por versión de traductor, ver arriba). Test `t_vk_robust`. Conformance sin VPVK_ROBUST.
-- 2026-10-26 VPKEngine `51b78be` (main; `ref:` subido): `VPVK_ASYNC_PIPELINES=0` = vkCreate*Pipelines síncrono (semántica Quest; timeout 60 s, backoff 500 ms/5 s, FAIL_ON_COMPILE_REQUIRED); vpgles async salvo `VPVK_GLES_SYNC_PIPELINES=1`; archive depth-only aparte; RAM: TileLocal entre encoders limpios, `transientViolated`, depth de ojo TAA materializado. Logs nuevos: `vpk.version`, `vk.pso.census`, `vk.pso.fail`, `vk.hitch`, `gles.uniform_err`, `gles.tex`, `gles.pso.recipe`, `gpu.missing`, `gpu.mem.rt`. Captura VPCAP + `vpreplay`/`vpimgdiff` + CI lavapipe vs Metal (detalle: `notas/captura.md`).
-- 2026-10-26 VQP: `VQLaunch.swift` pone `VPVK_ASYNC_PIPELINES=0` para juegos (barra de precache del juego real; antes async: ITR2 >8000 PSO «hechos» sin compilar). `kl_frame_boundary` (kl_bg.c) llama `vpvk_frame_boundary` 1/frame desde EndFrame4/EndFrame/xrEndFrame (dueño de ruta, traspaso 500 ms).
-- 2026-10-26 VQP libc/JNI: `kl_bs_resolve` (ruta con '\' literal primero, si no '\'→'/'; `[fs] backslash_fallback`); `klj_arr_data` en 13 sitios JNI; cuarentena pthread libera solo si destroy==0; ForceQuit vuelca `[forcequit]` a fd 2 sin crash.log; receptores UE `com/epicgames/unreal/*` (antes solo ue4/* → ITR2 sin batería/volumen); tabla `g_ue4_thunks` (36 filas S/H/O); AudioFocus GRANTED; isFinishing/getDisplay; `[jni] noop_hit`; `GetEyeFovLayerId` real; `createTelemetryHandler` objeto sintético. Tests `t_bslash`, `t_forcequit`, `t_ue4_thunk`, `t_ue4_receivers`, `t_noop_hit`, `t_jni_synth`, `t_ovrp_render`, `t_libc_sem`.
-- 2026-10-26 VQP captura: ajuste por juego «Captura de frames (diagnóstico)» (VPVK_CAPTURE=1, `QUEST/capturas/<juego>/`), gesto pulsación larga (`kl_diagcap.c`, combo/segundos configurables) → `vpvk_capture_request`; «Incluir capturas» en registros. Test `t_diagcap`, `t_frame_boundary`.
+- 2026-10-28 Build con VQP `184e4dd`+pin y VPKEngine `9995cc9` (motor validado por CTS: Vulkan 26 Fail / GLES 64 Fail, 0 crash; ver `notas/cts.md` del motor). Sin probar en visor.
+- 2026-10-28 `184e4dd` (revisión adversarial): fin de frame espera solo las colas del guest usadas en el frame (hasta 8, `QueueWaitIdle` bajo `g_qsub_mu`; sin `gq_multi` pegajoso ni `DeviceWaitIdle`); `klvk_shadow_pump(q)` en la cola del guest; suelo de retiro para imágenes normales `(age>=after && issued>=frame+8 && gpu_serial>=frame+1) || age>=4*after`; `vkQueueSubmit2/KHR` → NULL si el driver no lo tiene; `klvk_wq` fija la cola 0 de Klepton (acquire, clears y marcador). Tests `t_frame_fence`, `t_retire_due`, `t_vk_trap` (kl_vulkan.c entero sin compilar fuera de visionOS).
+- 2026-10-28 `77d58dc`: hooks `klvk_QueueSubmit2` (`vkQueueSubmit2` y `vkQueueSubmit2KHR` en `g_ours[]`, misma lógica que `klvk_QueueSubmit` sin trace/probe); `docs/perfil-adreno740.md` al día.
+- 2026-10-27 `57b09ba`: Klepton alineado con el perfil Quest 3 único del motor: multi-cola (`klvk_wq`, `klvk_note_guest_queue`), `EXT_metal_objects` interno vía gipa, lista de extensiones 128, fuera `KL_VK_VTX_SSBO`/`KL_VK_IMG_NOFMT`/parche ASTC, fuera ajuste «Perfil Vulkan completo» y `VPVK_EXTRA_EXTENSIONS`; VQConformance con `VPVK_FORCE_ANISO=0`, `VPVK_QUEST_IDENTITY=1`, esperas 120000.
+- 2026-10-27 `872ffa3`: fuera VPKTAA y foveado propio; ajuste MSAA Juego/x2/x4 (`VPVK_MSAA_FORCE`, global y por juego, siempre memoryless); captura instantánea (`vq.cap.hold.*`, defecto 0).
+- 2026-10-27 Build `7f66ae7` (run 40562139335): causas medidas de ITR2/Gundam/captura; detalle en `notas/juegos.md`.
 
 ## Current state
-- Última build verde: run 40562139335 (VQP `7f66ae7`, VPK `3e27ccd`), sin probar en visor.
+- Última build: la de 2026-10-28 (ver run en Actions); sin probar en visor.
 - Pendiente (orden):
-  0. Verificar en log nuevo: `gpu.shader.lib … wait_ms= src=` (demanda sin espera), `gpu.archive.defer`, `vk.boot_summary blocked_ms` de ITR2 (antes 33,9 s), `gpu.cb.background` en vez de `gpu.hang`, `vk.taa native … passes=1` y `[taa] stats gpu=` (antes 19,9 ms), `[pt] passthrough ON` en Gundam, ficheros `.vpcap` en `QUEST/capturas/`. Gesto de captura no llegó en Gundam/ITR2 (bit 0x400 nunca visto): unverified. Crash libfmod+0x7d3f8 (Gundam, hilo audio guest) sin causa.
-  1. Log nuevo por juego: ITR2 `gpu.missing` (qué recurso falta) y `vk.pso.census` (created vs >8000 del juego); Maestro `gles.uniform_err` (uniform concreto del morado) y `gles.tex`; Gundam `[pt] passthrough ON`, `[fs] backslash_fallback`, si sigue el crash en libfmod; todos `vk.hitch`, `gpu.mem.rt mat_why=`, `gles.pso.recipe`, `[jni] noop_hit`; tiempo de arranque con PSO síncrono.
-  2. Capturar frame roto (Maestro morado, ITR2) y correr `replay.yml` → primer draw divergente.
-  3. RAM: MSAA `HeavyGeometry` sigue materializando (Gundam ~650 MiB); EXT_multisampled_render_to_texture de GLES crea 1x (decisión pendiente: MSAA real transient o nada).
-  4. `VPVK_SPLIT_VIEWS=1` (pase por ojo, VPKEngine `493d7da`) candidato para MSAA HeavyGeometry multiview; apagado. Si se activa con foveado propio, el mapa VRR de 2 capas lo construye el motor (commands.cpp ~697 `mapFor`, platform_metal.mm ~235): el cambio sería en el motor (ref. AVP `kl_gpu_time.m`). unverified.
-  5. -1004 restantes en ovrp son deliberados (lista en kl_ovrp*.c); Unity Choreographer/Swappy sin verificar (falta log Gundam).
-- Riesgos abiertos: twin render pass depende de marcar imágenes de ojo; draws con `imageBuffer` sin enlazar se saltan; pausa con la Corona = `_exit(0)` (justificado en KleptonApp.swift:100-112: ARKit/compositor/FMOD/Unity no reanudables); PSO síncrono puede alargar arranque en juegos de un solo hilo.
+  1. Log nuevo por juego: ITR2 (objetos del menú, `vk.pso.census`, `gpu.missing`, tiempo de precache), Maestro (morado: `gles.uniform_err`, `gles.tex`), Gundam (`[pt] passthrough ON`, crash al activar RA, parpadeo de asteroides), todos `gpu.mem.rt`, `msaa_materialized`/`memorylessFailure` (debe ser 0), `vk.hitch`.
+  2. Probar MSAA forzado x2/x4 y RCAS; captura instantánea (`.vpcap` en `QUEST/capturas/`).
+  3. Si un frame sale roto: captura + `replay.yml` del motor.
+  4. Crash libfmod+0x7d3f8 (Gundam, hilo audio) sin causa.
+- Riesgos: `g_qsub_mu` retenido durante `QueueWaitIdle` bloquea submits de otros hilos (tope 2 s del motor si un lote timeline espera a otro hilo); Submit2-only no sale en trazas `[TRACE]`/probe; claves de ajustes huérfanas sin efecto (`vq.aaMode.*`, `vq.aaMSAA.*`, `vq.vkFullProfile`, `vq.cap.sec.*`); pausa con la Corona = `_exit(0)`.
 
 ## Decisions
-- Todo global, sin condiciones por juego (salvo ajustes del usuario: AA, resolución, anisótropo, RCAS, captura).
-- Solo offline: `KL_NET_OFFLINE`=1, `KL_PLAT_TOKEN_ERROR`=1; IAP/AssetFile = fallo OFFLINE tipado; solo `Entitle*` DRM aborta.
-- Mandos: Touch 0x3 siempre conectado (Sense real o emulación por pellizco) + bits de mano 0x60; `HandTrackingEnabled` = proveedor de manos y ningún Sense adjunto.
-- Render pass: el guest recibe sus store ops; twin con STORE forzado solo si toca imagen de ojo o framebuffer desconocido (`KL_VK_RESOLVE_STORE=2` = todo forzado).
-- `vkGetInstanceProcAddr` desconocido devuelve stub no-NULL (Wrath2). `VPVK_REPORT_GEOM=1` se mantiene (128 interpoladores Unity).
-- `VPVK_MSAA_DEAD_STORE` apagado en juegos y conformidad. MSAA: STORE del cliente siempre conserva samples (keepSamples).
-- VPKEngine `main` siempre actualizado con cualquier arreglo del motor de cualquier proyecto; VQP fija `ref:` a SHA de main.
-- Pipelines: juegos con `VPVK_ASYNC_PIPELINES=0` (síncrono, como el driver de Quest); el motor es async por defecto (AVP).
-- MSAA del juego mantenido por defecto; Automático: VPKTAA solo si no hay MSAA.
-- `nativeLowMemory` solo en el hilo del juego; no desde `kl_jni_drain_ui_tasks`.
-- `ovrp_GetEyeLayerRecommendedResolution` → -1004 sin capa de ojo viva.
-- Slider de resolución = tamaño final del ojo; render_scale = 1. Tamaño recomendado fijo por partida; nunca reaprender por capa.
-- Presupuesto anunciado al guest = límite real (6144 ya probado: guests se ahogan). No reintroducir.
+- Todo global, sin condiciones por juego (salvo ajustes del usuario: resolución, MSAA, anisótropo, RCAS, ASW, captura).
+- Sin VPKTAA ni foveado propio. AA = MSAA del juego o forzado x2/x4, siempre memoryless.
+- Perfil Vulkan/GLES único = Quest 3 real del motor; Klepton no fuerza features ni extensiones.
+- Klepton envía en su cola 0 fija; las copias de sombra van en la cola del guest.
+- Solo offline: `KL_NET_OFFLINE`=1, `KL_PLAT_TOKEN_ERROR`=1; solo `Entitle*` DRM aborta.
+- Mandos: Touch 0x3 siempre conectado + bits de mano 0x60.
+- Render pass: el guest recibe sus store ops; twin con STORE forzado solo sobre imagen de ojo o framebuffer desconocido.
+- `vkGetInstanceProcAddr` desconocido devuelve stub no-NULL (Wrath2); `vkQueueSubmit2*` NULL si no hay entrada real. `VPVK_REPORT_GEOM=1`.
+- `VPVK_MSAA_DEAD_STORE` apagado.
+- `nativeLowMemory` solo en el hilo del juego.
+- Slider de resolución = tamaño final del ojo; render_scale = 1; tamaño fijo por partida.
+- Presupuesto anunciado al guest = límite real.
 - Fin de frame segmentado apagado (`KL_VK_FRAME_ASYNC=1` lo activa).
-- Calidad del compositor 1.0: no tocar. Ritmo encajado al panel.
-- GLES ES 3.1. Identidad Quest 3 (`KL_QUEST3`, headset 11); mandos Touch de Quest 2; eye tracking Unsupported.
-- Foveado de Quest apagado; propio opt-in, M5 solo en M5, exige VPKTAA nativo.
-- ASW/PTW apagados por defecto (`KL_CP_ASW`=0, `KL_CP_PTW`=0). Frame congelado: 3,0 s.
-- Valores: burst audio 1024 con Wwise; `kMaxArchiveFiles` 512; `VPVK_MAX_DRAWS_PER_CB` 256; anillo TAA 4; máscara UI R8 slot 7; `KL_OVERLAY_SUBMIT_ORDER`=1.
-- Datos de juegos nunca en el repo.
-- Build solo con `[build]`, completa y revisada.
-- Modo sentado solo eleva origen floor/stage (EyeLevel y XR LOCAL intactos); se cachea al lanzar.
-- Identidad Quest/Adreno: VQP la activa siempre (`vq_gfx_config_forward` → `vpvk_config_set_quest_identity(1)` + `VPVK_QUEST_IDENTITY=1`); verificar en log.
-- Passthrough ovrp: solo por forma de capa (7/8/10/11) con InsightPassthrough inicializado; el estilo no activa.
-- Auriculares UE: `stateChanged(0)` (sin jack, altavoz del visor).
-- `VPVK_ROBUST`: valor aprendido por juego (0 o app) para que prewarm y juego coincidan; GLES siempre app (= robust on, sin cambio).
-- Knockout de shaders de VPKEngine (AVP) no se usa en VQP (no se arma).
+- Calidad del compositor 1.0; ritmo encajado al panel.
+- GLES ES 3.1. Identidad Quest 3 (`KL_QUEST3`, headset 11, `VPVK_QUEST_IDENTITY=1`).
+- ASW/PTW apagados por defecto; SpaceWarp servido siempre (AoT falla sin él). Frame congelado: 3,0 s.
+- Valores: burst audio 1024 con Wwise; `kMaxArchiveFiles` 512; `VPVK_MAX_DRAWS_PER_CB` 256; máscara UI R8 slot 7; `KL_OVERLAY_SUBMIT_ORDER`=1.
+- Datos de juegos nunca en el repo. Build solo con `[build]`, completa y revisada.
+- Passthrough ovrp: por forma de capa (7/8/10/11) o `EnqueueSubmitLayer2`, con InsightPassthrough inicializado.
+- `VPVK_ROBUST` aprendido por juego (0 o app); purga de caché al cambiar `vpvk_translator_tag()`.
+- VPKEngine `main` siempre con todos los arreglos del motor; VQP fija `ref:` a SHA de main.
 
 ## Files in play
-- `app/Sources/{VQLaunch,VQLauncher,VQLog,VQFolder}.swift`.
-- `klepton/runtime/xr/{kl_ovrp.c,kl_ovrp_render.c,kl_openxr.c}`, `klepton/runtime/gfx/kl_bg.{c,h}`, `klepton/runtime/diag/kl_diagcap.{c,h}`.
-- `klepton/runtime/jni/{kl_jni_ue4.c,kl_jni_android.c,kl_jni_window.c,kl_jni_display.c,kl_jni_io.c,kl_jni_bridge.c,kl_jni_services.c}`, `klepton/runtime/kl_jni.c`.
-- `klepton/runtime/libc/{kl_libc.c,kl_pthread.c}`, `klepton/runtime/kl_fault.c`.
-- `tools/ci/{host-tests.sh,jni-audit.py}`, `.github/workflows/visionos.yml` (`ref:`).
+- `klepton/runtime/gfx/kl_vulkan.c`, `klepton/runtime/xr/{kl_ovrp.c,kl_ovrp.h}`, `klepton/tests/{t_frame_fence,t_retire_due}.c`.
+- `app/Sources/{VQLaunch,VQLauncher,VQConformance}.swift`, `docs/perfil-adreno740.md`.
+- `.github/workflows/visionos.yml` (`ref:`).
 
 ## Module index
 - `notas/arquitectura.md`: runtime, app, visor, datos de plataforma, ABI OVRPlugin, resolución.
