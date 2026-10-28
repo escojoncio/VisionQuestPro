@@ -11,7 +11,11 @@
 ## Current state
 - Última build verde: run 40694850720 (VQP `81136fc`, VPK `8c21013`); sin probar en visor.
 - Pendiente (orden):
-  1. Log nuevo por juego: ITR2 (objetos del menú, `vk.pso.census`, `gpu.missing`, tiempo de precache), Maestro (morado: `gles.uniform_err`, `gles.tex`), Gundam (`[pt] passthrough ON`, crash al activar RA, parpadeo de asteroides), todos `gpu.mem.rt`, `msaa_materialized`/`memorylessFailure` (debe ser 0), `vk.hitch`.
+  1. Logs 2026-10-28 (VQP `81136fc`) analizados; sin causa demostrada aún:
+     - Gundam crash: SIGSEGV libfmod.so+0x7d3f8, hilo guest, dirección no mapeada; RAM descartada (foot 3771M, lim_rem 4420M); sin símbolos de libfmod.
+     - Gundam RA: `RequestSceneCapture` devuelve id síncrono y el evento 100 sale tras ≤8 s+1,5 s (`kl_ovrp_spatial.c:701-735`); room posiblemente sintética (`kl_spatial.c:67,560`); `SetSpaceComponentStatus` ignora enable (`:465-482`); capa passthrough 4 expira a 3 EndFrame4 sin re-encolar (`kl_ovrp.c:6998-7056`). Causa de que el botón de Space Setup no cree la habitación: unverified; falta el retorno numérico de las llamadas ovrp_* spatial en el log.
+     - Gundam gráfico: 6 fragment modules magenta (Unity error shader) `[vk] [magenta]`, `[imgfmt] fmt 157/151/127 UNSUPPORTED` (3), PSO failed=0.
+     - Maestro morado: `gles.uniform_err base_type_mismatch` vec4 declarado vs ivec4/uvec4 (vc0_h[0], vc1_h[0]); unverified que sea la causa.
   2. Probar MSAA forzado x2/x4 y RCAS; captura instantánea (`.vpcap` en `QUEST/capturas/`).
   3. Si un frame sale roto: captura + `replay.yml` del motor.
   4. Crash libfmod+0x7d3f8 (Gundam, hilo audio) sin causa.
