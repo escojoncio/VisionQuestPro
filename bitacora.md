@@ -10,15 +10,10 @@
 - 2026-10-27 `872ffa3`: fuera VPKTAA y foveado propio; ajuste MSAA Juego/x2/x4 (`VPVK_MSAA_FORCE`, global y por juego, siempre memoryless); captura instantánea (`vq.cap.hold.*`, defecto 0).
 - 2026-10-27 Build `7f66ae7` (run 40562139335): causas medidas de ITR2/Gundam/captura; detalle en `notas/juegos.md`.
 
-## EN CURSO (2026-10-28, build VQP `40eb08a`, logs Registros_18) — retomar aquí si se corta la sesión
-Hallazgos demostrados:
-- Gundam AR: `RequestSceneCapture` ok (12 planos, 1 room, 8 meshes) pero `QuerySpaces filter=2 loc=1` devuelve results=0 (x2, req 258/260); luego Retrieve cap=0 count=0 y el juego no avanza. Todos los ret=0, ningún stub. klepton-boot.log ~50207-50563 (carpeta 20-33-49-fin-Gundam). Código: klepton/runtime/xr/kl_ovrp_spatial.c run_query (~500-568). filter=2 = filtro por componentes (unverified).
-- MSAA forzado: Attack on Titan lo aplica (`vk.msaa force=4`, twins s4 + resolve). ITR2 muestra `msaa_override=0`: ese juego no tenía el forzado puesto (unverified qué eligió el usuario; revisar precedencia global/por juego en app/Sources/VQLaunch.swift).
-- ITR2: msaa_materialized s4 son solo 2 targets (3514 OtherEncoder 193M, 3515 D24S8 SampledRead 250M); el fix de Load/TRANSIENT no los evita (violación SampledRead/OtherEncoder con memValid=true). El resto de 'materializados' son s1 normales.
-- ITR2 muere por SIGKILL del sistema (main thread inactivo, sin watchdog propio) tras >7 s sin frames del guest (serial 424 fijo, pose age 5,9 s, 91 stale seguidos) durante compilación de shaders bajo demanda (356 libs, 11,5 s). AoT sin huecos y sin kill. Correlación, causa unverified.
-- Maestro: gles.uniform_err prog=2873 vc0_h[0] (loc 4, 4iv sobre vec4[5]) y prog=4751 vc1_h[0] (loc 19, 4uiv). Causa unverified.
-Plan: A) coder arregla QuerySpaces filter por componentes y loguea el filtro pedido; test spatial_test.c. B) revisión adversarial Sonnet. C) UNA build `[build]`. Pendiente sin causa: ITR2 stall de shaders (idea: no bloquear al guest >N s; diseño), Maestro morado, FMOD crash.
-Reglas del usuario: sin CTS/dEQP; poca cuota; avisar antes de pushes/permisos no pedidos.
+## Last build candidata (2026-10-28)
+- Gundam AR: `STORAGE_LOCAL` era 0 (OVRPlugin: 0 Invalid, 1 Local, 2 Cloud; el juego envía loc=1 y `run_query` devolvía 0 siempre) → ahora 1; loc 0 se sigue sirviendo como Local, Cloud no (`IS_LOCAL_LOC`, kl_ovrp_spatial.c). Valor del enum de memoria, unverified en dispositivo. Log nuevo `[sp-call] ... q#k filterType= ...` + `info64=`. Test spatial_test.c OK.
+- MSAA forzado: AoT solo twinnea 6 pasadas 1116x1129 s4; la del ojo 3552x2258 no; contadores `vk.msaa rej` en el motor para ver por qué. El usuario no nota diferencia con forzado en AoT.
+- ITR2 sigue muriendo por SIGKILL del sistema tras >7 s sin frames del guest durante compilación de shaders (356 libs, 11,5 s); `.ips` 20:34:42 pendiente de analizar (el usuario lo adjuntó). Maestro (uniform_err prog=2873/4751) y FMOD sin arreglo. Ver ramas wip/2026-10-28 ya mergeadas.
 
 ## Current state
 - Última build verde: run 40694850720 (VQP `81136fc`, VPK `8c21013`); sin probar en visor.
