@@ -7866,6 +7866,28 @@ static VkResult VKAPI_CALL klvk_QueueSubmit(VkQueue q, uint32_t n,
     }
     return r;
 }
+// vkQueueSubmit2 / vkQueueSubmit2KHR (synchronization2, advertised by the engine): a guest that submits only through
+// it must still be seen by the queue tracking (klvk_note_guest_queue) and get the same lock and shadow pump.
+static VkResult VKAPI_CALL klvk_QueueSubmit2(VkQueue q, uint32_t n,
+        const VkSubmitInfo2 *si, VkFence fence) {
+    static PFN_vkQueueSubmit2 real;
+    if (!real && real_gdpa) {
+        VkDevice dv = g_devs[0]?g_devs[0]->dev:NULL;
+        real = (PFN_vkQueueSubmit2)real_gdpa(dv, "vkQueueSubmit2");
+        if (!real) real = (PFN_vkQueueSubmit2)real_gdpa(dv, "vkQueueSubmit2KHR");
+    }
+    kl_bg_wait();   // before g_qsub_mu, as in klvk_QueueSubmit
+    klvk_note_guest_queue(q);
+    VkResult r = VK_ERROR_INITIALIZATION_FAILED;
+    if (real) {
+        pthread_mutex_lock(&g_qsub_mu);      // see klvk_qsubmit
+        r = real(q, n, si, fence);
+        pthread_mutex_unlock(&g_qsub_mu);
+    }
+    if (r == VK_ERROR_DEVICE_LOST) return klvk_lost("vkQueueSubmit2", r);
+    if (r == VK_SUCCESS) klvk_shadow_pump();
+    return r;
+}
 // UE4's Variable Rate Shading / foveation probe. Two-call enumeration:
 // (count, NULL) asks how many rates exist, (count, array) fills that many. The
 // generic no-op stub returned VK_SUCCESS WITHOUT writing *count, leaving the
@@ -9726,6 +9748,8 @@ static const entry g_ours[] = {
     E(AcquireNextImageKHR), E(QueuePresentKHR),
     E(AllocateMemory), E(BindImageMemory),
     E(QueueSubmit),
+    E(QueueSubmit2),
+    { "vkQueueSubmit2KHR", (PFN_vkVoidFunction)klvk_QueueSubmit2 },
     E(WaitForFences), E(GetFenceStatus), E(DeviceWaitIdle), E(QueueWaitIdle), E(DestroyDevice),
     E(GetPhysicalDeviceProperties),
     E(GetPhysicalDeviceProperties2),

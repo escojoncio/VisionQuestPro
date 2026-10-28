@@ -24,14 +24,14 @@ usuario) y meterlo en `vpkengine/gpu/vulkan/docs/adreno740.json`; idealmente gen
 | Props/identidad/límites | `vpkengine/gpu/vulkan/src/physical_device.cpp:13-136` (`makeProps`) |
 | Memoria | `physical_device.cpp:138-156` (`makeMem`) |
 | Formatos | `physical_device.cpp:158-279` (`kFormats`, `formatFeatures`) |
-| Extensiones instancia / dispositivo | `physical_device.cpp:284-317` (extras tras `extraExtensions()` = VPVK_EXTRA_EXTENSIONS, `ext.cpp:22`) |
+| Extensiones instancia / dispositivo | `physical_device.cpp:284-317` (extras tras `extraExtensions()` = VPVK_EXTRA_EXTENSIONS, `ext.cpp:22`; ignorada con identidad Quest: perfil único) |
 | Properties2 pNext | `entry.cpp:225-296` |
 | Features / Features2 | `entry.cpp:300-397` |
 | Colas | `entry.cpp:~399-408` |
 | Klepton: identidad (solo MoltenVK/batman) | `visionquestpro/klepton/runtime/gfx/kl_vulkan.c:6058-6120` (`klvk_spoof_gpu`, `klvk_spoof_props`, driverVersion 512.744.0) |
 | Klepton: máscara de muestras | `kl_vulkan.c:6087-6101` (`KL_VK_MAX_SAMPLES`, AC Nexus=2) |
-| Klepton: features | `kl_vulkan.c:6208-6243` (`klvk_patch_features`: vertexPipelineStoresAndAtomics=1, `KL_VK_IMG_NOFMT`) |
-| Klepton: ASTC formatos (olar/wanderer) | `kl_vulkan.c:6269-6300` |
+| Klepton: features | `kl_vulkan.c` (`klvk_patch_features`: sin forzados; entrega el perfil Quest 3 del motor tal cual y solo registra una vez lo que decide el juego) |
+| Klepton: ASTC formatos (olar/wanderer) | parche eliminado; Klepton ya no toca los formatos ASTC |
 | Klepton: oculta FDM/shading rate | `kl_vulkan.c:6314-` |
 
 Leyenda Estado: **=** igual · **MÁS** VPKEngine declara de más (riesgo: lo usa y falla) · **MENOS** declara de menos
@@ -44,18 +44,18 @@ Leyenda Estado: **=** igual · **MÁS** VPKEngine declara de más (riesgo: lo us
 | driverVersion | 512.7xx con bit31 [B] (Klepton usa 512.744.0) | 0.1.0 (`:16`) | MENOS (**crítico**) | Unity rechaza Qualcomm sin bit31 → "hardware requirements" (ya documentado en `kl_vulkan.c:6107-6112`). Copiar `VK_MAKE_VERSION(512,744,0)` a `physical_device.cpp:16`. |
 | vendorID/deviceID/name | 0x5143 / 0x43050a01 [C] / "Adreno (TM) 740" | 0x5143 / 0x43051401 / igual | = (deviceID C) | Confirmar deviceID real. |
 | VkPhysicalDeviceDriverProperties (driverID QUALCOMM_PROPRIETARY, "Qualcomm Technologies Inc. Adreno Vulkan Driver") | sí [A: VK_KHR_driver_properties obligatorio Android] | no responde (`entry.cpp` switch sin caso) | MENOS | Añadir caso en `entry.cpp:~290`. |
-| Colas | 1 familia G/C/T, queueCount 3 [B], timestampValidBits 64 | 1 familia, 1 cola | MENOS (bajo) | — |
+| Colas | 1 familia G/C/T, queueCount 3 [B], timestampValidBits 64 | 1 familia, 4 colas | MENOS (bajo) | — |
 
 ## 3. Features 1.0 (`entry.cpp:300-347`) — P0/P1
 | Feature | Adreno 740 | VPKEngine | Estado | Nota |
 |---|---|---|---|---|
 | robustBufferAccess, fullDrawIndexUint32, imageCubeArray, independentBlend, sampleRateShading, depthBiasClamp, fragmentStoresAndAtomics, largePoints, ETC2, ASTC_LDR, occlusionQueryPrecise, *ArrayDynamicIndexing (sampled/uniform/storage buf) | 1 [A] | 1 | = | |
-| **vertexPipelineStoresAndAtomics** | 1 [B] | 0 salvo CTS (`:325`) | MENOS (P0, rosa Unity) | Klepton lo fuerza a 1 (`kl_vulkan.c:6210`). Hacer 1 fijo en VPKEngine y validar con CTS `dEQP-VK.*vertex*store*`. |
+| **vertexPipelineStoresAndAtomics** | 1 [B] | 0 salvo CTS (`:325`) | MENOS (P0, rosa Unity) | Klepton ya no lo fuerza (override eliminado). Hacer 1 fijo en VPKEngine y validar con CTS `dEQP-VK.*vertex*store*`. |
 | **shaderInt16** | 1 [A, baseline] | 0 (no puesto) | MENOS (P0) | Obligatorio Android baseline. Unity/UE con half/min16 lo consultan. MSL tiene `short`: implementable. |
 | shaderStorageImageArrayDynamicIndexing | 1 [A] | 0 | MENOS (P1) | MSL lo soporta (array de texturas). |
 | geometryShader / tessellationShader | 1 [B] | 0; 1 con VPVK_REPORT_GEOM | NOCUMPLE si =1 | Metal no tiene GS; teselación sí (post-tess vertex). Mantener el puente actual + `vk.err what=stage`. |
 | multiViewport | 1 [B], maxViewports 16 | 0 / maxViewports 1 | MENOS (P2) | Metal soporta 16 viewports (`[[viewport_array_index]]`). |
-| shaderStorageImageReadWithoutFormat / WriteWithoutFormat | Write=1, Read=0? [C] | 0 (Klepton `KL_VK_IMG_NOFMT`) | C | Confirmar. |
+| shaderStorageImageReadWithoutFormat / WriteWithoutFormat | Write=1, Read=0? [C] | 0 (sin forzado en Klepton) | C | Confirmar. |
 | textureCompressionBC | **0** [B: Adreno móvil no tiene BC] | 1 (`:318`) | **MÁS** (P1) | Un juego con rama BC (UE escoge formato por feature) cogería texturas no presentes en el paquete ASTC/ETC. Poner 0 para igualar (los APK de Quest solo traen ASTC/ETC). |
 | dualSrcBlend | 1 [B] | 1 | = | |
 | depthClamp | 1 [B] | 1 | = | |
@@ -82,7 +82,7 @@ es legal, pero al subir a 1.3 hay que rellenarlos.
 | **variablePointers / variablePointersStorageBuffer** | 1 [A, baseline] | 0 (`:383`) | MENOS (P2) |
 | storageBuffer16BitAccess / uniformAndStorageBuffer16BitAccess / storagePushConstant16 / storageInputOutput16 | 1/1/0/1? [B/C] | 0 (`:379`) | MENOS (P1, UE5 mobile) |
 | protectedMemory | 0 [B] | 0 | = |
-| timelineSemaphore, synchronization2, dynamicRendering, separateDepthStencilLayouts, scalarBlockLayout, uniformBufferStandardLayout, multiDraw | 1 [B] (driver 1.3) | solo con VPVK_EXTRA_EXTENSIONS | MENOS hasta validar CTS |
+| timelineSemaphore, synchronization2, dynamicRendering, separateDepthStencilLayouts, scalarBlockLayout, uniformBufferStandardLayout, multiDraw | 1 [B] (driver 1.3) | perfil Quest 3 único del motor (VPVK_EXTRA_EXTENSIONS ya no se usa) | MENOS hasta validar CTS |
 | descriptorIndexing (+ UpdateAfterBind, partiallyBound, runtimeDescriptorArray) | 1 [B] | 0 | MENOS (P2, UE5 bindless opcional) |
 | bufferDeviceAddress | 1 [B] | 0 | MENOS (P2) |
 | hostQueryReset, imagelessFramebuffer, shaderSubgroupExtendedTypes, vulkanMemoryModel | 1 [B] | 0 | MENOS (P3) |
@@ -172,7 +172,7 @@ MENOS (P2, Unity lo intenta habilitar si existe; inocuo si no).
 | KHR_variable_pointers | sí [A] | no | MENOS (P2) |
 | KHR_external_memory/_fd, external_semaphore/_fd, external_fence/_fd, ANDROID_external_memory_android_hardware_buffer, EXT_queue_family_foreign | sí [A] | no | MENOS (P2; vídeo/AHB, Klepton lo puentea) |
 | KHR_driver_properties | sí [A] | no | MENOS (P1) |
-| KHR_image_format_list, KHR_sampler_ycbcr_conversion, KHR_16bit_storage, KHR_8bit_storage, KHR_shader_float16_int8, KHR_depth_stencil_resolve, KHR_imageless_framebuffer, KHR_timeline_semaphore, KHR_synchronization2, KHR_dynamic_rendering, KHR_copy_commands2, KHR_draw_indirect_count, KHR_separate_depth_stencil_layouts, KHR_uniform_buffer_standard_layout, EXT_scalar_block_layout, KHR_buffer_device_address, EXT_descriptor_indexing, KHR_shader_subgroup_extended_types, KHR_spirv_1_4, KHR_shader_float_controls, KHR_vulkan_memory_model, KHR_maintenance4, KHR_format_feature_flags2, EXT_host_query_reset, EXT_memory_budget, EXT_subgroup_size_control, EXT_texture_compression_astc_hdr, EXT_sampler_filter_minmax, EXT_extended_dynamic_state(2), EXT_pipeline_creation_cache_control, EXT_robustness2 | sí [B] | parte detrás de VPVK_EXTRA_EXTENSIONS, resto no | MENOS (P1-P3, ir validando con CTS) |
+| KHR_image_format_list, KHR_sampler_ycbcr_conversion, KHR_16bit_storage, KHR_8bit_storage, KHR_shader_float16_int8, KHR_depth_stencil_resolve, KHR_imageless_framebuffer, KHR_timeline_semaphore, KHR_synchronization2, KHR_dynamic_rendering, KHR_copy_commands2, KHR_draw_indirect_count, KHR_separate_depth_stencil_layouts, KHR_uniform_buffer_standard_layout, EXT_scalar_block_layout, KHR_buffer_device_address, EXT_descriptor_indexing, KHR_shader_subgroup_extended_types, KHR_spirv_1_4, KHR_shader_float_controls, KHR_vulkan_memory_model, KHR_maintenance4, KHR_format_feature_flags2, EXT_host_query_reset, EXT_memory_budget, EXT_subgroup_size_control, EXT_texture_compression_astc_hdr, EXT_sampler_filter_minmax, EXT_extended_dynamic_state(2), EXT_pipeline_creation_cache_control, EXT_robustness2 | sí [B] | perfil Quest 3 único del motor (VPVK_EXTRA_EXTENSIONS ya no se usa) | MENOS (P1-P3, ir validando con CTS) |
 | EXT_multi_draw | no [C] | con extras | posible MÁS |
 | EXT_metal_objects | **no** | sí | **MÁS** (P2) — delata que no es Adreno; quitarla del listado al juego (mantener interna para Klepton) |
 | EXT_fragment_density_map(2), QCOM_fragment_density_map_offset, KHR_fragment_shading_rate, QCOM_render_pass_transform/store_ops/rotated_copy, QCOM_tile_properties | sí [B] | no (intencional para FDM) | MENOS intencional |
