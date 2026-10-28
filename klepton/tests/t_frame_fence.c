@@ -23,7 +23,7 @@ typedef struct { unsigned target; int used; } fake_fence;
 static fake_fence g_ff[16];
 
 typedef struct {
-    VkDevice dev; VkQueue queue;
+    VkDevice dev; VkQueue queue; int gq_multi;
     PFN_vkCreateFence CreateFence; PFN_vkGetFenceStatus GetFenceStatus;
     PFN_vkWaitForFences WaitForFences; PFN_vkResetFences ResetFences;
 } klvk_device;
@@ -68,6 +68,7 @@ static VkResult klvk_qsubmit(klvk_device *d, VkQueue q, uint32_t n, const VkSubm
     ((fake_fence *)(uintptr_t)f)->target = g_submitted;
     return VK_SUCCESS;
 }
+static VkQueue klvk_wq(klvk_device *d) { return d->queue; }
 static void klvk_gpu_mark_lost(const char *why);
 
 #include "fence_blocks.inc"
@@ -81,7 +82,7 @@ static void reset_world(int stages) {
     g_fe_lat_sum = g_fe_lat_max = 0; g_fe_lat_n = 0; g_native_n = 0; g_fe_native_seen = 0; g_fe_cfg_n = -1;
     memset(g_eye, 0, sizeof g_eye);
     for (int i = 0; i < stages; i++) g_eye[i][0].img = 1;
-    g_dev0.dev = (VkDevice)(uintptr_t)0x1000; g_dev0.queue = (VkQueue)(uintptr_t)0x2000;
+    g_dev0.dev = (VkDevice)(uintptr_t)0x1000; g_dev0.queue = (VkQueue)(uintptr_t)0x2000; g_dev0.gq_multi = 0;
     g_dev0.CreateFence = f_create; g_dev0.GetFenceStatus = f_status; g_dev0.WaitForFences = f_wait; g_dev0.ResetFences = f_reset;
 }
 
@@ -152,6 +153,14 @@ int main(void) {
       g_native_n++;
       assert(one_frame(2, &w, &infl, &fmax) == 0);                    // caller does the queue wait
       assert(one_frame(3, &w, &infl, &fmax) == 1); }
+
+    // 5b. Guest work on more than one VkQueue: an empty submit orders after one queue only, so the caller waits (returns 0).
+    reset_world(3);
+    g_dev0.gq_multi = 1;
+    { double w = 0; unsigned infl = 0, fmax = 0;
+      assert(one_frame(1, &w, &infl, &fmax) == 0);
+      assert(g_fe_n == 0); }
+    g_dev0.gq_multi = 0;
 
     // 6. The ring never overruns and recycles fences (many frames, GPU always far behind).
     reset_world(4);

@@ -148,9 +148,6 @@ final class VQSettings: ObservableObject {
     /// Experimental: GLES games through VPKEngine's own OpenGL ES (vpgles in VPVulkan). Off by default:
     /// while off, GLES-only games stay marked incompatible ("solo Vulkan").
     @Published var glesVPK: Bool { didSet { save() } }
-    /// Experimental: exposes to games every capability of the Adreno 740 profile, even those the CTS has not
-    /// validated yet (VPVK_EXTRA_EXTENSIONS). Off by default; the CTS forces it on by itself (VQConformance).
-    @Published var vkFullProfile: Bool { didSet { save() } }
     /// Initial posture for the OVRPlugin eye height (KL_OVRP_POSTURE); auto re-measure always on.
     @Published var posture: String { didSet { save() } }   // "auto" | "seated" | "standing"
     /// «Sentado»: raises the guest's floor/stage space by (standing height − measured eye height) so a seated
@@ -214,7 +211,6 @@ final class VQSettings: ObservableObject {
         // Saved as "vq.vpengine" before the engine was renamed VPKEngine.
         useVPKEngine = (d.object(forKey: "vq.vpkengine") ?? d.object(forKey: "vq.vpengine")) as? Bool ?? true
         glesVPK = d.object(forKey: "vq.glesVPK") as? Bool ?? false
-        vkFullProfile = d.object(forKey: "vq.vkFullProfile") as? Bool ?? false
         posture = d.string(forKey: "vq.posture") ?? "auto"
         seated = d.object(forKey: "vq.seated") as? Bool ?? false
         standHeight = min(max(d.object(forKey: "vq.standHeight") as? Double ?? 1.65, 1.40), 2.00)
@@ -269,7 +265,6 @@ final class VQSettings: ObservableObject {
         d.set(includeCaptures, forKey: "vq.includeCaptures")
         d.set(useVPKEngine, forKey: "vq.vpkengine")
         d.set(glesVPK, forKey: "vq.glesVPK")
-        d.set(vkFullProfile, forKey: "vq.vkFullProfile")
         d.set(posture, forKey: "vq.posture")
         d.set(seated, forKey: "vq.seated")
         d.set(standHeight, forKey: "vq.standHeight")
@@ -475,8 +470,8 @@ final class VQSettings: ObservableObject {
         unsetenv("VPVK_DEVICE_LOST_STRICT")
         // Conformance-only: games never refuse a device for features they enable without using (VQConformance sets it).
         unsetenv("VPVK_STRICT_FEATURES")
-        // «Perfil Vulkan completo»; the conformance runs set it again either way (VQConformance).
-        if vkFullProfile { setenv("VPVK_EXTRA_EXTENSIONS", "1", 1) } else { unsetenv("VPVK_EXTRA_EXTENSIONS") }
+        // One Quest 3 profile for games and conformance: VPKEngine ignores VPVK_EXTRA_EXTENSIONS under the Quest identity.
+        unsetenv("VPVK_EXTRA_EXTENSIONS")
         // Pipelines: VPKEngine's default (asynchronous), no longer forced synchronous. The eye's passes wait up to 4 s for their
         // pipelines (a user override of the variable wins). The conformance runs set VPVK_ASYNC_PIPELINES=0 themselves (VQConformance).
         unsetenv("VPVK_ASYNC_PIPELINES")
@@ -488,7 +483,7 @@ final class VQSettings: ObservableObject {
         setenv("VPVK_REPORT_GEOM", "1", 1)
         // The engine's jitter env also switches off the RCAS UI mask (set_jitter still): games never inherit a 0 from an earlier run.
         unsetenv("VPVK_TAA_JITTER")
-        VQLog.log("Gráficos: foveado Quest y propio siempre apagados, MSAA forzado \(effMSAA == 0 ? "el del juego" : "x\(effMSAA)") (juego \(gameKey.isEmpty ? "?" : gameKey), \(VQGameMSAA.load(key: gameKey) == nil ? "global" : "del juego")), Nitidez (RCAS) \(Int(effRcas * 100)) % (\(VQGameRCAS.load(key: gameKey) == nil ? "global" : "del juego")), anisotrópico x\(effAniso), diagnóstico de rendimiento \(perfDiag), diagnóstico de ficheros \(fsDiag), resolución \(Int(effPct.rounded())) %, ASW apagado \(aswDisabled), perfil Quest 3 \(quest3Profile), perfil Vulkan completo \(vkFullProfile), FPS en pantalla \(showFps)")
+        VQLog.log("Gráficos: foveado Quest y propio siempre apagados, MSAA forzado \(effMSAA == 0 ? "el del juego" : "x\(effMSAA)") (juego \(gameKey.isEmpty ? "?" : gameKey), \(VQGameMSAA.load(key: gameKey) == nil ? "global" : "del juego")), Nitidez (RCAS) \(Int(effRcas * 100)) % (\(VQGameRCAS.load(key: gameKey) == nil ? "global" : "del juego")), anisotrópico x\(effAniso), diagnóstico de rendimiento \(perfDiag), diagnóstico de ficheros \(fsDiag), resolución \(Int(effPct.rounded())) %, ASW apagado \(aswDisabled), perfil Quest 3 \(quest3Profile), FPS en pantalla \(showFps)")
         VQLog.log("Ajustes: sin red \(offline), log del juego \(guestLog), vigilante \(Int(watchdogSeconds)) s")
     }
 }

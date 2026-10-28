@@ -38,7 +38,7 @@ enum VQConformance {
         setenv("KL_XR_STRICT_LAYERS", "1", 1)
         // vkCreateDevice rejects unsupported features (spec behaviour); games keep the lenient path.
         setenv("VPVK_STRICT_FEATURES", "1", 1)
-        setenv("VPVK_EXTRA_EXTENSIONS", "1", 1); unsetenv("VPVK_REPORT_GEOM"); setenv("VPVK_ASYNC_PIPELINES", "0", 1)
+        unsetenv("VPVK_REPORT_GEOM"); setenv("VPVK_ASYNC_PIPELINES", "0", 1)
         neutralGraphics()
         VQLog.log("Conformidad OpenXR: plugin Vulkan2, sin tests interactivos; progreso en el HUD; resultado en el registro del juego y en openxr_cts.xml")
     }
@@ -158,9 +158,7 @@ enum VQConformance {
         setenv("VPVK_DEVICE_LOST_STRICT", "1", 1)
         // vkCreateDevice rejects unsupported features (spec behaviour); games keep the lenient path.
         setenv("VPVK_STRICT_FEATURES", "1", 1)
-        // Extensions VPKEngine advertises only to the conformance run until it has validated them
-        // (timeline semaphores, synchronization2, dynamic rendering, copy_commands2, multi_draw…).
-        setenv("VPVK_EXTRA_EXTENSIONS", "1", 1); unsetenv("VPVK_REPORT_GEOM"); setenv("VPVK_ASYNC_PIPELINES", "0", 1)
+        unsetenv("VPVK_REPORT_GEOM"); setenv("VPVK_ASYNC_PIPELINES", "0", 1)
         neutralGraphics()
 
         VQLog.log("Conformidad: \(batches.count) tandas, \(totalCases) casos (perfil \(profile)); hechos \(done), "
@@ -463,7 +461,12 @@ enum VQConformance {
     static func neutralGraphics() {
         setenv("KL_OVRP_SEATED", "0", 1)   // «Sentado» raises STAGE: the self-test expects STAGE == the tracking space
         setenv("VPVK_ANISO", "0", 1)
-        setenv("VPVK_FORCE_ANISO", "0", 1)
+        setenv("VPVK_FORCE_ANISO", "0", 1)   // CI (cts.yml): the game's own anisotropy; the app default x16 changes the LOD
+        // Same environment as VPKEngine's CTS job (cts.yml): Quest identity, no draw/dispatch dropped for a slow compile.
+        setenv("VPVK_QUEST_IDENTITY", "1", 1)
+        setenv("VPVK_PIPELINE_PERSIST_WAIT_MS", "120000", 1)
+        setenv("VPVK_PIPELINE_DRAW_WAIT_MS", "120000", 1)
+        setenv("VPVK_TRANSLATE_WAIT_MS", "120000", 1)
         setenv("VPVK_MSAA_FORCE", "0", 1)
         setenv("KL_RCAS", "0", 1)   // the driver tests see the game's picture untouched
         setenv("VPVK_RCAS", "0", 1)

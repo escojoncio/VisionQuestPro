@@ -307,11 +307,6 @@ struct VQSettingsView: View {
                     Toggle(VQL("Forzar Vulkan en juegos Unity", "Force Vulkan in Unity games"), isOn: $settings.forceVulkan)
                     Toggle(VQL("OpenGL ES con VPKEngine (experimental)", "OpenGL ES with VPKEngine (experimental)"),
                            isOn: $settings.glesVPK)
-                    Toggle(VQL("Perfil Vulkan completo (experimental)", "Full Vulkan profile (experimental)"),
-                           isOn: $settings.vkFullProfile)
-                    Text(VQL("Expone a los juegos todas las capacidades del perfil Adreno 740, aunque el CTS aún no las haya validado. Sirve para comprobar si un fallo gráfico (objetos rosas) se debe a una capacidad que el juego no ve. Se aplica al lanzar el juego.",
-                             "Exposes every capability of the Adreno 740 profile to games, even those the CTS has not validated yet. Use it to check whether a graphics glitch (pink objects) is caused by a capability the game cannot see. Applied when the game launches."))
-                        .font(.caption)
                     Toggle(VQL("Capturas de diagnóstico", "Diagnostic captures"), isOn: $settings.diagCaptures)
                     Toggle(VQL("Diagnóstico de rendimiento", "Performance diagnostics"), isOn: $settings.perfDiag)
                     Toggle(VQL("Diagnóstico de ficheros (log grande)", "File diagnostics (large log)"), isOn: $settings.fsDiag)

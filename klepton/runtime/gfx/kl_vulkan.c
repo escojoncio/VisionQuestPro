@@ -340,7 +340,9 @@ typedef struct {
     VkDevice          dev;
     VkPhysicalDevice  phys;
     uint32_t          queue_family;
-    VkQueue           queue;          // for the acquire signal + the capture submit
+    VkQueue           queue;          // for the acquire signal + the capture submit (queue 0 of the family)
+    VkQueue           gq;             // the queue the guest first submitted/presented on (klvk_note_guest_queue)
+    int               gq_multi;       // the guest has used more than one VkQueue (the engine exposes 4)
     PFN_vkGetDeviceQueue              GetDeviceQueue;
     PFN_vkCreateImage                 CreateImage;
     PFN_vkDestroyImage                DestroyImage;
@@ -436,6 +438,32 @@ static klvk_device *dev_of_queue(VkQueue q) {
     (void)q;
     return g_ndev ? g_devs[0] : NULL;
 }
+// VPKEngine exposes 4 VkQueues in one family, each with its own submission order and no order between
+// them. Everything klepton submits itself (frame-end fence marker, shadow/capture copies, clears) is only
+// ordered after the guest's work when it goes on the guest's queue, so follow the first queue the guest
+// submits or presents on (queue 0 until then). A guest that uses several queues has no single queue that
+// orders after all its work: the frame end then waits for the whole device (klvk_frame_wait_idle).
+static VkQueue klvk_wq(klvk_device *d) {
+    VkQueue g = __atomic_load_n(&d->gq, __ATOMIC_ACQUIRE);
+    return g ? g : d->queue;
+}
+static void klvk_note_guest_queue(VkQueue q) {
+    klvk_device *d = dev_of_queue(q);
+    if (!d || !q) return;
+    VkQueue cur = __atomic_load_n(&d->gq, __ATOMIC_ACQUIRE);
+    if (!cur) {
+        VkQueue none = NULL;
+        if (__atomic_compare_exchange_n(&d->gq, &none, q, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) return;
+        cur = none;
+    }
+    if (cur != q && !__atomic_exchange_n(&d->gq_multi, 1, __ATOMIC_ACQ_REL))
+        VKI("the guest submits on more than one VkQueue: frame end waits for the whole device\n");
+}
+static VkResult klvk_frame_wait_idle(klvk_device *d) {
+    if (__atomic_load_n(&d->gq_multi, __ATOMIC_ACQUIRE) && d->DeviceWaitIdle) return d->DeviceWaitIdle(d->dev);
+    return d->QueueWaitIdle ? d->QueueWaitIdle(klvk_wq(d))
+         : d->DeviceWaitIdle ? d->DeviceWaitIdle(d->dev) : VK_SUCCESS;
+}
 
 // ---------------------------------------------------------------------------
 // PNG (top-down; Vulkan images already are). kl_glfb.c has its own writer and
@@ -504,10 +532,10 @@ static int fmt_is_bgra(VkFormat f) {
 // This is the same judgement the rest of the port makes about group answers:
 // answering call-by-call would let the guest see a set that disagrees with
 // itself.
-typedef struct { const char *names[64]; uint32_t n; } extlist;
+typedef struct { const char *names[128]; uint32_t n; } extlist;   // the Quest 3 profile lists ~70 device extensions
 
 static void ext_add(extlist *l, const char *n) {
-    if (l->n >= 64) return;
+    if (l->n >= 128) return;
     for (uint32_t i = 0; i < l->n; i++) if (!strcmp(l->names[i], n)) return;
     l->names[l->n++] = n;
 }
@@ -751,7 +779,10 @@ static VkResult klvk_CreateDevice(VkPhysicalDevice phys, const VkDeviceCreateInf
     // behaviour of its own — nothing else in the device's operation changes —
     // and eye_mtl_texture falls back to MoltenVK's own deprecated entry point if
     // it is absent, so this is an upgrade rather than a requirement.
-    if (have && ext_supported(have, nhave, "VK_EXT_metal_objects"))
+    // VPKEngine under the Quest identity does not LIST it (an Adreno has none) but accepts it in vkCreateDevice and
+    // needs it enabled to answer vkExportMetalObjectsEXT: so also when the entry point resolves without being listed.
+    if (have && (ext_supported(have, nhave, "VK_EXT_metal_objects") ||
+                 real_gipa(g_instance, "vkExportMetalObjectsEXT")))
         ext_add(&keep, "VK_EXT_metal_objects");
 
     VkDeviceCreateInfo mine = ci ? *ci : (VkDeviceCreateInfo){
@@ -1035,7 +1066,7 @@ static VkResult klvk_AcquireNextImageKHR(VkDevice dev, VkSwapchainKHR h,
             .signalSemaphoreCount = sem ? 1u : 0u,
             .pSignalSemaphores = sem ? &sem : NULL,
         };
-        VkResult r = klvk_qsubmit(d, d->queue, 1, &si, fence);
+        VkResult r = klvk_qsubmit(d, klvk_wq(d), 1, &si, fence);
         if (r != VK_SUCCESS) VKT("acquire signal submit: %d\n", r);
     }
     (void)dev;
@@ -1926,7 +1957,7 @@ static void klvk_image_clear_black(klvk_device *d, VkImage img, uint32_t layers,
         if (d->EndCommandBuffer(cmd) != VK_SUCCESS) goto out;
         VkSubmitInfo si = { .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO, .commandBufferCount = 1, .pCommandBuffers = &cmd };
         d->ResetFences(d->dev, 1, &fence);
-        if (klvk_qsubmit(d, d->queue, 1, &si, fence) == VK_SUCCESS &&
+        if (klvk_qsubmit(d, klvk_wq(d), 1, &si, fence) == VK_SUCCESS &&
             d->WaitForFences(d->dev, 1, &fence, VK_TRUE, 2000000000ull) != VK_SUCCESS) {
             // Still pending: its command buffer and fence must not be reset. Stop clearing.
             pool = VK_NULL_HANDLE;
@@ -2207,7 +2238,7 @@ unsigned long long kl_vulkan_layer_image(int layer_key, int stage, int eye,
         VkSubmitInfo si = { .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
                             .commandBufferCount = 1, .pCommandBuffers = &d->cap_cmd };
         d->ResetFences(d->dev, 1, &d->cap_fence);
-        if (klvk_qsubmit(d, d->queue, 1, &si, d->cap_fence) == VK_SUCCESS)
+        if (klvk_qsubmit(d, klvk_wq(d), 1, &si, d->cap_fence) == VK_SUCCESS)
             d->WaitForFences(d->dev, 1, &d->cap_fence, VK_TRUE, 2000000000ull);
         VKI("eye image stage %d pre-cleared: %s (KL_VK_EYE_TINT)\n", stage,
             layers > 1 ? "layer 0 GREEN, layer 1 BLUE"
@@ -2871,7 +2902,7 @@ static int klvk_ed_snapshot(klvk_device *d, int stage, int eye, VkImage src, VkF
     VkSubmitInfo si = { .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
                         .commandBufferCount = 1, .pCommandBuffers = &cmd };
     d->ResetFences(d->dev, 1, &fence);
-    if (klvk_qsubmit(d, d->queue, 1, &si, fence) != VK_SUCCESS) return 0;
+    if (klvk_qsubmit(d, klvk_wq(d), 1, &si, fence) != VK_SUCCESS) return 0;
     if (d->WaitForFences(d->dev, 1, &fence, VK_TRUE, 2000000000ull) != VK_SUCCESS) {
         broken = 1;     // still pending: never reset this command buffer again
         VKI("[taa-depth] depth snapshot copy timed out — copies off for this run\n");
@@ -3361,7 +3392,7 @@ static void klvk_shadow_pump(void) {
         .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
         .commandBufferCount = 1, .pCommandBuffers = &cmd,
     };
-    if (klvk_qsubmit(d, d->queue, 1, &si, fence) == VK_SUCCESS) {
+    if (klvk_qsubmit(d, klvk_wq(d), 1, &si, fence) == VK_SUCCESS) {
         pending = 1;
         pthread_mutex_lock(&g_shadow_lock);
         for (int i = 0; i < nwork; i++)
@@ -3678,7 +3709,7 @@ void kl_vulkan_capture_layers(void) {
         if (!sl->img) continue;
         char path[1024];
         snprintf(path, sizeof path, "%s/vk_layer%02d.png", dir, g_layer_img[i].key);
-        cap_image_layer(d, d->queue, sl->img, sl->w, sl->h, sl->fmt,
+        cap_image_layer(d, klvk_wq(d), sl->img, sl->w, sl->h, sl->fmt,
                         VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, 0, path, NULL, 0);
         // ...and the guest texture it was copied from, if it is still registered and
         // uncompressed: a magenta layer over a magenta source is the guest's content
@@ -3691,7 +3722,7 @@ void kl_vulkan_capture_layers(void) {
              g_layer_img[i].src_fmt == VK_FORMAT_B8G8R8A8_UNORM ||
              g_layer_img[i].src_fmt == VK_FORMAT_B8G8R8A8_SRGB)) {
             snprintf(path, sizeof path, "%s/vk_layer%02d_src.png", dir, g_layer_img[i].key);
-            cap_image_layer(d, d->queue, src, g_layer_img[i].src_w, g_layer_img[i].src_h,
+            cap_image_layer(d, klvk_wq(d), src, g_layer_img[i].src_w, g_layer_img[i].src_h,
                             g_layer_img[i].src_fmt, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
                             0, path, NULL, 0);
         }
@@ -3702,7 +3733,7 @@ void kl_vulkan_capture_layers(void) {
     if (g_wild_scratch) {
         char path[1024];
         snprintf(path, sizeof path, "%s/vk_scratch.png", dir);
-        cap_image_layer(d, d->queue, g_wild_scratch, 4096, 4096,
+        cap_image_layer(d, klvk_wq(d), g_wild_scratch, 4096, 4096,
                         VK_FORMAT_R8G8B8A8_UNORM,
                         VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, 0, path, NULL, 0);
     }
@@ -3743,7 +3774,7 @@ void kl_vulkan_capture_eyes(unsigned frame, int stage) {
             // The guest submitted this to a compositor, so it left it readable
             // by one — SHADER_READ_ONLY_OPTIMAL. See cap_image on why a wrong
             // guess here is cheap on MoltenVK specifically.
-            if (cap_image_layer(d, d->queue, g_eye[st][slot].img, g_eye[st][slot].w,
+            if (cap_image_layer(d, klvk_wq(d), g_eye[st][slot].img, g_eye[st][slot].w,
                                 g_eye[st][slot].h, g_eye[st][slot].fmt,
                                 VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
                                 layered ? (uint32_t)eye : 0u, path, NULL, 0))
@@ -3952,7 +3983,7 @@ static void klvk_eye_shadow_copy(klvk_device *d, int stage) {
         .commandBufferCount = 1, .pCommandBuffers = &cmd,
     };
     d->ResetFences(d->dev, 1, &fence);
-    if (klvk_qsubmit(d, d->queue, 1, &si, fence) != VK_SUCCESS) return;
+    if (klvk_qsubmit(d, klvk_wq(d), 1, &si, fence) != VK_SUCCESS) return;
     d->WaitForFences(d->dev, 1, &fence, VK_TRUE, 2000000000ull);
 
     if (!g_eye_shadow_mtl[stage])
@@ -5075,6 +5106,8 @@ static int klvk_fe_recycle(klvk_device *d) {
 // before (no fence available, native command buffers in the picture, submit failed, device lost).
 static int klvk_frame_fence(klvk_device *d, uint64_t issued, double *waited_s, unsigned *inflight, unsigned *fmax_out) {
     if (!d || !d->queue || !d->CreateFence || !d->GetFenceStatus || !d->WaitForFences || !d->ResetFences) return 0;
+    // An empty submit orders after one queue only: with guest work on several, the caller waits for the device.
+    if (__atomic_load_n(&d->gq_multi, __ATOMIC_ACQUIRE)) return 0;
     static int broken;
     if (broken) return 0;
     // Native command buffers (VPKEngine's own queue work: the MSAA depth resolve, a VPKTAA resolve) are not
@@ -5104,7 +5137,7 @@ static int klvk_frame_fence(klvk_device *d, uint64_t issued, double *waited_s, u
     }
     // The marker: an empty submit with the fence, ordered after everything the guest has submitted.
     unsigned slot = (g_fe_head + g_fe_n) % KLVK_FE_RING;
-    VkResult r = klvk_qsubmit(d, d->queue, 0, NULL, g_fe[slot].f);
+    VkResult r = klvk_qsubmit(d, klvk_wq(d), 0, NULL, g_fe[slot].f);
     if (r != VK_SUCCESS) {
         static int said;
         if (!said++) VKI("[frame-end] fence submit answered %d — the frame end waits for the queue\n", (int)r);
@@ -5263,7 +5296,7 @@ void kl_vulkan_frame_done(int stage) {
     }
     if (committed && !nowait) {
         double tw0 = klvk_now_s();
-        if (d && d->queue && d->QueueWaitIdle) d->QueueWaitIdle(d->queue);
+        if (d && d->queue) klvk_frame_wait_idle(d);
         klvk_slow_wait_note("QueueWaitIdle (resolved frame, NOWAIT=0)", tw0);
         klvk_serial_advance(issued);
     }
@@ -5290,9 +5323,7 @@ void kl_vulkan_frame_done(int stage) {
     if (!committed && !piped) {
         double tw0 = klvk_now_s();
         if (kl_env_on("KL_VK_FRAME_SYNC", 1) && d && d->queue) {
-            VkResult r = d->QueueWaitIdle ? d->QueueWaitIdle(d->queue)
-                       : d->DeviceWaitIdle ? d->DeviceWaitIdle(d->dev)
-                                           : VK_SUCCESS;
+            VkResult r = klvk_frame_wait_idle(d);
             klvk_slow_wait_note("QueueWaitIdle (frame end)", tw0);
             fe_wait = klvk_now_s() - tw0;
             if (r != VK_SUCCESS) {
@@ -5382,6 +5413,7 @@ int kl_vulkan_taa_gles_frame_end(int stage, unsigned long long rec_serial) {
 static VkResult klvk_QueuePresentKHR(VkQueue q, const VkPresentInfoKHR *pi) {
     kl_bg_wait();
     klvk_device *d = dev_of_queue(q);
+    klvk_note_guest_queue(q);
     unsigned this_frame = g_presented++;
 
     int every = kl_env_int("KL_VK_OUT_EVERY", 1);
@@ -7565,22 +7597,10 @@ static void VKAPI_CALL klvk_GetPhysicalDeviceQueueFamilyProperties(
 // The rest of the vkGetPhysicalDevice* family Unity's device init queries on the
 // same NULL handle — each substitutes the live device and passes through. Kept
 // terse; they share the resolve-once + guard shape.
-// Features as an Adreno 740 reports them where VPKEngine is more conservative than the
-// hardware (2026-10-15 (18), AC Nexus UI drawn with Unity's error shader). VPKEngine ties
-// vertexPipelineStoresAndAtomics to its conformance-only switch; with it 0 Unity reports
-// SystemInfo.maxComputeBufferInputsVertex = 0 and drops every subshader whose vertex program
-// reads a StructuredBuffer — the pink-material failure Unity is known for on such GPUs.
-// Adreno and MoltenVK (where AC's menus are fine) both report 1, and Metal vertex functions
-// read device buffers natively. Default 0 (VPKEngine's answer, behind its CTS gate): exposed to
-// AC it hung the shader warmup (2026-10-16); KL_VK_VTX_SSBO=1 forces it for A/B tests only;
-// KL_VK_IMG_NOFMT=1 also claims storage-image read/write without format (second suspect).
+// The features the guest is handed are VPKEngine's Quest 3 profile as it stands (vertex stores/atomics included);
+// klepton overrides none, it only logs once what the guest decides on.
 static void klvk_patch_features(VkPhysicalDeviceFeatures *f) {
     if (!f) return;
-    if (kl_env_on("KL_VK_VTX_SSBO", 0)) f->vertexPipelineStoresAndAtomics = VK_TRUE;
-    if (kl_env_on("KL_VK_IMG_NOFMT", 0)) {
-        f->shaderStorageImageReadWithoutFormat = VK_TRUE;
-        f->shaderStorageImageWriteWithoutFormat = VK_TRUE;
-    }
     static int said;
     if (!said++)
         VKI("features to the guest: vertexStores=%u fragStores=%u geom=%u tess=%u int16=%u multiViewport=%u "
@@ -7619,34 +7639,6 @@ static void VKAPI_CALL klvk_GetPhysicalDeviceMemoryProperties(
     pd = KLVK_PHYS_OR_SUB(pd, "GetPhysicalDeviceMemoryProperties");
     if (real) real(pd, m);
 }
-// LDR ASTC block formats occupy VK_FORMAT_ASTC_4x4_UNORM_BLOCK(157) ..
-// VK_FORMAT_ASTC_12x12_SRGB_BLOCK(184) contiguously.
-static int klvk_is_astc(VkFormat f) { return (int)f >= 157 && (int)f <= 184; }
-
-// CANDIDATE FIX (olar/wanderer gray hunt): make ASTC formats report full sampling
-// support. If MoltenVK on visionOS under-reports optimalTilingFeatures for ASTC
-// (missing SAMPLED_IMAGE / SAMPLED_IMAGE_FILTER_LINEAR), UE decides the ASTC texture
-// is not usable for sampling and keeps a default placeholder bound -> gray world.
-// Apple GPUs DO sample and linearly filter ASTC, so forcing these bits on is correct
-// for this hardware. Also logs what MoltenVK reported first (the probe). emu_on()
-// gates it to olar/wanderer. Returns nonzero if it patched (for the log).
-#define KLVK_FF_SAMPLED        0x00000001u
-#define KLVK_FF_FILTER_LINEAR  0x00001000u
-#define KLVK_FF_BLIT_SRC       0x00000400u
-#define KLVK_FF_TRANSFER_SRC   0x00004000u
-#define KLVK_FF_TRANSFER_DST   0x00008000u
-static void klvk_astc_patch_features(VkFormat fmt, VkFormatProperties *p) {
-    if (!p || !emu_on() || !klvk_is_astc(fmt)) return;
-    uint32_t want = KLVK_FF_SAMPLED | KLVK_FF_FILTER_LINEAR |
-                    KLVK_FF_BLIT_SRC | KLVK_FF_TRANSFER_SRC | KLVK_FF_TRANSFER_DST;
-    uint32_t before = p->optimalTilingFeatures;
-    static int said;
-    if (said < 24 && (before & want) != want) { said++;
-        VKI("[fix] ASTC fmt %d optimalTilingFeatures %#x (missing %#x) — forcing full "
-            "sampled+linear support so UE uses the real texture, not a default\n",
-            (int)fmt, before, want & ~before); }
-    p->optimalTilingFeatures |= want;
-}
 static void VKAPI_CALL klvk_GetPhysicalDeviceFormatProperties(
         VkPhysicalDevice pd, VkFormat fmt, VkFormatProperties *p) {
     static PFN_vkGetPhysicalDeviceFormatProperties real; static int t;
@@ -7654,7 +7646,6 @@ static void VKAPI_CALL klvk_GetPhysicalDeviceFormatProperties(
         real_gipa(g_instance, "vkGetPhysicalDeviceFormatProperties"); }
     pd = KLVK_PHYS_OR_SUB(pd, "GetPhysicalDeviceFormatProperties");
     if (real) real(pd, fmt, p);
-    klvk_astc_patch_features(fmt, p);
 }
 static void VKAPI_CALL klvk_GetPhysicalDeviceFormatProperties2(
         VkPhysicalDevice pd, VkFormat fmt, VkFormatProperties2 *p) {
@@ -7665,7 +7656,6 @@ static void VKAPI_CALL klvk_GetPhysicalDeviceFormatProperties2(
             real_gipa(g_instance, "vkGetPhysicalDeviceFormatProperties2KHR"); } }
     pd = KLVK_PHYS_OR_SUB(pd, "GetPhysicalDeviceFormatProperties2");
     if (real) real(pd, fmt, p);
-    if (p) klvk_astc_patch_features(fmt, &p->formatProperties);
 }
 // The two device-enumeration queries Unity runs while VALIDATING a physical
 // device (layers, then extensions) — the phase where AC Nexus was passing NULL.
@@ -7845,6 +7835,7 @@ static VkResult VKAPI_CALL klvk_QueueSubmit(VkQueue q, uint32_t n,
     static PFN_vkQueueSubmit real;
     if (!real && real_gdpa) real = (PFN_vkQueueSubmit)real_gdpa(g_devs[0]?g_devs[0]->dev:NULL, "vkQueueSubmit");
     kl_bg_wait();   // before g_qsub_mu: a blocked guest must not hold the queue lock
+    klvk_note_guest_queue(q);
     if (klvk_trace()) {
         static int c;
         if (c < 40) { c++;
