@@ -1,7 +1,7 @@
 # Bitácora — VisionQuestPro
 
 ## Last done
-- 2026-10-28 Build con VQP `184e4dd`+pin y VPKEngine `9995cc9` (motor validado por CTS: Vulkan 26 Fail / GLES 64 Fail, 0 crash; ver `notas/cts.md` del motor). Sin probar en visor.
+- 2026-10-28 Build con VQP `e0bb8a6`+pin y VPKEngine `8c21013` (incluye orden de operandos OpSMod determinista gcc/clang y test de occlusion query con espera) (motor validado por CTS: Vulkan 26 Fail / GLES 64 Fail, 0 crash; ver `notas/cts.md` del motor). Sin probar en visor.
 - 2026-10-28 `184e4dd` (revisión adversarial): fin de frame espera solo las colas del guest usadas en el frame (hasta 8, `QueueWaitIdle` bajo `g_qsub_mu`; sin `gq_multi` pegajoso ni `DeviceWaitIdle`); `klvk_shadow_pump(q)` en la cola del guest; suelo de retiro para imágenes normales `(age>=after && issued>=frame+8 && gpu_serial>=frame+1) || age>=4*after`; `vkQueueSubmit2/KHR` → NULL si el driver no lo tiene; `klvk_wq` fija la cola 0 de Klepton (acquire, clears y marcador). Tests `t_frame_fence`, `t_retire_due`, `t_vk_trap` (kl_vulkan.c entero sin compilar fuera de visionOS).
 - 2026-10-28 `77d58dc`: hooks `klvk_QueueSubmit2` (`vkQueueSubmit2` y `vkQueueSubmit2KHR` en `g_ours[]`, misma lógica que `klvk_QueueSubmit` sin trace/probe); `docs/perfil-adreno740.md` al día.
 - 2026-10-27 `57b09ba`: Klepton alineado con el perfil Quest 3 único del motor: multi-cola (`klvk_wq`, `klvk_note_guest_queue`), `EXT_metal_objects` interno vía gipa, lista de extensiones 128, fuera `KL_VK_VTX_SSBO`/`KL_VK_IMG_NOFMT`/parche ASTC, fuera ajuste «Perfil Vulkan completo» y `VPVK_EXTRA_EXTENSIONS`; VQConformance con `VPVK_FORCE_ANISO=0`, `VPVK_QUEST_IDENTITY=1`, esperas 120000.
