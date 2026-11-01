@@ -28,6 +28,6 @@
 ## Procedimiento al recibir `.vpcap` (sesión nueva)
 1. Ficheros: `QUEST/capturas/<game.id>/*.vpcap` (adjuntos o vía carpeta enlazada). Nunca al repo `main`.
 2. Validez: `vpcap_dump f.vpcap -l`; si END trae `invalid=1`, el replay no sirve: anotar `reason=` y arreglar el hook que falta.
-3. Linux (sesión cloud) solo da la referencia: build `cmake -S gpu -B build/gpu -G Ninja -DCMAKE_BUILD_TYPE=Release && ninja -C build/gpu vpreplay` y `ninja -C build/gpu-host vpimgdiff` (en vpkengine); `tools/replay/compare.sh f.vpcap OUT lvp` → PNG por draw (lavapipe).
+3. Linux (sesión cloud) solo da la referencia: build `cmake -S gpu -B build/gpu -G Ninja -DCMAKE_BUILD_TYPE=Release && ninja -C build/gpu vpreplay` y `ninja -C build/gpu-host vpimgdiff` (en vpkengine); `tools/replay/compare.sh` en modo `lvp` (sintaxis exacta en la cabecera del script; unverified) → PNG por draw (lavapipe).
 4. Nuestro camino (Metal) solo en macOS: workflow `replay.yml` (workflow_dispatch, entrada `url` o `path` en la rama `captures`). Subir la captura a la rama `captures` de vpkengine, lanzar el workflow, descargar el artefacto: `report.txt` con `FIRST DIVERGENCE` (llamada + pipeline) y PNG divergentes en `<VPVK_DIR>.diverged/`.
 5. Con la llamada divergente: Haiku localiza pipeline/shader/pase en el report; Sonnet arregla en el motor con test que reproduzca ese estado.
