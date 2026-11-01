@@ -831,8 +831,9 @@ static const char *const k_refused[] = {
     "ovrp_StartBodyTracking", "ovrp_StartBodyTracking2", "ovrp_StopBodyTracking",
     "ovrp_GetBodyState", "ovrp_GetBodyState4", "ovrp_RequestBodyTrackingFidelity",
     "ovrp_SuggestBodyTrackingCalibrationOverride", "ovrp_ResetBodyTrackingCalibration",
-    // eyes
-    "ovrp_StartEyeTracking", "ovrp_StopEyeTracking",
+    // eyes (GetEyeGazesState: ovrpEyeGazesState has no layout checked here, and a success with
+    // nothing written would hand the caller an uninitialised gaze)
+    "ovrp_StartEyeTracking", "ovrp_StopEyeTracking", "ovrp_GetEyeGazesState",
     NULL
 };
 

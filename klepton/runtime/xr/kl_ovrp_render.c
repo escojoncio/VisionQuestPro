@@ -153,8 +153,9 @@ static int32_t r_Initialize(void)  { FN(Initialize);  init_via_7(); return 1; }
 static int32_t r_Initialize2(void) { FN(Initialize2); init_via_7(); return 1; }
 static ovrpResult r_Initialize3(void) { FN(Initialize3); init_via_7(); return KLOVRP_SUCCESS; }
 static ovrpResult r_Initialize4(void) { FN(Initialize4); init_via_7(); return KLOVRP_SUCCESS; }
-// Same success no-op every PreInitialize arity gives (kl_ovrp.c's ok list).
-static int32_t r_PreInitialize2(void) { FN(PreInitialize2); return 0; }
+// Same success no-op every PreInitialize arity gives (kl_ovrp.c's ok list). An ovrpResult in 1.89 / 1.94 /
+// 1.110 alike: the real body is `PreInitialize5(NULL, 0, 0)` as a tail call.
+static ovrpResult r_PreInitialize2(void) { FN(PreInitialize2); return KLOVRP_SUCCESS; }
 
 // Frame lifecycle: the guest ignores these returns; pass the sibling's through.
 static int32_t legacy_begin(int frame) {
@@ -289,6 +290,10 @@ static int32_t r_GetEyeTextureArrayEnabled(void)       { FN(GetEyeTextureArrayEn
 static int32_t r_GetEyeTextureShared(void)             { FN(GetEyeTextureShared);               return __atomic_load_n(&g.eye_shared, __ATOMIC_RELAXED); }
 static int32_t r_SetEyeTextureShared(int v)            { FN(SetEyeTextureShared); __atomic_store_n(&g.eye_shared, !!v, __ATOMIC_RELAXED); return 1; }
 static int32_t r_GetEyeOcclusionMeshEnabled(void)      { FN(GetEyeOcclusionMeshEnabled);        return 0; }   // no mesh (GetEyeOcclusionMesh is "no")
+// ovrpBool (1.94: BOOL, one int arg): the shared "success" 0 read as FALSE = refused. Accepted; there is no mesh, so the getter stays 0.
+static int32_t r_SetEyeOcclusionMeshEnabled(int v)     { FN(SetEyeOcclusionMeshEnabled); (void)v;  return KLOVRP_TRUE; }
+// ovrpBool, same in 1.89 / 1.94 / 1.110 (BOOL(x0:i32); the real body is `and w0, w0, #1` of the backend result).
+static int32_t r_SetEyeTextureArrayEnabled(int v)      { FN(SetEyeTextureArrayEnabled); (void)v;   return KLOVRP_TRUE; }
 // Both are ovrpResult f(int *out) in the 1.117 build (RESULT{-1002,-1001[,0]}).
 static ovrpResult r_GetEyeFovPremultipliedAlphaMode(int32_t *out) {
     FN(GetEyeFovPremultipliedAlphaMode);
@@ -650,11 +655,12 @@ static int32_t r_SetLogCallback2(void *cb) {
 
 // Native handles. Only the OpenXR proc-addr getter has something real to give
 // (kl_openxr's own xrGetInstanceProcAddr); the rest is "no native object here".
-static int32_t r_GetNativeOpenXRHandles(void *inst, void *sess, void *sys) {
+// ovrpResult f(uint64_t *xrInstance, uint64_t *xrSession): two pointers in 1.89, 1.94 and 1.110. There is no
+// third argument, so x2 is the caller's stale register and is never written through.
+static int32_t r_GetNativeOpenXRHandles(void *inst, void *sess) {
     FN(GetNativeOpenXRHandles);
     if (pok(inst)) *(uint64_t *)inst = 0;
     if (pok(sess)) *(uint64_t *)sess = 0;
-    if (pok(sys))  *(uint64_t *)sys = 0;
     return KLOVRP_UNSUPPORTED;              // handles exist only inside an OpenXR guest's own session
 }
 // Pointer outputs: NULL and 0, never written - the guest pre-zeroes the slot (see
@@ -762,7 +768,8 @@ static const kl_ovrp_entry k_tab[] = {
     // 2. per-eye render state
     E(GetEyeTextureScale), E(GetEyeViewportScale), E(GetEyeRecommendedResolutionScale),
     E(GetEyeTextureFlippedY), E(GetEyeTextureArrayEnabled), E(GetEyeTextureShared),
-    E(SetEyeTextureShared), E(GetEyeOcclusionMeshEnabled), E(GetEyeFovPremultipliedAlphaMode),
+    E(SetEyeTextureShared), E(GetEyeOcclusionMeshEnabled), E(SetEyeOcclusionMeshEnabled), E(SetEyeTextureArrayEnabled),
+    E(GetEyeFovPremultipliedAlphaMode),
     E(GetEyeFovLayerId), E(GetEyePixelsPerTanAngleAtCenter), E(GetEyePixelsPerTanAngleAtCenter2),
     E(GetEyeFrustum), E(GetHmdToEyeOffset), E(GetHmdToEyeOffset2),
     {"ovrp_GetEyePose", (void *)klovrp_GetEyePose_entry},

@@ -69,6 +69,7 @@ out:
 // The stub tail-calls here, so this return value is the ovrp_ call's return
 // value. ovrpSuccess is 0, which makes a permissive zero mean "it worked" —
 // wrong in the usual way, but it is what collects the whole surface in one run.
+// KL-TEST-BEGIN ovrpfallback
 static int klovrp_name_is_predicate(const char *name) {
     if (strncmp(name, "ovrp_", 5) != 0) return 0;
     const char *f = name + 5;
@@ -87,13 +88,41 @@ static int klovrp_name_is_predicate(const char *name) {
     return 0;
 }
 
+// Pointer-returning entry points: a negative result would be called as a function pointer.
+static int klovrp_name_is_pointer_ret(const char *name) {
+    return strstr(name, "ProcAddr") || strstr(name, "Hook") ||
+           (strncmp(name, "ovrp_Get", 8) == 0 &&
+            (strstr(name, "Pointer") || strstr(name, "Ptr")));
+}
+// What an entry point nobody implemented answers, by name: 0 for a predicate or a pointer
+// getter, else ovrpFailure_Unsupported.
+static uint64_t klovrp_fallback_value(const char *name) {
+    if (klovrp_name_is_predicate(name) || klovrp_name_is_pointer_ret(name)) return 0;
+    return (uint64_t)(int64_t)-1004;
+}
+// KL-TEST-END ovrpfallback
+
+// Every generic handler answers in x0 only. A guest that reads the same entry point as a float,
+// a double or an HFA (ovrpVector3f / ovrpFovf: s0..s3) reads v0..v3, which hold whatever the
+// last C call left there - a random "eye height" or a NaN IPD. So the generic handlers end in
+// zeros: the caller sees 0.0 / (0,0,0,0) on a name that was never classified as a float return
+// and landed here. Structs returned through x8 cannot be covered (the size is unknown): those
+// need their own thunk (kl_ovrp_sret*.S).
+static inline __attribute__((always_inline)) uint64_t klovrp_gret(uint64_t x0) {
+#if defined(__aarch64__)
+    __asm__ volatile("movi v0.16b, #0\n\tmovi v1.16b, #0\n\tmovi v2.16b, #0\n\tmovi v3.16b, #0"
+                     ::: "v0", "v1", "v2", "v3");
+#endif
+    return x0;
+}
+
 static uint64_t klovrp_called(const char *name) {
     int s = ovrp_slot(name);
     if (s >= 0) g_ovrp[s].calls++;
     if (kl_permissive()) {
         if (s >= 0 && g_ovrp[s].calls == 1)
             fprintf(stderr, "  [ovrp] call (permissive, returning 0): %s\n", name);
-        return 0;
+        return klovrp_gret(0);
     }
     // Named WITH ITS CALLER. Every other entry point in this file is reached
     // from libunity or libOculusXRPlugin, and the one time that was not true it
@@ -119,17 +148,14 @@ static uint64_t klovrp_called(const char *name) {
         fprintf(stderr, "  [ovrp] unimplemented %s -> %s (from %s+0x%zx; logged once)\n",
                 name, pred ? "0 (predicate: no)" : "UNSUPPORTED", img ? img : "?", off);
     }
-    if (pred) return 0;
-    // Pointer-returning entry points: a negative result would be called as a
-    // function pointer. NULL is the only safe "unsupported".
-    if (strstr(name, "ProcAddr") || strstr(name, "Hook") ||
-        (strncmp(name, "ovrp_Get", 8) == 0 &&
-         (strstr(name, "Pointer") || strstr(name, "Ptr")))) {
+    if (pred) return klovrp_gret(0);
+    // Pointer-returning entry points: NULL is the only safe "unsupported".
+    if (klovrp_name_is_pointer_ret(name)) {
         if (s < 0 || g_ovrp[s].calls == 1)
             fprintf(stderr, "  [ovrp] %s looks pointer-returning -> NULL\n", name);
-        return 0;
+        return klovrp_gret(0);
     }
-    return (uint64_t)(int64_t)-1004;  // ovrpFailure_Unsupported
+    return klovrp_gret(klovrp_fallback_value(name));  // ovrpFailure_Unsupported
 }
 
 // ---------------------------------------------------------------------------
@@ -372,21 +398,21 @@ static uint64_t klovrp_ok(const char *name) {
         if (n == 1 && kl_env_on("KL_OVRP_TEARDOWN_SNAP", 1))
             kl_sample_snapshot(stderr, name);
     }
-    return OVRP_SUCCESS;
+    return klovrp_gret(OVRP_SUCCESS);
 }
 
 // Returns ovrpBool: 1 is "yes". Used for the capability and state predicates that
 // have to agree with the fact that we answered ovrp_Initialize5 with success.
 static uint64_t klovrp_yes(const char *name) {
     ovrp_hit(name);
-    return OVRP_TRUE;
+    return klovrp_gret(OVRP_TRUE);
 }
 
 // Returns ovrpBool: 0 is "no". For capabilities we genuinely do not have — the
 // honest answer, and the one that keeps Unity off a path with nothing behind it.
 static uint64_t klovrp_no(const char *name) {
     ovrp_hit(name);
-    return 0;
+    return klovrp_gret(0);
 }
 
 // Returns ovrpResult: -1004 UNSUPPORTED. For whole subsystems that genuinely do
@@ -395,7 +421,7 @@ static uint64_t klovrp_no(const char *name) {
 // guest sees init fail and never calls CreatePassthroughLayer et al.
 static uint64_t klovrp_unsupported(const char *name) {
     ovrp_hit(name);
-    return OVRP_FAIL_UNSUPPORTED;
+    return klovrp_gret(OVRP_FAIL_UNSUPPORTED);
 }
 
 // ---------------------------------------------------------------------------
@@ -10210,27 +10236,19 @@ static const char *const g_ovrp_result_ok[] = {
     // rendering — olar aborted here on the unimplemented trampoline (signal 6).
     // There is no telemetry pipe on this host (the Qpl* markers above are
     // no-ops), so the whole family answers ovrpResult success and touches no
-    // out-param: for GetUnifiedConsent / the ShouldShow* predicates that means
-    // the guest's pre-zeroed consent/should-show local stays false ("no consent
-    // recorded, nothing to show"), which suppresses the consent dialog rather
-    // than driving it into the buffer-filling GetConsent*Text getters. The
-    // Save*/Set* half are pure setters — success is unambiguously safe. Return 0
-    // and read nothing is safe under either ABI (ovrpResult+outparam or a bare
-    // ovrpBool), so no argument is dereferenced.
+    // out-param. ovrp_GetUnifiedConsent returns the consent enum BY VALUE (OVRPlugin
+    // 1.110, the only build that has the family); 0 is the answer given, which of the
+    // enum values means "no consent recorded" is unverified. ShouldShowTelemetry-
+    // ConsentWindow is a bare ovrpBool: FALSE = nothing to show. The Save*/Set* half
+    // are pure setters — success is unambiguously safe. Return 0 and read nothing is
+    // safe, so no argument is dereferenced.
+    // (ovrp_ShouldShowTelemetryNotification and the ovrp_GetConsent*Text getters are
+    // no longer here: kl_ovrp_misc.c refuses them by name, -1004, and a registered
+    // refusal is consulted before these lists.)
     "ovrp_GetUnifiedConsent", "ovrp_SaveUnifiedConsent",
     "ovrp_SaveUnifiedConsentWithOlderVersion", "ovrp_SetDeveloperTelemetryConsent",
-    "ovrp_ShouldShowTelemetryConsentWindow", "ovrp_ShouldShowTelemetryNotification",
+    "ovrp_ShouldShowTelemetryConsentWindow",
     "ovrp_SetNotificationShown",
-    // ...and the consent-TEXT getters. olar calls ovrp_GetConsentSettingsChangeText
-    // even though the ShouldShow* predicates answered "nothing to show" — it aborted
-    // on the unimplemented trampoline (signal 6). Answering success and touching no
-    // out-param leaves the guest's text buffer as it found it (empty on the common
-    // pre-zeroed path); there is no consent dialog to populate on this host anyway.
-    // Names cover the Meta XR consent-text family; unused ones are harmless.
-    "ovrp_GetConsentSettingsChangeText", "ovrp_GetConsentTitleText",
-    "ovrp_GetConsentMarkdownText", "ovrp_GetConsentNotificationText",
-    "ovrp_GetConsentText", "ovrp_GetConsentTitle",
-    "ovrp_GetConsentNotificationMarkdownText",
     // Telemetry event sink (olar) — there is no telemetry pipe here; accept and drop.
     "ovrp_SendEvent2", "ovrp_SendEvent",
     // Per-eye buffer sharpening hint (wanderer, UE5). Advisory image post; nothing
@@ -10239,19 +10257,16 @@ static const char *const g_ovrp_result_ok[] = {
     // (ovrp_GetCurrentInteractionProfile is served for real now: Touch per hand
     // with a connected controller, see klovrp_GetCurrentInteractionProfile.)
     // Environment depth (Quest 3 passthrough occlusion) — wanderer probes the frame
-    // descriptor. No depth pipe on visionOS; success + a zeroed desc reads as an
-    // empty/absent depth frame, which the guest treats as "no occlusion this frame".
+    // descriptor. Served for real now by kl_ovrp_spatial.c (a registered function is
+    // consulted before this list, so this entry is shadowed).
     "ovrp_GetEnvironmentDepthFrameDesc",
     // (ovrp_SetControllerLocalizedVibration is served for real now: the haptics
     // block in this file feeds the Sense controllers' CoreHaptics engines.)
-    // Eye tracking (Quest Pro) — wanderer starts/stops it per session. No eye
-    // tracker on this path; accept the start/stop, and gaze reads stay zeroed.
+    // Eye tracking (Quest Pro): no eye tracker on this path.
     // (StartEyeTracking/StopEyeTracking moved to Unsupported: a Quest 3 has no
-    // eye tracker and its plugin answers ovrpFailure_Unsupported there.)
-    // Per-frame eye-gaze poll (wanderer, right after StartEyeTracking). Success +
-    // a pre-zeroed EyeGazesState reads as "no gaze this frame", which the guest
-    // treats as gaze unavailable rather than a fault.
-    "ovrp_GetEyeGazesState",
+    // eye tracker and its plugin answers ovrpFailure_Unsupported there. So did
+    // ovrp_GetEyeGazesState: kl_ovrp_input.c refuses it by name, -1004, rather
+    // than answer success over a struct nobody fills.)
     // wanderer (UE5) polls ovrp_GetUserNeckEyeDistance2 from its per-frame path
     // (right before EndFrame4) and aborted on the unimplemented trampoline
     // (signal 6). It is the OVR neck-model arm length; answering success and

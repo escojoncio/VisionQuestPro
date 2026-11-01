@@ -38,6 +38,7 @@ klepton_tests() {
   run kl_ovrp_eyesize_test -I. tests/kl_ovrp_eyesize_test.c -lm
   run t_ovrp_input -I.. -I../.. tests/t_ovrp_input.c -lm
   run t_ovrp_render -Wno-unused-function -I.. -I../.. tests/t_ovrp_render.c -lm
+  run t_ovrp_misc -Wno-unused-function -I.. -I../.. tests/t_ovrp_misc.c
   run spatial_test -I.. -I../jni -I../libc -I../gfx -I. -I../media -I../guest -I../diag \
       tests/spatial_test.c kl_spatial.c kl_ovrp_spatial.c -lm -lpthread
   cd "$ROOT/klepton" || return 1
@@ -94,6 +95,8 @@ klepton_tests() {
   run t_forcequit -Wno-unused-function -I"$T/newt" tests/t_forcequit.c
   awk '/KL-TEST-BEGIN seatoff/{p=1;next} /KL-TEST-END seatoff/{p=0} p' runtime/xr/kl_ovrp.c > "$T/newt/seatoff.inc"
   run t_seat_offset -Wno-unused-function -I"$T/newt" tests/t_seat_offset.c -lm
+  awk '/KL-TEST-BEGIN ovrpfallback/{p=1;next} /KL-TEST-END ovrpfallback/{p=0} p' runtime/xr/kl_ovrp.c > "$T/newt/ovrpfallback.inc"
+  run t_ovrp_fallback -Wno-unused-function -I"$T/newt" tests/t_ovrp_fallback.c
   mkdir -p "$T/vmlog"
   awk '/KL-TEST-BEGIN vmgroup/{p=1;next} /KL-TEST-END vmgroup/{p=0} p' runtime/libc/kl_libc.c > "$T/vmlog/vmgroup.inc"
   run t_vmgroup -Wno-unused-function -I"$T/vmlog" tests/t_vmgroup.c

@@ -60,13 +60,10 @@ OK(IsCameraDeviceDepthFrameAvailable)
 OK(SetCameraDeviceDepthSensingMode)
 OK(SetCameraDevicePreferredColorFrameSize)
 OK(SetCameraDevicePreferredDepthQuality)
-OK(GetUseOverriddenExternalCameraFov)
-OK(GetUseOverriddenExternalCameraStaticPose)
 OK(OverrideExternalCameraFov)
 OK(OverrideExternalCameraStaticPose)
 OK(ResetDefaultExternalCamera)
 OK(SetDefaultExternalCamera)
-OK(Media_IsCastingToRemoteClient)
 OK(Media_SetMrcFrameSize)
 OK(SetKeyboardOverlayPose)
 OK(SetKeyboardOverlayUV)
@@ -124,6 +121,17 @@ static ovrpResult klm_Media_IsMrcActivated(int32_t *o) { kl_ovrp_hit("ovrp_Media
 static ovrpResult klm_Media_UseMrcDebugCamera(int32_t *o) { kl_ovrp_hit("ovrp_Media_UseMrcDebugCamera"); if (!o) return KLOVRP_INVALID_PARAM; *o = 0; return KLOVRP_SUCCESS; }
 static ovrpResult klm_Media_GetInitialized(int32_t *o) { kl_ovrp_hit("ovrp_Media_GetInitialized"); if (!o) return KLOVRP_INVALID_PARAM; *o = 0; return KLOVRP_SUCCESS; }
 
+// ovrpResult f(ovrpBool *out) / f(enum *out) with the out pointer the only argument (1.94: x0 ptr
+// forwarded to a virtual call, RESULT): a success the caller reads back must have written. Absent
+// hardware, so 0: not eye-tracked, input buffer type 0 (Memory), not casting.
+static ovrpResult klm_GetFoveationEyeTracked(int32_t *o) { kl_ovrp_hit("ovrp_GetFoveationEyeTracked"); if (!o) return KLOVRP_INVALID_PARAM; *o = 0; return KLOVRP_SUCCESS; }
+static ovrpResult klm_Media_GetMrcInputVideoBufferType(int32_t *o) { kl_ovrp_hit("ovrp_Media_GetMrcInputVideoBufferType"); if (!o) return KLOVRP_INVALID_PARAM; *o = 0; return KLOVRP_SUCCESS; }
+static ovrpResult klm_Media_IsCastingToRemoteClient(int32_t *o) { kl_ovrp_hit("ovrp_Media_IsCastingToRemoteClient"); if (!o) return KLOVRP_INVALID_PARAM; *o = 0; return KLOVRP_SUCCESS; }
+// ovrpResult f(int cameraId, ovrpBool *useOverridden) (1.94: x0 i32, x1 ptr): no external camera, so
+// nothing is overridden.
+static ovrpResult klm_GetUseOverriddenExternalCameraFov(int camera, int32_t *o) { (void)camera; kl_ovrp_hit("ovrp_GetUseOverriddenExternalCameraFov"); if (!o) return KLOVRP_INVALID_PARAM; *o = 0; return KLOVRP_SUCCESS; }
+static ovrpResult klm_GetUseOverriddenExternalCameraStaticPose(int camera, int32_t *o) { (void)camera; kl_ovrp_hit("ovrp_GetUseOverriddenExternalCameraStaticPose"); if (!o) return KLOVRP_INVALID_PARAM; *o = 0; return KLOVRP_SUCCESS; }
+
 // ovrpResult ovrp_TelemetryCreateMetadataHandle(int *out) (1.117 only) and
 // ovrpResult ovrp_QplCreateMarkerHandle(const char *name, int *out): a handle the
 // guest passes back to calls that drop their data, so any non-zero value will do.
@@ -153,6 +161,8 @@ static ovrpResult klm_GetNativeSDKPointer2(void **o) {
 static const kl_ovrp_entry k_tab[] = {
     E(GetEnvironmentDepthSupported),
     E(GetEnvironmentDepthHandRemovalSupported),
+    E(GetFoveationEyeTracked),
+    E(Media_GetMrcInputVideoBufferType),
     E(GetBodyTrackingEnabled),
     E(GetBodyTrackingSupported),
     E(GetFaceTrackingEnabled),
@@ -232,7 +242,15 @@ static const char *const k_refused[] = {
     "ovrp_MetaWandAuth_Authenticate", "ovrp_MetaWandAuth_GetAccessToken",
     "ovrp_KtxLoadFromMemory", "ovrp_KtxGetTextureData", "ovrp_KtxNeedsTranscoding",
     "ovrp_KtxTextureHeight", "ovrp_KtxTextureSize", "ovrp_KtxTextureWidth", "ovrp_KtxTranscode",
-    "ovrp_RegisterOpenXREventHandler", "ovrp_PollFuture", NULL,
+    "ovrp_RegisterOpenXREventHandler", "ovrp_PollFuture",
+    // Telemetry consent (OVRPlugin 1.110 only, absent from 1.89 / 1.94): no arguments of their own,
+    // ovrpResult only (the engine's bool as 0 / -1000, not buffer getters). Success would mean "there is
+    // text / a notification to show", and no consent flow exists on this host, so -1004.
+    // (ovrp_GetUnifiedConsent is not here: it returns the enum BY VALUE.)
+    "ovrp_ShouldShowTelemetryNotification", "ovrp_GetConsentSettingsChangeText",
+    "ovrp_GetConsentTitle", "ovrp_GetConsentMarkdownText",
+    "ovrp_GetConsentNotificationMarkdownText", "ovrp_GetConsentTitleText",
+    "ovrp_GetConsentNotificationText", "ovrp_GetConsentText", NULL,
 };
 
 void kl_ovrp_misc_register(void) {

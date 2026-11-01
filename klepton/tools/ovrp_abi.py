@@ -639,6 +639,13 @@ def ret_kind(lib, info, depth=0, seen=None):
         return "CALLEE", "low", consts
     return "UNKNOWN", "low", consts
 
+# The dataflow reads x0 = (result of ovrp_GetInitialized) on the uninitialised early-out and calls it a
+# BOOL return, although these two never set x0 on the path that matters: read off the disassembly of
+# 1.89 / 1.94 / 1.110 (identical in all three). GetFloat zeroes d0 up front and returns s0;
+# GetEyeFrustum zeroes d0..d3 when uninitialised and otherwise returns the callee's s0..s3 (an
+# ovrpFrustumf, four floats = an HFA).
+RET_OVERRIDE = {"ovrp_GetFloat": ("F32", "high"), "ovrp_GetEyeFrustum": ("HFA4", "high")}
+
 def merge_ext(lst):
     """list of (off,size) -> (lo, hi, indexed, unknownsize)"""
     lo = hi = None; idx = False; unk = False
@@ -654,6 +661,7 @@ def signature(lib, name):
     start, size = lib.exports[name]
     info = analyze(lib, start, start + size, 0)
     rk, rc, consts = ret_kind(lib, info)
+    if name in RET_OVERRIDE: rk, rc = RET_OVERRIDE[name]; consts = set()
     ints, floats = {}, {}
     for k in range(8):
         if k in info.used or k in info.ptr or k in info.fwd_unknown:

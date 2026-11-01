@@ -8,7 +8,16 @@ double kl_ovrp_predicted_display_time(void) { return 5.0; }
 void kl_ovrp_guest_head(int s, kl_ovrp_pose7 *o) { (void)s; memset(o, 0, sizeof *o); o->py = 1.6f; o->qw = 1; }
 float klovrp_guest_origin_y(void) { return 0.5f; }
 void *kl_ovrp_sym(const char *n) { (void)n; return 0; }
-void kl_ovrp_register(const kl_ovrp_entry *t, size_t n, const char *const *r) { (void)t; (void)n; (void)r; }
+static const kl_ovrp_entry *g_tab; static size_t g_ntab;
+void kl_ovrp_register(const kl_ovrp_entry *t, size_t n, const char *const *r) { (void)r; g_tab = t; g_ntab = n; }
+static void *find(const char *name) {         // what kl_ovrp_sym hands the guest for a registered name
+    for (size_t i = 0; i < g_ntab; i++) if (!strcmp(g_tab[i].name, name)) return g_tab[i].fn;
+    return NULL;
+}
+static int refused(const char *name) {
+    for (const char *const *r = k_refused; *r; r++) if (!strcmp(*r, name)) return 1;
+    return 0;
+}
 uint64_t klovrp_GetNodePoseState_impl(int a, int b, void *c) { (void)a; (void)b; memset(c, 0, 0x58); ((float *)c)[3] = 1; ((float *)c)[4] = 1; return 0; }
 // x8 entry points live in kl_ovrp_sret2.S (arm64 only); the host test calls the C bodies.
 void klovrp_GetNodePose_entry(void) {} void klovrp_GetNodeVelocity_entry(void) {}
@@ -140,6 +149,10 @@ int main(void) {
     kl_ovrp_set_controller_attached(1, 0);
     assert(klovrp_GetHandTrackingEnabled(&ht) == 0 && ht == 1);
     kl_ovrp_set_hand_joints(1, NULL, 0, NULL, 0);
+    kl_ovrp_input_register();
+    // ovrp_GetEyeGazesState: success with nothing written read as a valid (garbage) gaze. Eye tracking
+    // is refused by name (like Start/StopEyeTracking), so the caller never reads the struct.
+    assert(refused("ovrp_GetEyeGazesState") && !find("ovrp_GetEyeGazesState"));
     puts("t_ovrp_input ok");
     return 0;
 }
