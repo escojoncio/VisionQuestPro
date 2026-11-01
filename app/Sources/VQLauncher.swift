@@ -365,6 +365,9 @@ struct VQLoadingView: View {
     private var phrase: String {
         if failed { return VQL("No se pudo iniciar el juego", "The game could not start") }
         if finished || openedSpace { return VQL("Iniciando VR…", "Starting VR…") }
+        if prewarm.active && prewarm.saving {
+            return VQL("Guardando caché \(prewarm.done) / \(prewarm.total)", "Saving cache \(prewarm.done) / \(prewarm.total)")
+        }
         if prewarm.active && prewarm.compiling {
             return VQL("Compilando shaders \(prewarm.done) / \(prewarm.total)", "Compiling shaders \(prewarm.done) / \(prewarm.total)")
         }

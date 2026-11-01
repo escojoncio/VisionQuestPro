@@ -73,6 +73,11 @@ uint32_t vq_prewarm_count(void) {
     return f ? f() : 0;
 }
 
+uint32_t vq_prewarm_phase(void) {
+    uint32_t (*f)(void) = (uint32_t (*)(void))dlsym(RTLD_DEFAULT, "vpvk_prewarm_phase");
+    return f ? f() : 0;
+}
+
 uint32_t vq_prewarm_run(vq_prewarm_progress progress, void *user) {
     typedef uint32_t (*run_fn)(vq_prewarm_progress, void *);
     run_fn f = (run_fn)dlsym(RTLD_DEFAULT, "vpvk_prewarm");

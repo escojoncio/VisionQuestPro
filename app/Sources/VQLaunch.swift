@@ -486,9 +486,10 @@ final class VQSettings: ObservableObject {
         unsetenv("VPVK_STRICT_FEATURES")
         // One Quest 3 profile for games and conformance: VPKEngine ignores VPVK_EXTRA_EXTENSIONS under the Quest identity.
         unsetenv("VPVK_EXTRA_EXTENSIONS")
-        // Pipelines: VPKEngine's default (asynchronous), no longer forced synchronous; the eye's draws are skipped while their
-        // pipeline compiles (engine default of VPVK_PIPELINE_EYE_HARD_WAIT_MS). The conformance runs set VPVK_ASYNC_PIPELINES=0 themselves (VQConformance).
-        unsetenv("VPVK_ASYNC_PIPELINES")
+        // Pipelines: Quest-faithful create. On Quest the driver compiles inside vkCreate*Pipelines, so an engine that counts
+        // returned creates as warm (Unreal's PSO precache) must get them ready; asynchronous creation let its loading bar reach
+        // 100 % while thousands still compiled (missing effects, low framerate). VPKEngine's own default stays asynchronous (AVP).
+        setenv("VPVK_ASYNC_PIPELINES", "0", 1)
         // VPKEngine 454f7cc dead-store elision (heuristic, risks a corrupted frame) — off until the translator marks samples to keep
         unsetenv("VPVK_MSAA_DEAD_STORE")
         // Games: report geometry/tessellation like Adreno so Unity keeps subshaders that need
@@ -883,6 +884,7 @@ final class VQPrewarm: ObservableObject {
     @Published var total: UInt32 = 0
     @Published var active = false
     @Published var compiling = false  // harvested SPIR-V or stored recipes being compiled ("Compilando shaders")
+    @Published var saving = false  // the pipeline archive being written after the recipes ("Guardando caché X/Y")
 
     /// Bump when the harvest or the SPIR-V -> MSL translator changes: the first-run precompile repeats.
     static let firstRunVersion = 2  // 2: VPKEngine per-variable private slots (new MSL)
@@ -907,10 +909,15 @@ final class VQPrewarm: ObservableObject {
         DispatchQueue.main.async { shared.total = count; shared.done = 0; shared.compiling = true; shared.active = true }
         let start = Date()
         let n = vq_prewarm_run({ done, total, _ in
-            DispatchQueue.main.async { VQPrewarm.shared.done = done; VQPrewarm.shared.total = total }
+            // After the recipes the engine writes the binary archive (minutes on a first run) and counts entries archived.
+            let saving = vq_prewarm_phase() == 1
+            DispatchQueue.main.async {
+                VQPrewarm.shared.saving = saving
+                VQPrewarm.shared.done = done; VQPrewarm.shared.total = total
+            }
         }, nil)
         let ms = Int(Date().timeIntervalSince(start) * 1000)
-        DispatchQueue.main.async { shared.compiling = false; shared.active = false }
+        DispatchQueue.main.async { shared.compiling = false; shared.saving = false; shared.active = false }
         VQLog.log("Shaders: precompilados \(n) pipelines en \(ms) ms")
     }
 

@@ -30,6 +30,8 @@ uint32_t vq_prewarm_count(void);
 // Compiles them all before the game starts (blocking; call off the main thread).
 typedef void (*vq_prewarm_progress)(uint32_t done, uint32_t total, void *user);
 uint32_t vq_prewarm_run(vq_prewarm_progress progress, void *user);
+// Read from the progress callback of vq_prewarm_run: 0 = compiling recipes, 1 = saving the pipeline archive (done/total = entries archived).
+uint32_t vq_prewarm_phase(void);
 // First-run precompile: translates + compiles every <dir>/*.spv (vq_harvest_spirv output) with
 // VPVulkan's vpvk_precompile_spirv. Returns the libraries compiled (0 without VPVulkan).
 uint32_t vq_precompile_run(const char *dir, vq_prewarm_progress progress, void *user);
