@@ -38,13 +38,15 @@ enum VQLaunch {
         setenv("KL_MVK_DIR", frameworks, 1)
         setenv("KL_ANGLE_DIR", frameworks, 1)
         VQSettings.shared.applyToEnvironment(game: game)
-        // Setting (on by default): QUEST/Cache/<game>/Pipelines, so recipes, the MSL index
+        // Always QUEST/Cache/<game>/Pipelines when the QUEST folder is available, so recipes, the MSL index
         // and the Metal binary archives survive reinstalling the app (Caches/ is wiped then).
+        // Library/Caches only when QUEST is unavailable.
         let appCache = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("VisionQuestPro/PipelineCache/\(game.id)", isDirectory: true)
         var psoCache = appCache
-        if VQSettings.shared.shaderCacheInQuest, let q = VQFolder.shared.cache(for: game.id) {
+        if let q = VQFolder.shared.cache(for: game.id) {
             psoCache = q.appendingPathComponent("Pipelines", isDirectory: true)
+            migratePipelineCache(from: appCache, to: psoCache)
         }
         VQLog.log("Shaders: caché de pipelines en \(psoCache.path)")
         // The conformance tests: no Metal binary archive. Their pipelines are one-off (nothing to
@@ -91,6 +93,22 @@ enum VQLaunch {
         let fwd = vq_gfx_config_forward()
         VQLog.log("Gráficos: ajustes enviados a VPVulkan \(fwd == 1 ? "sí" : "no (driver no cargado)")")
         return rc
+    }
+
+    /// Moves (not copies) an old Library/Caches pipeline cache into the QUEST one: every entry that does not
+    /// already exist at the destination (existing ones are skipped), then the old folder is removed when empty.
+    static func migratePipelineCache(from old: URL, to new: URL) {
+        let fm = FileManager.default
+        guard let oldItems = try? fm.contentsOfDirectory(atPath: old.path), !oldItems.isEmpty else { return }
+        try? fm.createDirectory(at: new, withIntermediateDirectories: true)
+        var moved = 0, skipped = 0
+        for name in oldItems {
+            let dst = new.appendingPathComponent(name)
+            if fm.fileExists(atPath: dst.path) { skipped += 1; continue }
+            if (try? fm.moveItem(at: old.appendingPathComponent(name), to: dst)) != nil { moved += 1 } else { skipped += 1 }
+        }
+        if (try? fm.contentsOfDirectory(atPath: old.path))?.isEmpty ?? false { try? fm.removeItem(at: old) }
+        VQLog.log("[pso] migrated \(moved) files, skipped \(skipped)")
     }
 
     /// `to` relative to `from` (both directories), with ".." where needed.
@@ -165,8 +183,6 @@ final class VQSettings: ObservableObject {
     @Published var gameLanguage: String { didSet { save() } }
     /// Compile the game's known shaders/pipelines before it starts (VPVulkan recipe store).
     @Published var precompileShaders: Bool { didSet { save() } }
-    /// Keep the shader/pipeline cache in QUEST/Cache (survives reinstalls) instead of the app's Caches.
-    @Published var shaderCacheInQuest: Bool { didSet { save() } }
     /// AOT shaders (VPKEngine VPVK_AOT): the whole game's shaders/pipelines are built into the Metal
     /// binary archive before playing; unseen variants compile in the background without holding frames.
     @Published var aotShaders: Bool { didSet { save() } }
@@ -221,7 +237,6 @@ final class VQSettings: ObservableObject {
         storeCovers = d.object(forKey: "vq.storeCovers") as? Bool ?? true
         gameLanguage = d.string(forKey: "vq.gameLang") ?? "auto"
         precompileShaders = d.object(forKey: "vq.precompile") as? Bool ?? true
-        shaderCacheInQuest = d.object(forKey: "vq.psoInQuest") as? Bool ?? true
         aotShaders = d.object(forKey: "vq.aot") as? Bool ?? false
         conformanceMinutes = d.object(forKey: "vq.ctsMinutes") as? Double ?? 15
         conformanceMemoryMB = d.object(forKey: "vq.ctsMemMB") as? Int ?? 3000
@@ -273,7 +288,6 @@ final class VQSettings: ObservableObject {
         d.set(storeCovers, forKey: "vq.storeCovers")
         d.set(gameLanguage, forKey: "vq.gameLang")
         d.set(precompileShaders, forKey: "vq.precompile")
-        d.set(shaderCacheInQuest, forKey: "vq.psoInQuest")
         d.set(aotShaders, forKey: "vq.aot")
         d.set(conformanceMinutes, forKey: "vq.ctsMinutes")
         d.set(conformanceMemoryMB, forKey: "vq.ctsMemMB")
@@ -472,10 +486,9 @@ final class VQSettings: ObservableObject {
         unsetenv("VPVK_STRICT_FEATURES")
         // One Quest 3 profile for games and conformance: VPKEngine ignores VPVK_EXTRA_EXTENSIONS under the Quest identity.
         unsetenv("VPVK_EXTRA_EXTENSIONS")
-        // Pipelines: VPKEngine's default (asynchronous), no longer forced synchronous. The eye's passes wait up to 4 s for their
-        // pipelines (a user override of the variable wins). The conformance runs set VPVK_ASYNC_PIPELINES=0 themselves (VQConformance).
+        // Pipelines: VPKEngine's default (asynchronous), no longer forced synchronous; the eye's draws are skipped while their
+        // pipeline compiles (engine default of VPVK_PIPELINE_EYE_HARD_WAIT_MS). The conformance runs set VPVK_ASYNC_PIPELINES=0 themselves (VQConformance).
         unsetenv("VPVK_ASYNC_PIPELINES")
-        setenv("VPVK_PIPELINE_EYE_HARD_WAIT_MS", "4000", 0)
         // VPKEngine 454f7cc dead-store elision (heuristic, risks a corrupted frame) — off until the translator marks samples to keep
         unsetenv("VPVK_MSAA_DEAD_STORE")
         // Games: report geometry/tessellation like Adreno so Unity keeps subshaders that need

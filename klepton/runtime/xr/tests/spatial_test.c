@@ -6,6 +6,7 @@
 #include <string.h>
 #include <math.h>
 #include <unistd.h>
+#include <time.h>
 #include "kl_ovrp_priv.h"
 #include "kl_spatial.h"
 #include "kl_envdepth.h"
@@ -33,6 +34,13 @@ static const kl_ovrp_entry *g_tab; static size_t g_ntab;
 void kl_ovrp_register(const kl_ovrp_entry *t, size_t n, const char *const *r) { g_tab = t; g_ntab = n; (void)r; }
 void kl_ovrp_spatial_register(void);
 static void *F(const char *name) { for (size_t i = 0; i < g_ntab; i++) if (!strcmp(g_tab[i].name, name)) return g_tab[i].fn; return NULL; }
+
+// "[sp-sum]" sink (kl_ovrp_spatial.c): the lines it would write to stderr.
+void kl_ovrp_sp_sum_set_sink(void (*sink)(const char *line));
+void kl_ovrp_sp_sum_tick_at(uint64_t now_ns);
+static char g_sum[8][1100];
+static int g_nsum;
+static void sum_sink(const char *line) { if (g_nsum < 8) snprintf(g_sum[g_nsum], sizeof g_sum[0], "%s", line); g_nsum++; }
 
 #define CK(c) do { if (!(c)) { printf("FAIL line %d: %s\n", __LINE__, #c); fails++; } } while (0)
 static int fails;
@@ -280,6 +288,25 @@ int main(void) {
     // mesh removal and plane removal
     kl_spatial_mesh(U16(30), 1, m, NULL, 0, NULL, 0);
     CK(kl_spatial_count(KLSP_MESH) == 0);
+    // [sp-sum]: nothing before 5 s, one line after, none while nothing changes, then the PollEvent counters.
+    {
+        struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
+        uint64_t base = (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec, sec = 1000000000ull;
+        kl_ovrp_sp_sum_set_sink(sum_sink);
+        kl_ovrp_sp_sum_tick_at(base);
+        CK(g_nsum == 0);
+        kl_ovrp_sp_sum_tick_at(base + 6 * sec);
+        CK(g_nsum == 1 && !strncmp(g_sum[0], "[sp-sum] t=", 11) && strstr(g_sum[0], " CreateSpatialAnchor=") && strstr(g_sum[0], " GetSpaceUuid=")
+           && strstr(g_sum[0], "/0") && strlen(g_sum[0]) <= 900);
+        kl_ovrp_sp_sum_tick_at(base + 12 * sec);
+        CK(g_nsum == 1);                                   // nothing changed since the last line
+        kl_ovrp_sp_note_poll(-1); kl_ovrp_sp_note_poll(49); kl_ovrp_sp_note_poll(49);
+        kl_ovrp_sp_sum_tick_at(base + 14 * sec);
+        CK(g_nsum == 1);                                   // not yet 5 s after the last line
+        kl_ovrp_sp_sum_tick_at(base + 20 * sec);
+        CK(g_nsum == 2 && strstr(g_sum[1], " Poll=3 ev49=2") && !strstr(g_sum[1], "CreateSpatialAnchor"));
+        kl_ovrp_sp_sum_set_sink(NULL);
+    }
     puts(fails ? "FALLA" : "OK");
     snprintf(cmd, sizeof cmd, "rm -rf %s", g_dir); if (system(cmd)) {}
     return fails != 0;

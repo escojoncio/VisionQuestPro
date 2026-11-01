@@ -115,6 +115,8 @@ void kl_ovrp_hit(const char *name);
 // Budget of permanent diagnostic lines (spatial call/event traces, passthrough expiry detail): 1 while the session
 // total is under KL_OVRP_DIAG_LINES, else 0 (and one "[diag] budget exhausted" line when it runs out). Call once per line.
 int  kl_ovrp_diag_ok(void);
+// "[sp-sum]" periodic summary (kl_ovrp_spatial.c): one PollEvent call, with the type of the event it delivered (-1 = none).
+void kl_ovrp_sp_note_poll(int32_t type);
 // The shared handlers' bodies, for a function that wants the same answer
 // without a table entry of its own: returns 0 / -1004 after kl_ovrp_hit(name).
 ovrpResult kl_ovrp_ok(const char *name);

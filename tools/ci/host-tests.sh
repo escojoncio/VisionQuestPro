@@ -110,6 +110,10 @@ klepton_tests() {
   run t_ue4_thunk -Wno-unused-function -I"$T/newt" tests/t_ue4_thunk.c
   awk '/KL-TEST-BEGIN noophit/{p=1;next} /KL-TEST-END noophit/{p=0} p' runtime/kl_jni.c > "$T/newt/noophit.inc"
   run t_noop_hit -Wno-unused-function -I"$T/newt" tests/t_noop_hit.c -lpthread
+  awk '/KL-TEST-BEGIN permq/{p=1;next} /KL-TEST-END permq/{p=0} p' runtime/jni/kl_jni_window.c > "$T/newt/permq.inc"
+  run t_perm_queue -Wno-unused-function -I"$T/newt" tests/t_perm_queue.c -lpthread
+  awk '/KL-TEST-BEGIN spsum/{p=1;next} /KL-TEST-END spsum/{p=0} p' runtime/xr/kl_ovrp_spatial.c > "$T/newt/spsum.inc"
+  run t_sp_sum -Wno-unused-function -I"$T/newt" tests/t_sp_sum.c
   return $rc
 }
 

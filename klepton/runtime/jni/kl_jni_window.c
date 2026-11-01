@@ -749,50 +749,168 @@ static klj_val klj_SL_isVRLinkRunning(void *env, void *self, const klj_val *a, i
 
 // Activity.requestPermissions(String[], int) — the runtime prompt. On Android
 // this RETURNS IMMEDIATELY and the answer arrives later on the main thread, at
-// onRequestPermissionsResult; returning is therefore the whole of the
-// synchronous contract, and anything more would be this call pretending to be
-// the dialog.
+// onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults).
 //
-// There is no user to prompt, so the answer is the one checkSelfPermission just
-// gave — a prompt cannot turn "no such sensor" into yes. What must not happen is
-// silence: the guest asked a question, and a request that never resolves is a
-// wait that never ends. The delivery path is not invented
-// either, it is read off the guest's own SDLActivity bytecode:
-// onRequestPermissionsResult computes `grantResults[0] == PERMISSION_GRANTED`
-// and calls the static native nativePermissionResult(requestCode, granted). We
-// call that native with the same two values.
+// There is no user to prompt, so the answer is the one checkSelfPermission gives
+// (0 GRANTED / -1 DENIED) — a prompt cannot turn "no such sensor" into yes. What
+// must not happen is silence: the guest asked a question, and a request that
+// never resolves is a wait that never ends. So the request is queued here and
+// answered on the next kl_jni_drain_ui_tasks (the main-loop tick), never
+// re-entrantly from inside this call.
 //
-// Deliberately synchronous, where Android is not. Deferring it means a queue
-// entry kind that does not exist yet (g_ui_tasks holds Runnables and Messages),
-// and this caller — Valve's own code, which requested two permissions and
-// carried straight on — does not block on the answer. If a future caller does
-// re-enter badly, this is the line to move onto the main looper.
-static klj_val klj_Activity_requestPermissions(void *env, void *self, const klj_val *a, int n) {
-    (void)self;
-    klj_array *arr = n > 0 ? klj_arr(a[0].l) : NULL;
-    int32_t    code = n > 1 ? (int32_t)a[1].j : 0;
-    int        all_granted = 1;
+// The guest's Java is not run (no dex), so "onRequestPermissionsResult" reaches
+// it through what it does have: a native of that name on the activity's class
+// if it registered one, SDLActivity.nativePermissionResult(requestCode, granted)
+// (read off the guest's own SDLActivity bytecode: it computes
+// `grantResults[0] == PERMISSION_GRANTED`), or, for Unity's
+// UnityPermissions.requestUserPermissions, the IPermissionRequestCallbacks proxy.
+//
+// KL-TEST-BEGIN permq
+#define KLJ_PERM_MAX_REQ 8
+#define KLJ_PERM_MAX_N   16
+typedef struct {
+    void   *target;                 // the Activity the guest called, or NULL
+    void   *cb;                     // Unity's IPermissionRequestCallbacks proxy (pinned), or NULL
+    int32_t code;
+    int     n;
+    char   *perm[KLJ_PERM_MAX_N];   // strdup'd: the guest's jstrings die with its frame
+    int32_t res[KLJ_PERM_MAX_N];    // 0 GRANTED / -1 DENIED, as checkSelfPermission reports
+} klj_perm_req;
+static klj_perm_req    g_perm_q[KLJ_PERM_MAX_REQ];
+static unsigned        g_perm_qh, g_perm_qn;
+static pthread_mutex_t g_perm_mu = PTHREAD_MUTEX_INITIALIZER;
 
-    for (int i = 0; arr && arr->kind == 'L' && i < arr->len; i++) {
-        const char *p = klj_str(((void **)arr->data)[i]), *why = "";
-        int granted = klj_permission_state(p ? p : "", &why);
-        if (!granted) all_granted = 0;
-        KLJ_LOG("Activity.requestPermissions[%d] \"%s\" -> %s%s", i, p ? p : "",
-                granted ? "GRANTED" : "DENIED", why);
+// Queue one request with its results computed now. Returns 1 if queued.
+static int klj_perm_push(void *target, void *cb, int32_t code, const char *const *perms, int n) {
+    if (n < 0) n = 0;
+    if (n > KLJ_PERM_MAX_N) n = KLJ_PERM_MAX_N;
+    klj_perm_req r;
+    memset(&r, 0, sizeof r);
+    r.target = target; r.cb = cb; r.code = code; r.n = n;
+    for (int i = 0; i < n; i++) {
+        const char *p = perms[i] ? perms[i] : "", *why = "";
+        r.perm[i] = strdup(p);
+        r.res[i]  = klj_permission_state(p, &why) ? 0 : -1;
     }
+    // Queued across the caller's local frame: pinned BEFORE it is visible to the drain (which unpins
+    // in klj_perm_release), and unpinned again here if the queue is full.
+    if (target) kl_jni_pin_object(target);
+    if (cb) kl_jni_pin_object(cb);
+    pthread_mutex_lock(&g_perm_mu);
+    int ok = g_perm_qn < KLJ_PERM_MAX_REQ;
+    if (ok) {
+        g_perm_q[(g_perm_qh + g_perm_qn) % KLJ_PERM_MAX_REQ] = r;
+        g_perm_qn++;
+    }
+    pthread_mutex_unlock(&g_perm_mu);
+    if (!ok) {
+        if (target) kl_jni_unpin_object(target);
+        if (cb) kl_jni_unpin_object(cb);
+        for (int i = 0; i < n; i++) free(r.perm[i]);
+    }
+    return ok;
+}
 
-    // grantResults[0] is what SDLActivity actually reads, so a mixed request is
-    // reported by its first element — but only all-granted is answered true, to
-    // avoid a partial grant reading as a whole one.
-    void (*result)(void *, void *, int32_t, uint8_t) =
-        (void (*)(void *, void *, int32_t, uint8_t))
-            kl_jni_native("org/libsdl/app/SDLActivity", "nativePermissionResult", NULL);
-    KLJ_LOG("Activity.requestPermissions(code=%d) -> nativePermissionResult(%d, %s)%s",
-            code, code, all_granted ? "true" : "false",
-            result ? "" : " — SKIPPED, the guest registered no such native");
-    if (result) result(kl_jni_env(), kl_jni_class("org/libsdl/app/SDLActivity"), code,
-                       (uint8_t)(all_granted ? 1 : 0));
+// Take the oldest request (the caller finishes it with klj_perm_release). Returns 0 when empty.
+static int klj_perm_pop(klj_perm_req *out) {
+    pthread_mutex_lock(&g_perm_mu);
+    int ok = g_perm_qn > 0;
+    if (ok) {
+        *out = g_perm_q[g_perm_qh];
+        g_perm_qh = (g_perm_qh + 1) % KLJ_PERM_MAX_REQ;
+        g_perm_qn--;
+    }
+    pthread_mutex_unlock(&g_perm_mu);
+    return ok;
+}
+
+// A request taken off the queue is finished: drop the pins klj_perm_push took and free the names.
+static void klj_perm_release(klj_perm_req *r) {
+    if (r->target) kl_jni_unpin_object(r->target);
+    if (r->cb) kl_jni_unpin_object(r->cb);
+    for (int i = 0; i < r->n; i++) free(r->perm[i]);
+}
+// KL-TEST-END permq
+
+// Queue a request read from a guest String[] (shared with UnityPermissions.requestUserPermissions).
+int klj_perm_request(void *target, void *cb, int32_t code, void *string_array) {
+    klj_array *arr = klj_arr(string_array);
+    const char *perms[KLJ_PERM_MAX_N];
+    int n = 0;
+    for (int i = 0; arr && arr->kind == 'L' && i < arr->len && n < KLJ_PERM_MAX_N; i++) {
+        const char *p = klj_str(((void **)arr->data)[i]);
+        perms[n++] = p ? p : "";
+    }
+    int ok = klj_perm_push(target, cb, code, perms, n);
+    if (!ok) fprintf(stderr, "[perm] request code=%d n=%d dropped: queue full\n", code, n);
+    return ok;
+}
+
+// The main-loop tick: answer every queued request. Called from kl_jni_drain_ui_tasks,
+// on the pump thread, with no lock held (the guest's callback may request again).
+unsigned klj_drain_permissions(void) {
+    unsigned ran = 0;
+    klj_perm_req r;
+    while (klj_perm_pop(&r)) {
+        int all_granted = 1;
+        for (int i = 0; i < r.n; i++) {
+            if (r.res[i] != 0) all_granted = 0;
+            KLJ_LOG("requestPermissions[%d] \"%s\" -> %s", i, r.perm[i], r.res[i] == 0 ? "GRANTED" : "DENIED");
+        }
+        fprintf(stderr, "[perm] request code=%d n=%d -> callback\n", (int)r.code, r.n);
+        int delivered = 0;
+        if (r.cb) {
+            // Unity: callbacks.onPermissionGranted(String) / onPermissionDenied(String) per permission.
+            for (int i = 0; i < r.n; i++) {
+                klj_PushLocalFrame(NULL, 0);
+                void *args = klj_new_array('L', "java/lang/Object", 1);
+                void **ad = klj_arr_data(args, 1);
+                if (ad) ad[0] = kl_jni_new_string(r.perm[i]);
+                klj_proxy_invoke(r.cb, "com/unity3d/player/IPermissionRequestCallbacks",
+                                 r.res[i] == 0 ? "onPermissionGranted" : "onPermissionDenied",
+                                 "(Ljava/lang/String;)V", args);
+                klj_PopLocalFrame(NULL, NULL);
+            }
+            delivered = 1;
+        } else {
+            klj_object *to = r.target ? klj_as_object(r.target) : NULL;
+            void (*onres)(void *, void *, int32_t, void *, void *) =
+                to ? (void (*)(void *, void *, int32_t, void *, void *))
+                         kl_jni_native(to->cls, "onRequestPermissionsResult", "(I[Ljava/lang/String;[I)V")
+                   : NULL;
+            if (onres) {
+                klj_PushLocalFrame(NULL, 0);
+                void *strs = kl_jni_new_string_array((const char *const *)r.perm, r.n);
+                void *ints = klj_new_array('I', NULL, r.n);
+                int32_t *id = klj_arr_data(ints, r.n);
+                if (id) for (int i = 0; i < r.n; i++) id[i] = r.res[i];
+                onres(kl_jni_env(), r.target, r.code, strs, ints);
+                klj_PopLocalFrame(NULL, NULL);
+                delivered = 1;
+            }
+            // SDLActivity.onRequestPermissionsResult reads grantResults[0] only; a mixed request
+            // is answered true only when all were granted, so a partial grant never reads as whole.
+            void (*sdl)(void *, void *, int32_t, uint8_t) =
+                (void (*)(void *, void *, int32_t, uint8_t))
+                    kl_jni_native("org/libsdl/app/SDLActivity", "nativePermissionResult", NULL);
+            if (sdl) {
+                sdl(kl_jni_env(), kl_jni_class("org/libsdl/app/SDLActivity"), r.code,
+                    (uint8_t)(all_granted ? 1 : 0));
+                delivered = 1;
+            }
+        }
+        if (!delivered)
+            KLJ_LOG("requestPermissions(code=%d): the guest registered no receiver — nothing to call", (int)r.code);
+        klj_perm_release(&r);
+        ran++;
+    }
+    return ran;
+}
+
+static klj_val klj_Activity_requestPermissions(void *env, void *self, const klj_val *a, int n) {
     (void)env;
+    int32_t code = n > 1 ? (int32_t)a[1].j : 0;
+    klj_perm_request(self, NULL, code, n > 0 ? a[0].l : NULL);
     return (klj_val){.j = 0};
 }
 

@@ -348,6 +348,10 @@ klj_val klj_Display_getRefreshRate(void *env, void *self, const klj_val *a, int 
 int      klj_ue4_thunk_answer(const klj_wanted *w, klj_val *out);
 klj_val klj_UnityPlayer_loadLibrary(void *env, void *self, const klj_val *a, int n);
 unsigned klj_drain_soft_input(void);
+// kl_jni_window.c: Activity.requestPermissions / UnityPermissions.requestUserPermissions answered
+// asynchronously (queue + drain on the main-loop tick, from kl_jni_drain_ui_tasks).
+int      klj_perm_request(void *target, void *cb, int32_t code, void *string_array);
+unsigned klj_drain_permissions(void);
 // kl_jni_hostvideo.c: deliver the SurfaceTexture.onFrameAvailable callbacks announced since the last
 // drain, on the calling (game / UI) thread. Called from kl_jni_drain_ui_tasks.
 void klhv_drain(void);

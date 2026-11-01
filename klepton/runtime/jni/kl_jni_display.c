@@ -256,9 +256,19 @@ static klj_val klj_UnityPlayer_requestUserAuthorization(void *env, void *self,
 // callback would need it invoked, and this is where that would go.
 static klj_val klj_UnityPermissions_requestUserPermissions(void *env, void *self,
                                                            const klj_val *a, int n) {
-    (void)env; (void)self; (void)a; (void)n;
+    (void)env; (void)self;
     KLJ_LOG("UnityPermissions.requestUserPermissions(...) — no user to ask; "
-            "state is whatever hasUserAuthorizedPermission reports");
+            "answered on the next tick through the callbacks, as hasUserAuthorizedPermission reports");
+    // Static, signature (UnityPlayerActivity, String[], IPermissionRequestCallbacks)V: a[0] activity, a[1] the
+    // permissions, a[2] the callbacks proxy (same layout as hasUserAuthorizedPermission above, whose a[1] is its String).
+    // requestCode is Unity's own, unused here.
+    {
+        klj_array *pa = n > 1 ? klj_arr(a[1].l) : NULL;
+        static int said;
+        if (!said++)
+            fprintf(stderr, "[perm] unity request n=%d cb=%p\n", pa ? pa->len : -1, n > 2 ? a[2].l : NULL);
+    }
+    if (n > 2 && a[2].l) klj_perm_request(NULL, a[2].l, 0, a[1].l);
     return (klj_val){.l = NULL};
 }
 

@@ -44,8 +44,11 @@
 #define ULL(x) ((unsigned long long)(x))
 #define SPT(fn, ret, ...) do { \
         static unsigned _c; \
+        static sp_stat _s; \
+        int32_t _r = (int32_t)(ret); \
         unsigned _k = __atomic_add_fetch(&_c, 1, __ATOMIC_RELAXED); \
-        if (_k <= SP_PER_FN && kl_ovrp_diag_ok()) sp_emit(fn, _k, ret, __VA_ARGS__); \
+        sp_note(&_s, fn, _r); \
+        if (_k <= SP_PER_FN && kl_ovrp_diag_ok()) sp_emit(fn, _k, _r, __VA_ARGS__); \
     } while (0)
 static void sp_emit(const char *fn, unsigned k, int32_t ret, const char *fmt, ...) __attribute__((format(printf, 4, 5)));
 static void sp_emit(const char *fn, unsigned k, int32_t ret, const char *fmt, ...) {
@@ -56,6 +59,137 @@ static void sp_emit(const char *fn, unsigned k, int32_t ret, const char *fmt, ..
     va_end(ap);
     fprintf(stderr, "  [sp-call] fn=%s n=%u %s ret=%d\n", fn, k, b, (int)ret);
 }
+
+// ---- [sp-sum]: periodic summary, outside the [sp-call]/[sp-ev] budgets ---------------------------------------
+// The per-call traces stop after SP_PER_FN calls per function and KL_OVRP_DIAG_LINES lines in all, so a long MR
+// session goes dark. Every SPT call site also bumps a counter and keeps the last return value; every 5 s, if a
+// spatial function was called or an event delivered since the last line, ONE line is written (not counted in the
+// budget):  [sp-sum] t=<s>s Fn=<calls>/<lastret> ... Poll=<PollEvent calls> evN=<events of type N delivered> ...
+// (calls and events are totals since the start; only what changed since the last line is listed, except Poll).
+// A line longer than SP_SUM_LINE is split in several lines of the same instant.
+#define SP_SUM_EVERY_NS 5000000000ull
+#define SP_SUM_LINE 900
+#define SP_SUM_MAXFN 96
+#define SP_SUM_MAXEV 129                   // event types 0..127, [128] = anything else
+typedef struct { const char *name; unsigned calls, rep; int32_t last; int reg; } sp_stat;
+
+// KL-TEST-BEGIN spsum
+// One "Fn=calls/lastret" token; "ovrp_" is dropped from the name to keep the line short.
+static void sp_sum_tok_fn(char *buf, size_t cap, const char *name, unsigned calls, int32_t last) {
+    if (strncmp(name, "ovrp_", 5) == 0) name += 5;
+    snprintf(buf, cap, "%s=%u/%d", name, calls, (int)last);
+}
+// Joins the tokens as "[sp-sum] t=<t>s tok tok ..." and hands each finished line (no newline) to emit; a line
+// is closed before it would pass `maxlen` characters and the next one repeats the prefix. A token is never cut.
+static void sp_sum_build(double t, const char *const *tok, unsigned n, size_t maxlen,
+                         void (*emit)(const char *line, void *ctx), void *ctx) {
+    char line[1024], pre[48];
+    int pl = snprintf(pre, sizeof pre, "[sp-sum] t=%.0fs", t);
+    size_t cap = maxlen < sizeof line - 1 ? maxlen : sizeof line - 1;
+    size_t len = (size_t)pl;
+    unsigned in_line = 0;
+    memcpy(line, pre, len + 1);
+    for (unsigned i = 0; i < n; i++) {
+        size_t tl = strlen(tok[i]);
+        if (in_line && len + 1 + tl > cap) {
+            emit(line, ctx);
+            memcpy(line, pre, (size_t)pl + 1);
+            len = (size_t)pl;
+            in_line = 0;
+        }
+        if (len + 1 + tl > sizeof line - 1) continue;      // a single token larger than the buffer: dropped
+        line[len++] = ' ';
+        memcpy(line + len, tok[i], tl + 1);
+        len += tl;
+        in_line++;
+    }
+    if (in_line) emit(line, ctx);
+}
+// KL-TEST-END spsum
+
+static sp_stat *volatile g_sp_reg[SP_SUM_MAXFN];
+static unsigned g_sp_nreg;
+static unsigned g_sp_poll, g_sp_ev[SP_SUM_MAXEV], g_sp_ev_rep[SP_SUM_MAXEV];
+static uint64_t g_sp_t0, g_sp_due;
+static void (*g_sp_sink)(const char *line);                // tests; NULL = stderr
+
+static void sp_sum_line(const char *line, void *ctx) {
+    (void)ctx;
+    if (g_sp_sink) g_sp_sink(line); else fprintf(stderr, "%s\n", line);
+}
+
+// The tick: emits the line when 5 s have passed since the last one and something changed. now_ns is any monotonic
+// clock; the first call only fixes t0. Safe from any thread (one caller wins each window).
+void kl_ovrp_sp_sum_tick_at(uint64_t now_ns) {
+    uint64_t due = __atomic_load_n(&g_sp_due, __ATOMIC_ACQUIRE);
+    if (!due) {
+        uint64_t zero = 0;
+        if (__atomic_compare_exchange_n(&g_sp_due, &zero, now_ns + SP_SUM_EVERY_NS, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
+            g_sp_t0 = now_ns;
+        return;
+    }
+    if (now_ns < due || !__atomic_compare_exchange_n(&g_sp_due, &due, now_ns + SP_SUM_EVERY_NS, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
+        return;
+    static char tokb[SP_SUM_MAXFN + SP_SUM_MAXEV + 1][56];
+    const char *tok[SP_SUM_MAXFN + SP_SUM_MAXEV + 1];
+    static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;  // tokb is shared; the window is already won, this is only the buffer
+    pthread_mutex_lock(&mu);
+    unsigned n = 0, changed = 0;
+    unsigned nreg = __atomic_load_n(&g_sp_nreg, __ATOMIC_ACQUIRE);
+    for (unsigned i = 0; i < nreg && i < SP_SUM_MAXFN; i++) {
+        sp_stat *s = g_sp_reg[i];
+        if (!s) continue;
+        unsigned c = __atomic_load_n(&s->calls, __ATOMIC_RELAXED);
+        if (c == s->rep) continue;
+        s->rep = c;
+        sp_sum_tok_fn(tokb[n], sizeof tokb[n], s->name, c, __atomic_load_n(&s->last, __ATOMIC_RELAXED));
+        tok[n] = tokb[n]; n++; changed++;
+    }
+    unsigned evfirst = n;
+    for (unsigned t = 0; t < SP_SUM_MAXEV; t++) {
+        unsigned c = __atomic_load_n(&g_sp_ev[t], __ATOMIC_RELAXED);
+        if (c == g_sp_ev_rep[t]) continue;
+        g_sp_ev_rep[t] = c;
+        if (t == SP_SUM_MAXEV - 1) snprintf(tokb[n], sizeof tokb[n], "evOther=%u", c);
+        else snprintf(tokb[n], sizeof tokb[n], "ev%u=%u", t, c);
+        tok[n] = tokb[n]; n++; changed++;
+    }
+    if (changed) {
+        // Poll goes first among the events so a split line still carries it.
+        snprintf(tokb[n], sizeof tokb[n], "Poll=%u", __atomic_load_n(&g_sp_poll, __ATOMIC_RELAXED));
+        tok[n] = tokb[n];
+        const char *poll = tok[n];
+        for (unsigned i = n; i > evfirst; i--) tok[i] = tok[i - 1];
+        tok[evfirst] = poll;
+        n++;
+        sp_sum_build((double)(now_ns - g_sp_t0) / 1e9, tok, n, SP_SUM_LINE, sp_sum_line, NULL);
+    }
+    pthread_mutex_unlock(&mu);
+}
+static void sp_sum_tick(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    kl_ovrp_sp_sum_tick_at((uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec);
+}
+// Called by every SPT call site: count + last return, and register the site on its first call.
+static void sp_note(sp_stat *s, const char *name, int32_t ret) {
+    __atomic_add_fetch(&s->calls, 1, __ATOMIC_RELAXED);
+    __atomic_store_n(&s->last, ret, __ATOMIC_RELAXED);
+    int zero = 0;
+    if (__atomic_compare_exchange_n(&s->reg, &zero, 1, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+        s->name = name;
+        unsigned i = __atomic_fetch_add(&g_sp_nreg, 1, __ATOMIC_ACQ_REL);
+        if (i < SP_SUM_MAXFN) __atomic_store_n(&g_sp_reg[i], s, __ATOMIC_RELEASE);
+    }
+    sp_sum_tick();
+}
+// ovrp_PollEvent / ovrp_PollEvent2 (kl_ovrp.c): one call, and the type of the event it delivered (-1 = queue empty).
+void kl_ovrp_sp_note_poll(int32_t type) {
+    __atomic_add_fetch(&g_sp_poll, 1, __ATOMIC_RELAXED);
+    if (type >= 0) __atomic_add_fetch(&g_sp_ev[type < 128 ? type : 128], 1, __ATOMIC_RELAXED);
+    sp_sum_tick();
+}
+void kl_ovrp_sp_sum_set_sink(void (*sink)(const char *line)) { g_sp_sink = sink; }
 
 // ---- ovrp constants ---------------------------------------------------------
 enum {

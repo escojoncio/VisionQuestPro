@@ -2222,6 +2222,7 @@ static uint64_t klovrp_PollEvent2(uint32_t *type, void **data) {
     if (!type || !data) return OVRP_FAIL_INVALID_PARAM;
     int32_t t = 0;
     int pn = klovrp_ev_pop(&t, g_ev_cur);
+    kl_ovrp_sp_note_poll(pn < 0 ? -1 : t);
     if (pn < 0) return OVRP_FAIL_OPERATION;   // empty
     klovrp_ev_log_polled("PollEvent2", t, g_ev_cur, pn);
     *type = (uint32_t)t;
@@ -2268,6 +2269,7 @@ static uint64_t klovrp_PollEvent(void *buf) {
     uint8_t tmp[KLOVRP_EV_MAX];
     int32_t t = 0;
     int n = klovrp_ev_pop(&t, tmp);
+    kl_ovrp_sp_note_poll(n < 0 ? -1 : t);
     if (n < 0) return OVRP_FAIL_OPERATION;
     klovrp_ev_log_polled("PollEvent", t, tmp, n);
     size_t cap = klovrp_pollevent_cap();
