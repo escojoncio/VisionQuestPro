@@ -151,6 +151,14 @@ static void del_locked(ent *e) {
     ent_free(e);
     *e = g_e[--g_n];
 }
+// Synthetic box-room planes (kl_spatial_synth_room) carry this uuid prefix; real ARKit data replaces them.
+static int is_synth(kl_uuid id) { return memcmp(id.b, "KLSYNTH", 7) == 0; }
+static void purge_synth_locked(void) {
+    for (uint32_t i = 0; i < g_n; ) {
+        if (g_e[i].kind == KLSP_PLANE && is_synth(g_e[i].id)) del_locked(&g_e[i]);
+        else i++;
+    }
+}
 static ent *upsert_locked(int kind, kl_uuid id) {
     ent *e = find_locked(id);
     if (e) return e->kind == kind ? e : NULL;       // a uuid never changes kind
@@ -281,6 +289,13 @@ void kl_spatial_plane(kl_uuid id, int removed, const float m4[16], float w, floa
     if (e) {
         memcpy(e->m, m4, sizeof e->m);
         e->w = w; e->h = h; e->label = label; e->tracked = 1;
+        if (!is_synth(id)) {        // real planes replace the synthetic room once they hold a floor and 3+ walls
+            int fl = 0, wl = 0;
+            for (uint32_t i = 0; i < g_n; i++) if (g_e[i].kind == KLSP_PLANE && !is_synth(g_e[i].id)) {
+                fl += g_e[i].label == KLSP_LBL_FLOOR; wl += g_e[i].label == KLSP_LBL_WALL;
+            }
+            if (fl >= 1 && wl >= 3) purge_synth_locked();
+        }
         free(e->poly); e->poly = NULL; e->npoly = 0;
         if (poly2d && npoly >= 3 && npoly <= KLSP_POLY_MAX) {
             e->poly = (float *)malloc((size_t)npoly * 2 * sizeof(float));
@@ -322,6 +337,7 @@ void kl_spatial_room(kl_uuid id, int removed, const kl_uuid *plane_ids, uint32_t
     pthread_mutex_lock(&g_mu);
     ent *e = find_locked(id);
     if (removed) { if (e && e->kind == KLSP_ROOM) del_locked(e); pthread_mutex_unlock(&g_mu); return; }
+    purge_synth_locked();           // a real room replaces the synthetic one
     e = upsert_locked(KLSP_ROOM, id);
     if (e) {
         free(e->mem); e->mem = NULL; e->nmem = 0;
@@ -501,9 +517,12 @@ static int room_info_locked(kl_uuid id, kl_uuid *floor, kl_uuid *ceiling,
         restrict_to_room = any;
     }
     float wx[1024], wz[1024]; uint32_t wi[1024];
+    int has_synth = 0;
+    for (uint32_t i = 0; i < g_n; i++) if (g_e[i].kind == KLSP_PLANE && is_synth(g_e[i].id)) has_synth = 1;
     for (uint32_t i = 0; i < g_n; i++) {
         ent *p = &g_e[i];
         if (p->kind != KLSP_PLANE) continue;
+        if (!room && !is_synth(p->id) && has_synth && (p->label == KLSP_LBL_FLOOR || p->label == KLSP_LBL_CEILING || p->label == KLSP_LBL_WALL)) continue;
         if (restrict_to_room) {
             int in = 0;
             for (uint32_t k = 0; k < room->nmem; k++) if (uuid_eq(room->mem[k], p->id)) { in = 1; break; }
@@ -698,5 +717,52 @@ int kl_spatial_raycast(const float o[3], const float d[3], float maxd, float *hi
     if (hit_pos) { hit_pos[0] = o[0] + dir[0] * best; hit_pos[1] = o[1] + dir[1] * best; hit_pos[2] = o[2] + dir[2] * best; }
     if (hit_nrm) { hit_nrm[0] = bn[0]; hit_nrm[1] = bn[1]; hit_nrm[2] = bn[2]; }
     if (hit_id) *hit_id = bid;
+    return 1;
+}
+
+// ---- synthetic box room (no ARKit data: Space Setup must still end with a room) ----
+// Floor at the tracking floor, ceiling 2.5 m, four walls of a 4x4 m box centred on (hx, hz) (guest space).
+// Planes use the ARKit frame (normal +Y; walls: local Z points down so Meta +Y is up, see kl_spatial.h).
+// Returns 1 when a synthetic room is present now, 0 when real planes/rooms exist (they win, nothing is added).
+int kl_spatial_synth_room(float hx, float hz) {
+    const float W = 4.0f, H = 2.5f, oy = kl_ovrp_guest_origin_y(), fy = -oy;
+    pthread_mutex_lock(&g_mu);
+    int synth = 0;
+    for (uint32_t i = 0; i < g_n; i++) {
+        if (g_e[i].kind == KLSP_ROOM) { pthread_mutex_unlock(&g_mu); return 0; }
+        if (g_e[i].kind == KLSP_PLANE) { if (!is_synth(g_e[i].id)) { pthread_mutex_unlock(&g_mu); return 0; } synth++; }
+    }
+    if (synth == 6) { pthread_mutex_unlock(&g_mu); return 1; }
+    purge_synth_locked();                              // incomplete set: rebuild
+    // inward normals: +Z, -X, -Z, +X; tangent t = (nz, 0, -nx)
+    static const float nn[4][2] = {{0, 1}, {-1, 0}, {0, -1}, {1, 0}};
+    for (int k = 0; k < 6; k++) {
+        float g[16] = {0};
+        g[15] = 1;
+        int label; float w = W, h = H;
+        if (k < 2) {                                   // 0 floor (normal up), 1 ceiling (normal down)
+            label = k ? KLSP_LBL_CEILING : KLSP_LBL_FLOOR; h = W;
+            g[0] = 1; g[5] = k ? -1.0f : 1.0f; g[10] = k ? -1.0f : 1.0f;
+            g[12] = hx; g[13] = fy + (k ? H : 0.0f); g[14] = hz;
+        } else {
+            label = KLSP_LBL_WALL;
+            float nx = nn[k - 2][0], nz = nn[k - 2][1];
+            g[0] = nz; g[2] = -nx;                     // X = tangent
+            g[4] = nx; g[6] = nz;                      // Y = inward normal
+            g[9] = -1.0f;                              // Z = down
+            g[12] = hx - nx * W * 0.5f; g[13] = fy + H * 0.5f; g[14] = hz - nz * W * 0.5f;
+        }
+        float a[16], ri[16];
+        g[13] += oy;                                   // as kl_spatial_from_guest, already under the lock
+        m_rigid_inv(g_rc, ri);
+        m_mul(ri, g, a);
+        kl_uuid id = k_zero;
+        memcpy(id.b, "KLSYNTH", 7); id.b[8] = (uint8_t)k;
+        ent *e = upsert_locked(KLSP_PLANE, id);
+        if (!e) { purge_synth_locked(); pthread_mutex_unlock(&g_mu); return 0; }
+        memcpy(e->m, a, sizeof e->m);
+        e->w = w; e->h = h; e->label = label; e->tracked = 1;
+    }
+    pthread_mutex_unlock(&g_mu);
     return 1;
 }

@@ -16,6 +16,10 @@ float kl_ovrp_guest_origin_y(void) { return g_oy; }
 static char g_dir[256];
 const char *kl_jni_files_dir(void) { return g_dir; }
 void kl_ovrp_hit(const char *n) { (void)n; }
+static float g_head[3] = {1.5f, 1.6f, -0.5f};
+void kl_ovrp_get_head_pose(float *px, float *py, float *pz, float *qx, float *qy, float *qz, float *qw) {
+    *px = g_head[0]; *py = g_head[1]; *pz = g_head[2]; *qx = *qy = *qz = 0; *qw = 1;
+}
 int kl_ovrp_diag_ok(void) { return 1; }
 ovrpResult kl_ovrp_ok(const char *n) { (void)n; return 0; }
 ovrpResult kl_ovrp_unsupported(const char *n) { (void)n; return -1004; }
@@ -91,10 +95,65 @@ int main(void) {
     kl_spatial_set_available(1, 1, 0, 1);
     kl_spatial_host h = {h_create, h_remove}; kl_spatial_set_host(&h);
     float m[16];
+
+    // --- capture with no plane/room data: synthetic room, event 100 SUCCESS, room query finds floor + walls
+    setenv("KL_SPATIAL_CAPTURE_TIMEOUT_MS", "300", 1);
+    g_nev = 0;
+    CK(((int32_t(*)(const void *, uint64_t *))F("ovrp_RequestSceneCapture"))(&info, &req) == 0 && req);
+    for (int i = 0; i < 40 && g_nev == 0; i++) usleep(100000);
+    CK(g_nev == 1 && g_ev[0].type == 100);
+    { int32_t r100 = -1; memcpy(&r100, g_ev[0].d + 8, 4); CK(r100 == 0); }
+    {
+        typedef struct { int32_t qt, mx; double to; int32_t loc, act, ft; void *ids; int32_t nids; void *comps; int32_t ncomps; } qi0;
+        int32_t w6[1] = {6}; qi0 q0 = {0, 100, 0, 1, 0, 2, NULL, 0, w6, 1};
+        struct { uint64_t space; kl_uuid u; } r0[16]; int32_t c0 = -1; uint64_t rq0 = 0;
+        CK(((int32_t(*)(const qi0 *, uint64_t *))F("ovrp_QuerySpaces"))(&q0, &rq0) == 0);
+        CK(((int32_t(*)(uint64_t *, int32_t, int32_t *, void *))F("ovrp_RetrieveSpaceQueryResults"))(&rq0, 16, &c0, r0) == 0 && c0 >= 1);
+        uint64_t rm0 = r0[0].space;
+        typedef struct { kl_uuid floor, ceil; int32_t wcap, wcount; kl_uuid *walls; } rl0;
+        rl0 l0; kl_uuid w0[8]; memset(&l0, 0, sizeof l0); l0.wcap = 8; l0.walls = w0;
+        CK(((int32_t(*)(uint64_t *, rl0 *))F("ovrp_GetSpaceRoomLayout"))(&rm0, &l0) == 0 && l0.wcount == 4);
+        float fw, fh2, gm[16]; int lb;
+        CK(kl_spatial_plane_info(l0.floor, &fw, &fh2, &lb, 0, NULL, NULL) && lb == KLSP_LBL_FLOOR);
+        float cx = 0, cz = 0; int nw = 0;                       // 4 walls around the head XZ
+        for (uint32_t i = 0; i < kl_spatial_count(KLSP_PLANE); i++) { kl_uuid pid; int l2;
+            if (kl_spatial_get(KLSP_PLANE, i, &pid, gm) && kl_spatial_plane_info(pid, NULL, NULL, &l2, 0, NULL, NULL) && l2 == KLSP_LBL_WALL) { cx += gm[12]; cz += gm[14]; nw++; } }
+        CK(nw == 4 && fabsf(cx / 4 - 1.5f) < 1e-4f && fabsf(cz / 4 + 0.5f) < 1e-4f);
+
+        // component status: Set(enable) is stored per (space, component); unsupported stays off
+        typedef int32_t (*fset)(uint64_t *, int32_t, int32_t, double, uint64_t *);
+        typedef int32_t (*fget)(uint64_t *, int32_t, int32_t *, int32_t *);
+        int32_t en = -1, pe = -1; uint64_t sr = 0, rmh = rm0;
+        CK(((fget)F("ovrp_GetSpaceComponentStatus"))(&rmh, 6, &en, &pe) == 0 && en == 1);
+        g_nev = 0;
+        CK(((fset)F("ovrp_SetSpaceComponentStatus"))(&rmh, 6, 0, 0.0, &sr) == 0 && g_nev == 1 && g_ev[0].type == 50);
+        { int32_t ee; memcpy(&ee, g_ev[0].d + 44, 4); CK(ee == 0); }
+        CK(((fget)F("ovrp_GetSpaceComponentStatus"))(&rmh, 6, &en, &pe) == 0 && en == 0);
+        CK(((fget)F("ovrp_GetSpaceComponentStatus"))(&rmh, 7, &en, &pe) == 0 && en == 1);   // other component untouched
+        g_nev = 0;
+        CK(((fset)F("ovrp_SetSpaceComponentStatus"))(&rmh, 6, 1, 0.0, &sr) == 0 && g_nev == 1);
+        { int32_t ee; memcpy(&ee, g_ev[0].d + 44, 4); CK(ee == 1); }
+        CK(((fget)F("ovrp_GetSpaceComponentStatus"))(&rmh, 6, &en, &pe) == 0 && en == 1);
+        CK(((fset)F("ovrp_SetSpaceComponentStatus"))(&rmh, 3, 1, 0.0, &sr) == 0);          // Bounded2D on a room: unsupported
+        CK(((fget)F("ovrp_GetSpaceComponentStatus"))(&rmh, 3, &en, &pe) == 0 && en == 0);
+    }
+
+    // one real TABLE plane must not evict the synthetic room: layout stays floor + 4 walls
+    horiz(m, 0.5f, 0.75f, -1, 0); kl_spatial_plane(U16(3), 0, m, 1.2f, 0.8f, KLSP_LBL_TABLE, NULL, 0);
+    CK(kl_spatial_count(KLSP_PLANE) == 7);
+    {
+        kl_uuid rid = {{0}}, fl, ce, ws[8]; uint32_t nw = 0;
+        CK(kl_spatial_count(KLSP_ROOM) == 1 && kl_spatial_get(KLSP_ROOM, 0, &rid, NULL));
+        CK(kl_spatial_room_info(rid, &fl, &ce, 8, ws, &nw, 0, NULL, NULL) && nw == 4 && memcmp(fl.b, "KLSYNTH", 7) == 0);
+    }
     horiz(m, 0, 0, 0, 0); kl_spatial_plane(U16(1), 0, m, 4, 5, KLSP_LBL_FLOOR, NULL, 0);
     horiz(m, 0, 2.6f, 0, 1); kl_spatial_plane(U16(2), 0, m, 4, 5, KLSP_LBL_CEILING, NULL, 0);
     horiz(m, 0.5f, 0.75f, -1, 0); kl_spatial_plane(U16(3), 0, m, 1.2f, 0.8f, KLSP_LBL_TABLE, NULL, 0);
-    for (int i = 0; i < 4; i++) { ident(m, (i % 2 ? (i == 1 ? 2 : -2) : 0), 5.0f, (i % 2 ? 0 : (i == 0 ? -2.5f : 2.5f))); kl_spatial_plane(U16(10 + i), 0, m, 4, 2.6f, KLSP_LBL_WALL, NULL, 0); }
+    for (int i = 0; i < 4; i++) {
+        ident(m, (i % 2 ? (i == 1 ? 2 : -2) : 0), 5.0f, (i % 2 ? 0 : (i == 0 ? -2.5f : 2.5f))); kl_spatial_plane(U16(10 + i), 0, m, 4, 2.6f, KLSP_LBL_WALL, NULL, 0);
+        if (i == 1) CK(kl_spatial_count(KLSP_PLANE) == 11);     // real floor + 2 walls: synthetic set (6) still there
+        if (i == 2) CK(kl_spatial_count(KLSP_PLANE) == 6);      // real floor + 3 walls: synthetic purged
+    }
     CK(kl_spatial_count(KLSP_PLANE) == 7);
     CK(kl_spatial_count(KLSP_ROOM) == 1);                          // synthetic
 

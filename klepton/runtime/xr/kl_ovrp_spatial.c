@@ -294,10 +294,12 @@ static ovrpResult klovrp_CreateSpatialAnchor(const ci_anchor *info, uint64_t *re
     return r;
 }
 
+static void cs_clear(uint64_t space);
 SP_IMPL sp_DestroySpace(uint64_t space) {
     kl_ovrp_hit("ovrp_DestroySpace");
     kl_uuid id; int kind = 0;
     if (!space_of(space, &id, &kind)) return KLOVRP_SUCCESS;       // already gone: nothing to free
+    cs_clear(kl_spatial_handle_for(id));
     // The handle is a stable name for a uuid; there is nothing to release. An
     // anchor that was never saved dies with its handle (Quest: anchors are
     // ephemeral until SaveSpace); a saved one stays until EraseSpace.
@@ -405,6 +407,7 @@ SP_IMPL sp_EraseSpace(uint64_t space, int32_t location, uint64_t *req_out) {
     if (!space_of(space, &id, &kind)) return KLOVRP_INVALID_PARAM;
     uint64_t req = kl_spatial_new_request();
     *req_out = req;
+    cs_clear(kl_spatial_handle_for(id));
     return erase_one(id, kind, location, req);
 }
 static ovrpResult klovrp_EraseSpace(uint64_t space, int32_t location, uint64_t *req_out) {
@@ -541,13 +544,44 @@ static ovrpResult klovrp_EnumerateSpaceSupportedComponents(uint64_t space, uint3
     SPT("ovrp_EnumerateSpaceSupportedComponents", r, "space=0x%llx cap=%u count=%u", ULL(sp_h(space)), cap, count ? *count : 0u);
     return r;
 }
+// Requested enabled state per (space handle, component), set by ovrp_SetSpaceComponentStatus. Ring of 256.
+#define CS_MAX 256
+static struct { uint64_t space; int32_t type; int32_t on; } g_cs[CS_MAX];
+static unsigned g_cs_n, g_cs_next;
+static void cs_clear(uint64_t space) {
+    if (!space) return;
+    pthread_mutex_lock(&g_mu);
+    for (unsigned i = 0; i < g_cs_n; ) {
+        if (g_cs[i].space == space) g_cs[i] = g_cs[--g_cs_n]; else i++;
+    }
+    if (g_cs_next >= g_cs_n) g_cs_next = 0;
+    pthread_mutex_unlock(&g_mu);
+}
+static int cs_get(uint64_t space, int32_t type, int32_t *on) {
+    int r = 0;
+    if (!space) return 0;
+    pthread_mutex_lock(&g_mu);
+    for (unsigned i = 0; i < g_cs_n; i++) if (g_cs[i].space == space && g_cs[i].type == type) { *on = g_cs[i].on; r = 1; break; }
+    pthread_mutex_unlock(&g_mu);
+    return r;
+}
+static void cs_set(uint64_t space, int32_t type, int32_t on) {
+    if (!space) return;
+    pthread_mutex_lock(&g_mu);
+    unsigned i;
+    for (i = 0; i < g_cs_n; i++) if (g_cs[i].space == space && g_cs[i].type == type) break;
+    if (i == g_cs_n) { if (g_cs_n < CS_MAX) g_cs_n++; else i = g_cs_next++ % CS_MAX; if (i >= g_cs_n) i = g_cs_n - 1; }
+    g_cs[i].space = space; g_cs[i].type = type; g_cs[i].on = on;
+    pthread_mutex_unlock(&g_mu);
+}
 SP_IMPL sp_GetSpaceComponentStatus(uint64_t space, int32_t type, ovrpBool *enabled, ovrpBool *pending) {
     kl_ovrp_hit("ovrp_GetSpaceComponentStatus");
     if (enabled) *enabled = 0;
     if (pending) *pending = 0;
     kl_uuid id; int kind;
     if (!space_of(space, &id, &kind)) return KLOVRP_INVALID_PARAM;
-    if (enabled) *enabled = comp_supported(id, kind, type) ? 1 : 0;      // everything supported is always on
+    int32_t on = 0;
+    if (enabled) *enabled = comp_supported(id, kind, type) ? (cs_get(kl_spatial_handle_for(id), type, &on) ? on : 1) : 0;
     return KLOVRP_SUCCESS;
 }
 static ovrpResult klovrp_GetSpaceComponentStatus(uint64_t space, int32_t type, ovrpBool *enabled, ovrpBool *pending) {
@@ -567,9 +601,9 @@ SP_IMPL sp_SetSpaceComponentStatus(uint64_t space, int32_t type, ovrpBool enable
     int sup = comp_supported(id, kind, type);
     ev_status e; memset(&e, 0, sizeof e);
     e.requestId = req; e.space = kl_spatial_handle_for(id); e.uuid = id; e.component = type;
-    e.result = sup ? KLOVRP_SUCCESS : KLOVRP_UNSUPPORTED;   // what is supported is always on; `enable` cannot change that
-    (void)enable;
-    e.enabled = sup ? 1 : 0;
+    e.result = sup ? KLOVRP_SUCCESS : KLOVRP_UNSUPPORTED;
+    if (sup) cs_set(e.space, type, enable ? 1 : 0);
+    e.enabled = sup && enable ? 1 : 0;
     push(EV_SET_STATUS, &e, sizeof e);
     *req_out = req;
     return KLOVRP_SUCCESS;
@@ -890,16 +924,27 @@ static ovrpResult klovrp_GetSpaceTriangleMesh(uint64_t space, int32_t vcap, int3
 // query sees more than one wall; or a timeout, with whatever there is.
 static void *capture_thread(void *arg) {
     uint64_t req = (uint64_t)(uintptr_t)arg;
-    const int step_ms = 100, timeout_ms = 8000, settle_ms = 1500;
+    const int step_ms = 100, settle_ms = 1500;
+    int timeout_ms = 8000;
+    const char *tv = getenv("KL_SPATIAL_CAPTURE_TIMEOUT_MS");      // test hook; default unchanged
+    if (tv && atoi(tv) > 0) timeout_ms = atoi(tv);
     int waited = 0;
     while (waited < timeout_ms && kl_spatial_count(KLSP_PLANE) == 0 && kl_spatial_count(KLSP_ROOM) == 0
            && (kl_spatial_available(KLSP_CAP_PLANES) || kl_spatial_available(KLSP_CAP_ROOM))) {
         usleep(step_ms * 1000); waited += step_ms;
     }
     if (kl_spatial_count(KLSP_PLANE) > 0) usleep(settle_ms * 1000);
+    // Quest's Space Setup always ends with a room: with no ARKit planes/room, hand out a synthetic box around the head.
+    int synth = 0;
+    if (kl_spatial_count(KLSP_PLANE) == 0 && kl_spatial_count(KLSP_ROOM) == 0) {
+        float hp[3], hq[4];
+        kl_ovrp_get_head_pose(&hp[0], &hp[1], &hp[2], &hq[0], &hq[1], &hq[2], &hq[3]);
+        synth = kl_spatial_synth_room(hp[0], hp[2]);
+        if (synth) fprintf(stderr, "  [sp] capture synthetic room\n");
+    }
     ev_simple e; memset(&e, 0, sizeof e);
     e.requestId = req;
-    e.result = (kl_spatial_available(KLSP_CAP_PLANES) || kl_spatial_available(KLSP_CAP_ROOM) || kl_spatial_count(KLSP_PLANE))
+    e.result = (synth || kl_spatial_available(KLSP_CAP_PLANES) || kl_spatial_available(KLSP_CAP_ROOM) || kl_spatial_count(KLSP_PLANE))
                    ? KLOVRP_SUCCESS : KLOVRP_UNSUPPORTED;
     push(EV_SCENE_CAPTURE, &e, sizeof e);
     fprintf(stderr, "  [ovrp-spatial] scene capture %llu complete after %d ms: %u planes, %u rooms, %u meshes\n",

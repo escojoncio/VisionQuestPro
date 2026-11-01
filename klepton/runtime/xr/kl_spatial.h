@@ -81,5 +81,8 @@ int      kl_spatial_anchor_tracked(kl_uuid id);
 int      kl_spatial_room_info(kl_uuid id, kl_uuid *floor, kl_uuid *ceiling,
                               uint32_t wcap, kl_uuid *walls, uint32_t *nwalls,
                               uint32_t mcap, kl_uuid *members, uint32_t *nmembers);
+// Synthetic 4x4 m box room (floor, 2.5 m ceiling, 4 walls) centred on guest (hx, hz), for a scene capture that
+// found no ARKit data. 1 = synthetic room present; 0 = real planes/rooms exist (untouched). Real data replaces it.
+int      kl_spatial_synth_room(float hx, float hz);
 
 #endif
