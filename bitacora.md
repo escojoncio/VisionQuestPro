@@ -1,9 +1,10 @@
 # Bitácora — VisionQuestPro
 
 ## Last done
+- 2026-11-01 Build `[build]` con VQP + pin VPKEngine `1b50d48` (GLES uniform lenient `4b44477`, harvest con presión de memoria `122fdb3`). Sin probar en visor.
+- 2026-11-01 `fa624ba`: `ovrp_RequestSceneCapture` sin planos ARKit tras la espera crea habitación sintética 4x4x2,5 m centrada en la cabeza (`kl_spatial_synth_room`, planos uuid "KLSYNTH"); se purga con room real o suelo+3 paredes reales; `SetSpaceComponentStatus` guarda enable (anillo 256, `cs_*`, limpiado en Destroy/Erase). `KL_SPATIAL_CAPTURE_TIMEOUT_MS` (defecto 8000). spatial_test OK (ASan/UBSan).
+- 2026-11-01 `10c795a`: `[vk] [magenta-bind]` (8 primeros binds de pipelines con error shader de Unity; antes solo se veía la creación, que Unity hace siempre); palabras clave `subshaders`/`fallback shader`/`this GPU` en copia de log del guest (kl_va_handlers.c); `AAsset_read` -1 con ferror, `getBuffer` NULL con lectura corta y creación bajo mutex (t_aasset); `vq.psoInQuest` por defecto true (caché de pipelines en `QUEST/Cache/<juego>/Pipelines`, no se pierde al reinstalar).
 - 2026-10-28 Logging permanente (VPK `03aec8c`): `[sp-call]` (args+ret de ovrp espaciales, 20/fn), `[sp-ev] push|polled`, `[pt] expire detail`, `[diag]` presupuesto 2000 líneas, `[fatal] last log lines` (8 últimas líneas en klepton-crash.log). Ficheros: klepton/runtime/xr/kl_ovrp_spatial.c, kl_ovrp.c, kl_ovrp_priv.h, klepton/runtime/kl_fault.c y .h, klepton/visionos/Sources/kl_app.c. kl_ovrp.c y kl_fault.c no compilados en Linux (unverified hasta CI). Sin cambio de comportamiento. Etiquetas en notas/diagnostico.md.
-- 2026-10-28 VQP pin VPKEngine `c6c0087` (Load de TRANSIENT con memoria indefinida ya no materializa MSAA; ver bitácora del motor). Build lanzada con `[build]`; sin probar en visor. Sin cambios de Klepton/app.
-- 2026-10-28 Build verde run 40694850720 con VQP `e0bb8a6`+pin y VPKEngine `8c21013` (incluye orden de operandos OpSMod determinista gcc/clang y test de occlusion query con espera) (motor validado por CTS: Vulkan 26 Fail / GLES 64 Fail, 0 crash; ver `notas/cts.md` del motor). Sin probar en visor.
 - 2026-10-28 `184e4dd` (revisión adversarial): fin de frame espera solo las colas del guest usadas en el frame (hasta 8, `QueueWaitIdle` bajo `g_qsub_mu`; sin `gq_multi` pegajoso ni `DeviceWaitIdle`); `klvk_shadow_pump(q)` en la cola del guest; suelo de retiro para imágenes normales `(age>=after && issued>=frame+8 && gpu_serial>=frame+1) || age>=4*after`; `vkQueueSubmit2/KHR` → NULL si el driver no lo tiene; `klvk_wq` fija la cola 0 de Klepton (acquire, clears y marcador). Tests `t_frame_fence`, `t_retire_due`, `t_vk_trap` (kl_vulkan.c entero sin compilar fuera de visionOS).
 - 2026-10-28 `77d58dc`: hooks `klvk_QueueSubmit2` (`vkQueueSubmit2` y `vkQueueSubmit2KHR` en `g_ours[]`, misma lógica que `klvk_QueueSubmit` sin trace/probe); `docs/perfil-adreno740.md` al día.
 - 2026-10-27 `57b09ba`: Klepton alineado con el perfil Quest 3 único del motor: multi-cola (`klvk_wq`, `klvk_note_guest_queue`), `EXT_metal_objects` interno vía gipa, lista de extensiones 128, fuera `KL_VK_VTX_SSBO`/`KL_VK_IMG_NOFMT`/parche ASTC, fuera ajuste «Perfil Vulkan completo» y `VPVK_EXTRA_EXTENSIONS`; VQConformance con `VPVK_FORCE_ANISO=0`, `VPVK_QUEST_IDENTITY=1`, esperas 120000.
@@ -16,7 +17,7 @@
 - ITR2 sigue muriendo por SIGKILL del sistema tras >7 s sin frames del guest durante compilación de shaders (356 libs, 11,5 s); `.ips` 20:34:42 pendiente de analizar (el usuario lo adjuntó). Maestro (uniform_err prog=2873/4751) y FMOD sin arreglo. Ver ramas wip/2026-10-28 ya mergeadas.
 
 ## Current state
-- Última build verde: run 40694850720 (VQP `81136fc`, VPK `8c21013`); sin probar en visor.
+- Última build verde: run 40694850720 (VQP `81136fc`, VPK `8c21013`); build 2026-11-01 lanzada (ver Last done).
 - Pendiente (orden):
   1. Logs 2026-10-28 (VQP `81136fc`) analizados; sin causa demostrada aún:
      - Gundam crash: SIGSEGV libfmod.so+0x7d3f8, hilo guest, dirección no mapeada; RAM descartada (foot 3771M, lim_rem 4420M); sin símbolos de libfmod.
@@ -24,8 +25,10 @@
      - Gundam gráfico: 6 fragment modules magenta (Unity error shader) `[vk] [magenta]`, `[imgfmt] fmt 157/151/127 UNSUPPORTED` (3), PSO failed=0.
      - ITR2 (sesión 18:05Z, `81136fc`): SIGKILL del sistema a los 13 s durante compilación de shaders (foot 3028M, lim_rem 5163M, compresor saturado); `msaa_materialized=49` (1249M) con `transient_violation` en tex 77/80: `Load` sobre TRANSIENT en su primer attach materializa la imagen para siempre (`vpkengine gpu/core/src/frame_compiler.cpp:1056-1059`). Propuesta pendiente: tratar ese Load como contenido indefinido y mantener memoryless. Causa del kill: unverified.
      - Gundam FMOD (desensamblado de libfmod): el fallo es el decodificador FADPCM (función en +0x7d370) leyendo `ldrsh [x8,#8]` con x8=0x715a823c1c devuelto por un método virtual (vtable slot 4) del objeto en `[x21+0x170]`; la página 0x715a823000 está sin mapear (1,4 MB tras el fin de una región Malloc Large). Descartado: mmap/munmap de ficheros (no hay en el log; audio leído con read), alineación, burst. Hipótesis sin probar: bloque de datos de audio liberado mientras se decodifica (carrera de unload) o EOF mal calculado. Sin símbolos de build-id.
-     - Maestro: refutado que `glProgramUniform*` ignore `program` (usan `programOrError`, gl_api.cpp:2865-2871); `glGetUniformLocation` nunca devuelve -1 en los 64 logs (tope `seen.size()<64`, gl_api.cpp:2760, log truncado). Origen del glUniform4iv/4uiv sobre arrays float: unverified.
-     - Maestro morado: `gles.uniform_err base_type_mismatch` vec4 declarado vs ivec4/uvec4 (vc0_h[0], vc1_h[0]); unverified que sea la causa.
+     - Maestro morado: UE4 sube `glUniform4iv/4uiv` sobre `vec4 vc0_h[]` (Adreno copia bits); el motor lo descartaba. Arreglado en motor `4b44477`; unverified en visor (buscar `gles.uniform_lenient`).
+     - Gundam FMOD: libfmod usa AAsset_* por dlsym (AAssetManager_fromJava) y fopen/read; sin AAssetFileDescriptor. En +0x7d370 el puntero sale de un método virtual (slot 4, vtable+0x20) del objeto en `[this+0x170]`, args (x1=&out, w2=0x8c), registros de 12 bytes. Quién rellena +0x170: candidatos 0xa7470/0xe4b94 (sin confirmar). Sin arreglo.
+     - Magenta Gundam: los 6 módulos son el error shader que Unity 2021.3.15f1 crea siempre; no prueba que se dibuje. Ver `[magenta-bind]` y líneas "All subshaders removed" en el próximo log.
+     - ITR2: PSO service de UE5 (libpsoservice, `PSOProgramService`) no existe; `bindService` devuelve false (kl_jni_window.c:477) y UE compila en proceso. Mitigación del kill: harvest cede (motor `122fdb3`) y caché en QUEST.
   2. Probar MSAA forzado x2/x4 y RCAS; captura instantánea (`.vpcap` en `QUEST/capturas/`).
   3. Si un frame sale roto: captura + `replay.yml` del motor.
   4. Crash libfmod+0x7d3f8 (Gundam, hilo audio) sin causa.
