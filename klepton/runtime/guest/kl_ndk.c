@@ -531,20 +531,30 @@ static void *kl_AAssetManager_open(void *mgr, const char *fname, int mode) {
 // The lifetime is the ASSET's, in both — the buffer dies with AAsset_close and
 // the caller is not allowed to free it — so matching that exactly is what keeps
 // a leak the guest's rather than ours. UE4 reads UE4CommandLine.txt this way.
+// KL-TEST-BEGIN aasset
+// Two threads may ask for the buffer of the same asset: the lazy creation is under a lock. A short read
+// (file truncated, I/O error) is not cached: the caller gets NULL, never a half-filled buffer.
+static pthread_mutex_t g_asset_buf_mu = PTHREAD_MUTEX_INITIALIZER;
 static const void *kl_AAsset_getBuffer(kl_asset *a) {
     if (!a || !a->f) return NULL;
-    if (a->buf) return a->buf;
+    void *have = __atomic_load_n(&a->buf, __ATOMIC_ACQUIRE);
+    if (have) return have;
     if (a->len < 0) return NULL;
+    pthread_mutex_lock(&g_asset_buf_mu);
+    if (a->buf) { pthread_mutex_unlock(&g_asset_buf_mu); return a->buf; }
     void *buf = malloc((size_t)a->len + 1);
-    if (!buf) return NULL;
+    if (!buf) { pthread_mutex_unlock(&g_asset_buf_mu); return NULL; }
     off_t was = ftello(a->f);
     fseeko(a->f, 0, SEEK_SET);
     size_t got = fread(buf, 1, (size_t)a->len, a->f);
     fseeko(a->f, was, SEEK_SET);
+    if (got < (size_t)a->len) { free(buf); pthread_mutex_unlock(&g_asset_buf_mu); return NULL; }
     ((char *)buf)[got] = '\0';
-    a->buf = buf;
-    return a->buf;
+    __atomic_store_n(&a->buf, buf, __ATOMIC_RELEASE);
+    pthread_mutex_unlock(&g_asset_buf_mu);
+    return buf;
 }
+// KL-TEST-END aasset
 
 // ...and the same asset as a file descriptor plus a window into it. Android
 // answers with a descriptor onto the APK and a non-zero offset, which is why the
@@ -569,10 +579,15 @@ static int kl_AAsset_openFileDescriptor(kl_asset *a, int64_t *out_start, int64_t
     return fd;
 }
 
+// KL-TEST-BEGIN aasset
+// 0 is end of asset; -1 is a read error (what AAsset_read documents), not a silent 0.
 static int kl_AAsset_read(kl_asset *a, void *buf, size_t count) {
     if (!a || !a->f) return -1;
-    return (int)fread(buf, 1, count, a->f);
+    size_t got = fread(buf, 1, count, a->f);
+    if (got == 0 && ferror(a->f)) { clearerr(a->f); return -1; }
+    return (int)got;
 }
+// KL-TEST-END aasset
 static int64_t kl_AAsset_getLength64(kl_asset *a) { return a ? a->len : -1; }
 static int64_t kl_AAsset_seek64(kl_asset *a, int64_t off, int whence) {
     if (!a || !a->f || fseeko(a->f, off, whence) != 0) return -1;

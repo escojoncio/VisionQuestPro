@@ -6391,6 +6391,31 @@ static int klvk_module_is_magenta(uint64_t fs) {
     pthread_mutex_unlock(&g_magenta_mu);
     return hit;
 }
+// Creation proves nothing (Unity always builds its error shader): what matters is whether a draw BINDS such a
+// pipeline. The handles go into a small ring read lock-free by vkCmdBindPipeline (only once one exists).
+#define KLVK_MAGENTA_PIPES 16
+static uint64_t g_magenta_pipe[KLVK_MAGENTA_PIPES];
+static unsigned g_magenta_pipe_n;   // pipelines ever added; slots used = min(n, KLVK_MAGENTA_PIPES)
+static unsigned g_magenta_binds;
+static void klvk_magenta_pipe_add(uint64_t pipe) {
+    unsigned n = __atomic_load_n(&g_magenta_pipe_n, __ATOMIC_ACQUIRE), used = n < KLVK_MAGENTA_PIPES ? n : KLVK_MAGENTA_PIPES;
+    for (unsigned i = 0; i < used; i++) if (__atomic_load_n(&g_magenta_pipe[i], __ATOMIC_RELAXED) == pipe) return;
+    __atomic_store_n(&g_magenta_pipe[n % KLVK_MAGENTA_PIPES], pipe, __ATOMIC_RELAXED);
+    __atomic_store_n(&g_magenta_pipe_n, n + 1, __ATOMIC_RELEASE);   // creation is rare; a lost race only drops one handle
+}
+static void klvk_magenta_bind(uint64_t pipe) {
+    unsigned n = __atomic_load_n(&g_magenta_pipe_n, __ATOMIC_ACQUIRE);
+    if (!n || !pipe) return;
+    if (n > KLVK_MAGENTA_PIPES) n = KLVK_MAGENTA_PIPES;
+    for (unsigned i = 0; i < n; i++) {
+        if (__atomic_load_n(&g_magenta_pipe[i], __ATOMIC_RELAXED) != pipe) continue;
+        unsigned t = __atomic_add_fetch(&g_magenta_binds, 1, __ATOMIC_RELAXED);
+        if (t <= 8)
+            VKI("[magenta-bind] pipe=%p n=%u frame=%u\n", (void *)(uintptr_t)pipe, t,
+                (unsigned)__atomic_load_n(&g_frame_issued, __ATOMIC_RELAXED));
+        return;
+    }
+}
 static void klvk_note_magenta_pipelines(uint32_t n, const VkGraphicsPipelineCreateInfo *ci,
                                         const VkPipeline *out) {
     if (!ci || !out) return;
@@ -6410,6 +6435,7 @@ static void klvk_note_magenta_pipelines(uint32_t n, const VkGraphicsPipelineCrea
             pthread_mutex_unlock(&g_magenta_mu);
             if (!hit) continue;
             unsigned t = __atomic_add_fetch(&total, 1, __ATOMIC_RELAXED);
+            klvk_magenta_pipe_add((uint64_t)(uintptr_t)out[i]);
             if (__atomic_fetch_add(&said, 1, __ATOMIC_RELAXED) < 16) {
                 VKI("[magenta] pipeline %p uses that fragment module (renderPass %p subpass %u, "
                     "%u colour attachment(s), %u samples) — %u such pipeline(s) so far "
@@ -8157,6 +8183,7 @@ static void VKAPI_CALL klvk_CmdBindPipeline(void *cb, uint32_t bindPoint, uint64
         VKI("vkCmdBindPipeline: NULL pipeline bound (bindPoint %u) — a following "
             "draw will dereference null in MoltenVK\n", bindPoint); } }
     if (bindPoint == 0) klvk_prov_bind((VkCommandBuffer)cb, pipeline);
+    if (bindPoint == 0) klvk_magenta_bind(pipeline);
     if (real) real(cb, bindPoint, pipeline);
 }
 // Defined in the 2D-mirror block below; used here to record the bind-time GPU copy.

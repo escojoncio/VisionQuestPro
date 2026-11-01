@@ -38,7 +38,7 @@ enum VQLaunch {
         setenv("KL_MVK_DIR", frameworks, 1)
         setenv("KL_ANGLE_DIR", frameworks, 1)
         VQSettings.shared.applyToEnvironment(game: game)
-        // Optional (setting, off by default): QUEST/Cache/<game>/Pipelines, so recipes, the MSL index
+        // Setting (on by default): QUEST/Cache/<game>/Pipelines, so recipes, the MSL index
         // and the Metal binary archives survive reinstalling the app (Caches/ is wiped then).
         let appCache = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("VisionQuestPro/PipelineCache/\(game.id)", isDirectory: true)
@@ -221,7 +221,7 @@ final class VQSettings: ObservableObject {
         storeCovers = d.object(forKey: "vq.storeCovers") as? Bool ?? true
         gameLanguage = d.string(forKey: "vq.gameLang") ?? "auto"
         precompileShaders = d.object(forKey: "vq.precompile") as? Bool ?? true
-        shaderCacheInQuest = d.object(forKey: "vq.psoInQuest") as? Bool ?? false
+        shaderCacheInQuest = d.object(forKey: "vq.psoInQuest") as? Bool ?? true
         aotShaders = d.object(forKey: "vq.aot") as? Bool ?? false
         conformanceMinutes = d.object(forKey: "vq.ctsMinutes") as? Double ?? 15
         conformanceMemoryMB = d.object(forKey: "vq.ctsMemMB") as? Int ?? 3000

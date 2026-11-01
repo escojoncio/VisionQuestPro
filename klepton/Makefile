@@ -1289,6 +1289,15 @@ build/t_libc_sem: tests/t_libc_sem.c runtime/libc/kl_libc.c runtime/libc/kl_pthr
 	awk '/KL-TEST-BEGIN pthmap/{p=1;next} /KL-TEST-END pthmap/{p=0} p' runtime/libc/kl_pthread.c > build/libcsem/pthread_blocks.inc
 	awk '/KL-TEST-BEGIN mallocx/{p=1;next} /KL-TEST-END mallocx/{p=0} p' runtime/libc/kl_shim.c > build/libcsem/shim_blocks.inc
 	$(CC) -g -fsanitize=address,undefined -Wall -Wno-unused-function -Ibuild/libcsem -o $@ tests/t_libc_sem.c -lpthread
+# AAsset_read / AAsset_getBuffer error semantics, cut out of kl_ndk.c by KL-TEST markers; plain C, Linux or macOS.
+build/t_aasset: tests/t_aasset.c runtime/guest/kl_ndk.c Makefile
+	@mkdir -p build/aasset
+	awk '/KL-TEST-BEGIN aasset/{p=1;next} /KL-TEST-END aasset/{p=0} p' runtime/guest/kl_ndk.c > build/aasset/aasset.inc
+	$(CC) -g -fsanitize=address,undefined -Wall -Wno-unused-function -Ibuild/aasset -o $@ tests/t_aasset.c -lpthread
+.PHONY: aasset
+aasset: build/t_aasset
+	./build/t_aasset
+
 .PHONY: libcsem
 libcsem: build/t_libc_sem
 	@./build/t_libc_sem
