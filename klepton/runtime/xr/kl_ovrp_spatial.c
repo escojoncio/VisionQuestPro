@@ -34,12 +34,14 @@
 #define ONCE(msg) do { static int _o; if (!_o) { _o = 1; fprintf(stderr, "  [ovrp-spatial] %s\n", (msg)); } } while (0)
 
 // Permanent traces, counted against the shared diagnostic budget (kl_ovrp_diag_ok); nothing per frame.
-//   [sp-call] fn=<ovrp_*> n=<k> <key args/outs> ret=<ovrpResult>   the first SP_PER_FN calls of each function
+//   [sp-call] fn=<ovrp_*> n=<k> <key args/outs> ret=<ovrpResult>   the first SP_PER_FN calls of each function, and again at
+//                                                                   the 100th, 1000th and 10000th (outside the budget: 3 lines/fn)
 //   [sp-ev] push|polled type=<ovrpEventType> req=<requestId> ...   every event pushed / handed to the guest (SP_PER_EV per type)
 // A function's body is sp_<Name> (always inlined, so the frame the guest-caller lookup in kl_ovrp_hit walks is the
 // wrapper's, as before); the table entry klovrp_<Name> calls it and logs the arguments and the code returned.
 #define SP_PER_FN 20
 #define SP_PER_EV 50
+#define SP_REPEAT(k) ((k) == 100 || (k) == 1000 || (k) == 10000)
 #define SP_IMPL static inline __attribute__((always_inline)) ovrpResult
 #define ULL(x) ((unsigned long long)(x))
 #define SPT(fn, ret, ...) do { \
@@ -48,7 +50,7 @@
         int32_t _r = (int32_t)(ret); \
         unsigned _k = __atomic_add_fetch(&_c, 1, __ATOMIC_RELAXED); \
         sp_note(&_s, fn, _r); \
-        if (_k <= SP_PER_FN && kl_ovrp_diag_ok()) sp_emit(fn, _k, _r, __VA_ARGS__); \
+        if ((_k <= SP_PER_FN && kl_ovrp_diag_ok()) || SP_REPEAT(_k)) sp_emit(fn, _k, _r, __VA_ARGS__); \
     } while (0)
 static void sp_emit(const char *fn, unsigned k, int32_t ret, const char *fmt, ...) __attribute__((format(printf, 4, 5)));
 static void sp_emit(const char *fn, unsigned k, int32_t ret, const char *fmt, ...) {
@@ -62,12 +64,15 @@ static void sp_emit(const char *fn, unsigned k, int32_t ret, const char *fmt, ..
 
 // ---- [sp-sum]: periodic summary, outside the [sp-call]/[sp-ev] budgets ---------------------------------------
 // The per-call traces stop after SP_PER_FN calls per function and KL_OVRP_DIAG_LINES lines in all, so a long MR
-// session goes dark. Every SPT call site also bumps a counter and keeps the last return value; every 5 s, if a
-// spatial function was called or an event delivered since the last line, ONE line is written (not counted in the
-// budget):  [sp-sum] t=<s>s Fn=<calls>/<lastret> ... Poll=<PollEvent calls> evN=<events of type N delivered> ...
-// (calls and events are totals since the start; only what changed since the last line is listed, except Poll).
-// A line longer than SP_SUM_LINE is split in several lines of the same instant.
+// session goes dark. Every SPT call site also bumps a counter and keeps the last return value; every 5 s ONE line is
+// written (not counted in the budget):  [sp-sum] t=<s>s Fn=<calls>/<lastret> ... Poll=<PollEvent calls> evN=<events
+// of type N delivered> ...  (calls and events are totals since the start; only what changed since the last line is
+// listed, except Poll, which is always there: a line with Poll alone = no spatial call and no event in that window,
+// no line at all = the guest stopped polling).
+// A line longer than SP_SUM_LINE is split in several lines of the same instant. The Poll-alone lines (heartbeat) stop at
+// SP_SUM_HEARTBEATS per process (1 h, like [pt-sum]); the lines that carry changes are not counted.
 #define SP_SUM_EVERY_NS 5000000000ull
+#define SP_SUM_HEARTBEATS 720
 #define SP_SUM_LINE 900
 #define SP_SUM_MAXFN 96
 #define SP_SUM_MAXEV 129                   // event types 0..127, [128] = anything else
@@ -134,7 +139,7 @@ void kl_ovrp_sp_sum_tick_at(uint64_t now_ns) {
     const char *tok[SP_SUM_MAXFN + SP_SUM_MAXEV + 1];
     static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;  // tokb is shared; the window is already won, this is only the buffer
     pthread_mutex_lock(&mu);
-    unsigned n = 0, changed = 0;
+    unsigned n = 0;
     unsigned nreg = __atomic_load_n(&g_sp_nreg, __ATOMIC_ACQUIRE);
     for (unsigned i = 0; i < nreg && i < SP_SUM_MAXFN; i++) {
         sp_stat *s = g_sp_reg[i];
@@ -143,7 +148,7 @@ void kl_ovrp_sp_sum_tick_at(uint64_t now_ns) {
         if (c == s->rep) continue;
         s->rep = c;
         sp_sum_tok_fn(tokb[n], sizeof tokb[n], s->name, c, __atomic_load_n(&s->last, __ATOMIC_RELAXED));
-        tok[n] = tokb[n]; n++; changed++;
+        tok[n] = tokb[n]; n++;
     }
     unsigned evfirst = n;
     for (unsigned t = 0; t < SP_SUM_MAXEV; t++) {
@@ -152,18 +157,21 @@ void kl_ovrp_sp_sum_tick_at(uint64_t now_ns) {
         g_sp_ev_rep[t] = c;
         if (t == SP_SUM_MAXEV - 1) snprintf(tokb[n], sizeof tokb[n], "evOther=%u", c);
         else snprintf(tokb[n], sizeof tokb[n], "ev%u=%u", t, c);
-        tok[n] = tokb[n]; n++; changed++;
+        tok[n] = tokb[n]; n++;
     }
-    if (changed) {
-        // Poll goes first among the events so a split line still carries it.
-        snprintf(tokb[n], sizeof tokb[n], "Poll=%u", __atomic_load_n(&g_sp_poll, __ATOMIC_RELAXED));
-        tok[n] = tokb[n];
-        const char *poll = tok[n];
-        for (unsigned i = n; i > evfirst; i--) tok[i] = tok[i - 1];
-        tok[evfirst] = poll;
-        n++;
-        sp_sum_build((double)(now_ns - g_sp_t0) / 1e9, tok, n, SP_SUM_LINE, sp_sum_line, NULL);
+    static unsigned heartbeats;  // under mu
+    if (n == 0 && heartbeats++ >= SP_SUM_HEARTBEATS) {  // nothing changed and the heartbeat budget is spent
+        pthread_mutex_unlock(&mu);
+        return;
     }
+    // Poll goes first among the events so a split line still carries it.
+    snprintf(tokb[n], sizeof tokb[n], "Poll=%u", __atomic_load_n(&g_sp_poll, __ATOMIC_RELAXED));
+    tok[n] = tokb[n];
+    const char *poll = tok[n];
+    for (unsigned i = n; i > evfirst; i--) tok[i] = tok[i - 1];
+    tok[evfirst] = poll;
+    n++;
+    sp_sum_build((double)(now_ns - g_sp_t0) / 1e9, tok, n, SP_SUM_LINE, sp_sum_line, NULL);
     pthread_mutex_unlock(&mu);
 }
 static void sp_sum_tick(void) {
@@ -608,11 +616,15 @@ static ovrpResult locate(uint64_t a0, uint64_t a1, uint64_t a2, int v2) {
 }
 static ovrpResult klovrp_LocateSpace(uint64_t a0, uint64_t a1, uint64_t a2) {
     kl_ovrp_hit("ovrp_LocateSpace");
-    return locate(a0, a1, a2, 0);
+    ovrpResult r = locate(a0, a1, a2, 0);
+    SPT("ovrp_LocateSpace", r, "space=0x%llx", ULL(sp_h(isptr(a0) ? a1 : a0)));
+    return r;
 }
 static ovrpResult klovrp_LocateSpace2(uint64_t a0, uint64_t a1, uint64_t a2) {
     kl_ovrp_hit("ovrp_LocateSpace2");
-    return locate(a0, a1, a2, 1);
+    ovrpResult r = locate(a0, a1, a2, 1);
+    SPT("ovrp_LocateSpace2", r, "space=0x%llx", ULL(sp_h(isptr(a0) ? a1 : a0)));
+    return r;
 }
 SP_IMPL sp_GetSpaceUuid(uint64_t space, kl_uuid *out) {
     kl_ovrp_hit("ovrp_GetSpaceUuid");

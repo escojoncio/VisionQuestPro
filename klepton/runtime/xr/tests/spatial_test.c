@@ -39,8 +39,9 @@ static void *F(const char *name) { for (size_t i = 0; i < g_ntab; i++) if (!strc
 void kl_ovrp_sp_sum_set_sink(void (*sink)(const char *line));
 void kl_ovrp_sp_sum_tick_at(uint64_t now_ns);
 static char g_sum[8][1100];
+static char g_sumlast[1100];
 static int g_nsum;
-static void sum_sink(const char *line) { if (g_nsum < 8) snprintf(g_sum[g_nsum], sizeof g_sum[0], "%s", line); g_nsum++; }
+static void sum_sink(const char *line) { snprintf(g_sumlast, sizeof g_sumlast, "%s", line); if (g_nsum < 8) snprintf(g_sum[g_nsum], sizeof g_sum[0], "%s", line); g_nsum++; }
 
 #define CK(c) do { if (!(c)) { printf("FAIL line %d: %s\n", __LINE__, #c); fails++; } } while (0)
 static int fails;
@@ -288,7 +289,7 @@ int main(void) {
     // mesh removal and plane removal
     kl_spatial_mesh(U16(30), 1, m, NULL, 0, NULL, 0);
     CK(kl_spatial_count(KLSP_MESH) == 0);
-    // [sp-sum]: nothing before 5 s, one line after, none while nothing changes, then the PollEvent counters.
+    // [sp-sum]: nothing before 5 s, one line after, a Poll-only line while nothing changes, then the PollEvent counters.
     {
         struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
         uint64_t base = (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec, sec = 1000000000ull;
@@ -299,12 +300,23 @@ int main(void) {
         CK(g_nsum == 1 && !strncmp(g_sum[0], "[sp-sum] t=", 11) && strstr(g_sum[0], " CreateSpatialAnchor=") && strstr(g_sum[0], " GetSpaceUuid=")
            && strstr(g_sum[0], "/0") && strlen(g_sum[0]) <= 900);
         kl_ovrp_sp_sum_tick_at(base + 12 * sec);
-        CK(g_nsum == 1);                                   // nothing changed since the last line
+        CK(g_nsum == 2 && strstr(g_sum[1], " Poll=0") && !strchr(g_sum[1], '/'));   // nothing changed: the heartbeat, Poll alone
         kl_ovrp_sp_note_poll(-1); kl_ovrp_sp_note_poll(49); kl_ovrp_sp_note_poll(49);
         kl_ovrp_sp_sum_tick_at(base + 14 * sec);
-        CK(g_nsum == 1);                                   // not yet 5 s after the last line
+        CK(g_nsum == 2);                                   // not yet 5 s after the last line
         kl_ovrp_sp_sum_tick_at(base + 20 * sec);
-        CK(g_nsum == 2 && strstr(g_sum[1], " Poll=3 ev49=2") && !strstr(g_sum[1], "CreateSpatialAnchor"));
+        CK(g_nsum == 3 && strstr(g_sum[2], " Poll=3 ev49=2") && !strstr(g_sum[2], "CreateSpatialAnchor"));
+        // Heartbeat cap: 720 Poll-alone lines per process (one was written above); the next ones are dropped, a line with changes is not.
+        int n0 = g_nsum;
+        uint64_t t = base + 20 * sec;
+        for (int i = 0; i < 719; i++) { t += 6 * sec; kl_ovrp_sp_sum_tick_at(t); }
+        CK(g_nsum - n0 == 719);
+        t += 6 * sec; kl_ovrp_sp_sum_tick_at(t);
+        t += 6 * sec; kl_ovrp_sp_sum_tick_at(t);
+        CK(g_nsum - n0 == 719);                            // heartbeat 721 and 722: silent
+        kl_ovrp_sp_note_poll(50);
+        t += 6 * sec; kl_ovrp_sp_sum_tick_at(t);
+        CK(g_nsum - n0 == 720 && strstr(g_sumlast, " ev50=1"));   // changes still get their line
         kl_ovrp_sp_sum_set_sink(NULL);
     }
     puts(fails ? "FALLA" : "OK");
