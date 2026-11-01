@@ -33,7 +33,7 @@
      - imgfmt 157/151/127 de Gundam: el motor solo los rechaza para color/storage/linear; consulta legítima de Unity (Adreno tampoco); falta el usage en el log para confirmarlo.
      - Magenta Gundam: los 6 módulos son el error shader que Unity 2021.3.15f1 crea siempre; no prueba que se dibuje. Ver `[magenta-bind]` y líneas "All subshaders removed" en el próximo log.
      - ITR2: PSO service de UE5 (libpsoservice, `PSOProgramService`) no existe; `bindService` devuelve false (kl_jni_window.c:477) y UE compila en proceso. Mitigación del kill: harvest cede (motor `122fdb3`) y caché en QUEST.
-  2. Probar MSAA forzado x2/x4 y RCAS; captura instantánea (`.vpcap` en `QUEST/capturas/`).
+  2. Capturas `.vpcap` de ITR2 (geometría que falta, parpadeo) y Maestro: seguir `notas/captura.md` § Procedimiento (referencia lavapipe en Linux + workflow `replay.yml` en macOS para nuestro camino Metal).
   3. Si un frame sale roto: captura + `replay.yml` del motor.
   4. Crash libfmod+0x7d3f8 (Gundam, hilo audio) sin causa.
 - Riesgos: `g_qsub_mu` retenido durante `QueueWaitIdle` bloquea submits de otros hilos (tope 2 s del motor si un lote timeline espera a otro hilo); Submit2-only no sale en trazas `[TRACE]`/probe; claves de ajustes huérfanas sin efecto (`vq.aaMode.*`, `vq.aaMSAA.*`, `vq.vkFullProfile`, `vq.cap.sec.*`); pausa con la Corona = `_exit(0)`.
