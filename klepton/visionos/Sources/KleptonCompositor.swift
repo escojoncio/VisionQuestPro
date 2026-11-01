@@ -1797,6 +1797,10 @@ final class KleptonCompositor {
     private func eyeSource(_ eye: Int, _ stage: Int) -> EyeAllocation? {
         var slice: Int32 = 0
         if let t = kl_glfb_eye_mtl_texture(Int32(eye), Int32(stage), &slice) {
+            // A VPKEngine eye image the guest has not written (or VPKEngine has not zeroed) holds recycled Metal memory: pink/purple
+            // for the first second of a load. Asks for its clear (never waits; a busy submit retries next frame) and shows nothing
+            // (black) until it has landed; it composites from then on.
+            if kl_vulkan_mtl_zero_pending(t) != 0 { return nil }
             let tex = Unmanaged<MTLTexture>.fromOpaque(t).takeUnretainedValue() as MTLTexture
             return EyeAllocation(texture: arrayView(tex), slice: Int(slice),
                                  flipY: kl_glfb_eye_mtl_origin_top_left(Int32(eye),
@@ -3168,7 +3172,8 @@ final class KleptonCompositor {
                 var tex: MTLTexture? = nil
                 var slice: Int32 = 0
                 if slot >= 0,
-                   let t = kl_glfb_eye_mtl_texture(Int32(vi), slot, &slice) {
+                   let t = kl_glfb_eye_mtl_texture(Int32(vi), slot, &slice),
+                   kl_vulkan_mtl_zero_pending(t) == 0 {  // not yet zeroed by VPKEngine: skipped (see eyeSource)
                     // Through the array view for the reason the eye pass is:
                     // every shader in kl_reproject.c samples a
                     // texture2d_array, and a plain 2D bound to one samples
