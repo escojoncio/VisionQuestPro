@@ -36,7 +36,8 @@
 // Permanent traces, counted against the shared diagnostic budget (kl_ovrp_diag_ok); nothing per frame.
 //   [sp-call] fn=<ovrp_*> n=<k> <key args/outs> ret=<ovrpResult>   the first SP_PER_FN calls of each function, and again at
 //                                                                   the 100th, 1000th and 10000th (outside the budget: 3 lines/fn)
-//   LocateSpace/LocateSpace2 add: space=0x.. ok=0|1 why=none|space|pose kind=<KLSP_*> flags=0x.. p=(x,y,z) q=(x,y,z,w) origin=<arg>
+//   LocateSpace/LocateSpace2 add: space=0x.. ok=0|1 why=none|space|pose|cached (ok=0 for cached) kind=<KLSP_*> flags=0x.. p=(x,y,z) q=(x,y,z,w) origin=<arg>
+//                                 (why=cached: the plane left the live registry, the last pose given for the handle is returned, flags 0x3)
 //   [sp-loc-bad] space=0x.. kind=<KLSP_*> why=space|pose   the first SP_LOCBAD_MAX distinct handles whose locate failed (outside the budget)
 //   [sp-ev] push|polled type=<ovrpEventType> req=<requestId> ...   every event pushed / handed to the guest (SP_PER_EV per type)
 // A function's body is sp_<Name> (always inlined, so the frame the guest-caller lookup in kl_ovrp_hit walks is the
@@ -71,7 +72,7 @@ static void sp_emit(const char *fn, unsigned k, int32_t ret, const char *fmt, ..
 // of type N delivered> ...  (calls and events are totals since the start; only what changed since the last line is
 // listed, except Poll, which is always there: a line with Poll alone = no spatial call and no event in that window,
 // no line at all = the guest stopped polling).
-// loc_ok= loc_bad_space= loc_bad_pose= are the Locate results of THIS window only (reset at every line), listed when any is not 0.
+// loc_ok= loc_bad_space= loc_bad_pose= loc_cached= are the Locate results of THIS window only (reset at every line), listed when any is not 0.
 // A line longer than SP_SUM_LINE is split in several lines of the same instant. The Poll-alone lines (heartbeat) stop at
 // SP_SUM_HEARTBEATS per process (1 h, like [pt-sum]); the lines that carry changes are not counted.
 #define SP_SUM_EVERY_NS 5000000000ull
@@ -118,7 +119,7 @@ static void sp_sum_build(double t, const char *const *tok, unsigned n, size_t ma
 static sp_stat *volatile g_sp_reg[SP_SUM_MAXFN];
 static unsigned g_sp_nreg;
 static unsigned g_sp_poll, g_sp_ev[SP_SUM_MAXEV], g_sp_ev_rep[SP_SUM_MAXEV];
-static unsigned g_sp_loc[3];                               // window counters: ok, bad space, bad pose
+static unsigned g_sp_loc[4];                               // window counters: ok, bad space, bad pose, cached
 static uint64_t g_sp_t0, g_sp_due;
 static void (*g_sp_sink)(const char *line);                // tests; NULL = stderr
 
@@ -155,10 +156,10 @@ void kl_ovrp_sp_sum_tick_at(uint64_t now_ns) {
         tok[n] = tokb[n]; n++;
     }
     {
-        static const char *const nm[3] = {"loc_ok", "loc_bad_space", "loc_bad_pose"};
-        unsigned lc[3], any = 0;
-        for (int i = 0; i < 3; i++) { lc[i] = __atomic_exchange_n(&g_sp_loc[i], 0u, __ATOMIC_RELAXED); any |= lc[i]; }
-        if (any) for (int i = 0; i < 3; i++) { snprintf(tokb[n], sizeof tokb[n], "%s=%u", nm[i], lc[i]); tok[n] = tokb[n]; n++; }
+        static const char *const nm[4] = {"loc_ok", "loc_bad_space", "loc_bad_pose", "loc_cached"};
+        unsigned lc[4], any = 0;
+        for (int i = 0; i < 4; i++) { lc[i] = __atomic_exchange_n(&g_sp_loc[i], 0u, __ATOMIC_RELAXED); any |= lc[i]; }
+        if (any) for (int i = 0; i < 4; i++) { snprintf(tokb[n], sizeof tokb[n], "%s=%u", nm[i], lc[i]); tok[n] = tokb[n]; n++; }
     }
     unsigned evfirst = n;
     for (unsigned t = 0; t < SP_SUM_MAXEV; t++) {
@@ -446,9 +447,36 @@ static ovrpResult klovrp_CreateSpatialAnchor(const ci_anchor *info, uint64_t *re
     return r;
 }
 
+// Last good pose per handle. A scene capture is a snapshot on a Quest: a handle already returned stays valid, but ARKit
+// retires planes from the live registry, and the game keeps locating the handles it holds. Bounded; a handle past the
+// limit is just not remembered (zeros, as before). Destroy/Erase of a handle drops its entry. Handles are never reused, so an entry never goes stale for another space.
+#define SP_LASTPOSE_MAX 8192                  // = the handle limit of kl_spatial.c (KLSP_MAX_HANDLES)
+static struct { uint64_t h; ovrpPosef p; } g_lp[SP_LASTPOSE_MAX];
+static unsigned g_nlp;
+static pthread_mutex_t g_lp_mu = PTHREAD_MUTEX_INITIALIZER;
+static void lp_put(uint64_t h, const ovrpPosef *p) {
+    pthread_mutex_lock(&g_lp_mu);
+    unsigned i = 0;
+    while (i < g_nlp && g_lp[i].h != h) i++;
+    if (i < SP_LASTPOSE_MAX) { g_lp[i].h = h; g_lp[i].p = *p; if (i == g_nlp) g_nlp++; }
+    pthread_mutex_unlock(&g_lp_mu);
+}
+static int lp_get(uint64_t h, ovrpPosef *p) {
+    int found = 0;
+    pthread_mutex_lock(&g_lp_mu);
+    for (unsigned i = 0; i < g_nlp; i++) if (g_lp[i].h == h) { *p = g_lp[i].p; found = 1; break; }
+    pthread_mutex_unlock(&g_lp_mu);
+    return found;
+}
+static void lp_del(uint64_t h) {
+    pthread_mutex_lock(&g_lp_mu);
+    for (unsigned i = 0; i < g_nlp; i++) if (g_lp[i].h == h) { g_lp[i] = g_lp[--g_nlp]; break; }
+    pthread_mutex_unlock(&g_lp_mu);
+}
 static void cs_clear(uint64_t space);
 SP_IMPL sp_DestroySpace(uint64_t space) {
     kl_ovrp_hit("ovrp_DestroySpace");
+    lp_del(sp_h(space));                                           // also for a plane ARKit already retired: the game let go of it
     kl_uuid id; int kind = 0;
     if (!space_of(space, &id, &kind)) return KLOVRP_SUCCESS;       // already gone: nothing to free
     cs_clear(kl_spatial_handle_for(id));
@@ -553,6 +581,7 @@ static ovrpResult erase_one(kl_uuid id, int kind, int32_t location, uint64_t req
 }
 SP_IMPL sp_EraseSpace(uint64_t space, int32_t location, uint64_t *req_out) {
     kl_ovrp_hit("ovrp_EraseSpace");
+    lp_del(sp_h(space));
     if (!req_out) return KLOVRP_INVALID_PARAM;
     *req_out = 0;
     kl_uuid id; int kind;
@@ -579,6 +608,7 @@ SP_IMPL sp_EraseSpaces(uint32_t ns, const uint64_t *spaces, uint64_t a2, uint64_
     else { nu = (uint32_t)a2; uu = isptr(a3) ? (const kl_uuid *)(uintptr_t)a3 : NULL; }
     if (ns > 1024 || nu > 1024) return KLOVRP_INVALID_PARAM;
     *out = 0;
+    for (uint32_t i = 0; spaces && i < ns; i++) lp_del(sp_h((uint64_t)(uintptr_t)&spaces[i]));
     uint64_t req = kl_spatial_new_request();
     kl_uuid first; int kind = 0, have = 0;
     for (uint32_t i = 0; i < ns && !have && spaces; i++)
@@ -607,9 +637,9 @@ static ovrpResult klovrp_EraseSpaces(uint32_t ns, const uint64_t *spaces, uint64
 // ---- spaces: locate / identity ------------------------------------------------------
 // ovrp_LocateSpace(ref Posef location, ref UInt64 space, TrackingOrigin). The plan's
 // order (space, origin, out) is accepted too: there the first argument is not a pointer.
-// What one locate did, for the [sp-call] line and the [sp-sum] / [sp-loc-bad] counters. why: 0 none, 1 space, 2 pose.
+// What one locate did, for the [sp-call] line and the [sp-sum] / [sp-loc-bad] counters. why: 0 none, 1 space, 2 pose, 3 cached.
 typedef struct { uint64_t h, flags; int ok, why, kind; int32_t origin; ovrpPosef p; } sp_loc;
-static const char *const sp_why_s[3] = {"none", "space", "pose"};
+static const char *const sp_why_s[4] = {"none", "space", "pose", "cached"};
 #define SP_LOC_FMT "space=0x%llx ok=%d why=%s kind=%d flags=0x%llx p=(%.2f,%.2f,%.2f) q=(%.3f,%.3f,%.3f,%.3f) origin=%d"
 #define SP_LOC_ARGS(l) ULL((l).h), (l).ok, sp_why_s[(l).why], (l).kind, ULL((l).flags), \
         (l).p.Position.x, (l).p.Position.y, (l).p.Position.z, \
@@ -642,6 +672,14 @@ static ovrpResult locate(uint64_t a0, uint64_t a1, uint64_t a2, int v2, sp_loc *
     int sok = space_of(space, &id, &kind);
     if (!sok || !pose_of(id, kind, m)) {
         li->why = sok ? 2 : 1; li->kind = kind;
+        ovrpPosef cp;
+        if (lp_get(li->h, &cp)) {                       // known handle, plane gone from the registry: its last pose, not tracked
+            li->why = 3; li->p = cp;                    // ok stays 0: a substituted value, not a live locate
+            if (v2) { loc->flags = 0x3ull; loc->pose = cp; li->flags = loc->flags; }
+            else *(ovrpPosef *)(uintptr_t)out = cp;
+            __atomic_add_fetch(&g_sp_loc[3], 1, __ATOMIC_RELAXED);
+            return KLOVRP_SUCCESS;
+        }
         sp_loc_bad(li);
         if (v2) { memset(loc, 0, sizeof *loc); return KLOVRP_SUCCESS; }
         return KLOVRP_OPERATION_FAILED;
@@ -650,6 +688,7 @@ static ovrpResult locate(uint64_t a0, uint64_t a1, uint64_t a2, int v2, sp_loc *
     ovrpPosef p; m_to_pose(m, &p);
     if (v2) { loc->flags = tracked ? 0xFull : 0x3ull; loc->pose = p; }
     else *(ovrpPosef *)(uintptr_t)out = p;
+    if (kind != KLSP_ANCHOR) lp_put(li->h, &p);           // anchors are not remembered: a destroyed/erased one keeps failing
     li->ok = 1; li->kind = kind; li->p = p;
     if (v2) li->flags = loc->flags;
     __atomic_add_fetch(&g_sp_loc[0], 1, __ATOMIC_RELAXED);

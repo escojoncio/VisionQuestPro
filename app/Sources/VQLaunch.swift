@@ -490,6 +490,8 @@ final class VQSettings: ObservableObject {
         // returned creates as warm (Unreal's PSO precache) must get them ready; asynchronous creation let its loading bar reach
         // 100 % while thousands still compiled (missing effects, low framerate). VPKEngine's own default stays asynchronous (AVP).
         setenv("VPVK_ASYNC_PIPELINES", "0", 1)
+        // Render A/B of this build (remove afterwards): 0 = engine without merging/hoisting/sinking passes, 1 = normal.
+        setenv("VPVK_FRAME_OPT", "0", 1)
         // VPKEngine 454f7cc dead-store elision (heuristic, risks a corrupted frame) — off until the translator marks samples to keep
         unsetenv("VPVK_MSAA_DEAD_STORE")
         // Games: report geometry/tessellation like Adreno so Unity keeps subshaders that need

@@ -318,6 +318,7 @@ int main(void) {
     // mesh removal and plane removal
     kl_spatial_mesh(U16(30), 1, m, NULL, 0, NULL, 0);
     CK(kl_spatial_count(KLSP_MESH) == 0);
+    uint64_t h70 = 0; ovrpPosef p70;                              // a located plane that is retired later (cached locate)
     // --- diagnostics of locate: [sp-call] ok/why/kind/flags/pose/origin, [sp-loc-bad] (cap 10), window counters.
     // LocateSpace2 has been called 3 times so far (above), so the calls below are n=4.. and the loop reaches n=100.
     {
@@ -354,6 +355,15 @@ int main(void) {
         CK(L1(&p1, &tbl, 1) == 0 && fabsf(p1.p.Position.y - 0.75f) < 1e-5f);
         // plan order (space, origin, out): origin is the second argument
         CK(((fn3)F("ovrp_LocateSpace2"))(tbl, 3, (uint64_t)(uintptr_t)&loc) == 0 && ++l2n);
+        // a located plane that ARKit then retires: LocateSpace2 gives its last pose with flags 0x3, why=cached, no [sp-loc-bad]
+        horiz(m, 0.3f, 0.9f, -0.4f, 0); kl_spatial_plane(U16(70), 0, m, 1, 1, KLSP_LBL_TABLE, NULL, 0);
+        h70 = kl_spatial_handle_for(U16(70));
+        CK(L2(&loc, &h70, 1) == 0 && loc.flags == 0xF && ++l2n);                          // n=10
+        p70 = loc.p;
+        kl_spatial_plane(U16(70), 1, m, 1, 1, KLSP_LBL_TABLE, NULL, 0);
+        { kl_uuid tu; int tk = -1; CK(kl_spatial_uuid_for_handle(h70, &tu, &tk) && tk == 0); }   // the handle is known, the plane is gone
+        loc.flags = 0xdead; memset(&loc.p, 0x55, sizeof loc.p);
+        CK(L2(&loc, &h70, 2) == 0 && loc.flags == 0x3 && memcmp(&loc.p, &p70, sizeof p70) == 0 && ++l2n);   // n=11
         // 12 more distinct unknown handles, then fill up to the 100th call
         for (int i = 0; i < 12; i++) { uint64_t h = 0x8000 + i; CK(L2(&loc, &h, 1) == 0 && ++l2n); }
         for (; l2n < 100; ) { uint64_t h = 0x8000; CK(L2(&loc, &h, 1) == 0 && ++l2n); }
@@ -376,6 +386,10 @@ int main(void) {
         CK(cap_line(ln, sizeof ln, "fn=ovrp_LocateSpace2 n=9 ", hx, "ok=1 why=none kind=1 flags=0xf p=(0.50,0.75,-1.00) q=(") && strstr(ln, "origin=3 ret=0"));   // plan order
         snprintf(fr, sizeof fr, "n=100 space=0x8000 ok=0 why=space");
         CK(cap_line(ln, sizeof ln, "fn=ovrp_LocateSpace2 ", fr, "origin=1 ret=0"));                         // the n=100 line carries the new fields too
+        snprintf(hx, sizeof hx, "space=0x%llx ", (unsigned long long)h70);
+        CK(cap_line(ln, sizeof ln, "fn=ovrp_LocateSpace2 n=11 ", hx, "ok=0 why=cached kind=0 flags=0x3 p=(0.30,0.90,-0.40) q=(") && strstr(ln, "origin=2 ret=0"));
+        snprintf(hx, sizeof hx, "[sp-loc-bad] space=0x%llx ", (unsigned long long)h70);
+        CK(count_str(g_cap, hx) == 0);                           // cached is not a failure
         // [sp-loc-bad]: once per distinct handle, why and kind, capped at 10 in total
         CK(count_str(g_cap, "[sp-loc-bad]") == 10);
         CK(count_str(g_cap, "[sp-loc-bad] space=0x7777 kind=0 why=space\n") == 1);
@@ -385,6 +399,10 @@ int main(void) {
         // restore the state the rest of the test expects
         kl_spatial_room(realroom, 1, NULL, 0);
         CK(((int32_t(*)(uint64_t *))F("ovrp_DestroySpace"))(&uh) == 0 && kl_spatial_count(KLSP_ANCHOR) == 0);
+        // a destroyed anchor, located OK before, is not served from the last-pose table: zeros / failure as before
+        loc.flags = 0xdead; CK(L2(&loc, &uh, 0) == 0 && loc.flags == 0);
+        { struct { ovrpPosef p; } pa; CK(L1(&pa, &uh, 0) != 0); }
+        loc.flags = 0xdead; CK(L2(&loc, &ah, 0) == 0 && loc.flags == 0);              // the erased anchor from above too
     }
     // [sp-sum]: nothing before 5 s, one line after, a Poll-only line while nothing changes, then the PollEvent counters.
     {
@@ -426,13 +444,71 @@ int main(void) {
             uint64_t rh = room;
             CK(L2(&loc, &rh, 1) == 0);                                                // bad pose x1
             kl_spatial_room(U16(61), 1, NULL, 0);
+            CK(L2(&loc, &h70, 1) == 0 && L2(&loc, &h70, 1) == 0);                    // cached x2
             t += 6 * sec; kl_ovrp_sp_sum_tick_at(t);
-            CK(g_nsum - nl == 1 && strstr(g_sumlast, " LocateSpace2=") && strstr(g_sumlast, " loc_ok=2 loc_bad_space=3 loc_bad_pose=1"));
+            CK(g_nsum - nl == 1 && strstr(g_sumlast, " LocateSpace2=") && strstr(g_sumlast, " loc_ok=2 loc_bad_space=3 loc_bad_pose=1 loc_cached=2"));
             kl_ovrp_sp_note_poll(51);                                                  // (a Poll-alone line would be silent: heartbeat cap spent)
             t += 6 * sec; kl_ovrp_sp_sum_tick_at(t);
             CK(g_nsum - nl == 2 && strstr(g_sumlast, " ev51=1") && !strstr(g_sumlast, "loc_"));       // window reset: not repeated
         }
         kl_ovrp_sp_sum_set_sink(NULL);
+    }
+    // last pose per handle: v1, handles never located, the plane coming back, the table limit
+    {
+        typedef int32_t (*floc)(void *, uint64_t *, int32_t);
+        floc L2 = (floc)F("ovrp_LocateSpace2"), L1 = (floc)F("ovrp_LocateSpace");
+        struct { ovrpPosef p; } p1;
+        CK(L1(&p1, &h70, 1) == 0 && memcmp(&p1.p, &p70, sizeof p70) == 0);          // v1: SUCCESS with the last pose
+        horiz(m, 0.1f, 0.2f, 0.3f, 0); kl_spatial_plane(U16(72), 0, m, 1, 1, KLSP_LBL_TABLE, NULL, 0);
+        uint64_t h72 = kl_spatial_handle_for(U16(72));
+        kl_spatial_plane(U16(72), 1, m, 1, 1, KLSP_LBL_TABLE, NULL, 0);               // known handle, never located: no pose to give
+        loc.flags = 0xdead;
+        CK(L2(&loc, &h72, 1) == 0 && loc.flags == 0 && L1(&p1, &h72, 1) != 0);
+        horiz(m, 0.3f, 0.9f, -0.4f, 0); kl_spatial_plane(U16(70), 0, m, 1, 1, KLSP_LBL_TABLE, NULL, 0);   // comes back: the live pose again
+        CK(L2(&loc, &h70, 1) == 0 && loc.flags == 0xF);
+        // a plane the game destroys / erases stops answering from the table (also when ARKit retired it first)
+        {
+            uint64_t hd[3]; kl_uuid ud[3]; int32_t (*erases)(uint32_t, const uint64_t *, uint64_t, uint64_t, uint64_t *) = (void *)F("ovrp_EraseSpaces");
+            uint64_t ereq = 0;
+            for (int i = 0; i < 3; i++) {
+                ud[i] = U16(80 + i); horiz(m, 0.1f * (float)i, 0.5f, 0, 0); kl_spatial_plane(ud[i], 0, m, 1, 1, KLSP_LBL_TABLE, NULL, 0);
+                hd[i] = kl_spatial_handle_for(ud[i]);
+                CK(L2(&loc, &hd[i], 1) == 0 && loc.flags == 0xF);
+                kl_spatial_plane(ud[i], 1, m, 1, 1, KLSP_LBL_TABLE, NULL, 0);
+                loc.flags = 0xdead; CK(L2(&loc, &hd[i], 1) == 0 && loc.flags == 0x3);         // cached before the game lets go
+            }
+            CK(((int32_t(*)(uint64_t *))F("ovrp_DestroySpace"))(&hd[0]) == 0);
+            ((int32_t(*)(uint64_t *, int32_t, uint64_t *))F("ovrp_EraseSpace"))(&hd[1], 1, &ereq);
+            erases(1, &hd[2], 0, 0, &ereq);
+            for (int i = 0; i < 3; i++) { loc.flags = 0xdead; CK(L2(&loc, &hd[i], 1) == 0 && loc.flags == 0); }
+            loc.flags = 0xdead; CK(L2(&loc, &h70, 1) == 0 && loc.flags == 0xF);              // other entries untouched (h70 is live again)
+        }
+        // table limit (8192 = the handle limit): locate planes until kl_spatial runs out of handles, retire them, ask again
+        enum { NP = 8300 };
+        static uint64_t hs[NP];
+        int nh = 0;
+        for (int i = 0; i < NP; i++) {
+            kl_uuid u = U16(0); u.b[1] = (uint8_t)i; u.b[2] = (uint8_t)(i >> 8); u.b[3] = 0x5a;
+            horiz(m, 0, 0.001f * (float)(i + 1), 0, 0); kl_spatial_plane(u, 0, m, 1, 1, KLSP_LBL_TABLE, NULL, 0);
+            hs[i] = kl_spatial_handle_for(u);
+            if (hs[i]) { CK(L2(&loc, &hs[i], 1) == 0 && loc.flags == 0xF); nh++; }
+            kl_spatial_plane(u, 1, m, 1, 1, KLSP_LBL_TABLE, NULL, 0);
+        }
+        CK(nh > 8000 && nh < NP && hs[NP - 1] == 0);                                      // handles ran out before the planes did
+        int ncached = 0;
+        for (int i = 0; i < NP; i++) {
+            if (!hs[i]) continue;
+            loc.flags = 0xdead;
+            CK(L2(&loc, &hs[i], 1) == 0);
+            if (loc.flags == 0x3) { ncached++; CK(fabsf(loc.p.Position.y - 0.001f * (float)(i + 1)) < 1e-6f); }
+            else CK(loc.flags == 0);
+        }
+        CK(ncached == nh);                                                                // every located handle fits (the old 1024 limit is gone)
+        // a handle already in the (full) table still updates its pose
+        horiz(m, 0.4f, 0.8f, -0.2f, 0); kl_spatial_plane(U16(70), 0, m, 1, 1, KLSP_LBL_TABLE, NULL, 0);
+        CK(L2(&loc, &h70, 1) == 0 && loc.flags == 0xF);
+        kl_spatial_plane(U16(70), 1, m, 1, 1, KLSP_LBL_TABLE, NULL, 0);
+        CK(L2(&loc, &h70, 1) == 0 && loc.flags == 0x3 && fabsf(loc.p.Position.x - 0.4f) < 1e-6f && fabsf(loc.p.Position.y - 0.8f) < 1e-6f);
     }
     puts(fails ? "FALLA" : "OK");
     snprintf(cmd, sizeof cmd, "rm -rf %s", g_dir); if (system(cmd)) {}
