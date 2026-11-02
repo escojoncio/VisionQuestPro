@@ -1329,6 +1329,74 @@ void klj_noop_hit(const klj_wanted *w) {
 }
 void klj_noop_hit_current(void) { klj_noop_hit(g_klj_cur_call); }
 
+// ---- `[jni-prog] call`: does the game reach a progress / shader-cache dialog? -----------------------------------
+// Unreal links ShowProgressDialog / UpdateProgressDialog but the log never showed a call. The first KLJ_PROG_MAX calls
+// to a Java method whose name holds Progress, Dialog, Shader or Cache (any case) or PSO (exact case) are printed with
+// their decoded arguments (strings cut at 60 bytes); the va_list is read from a copy, so the real decode is untouched.
+// At most KLJ_PROG_PER_NAME of them per class.name, so a name called all the time (getCacheDir) cannot use up the 50
+// before ShowProgressDialog / UpdateProgressDialog are seen.
+static int klj_prog_name(const char *n) {
+    return strcasestr(n, "Progress") || strcasestr(n, "Dialog") || strcasestr(n, "Shader") ||
+           strcasestr(n, "Cache") || strstr(n, "PSO");
+}
+/* KL-TEST-BEGIN jniprog */
+#define KLJ_PROG_MAX 50
+#define KLJ_PROG_PER_NAME 3
+static int klj_prog_total;   // calls printed so far (read without the lock as a quick exit)
+// Index (0-based, in order) of this call among the printed ones, or -1 when it is not printed: KLJ_PROG_MAX printed in
+// all, KLJ_PROG_PER_NAME per class.name. A call over its name's limit does not use one of the KLJ_PROG_MAX. Every entry of
+// the table has printed at least once, so it cannot hold more than KLJ_PROG_MAX names. cls and name must stay valid
+// (they are the klj_wanted entry's: never freed).
+static int klj_prog_claim(const char *cls, const char *name) {
+    static struct { const char *cls, *name; int n; } tab[KLJ_PROG_MAX];
+    static int ntab;
+    static char lock;
+    int idx = -1;
+    while (__atomic_test_and_set(&lock, __ATOMIC_ACQUIRE)) {}
+    if (klj_prog_total < KLJ_PROG_MAX) {
+        int i = 0;
+        while (i < ntab && (strcmp(tab[i].cls, cls) || strcmp(tab[i].name, name))) i++;
+        if (i == ntab) { tab[ntab].cls = cls; tab[ntab].name = name; tab[ntab].n = 0; ntab++; }
+        if (tab[i].n < KLJ_PROG_PER_NAME) { tab[i].n++; idx = klj_prog_total; __atomic_store_n(&klj_prog_total, idx + 1, __ATOMIC_RELAXED); }
+    }
+    __atomic_clear(&lock, __ATOMIC_RELEASE);
+    return idx;
+}
+/* KL-TEST-END jniprog */
+static void klj_prog_log(const klj_wanted *w, kl_va *va, const klj_jvalue *args) {
+    if (__atomic_load_n(&klj_prog_total, __ATOMIC_RELAXED) >= KLJ_PROG_MAX || !klj_prog_name(w->name)) return;
+    int idx = klj_prog_claim(w->cls, w->name);
+    if (idx < 0) return;
+    klj_val argv[KLJ_MAX_ARGS];
+    kl_va vc;
+    int argc;
+    if (va) { vc = *va; argc = klj_decode_args(w->sig, &vc, argv); }
+    else argc = klj_decode_args_a(w->sig, args, argv);
+    char buf[512];
+    size_t o = 0;
+    buf[0] = 0;
+    const char *p = w->sig + 1;
+    for (int i = 0; i < argc && o + 96 < sizeof buf; i++) {
+        int ref = 0;
+        while (*p == '[') { ref = 1; p++; }
+        char t = *p;
+        if (t == 'L') { ref = 1; while (*p && *p != ';') p++; }
+        if (*p) p++;
+        if (ref) {
+            klj_object *ob = klj_as_object(argv[i].l);
+            if (ob && strcmp(ob->cls, KLJ_CLASS_STRING) == 0)
+                o += (size_t)snprintf(buf + o, sizeof buf - o, "%s\"%.60s\"", i ? ", " : "", ob->data ? (const char *)ob->data : "(null)");
+            else
+                o += (size_t)snprintf(buf + o, sizeof buf - o, "%s%s@%p", i ? ", " : "", ob ? ob->cls : "obj", argv[i].l);
+        } else if (t == 'F' || t == 'D')
+            o += (size_t)snprintf(buf + o, sizeof buf - o, "%s%g", i ? ", " : "", argv[i].d);
+        else
+            o += (size_t)snprintf(buf + o, sizeof buf - o, "%s%lld", i ? ", " : "", (long long)argv[i].j);
+    }
+    fprintf(stderr, "[jni-prog] call name=%s.%s%s args=(%s)%s\n", w->cls, w->name, w->sig, argc < 0 ? "undecodable" : buf,
+            idx + 1 == KLJ_PROG_MAX ? " (jni-prog cap reached)" : "");
+}
+
 static klj_val klj_call_common(void *env, void *self, void *mid, char want,
                                kl_va *va, const klj_jvalue *args) {
     klj_val zero = {0};
@@ -1358,6 +1426,7 @@ static klj_val klj_call_common(void *env, void *self, void *mid, char want,
     if (want != '?' && have != want)
         KLJ_LOG("WARNING %s.%s%s called through a '%c' slot but returns '%c'",
                 w->cls, w->name, w->sig, want, have);
+    klj_prog_log(w, va, args);
 
     const klj_binding *b = klj_resolve_binding(w->cls, w->name, w->sig);
     // The soft null-class answer (klj_GetObjectClass) hands java/lang/Object out

@@ -102,6 +102,12 @@ klepton_tests() {
   run t_vmgroup -Wno-unused-function -I"$T/vmlog" tests/t_vmgroup.c
   awk '/KL-TEST-BEGIN lring/{p=1;next} /KL-TEST-END lring/{p=0} p' runtime/libc/kl_va_handlers.c > "$T/vmlog/lring.inc"
   run t_lring -I"$T/vmlog" tests/t_lring.c
+  awk '/KL-TEST-BEGIN kwcopy/{p=1;next} /KL-TEST-END kwcopy/{p=0} p' runtime/libc/kl_va_handlers.c > "$T/vmlog/kwcopy.inc"
+  run t_kwcopy -I"$T/vmlog" tests/t_kwcopy.c
+  awk '/KL-TEST-BEGIN fscache/{p=1;next} /KL-TEST-END fscache/{p=0} p' runtime/libc/kl_libc.c > "$T/vmlog/fscache.inc"
+  run t_fscache -I"$T/vmlog" tests/t_fscache.c -lpthread
+  awk '/KL-TEST-BEGIN jniprog/{p=1;next} /KL-TEST-END jniprog/{p=0} p' runtime/kl_jni.c > "$T/newt/jniprog.inc"
+  run t_jni_prog -Wno-unused-function -I"$T/newt" tests/t_jni_prog.c
   awk '/KL-TEST-BEGIN synthobj/{p=1;next} /KL-TEST-END synthobj/{p=0} p' runtime/kl_jni.c > "$T/newt/synthobj.inc"
   run t_jni_synth -I"$T/newt" tests/t_jni_synth.c
   awk '/KL-TEST-BEGIN ue4recv/{p=1;next} /KL-TEST-END ue4recv/{p=0} p' runtime/jni/kl_jni_ue4.c > "$T/newt/ue4recv.inc"

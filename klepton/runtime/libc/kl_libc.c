@@ -562,6 +562,7 @@ static void stat_to_bionic(const struct stat *d, bionic_stat *b) {
 // helper is forward-declared rather than reordering the file.
 const char *kl_guest_path(const char *path, char *buf, size_t cap);
 static void kl_fs_trace(const char *op, const char *path, const char *extra, int failed);
+static void kl_fscache_note(const char *op, const char *path, long long ret, long long size);
 static void kl_media_probe_log(const char *op, const char *path, const char *host, int failed);
 
 // hl2 (HL2Q3VR): the engine exec's autoexec.cfg at startup, but that file isn't
@@ -832,6 +833,7 @@ int klb_stat(const char *p, bionic_stat *b)  { char kp[1024]; const char *q = kl
                                                    }
                                                }
                                                kl_fs_trace("stat", p, NULL, r != 0);
+                                               kl_fscache_note("stat", p, r ? -1 : 0, r ? -1 : (long long)s.st_size);
                                                kl_media_probe_log("stat", p, q, r != 0);
                                                if (!r) stat_to_bionic(&s, b); return r; }
 int klb_lstat(const char *p, bionic_stat *b) { char kp[1024]; const char *q = kl_guest_path(p, kp, sizeof kp);
@@ -5590,12 +5592,76 @@ int klb_madvise(void *a, size_t n, int advice) {
     }
 }
 
+/* KL-TEST-BEGIN fscache */
+// [fs-cache]: does the game look for / write a shader or pipeline cache, and where? A path holding (any case)
+// pipelinecache, upipelinecache, .metalar, shadercache, psocache or /Pipelines logs "[fs-cache] open|stat path=.. ret=..
+// size=..": the first successful open (and stat) of each path, plus failures no. 1, 2, 4, 8 of each (op, path) (a path
+// that fails every frame would use up the lines: 4 per failing path at most), 64 lines at most in total. ret is
+// the fd (open) or 0 (stat), -1 on failure; size -1 when unknown. errno is kept: the guest reads it after the call.
+#define KL_FSC_MAX 64
+#define KL_FSC_FAIL_LINES 4
+static int g_fsc_lines, g_fsc_nseen, g_fsc_nfail;
+static char g_fsc_seen[KL_FSC_MAX][168];      // op letter + path of the successes already logged
+static char g_fsc_fkey[KL_FSC_MAX][168];      // op letter + path of the failures seen (one entry per failing (op, path))
+static unsigned g_fsc_fn[KL_FSC_MAX];         // failures of each, logged or not
+static int g_fsc_fl[KL_FSC_MAX];              // failure lines logged of each
+static pthread_mutex_t g_fsc_mu = PTHREAD_MUTEX_INITIALIZER;
+static int kl_fscache_wanted(const char *path) {
+    static const char *const w[] = { "pipelinecache", "upipelinecache", ".metalar", "shadercache", "psocache", "/pipelines" };
+    if (!path || __atomic_load_n(&g_fsc_lines, __ATOMIC_RELAXED) >= KL_FSC_MAX) return 0;
+    for (const char *c = path; *c; c++)
+        for (unsigned k = 0; k < sizeof w / sizeof *w; k++)
+            if (strncasecmp(c, w[k], strlen(w[k])) == 0) return 1;
+    return 0;
+}
+static void kl_fscache_note(const char *op, const char *path, long long ret, long long size) {
+    if (!kl_fscache_wanted(path)) return;
+    int saved = errno, line = 0;
+    char key[168];
+    snprintf(key, sizeof key, "%c%s", op[0], path);
+    pthread_mutex_lock(&g_fsc_mu);
+    if (g_fsc_lines < KL_FSC_MAX) {
+        int dup = 0;
+        if (ret >= 0) {
+            for (int i = 0; i < g_fsc_nseen; i++)
+                if (!strcmp(g_fsc_seen[i], key)) { dup = 1; break; }
+        } else {
+            // Every entry logs its first failure (one line each), so nfail <= lines < KL_FSC_MAX here: the table cannot overflow.
+            int i = 0;
+            while (i < g_fsc_nfail && strcmp(g_fsc_fkey[i], key)) i++;
+            if (i == g_fsc_nfail) memcpy(g_fsc_fkey[g_fsc_nfail++], key, sizeof key);
+            unsigned n = ++g_fsc_fn[i];
+            dup = !((n & (n - 1)) == 0 && g_fsc_fl[i] < KL_FSC_FAIL_LINES);
+            if (!dup) g_fsc_fl[i]++;
+        }
+        if (!dup) {
+            if (ret >= 0) memcpy(g_fsc_seen[g_fsc_nseen++], key, sizeof key);
+            line = ++g_fsc_lines;
+        }
+    }
+    pthread_mutex_unlock(&g_fsc_mu);
+    if (line) fprintf(stderr, "[fs-cache] %s path=%.400s ret=%lld size=%lld%s\n", op, path, ret, size,
+                      line == KL_FSC_MAX ? " (fs-cache cap reached)" : "");
+    errno = saved;
+}
+static void kl_fscache_open(const char *path, int fd) {
+    long long size = -1;
+    if (!kl_fscache_wanted(path)) return;
+    struct stat st;
+    int saved = errno;
+    if (fd >= 0 && fstat(fd, &st) == 0) size = (long long)st.st_size;
+    errno = saved;
+    kl_fscache_note("open", path, fd, size);
+}
+/* KL-TEST-END fscache */
+
 // open() lives behind a variadic thunk in kl_va_handlers.c, so its trace call
 // comes back here rather than duplicating the mode lookup there.
 void kl_fs_trace_open(const char *path, int flags, int fd) {
     kl_media_probe_log("open", path, NULL, fd < 0);
     (void)flags;
     if (fd >= 0) kl_fstat_open(path, fd);
+    kl_fscache_open(path, fd);
     kl_fs_trace("open", path, NULL, fd < 0);
     if (kl_file_watch && fd >= 0) kl_file_watch("open", path, fd, NULL, 0, 0, NULL);
 }

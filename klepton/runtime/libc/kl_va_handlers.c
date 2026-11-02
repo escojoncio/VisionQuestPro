@@ -153,35 +153,69 @@ void kl_hl2_force_create_rendertargets(void) {
 // for Unity's unsupported-shader lines), matched case-insensitively at the start of a word: "died", "failed",
 // "combatant" count) are copied once more to our log as "[unity-kw] P/tag: text", so they can be
 // grepped on their own. Only INFO and above, or any priority of the Unity tag. Capped (KL_LOG_KW_MAX, default 1500;
-// 0 = off). Called from __android_log_print / __android_log_write; never changes what the guest sees.
+// 0 = off; the words of the block below have a budget of their own). Called from __android_log_print / __android_log_write; never changes what the guest sees.
+/* KL-TEST-BEGIN kwcopy */
+// Shader-cache / pipeline-cache / passthrough / anchor words (Unreal's PSO precompile and the MR features) come with
+// their own sub-cap per word (KL_KW_SUB lines) and their own budget (KL_KW_NEW_MAX lines in all, g_kw_new_n, at most
+// KL_LOG_KW_MAX), apart from the run-state words' g_kw_n, so they can never use up the global cap and push the run-state
+// words above out, whether or not they are exhausted. Any priority of tag UE4 / UE is allowed for them (Unreal logs at
+// DEBUG); the run-state words keep the INFO-and-above rule.
+#define KL_KW_SUB 100
+#define KL_KW_NEW_MAX 1000
+static const struct { const char *w; int sub; } g_kw[] = {
+    { "checkpoint", 0 }, { "respawn", 0 }, { "death", 0 }, { "die", 0 }, { "fail", 0 }, { "mission", 0 },
+    { "tutorial", 0 }, { "combat", 0 }, { "subshaders", 0 }, { "fallback shader", 0 }, { "this GPU", 0 },
+    { "PipelineCache", KL_KW_SUB }, { "upipelinecache", KL_KW_SUB }, { "ShaderPipelineCache", KL_KW_SUB },
+    { "PSO", KL_KW_SUB }, { "precompil", KL_KW_SUB }, { "Shader Cache", KL_KW_SUB }, { "Passthrough", KL_KW_SUB },
+    { "OVRManager", KL_KW_SUB }, { "MRUK", KL_KW_SUB }, { "anchor", KL_KW_SUB },
+};
+#define KL_KW_N (sizeof g_kw / sizeof *g_kw)
 static int g_kw_cap = -1;
-static int g_kw_n;
+static int g_kw_n;       // lines printed for the run-state words (sub 0): budget g_kw_cap
+static int g_kw_new_n;   // lines printed for the words with a sub-cap: budget kl_kw_new_cap()
+static int g_kw_sub_n[KL_KW_N];
+static int kl_kw_new_cap(void) { return g_kw_cap < KL_KW_NEW_MAX ? g_kw_cap : KL_KW_NEW_MAX; }
 int kl_log_keyword_open(void) {
     if (g_kw_cap < 0) {
         const char *e = getenv("KL_LOG_KW_MAX");
         g_kw_cap = e && *e ? atoi(e) : 1500;
         if (g_kw_cap < 0) g_kw_cap = 0;
     }
-    return __atomic_load_n(&g_kw_n, __ATOMIC_RELAXED) < g_kw_cap;
+    return __atomic_load_n(&g_kw_n, __ATOMIC_RELAXED) < g_kw_cap ||
+           __atomic_load_n(&g_kw_new_n, __ATOMIC_RELAXED) < kl_kw_new_cap();
+}
+// Index into g_kw of the word this line counts against, or -1. A word with a sub-cap that is used up, or any word whose
+// budget (run-state / new words) is used up, is skipped, so the line can still count against a later word that has room.
+static int kl_kw_find(int prio, const char *tag, const char *msg) {
+    int low = prio < 4;
+    int unity = tag && strstr(tag, "Unity");
+    int ue = tag && (!strcmp(tag, "UE4") || !strcmp(tag, "UE"));
+    int old_ok = __atomic_load_n(&g_kw_n, __ATOMIC_RELAXED) < g_kw_cap;
+    int new_ok = __atomic_load_n(&g_kw_new_n, __ATOMIC_RELAXED) < kl_kw_new_cap();
+    for (const char *c = msg; *c; c++) {
+        if (c != msg && ((c[-1] >= '0' && c[-1] <= '9') || ((c[-1] | 0x20) >= 'a' && (c[-1] | 0x20) <= 'z'))) continue;
+        for (unsigned k = 0; k < KL_KW_N; k++) {
+            if (low && !unity && !(g_kw[k].sub && ue)) continue;
+            if (g_kw[k].sub ? !new_ok : !old_ok) continue;
+            if (g_kw[k].sub && __atomic_load_n(&g_kw_sub_n[k], __ATOMIC_RELAXED) >= g_kw[k].sub) continue;
+            if (strncasecmp(c, g_kw[k].w, strlen(g_kw[k].w)) == 0) return (int)k;
+        }
+    }
+    return -1;
 }
 void kl_log_keyword_copy(int prio, const char *tag, const char *msg) {
     if (!msg || !kl_log_keyword_open()) return;
-    if (prio < 4 && !(tag && strstr(tag, "Unity"))) return;
-    static const char *const kw[] = { "checkpoint", "respawn", "death", "die", "fail", "mission", "tutorial", "combat",
-        "subshaders", "fallback shader", "this GPU" };
-    int hit = 0;
-    for (const char *c = msg; *c && !hit; c++) {
-        if (c != msg && ((c[-1] >= '0' && c[-1] <= '9') || ((c[-1] | 0x20) >= 'a' && (c[-1] | 0x20) <= 'z'))) continue;
-        for (unsigned k = 0; k < sizeof kw / sizeof *kw; k++)
-            if (strncasecmp(c, kw[k], strlen(kw[k])) == 0) { hit = 1; break; }
-    }
-    if (!hit) return;
-    int n = __atomic_fetch_add(&g_kw_n, 1, __ATOMIC_RELAXED);
-    if (n >= g_kw_cap) return;
+    int k = kl_kw_find(prio, tag, msg);
+    if (k < 0) return;
+    int cap = g_kw[k].sub ? kl_kw_new_cap() : g_kw_cap;
+    int n = __atomic_fetch_add(g_kw[k].sub ? &g_kw_new_n : &g_kw_n, 1, __ATOMIC_RELAXED);
+    if (n >= cap) return;
+    int sub_last = g_kw[k].sub && __atomic_add_fetch(&g_kw_sub_n[k], 1, __ATOMIC_RELAXED) == g_kw[k].sub;
     static const char lv[] = "??VDIWEF";
     fprintf(stderr, "  [unity-kw] %c/%s: %.400s%s\n", (prio >= 0 && prio < 8) ? lv[prio] : '?', tag ? tag : "", msg,
-            n + 1 == g_kw_cap ? " (kw line cap reached)" : "");
+            n + 1 == cap ? (g_kw[k].sub ? " (kw new-word line cap reached)" : " (kw line cap reached)") : sub_last ? " (kw word cap reached)" : "");
 }
+/* KL-TEST-END kwcopy */
 
 /* KL-TEST-BEGIN lring */
 // The guest's last errors, so a fatal can say WHY. UE4's fatal handler ends in AndroidThunkJava_ForceQuit (ignored here)
