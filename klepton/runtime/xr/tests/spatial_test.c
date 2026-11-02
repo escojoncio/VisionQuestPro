@@ -7,6 +7,7 @@
 #include <math.h>
 #include <unistd.h>
 #include <time.h>
+#include <fcntl.h>
 #include "kl_ovrp_priv.h"
 #include "kl_spatial.h"
 #include "kl_envdepth.h"
@@ -75,6 +76,34 @@ static void h_create(uint64_t req, const float m[16]) {
 static void h_remove(uint64_t req, kl_uuid id) { float m[16]; ident(m, 0, 0, 0); (void)m; kl_spatial_anchor(id, 1, m, 0); kl_spatial_request_done(req, 1, id); }
 
 typedef int32_t (*fn3)(uint64_t, uint64_t, uint64_t);
+// stderr -> file while a block runs, so the [sp-call] / [sp-loc-bad] lines can be read back.
+static int g_se = -1;
+static char g_cap[24576];
+static void cap_begin(void) {
+    char p[300]; snprintf(p, sizeof p, "%s/stderr.txt", g_dir);
+    fflush(stderr); g_se = dup(2);
+    int fd = open(p, O_WRONLY | O_CREAT | O_TRUNC, 0600); dup2(fd, 2); close(fd);
+}
+static void cap_end(void) {
+    char p[300]; snprintf(p, sizeof p, "%s/stderr.txt", g_dir);
+    fflush(stderr); dup2(g_se, 2); close(g_se);
+    FILE *f = fopen(p, "r"); size_t n = f ? fread(g_cap, 1, sizeof g_cap - 1, f) : 0; if (f) fclose(f);
+    g_cap[n] = 0;
+}
+static int count_str(const char *hay, const char *needle) {
+    int n = 0; for (const char *q = hay; (q = strstr(q, needle)); q++) n++;
+    return n;
+}
+// the first line of g_cap holding all of the given fragments (NULL-terminated list), copied to out
+static int cap_line(char *out, size_t cap, const char *a, const char *b, const char *c) {
+    for (const char *q = g_cap; *q; ) {
+        const char *e = strchr(q, '\n'); size_t l = e ? (size_t)(e - q) : strlen(q);
+        char ln[512]; snprintf(ln, sizeof ln, "%.*s", (int)(l < sizeof ln - 1 ? l : sizeof ln - 1), q);
+        if (strstr(ln, a) && (!b || strstr(ln, b)) && (!c || strstr(ln, c))) { snprintf(out, cap, "%s", ln); return 1; }
+        q += l + (e ? 1 : 0);
+    }
+    return 0;
+}
 int main(void) {
     snprintf(g_dir, sizeof g_dir, "/tmp/kl_spatial_test_%d", (int)getpid());
     char cmd[300]; snprintf(cmd, sizeof cmd, "mkdir -p %s", g_dir); if (system(cmd)) return 2;
@@ -289,6 +318,74 @@ int main(void) {
     // mesh removal and plane removal
     kl_spatial_mesh(U16(30), 1, m, NULL, 0, NULL, 0);
     CK(kl_spatial_count(KLSP_MESH) == 0);
+    // --- diagnostics of locate: [sp-call] ok/why/kind/flags/pose/origin, [sp-loc-bad] (cap 10), window counters.
+    // LocateSpace2 has been called 3 times so far (above), so the calls below are n=4.. and the loop reaches n=100.
+    {
+        typedef int32_t (*floc)(void *, uint64_t *, int32_t);
+        floc L2 = (floc)F("ovrp_LocateSpace2"), L1 = (floc)F("ovrp_LocateSpace");
+        char ln[512], hx[40], fr[64];
+        unsigned l2n = 3;
+        // an untracked anchor (flags 0x3), the real room that orphans the synthetic room's handle (why=pose)
+        kl_uuid au = U16(52); g_next_anchor = au;
+        CK(((int32_t(*)(const ci *, uint64_t *))F("ovrp_CreateSpatialAnchor"))(&info, &req) == 0);
+        float am[16]; ident(am, 0, 1, 0); kl_spatial_anchor(au, 0, am, 0);
+        uint64_t uh = kl_spatial_handle_for(au);
+        kl_uuid synth_id; int synth_kind = 0;
+        CK(kl_spatial_uuid_for_handle(room, &synth_id, &synth_kind) && synth_kind == KLSP_ROOM);
+        kl_uuid realroom = U16(60);
+        kl_spatial_room(realroom, 0, NULL, 0);
+        CK(kl_spatial_uuid_for_handle(room, &synth_id, &synth_kind) && synth_kind == KLSP_ROOM);   // still a room by kind, but kl_spatial_get no longer lists it
+        uint64_t unk = 0x7777, unk2 = 0x7777;
+        cap_begin();
+        // valid plane (tracked): ok=1 flags 0xf, its pose, the origin arg
+        CK(L2(&loc, &tbl, 1) == 0 && ++l2n);
+        // untracked anchor: flags 0x3
+        CK(L2(&loc, &uh, 0) == 0 && loc.flags == 0x3 && ++l2n);
+        // unknown handle: SUCCESS with flags 0, why=space
+        loc.flags = 0xdead;
+        CK(L2(&loc, &unk, 2) == 0 && loc.flags == 0 && ++l2n);
+        CK(L2(&loc, &unk2, 2) == 0 && ++l2n);                    // same handle again: no second [sp-loc-bad]
+        // known handle without a pose: why=pose
+        uint64_t rh = room;
+        CK(L2(&loc, &rh, 1) == 0 && loc.flags == 0 && ++l2n);
+        // v1: failure is OPERATION_FAILED, success is a pose; both logged
+        struct { ovrpPosef p; } p1;
+        CK(L1(&p1, &unk, 1) != 0);
+        CK(L1(&p1, &tbl, 1) == 0 && fabsf(p1.p.Position.y - 0.75f) < 1e-5f);
+        // plan order (space, origin, out): origin is the second argument
+        CK(((fn3)F("ovrp_LocateSpace2"))(tbl, 3, (uint64_t)(uintptr_t)&loc) == 0 && ++l2n);
+        // 12 more distinct unknown handles, then fill up to the 100th call
+        for (int i = 0; i < 12; i++) { uint64_t h = 0x8000 + i; CK(L2(&loc, &h, 1) == 0 && ++l2n); }
+        for (; l2n < 100; ) { uint64_t h = 0x8000; CK(L2(&loc, &h, 1) == 0 && ++l2n); }
+        cap_end();
+        snprintf(hx, sizeof hx, "space=0x%llx ", (unsigned long long)tbl);
+        CK(cap_line(ln, sizeof ln, "fn=ovrp_LocateSpace2 n=4 ", hx, "ok=1 why=none kind=1 flags=0xf p=(0.50,0.75,-1.00) q=("));
+        CK(strstr(ln, ") origin=1") != NULL);
+        snprintf(hx, sizeof hx, "space=0x%llx ", (unsigned long long)uh);
+        CK(cap_line(ln, sizeof ln, "fn=ovrp_LocateSpace2 n=5 ", hx, "ok=1 why=none kind=3 flags=0x3 p=(0.00,1.00,0.00) q=("));
+        CK(strstr(ln, ") origin=0") != NULL);
+        CK(cap_line(ln, sizeof ln, "fn=ovrp_LocateSpace2 n=6 ", "space=0x7777 ok=0 why=space kind=0 flags=0x0 ", "p=(0.00,0.00,0.00) q=(0.000,0.000,0.000,0.000) origin=2 ret=0"));
+        snprintf(hx, sizeof hx, "space=0x%llx ", (unsigned long long)room);
+        CK(cap_line(ln, sizeof ln, "fn=ovrp_LocateSpace2 n=8 ", hx, "ok=0 why=pose kind=4 flags=0x0 "));
+        CK(strstr(ln, "origin=1 ret=0") != NULL);
+        CK(cap_line(ln, sizeof ln, "fn=ovrp_LocateSpace ", "space=0x7777 ok=0 why=space ", "origin=1 ret="));
+        CK(strstr(ln, "ret=0") == NULL);                        // v1: OPERATION_FAILED
+        snprintf(hx, sizeof hx, "space=0x%llx ", (unsigned long long)tbl);
+        CK(cap_line(ln, sizeof ln, "fn=ovrp_LocateSpace ", hx, "ok=1 why=none kind=1 flags=0x0 p=(0.50,0.75,-1.00)"));
+        CK(strstr(ln, "ret=0") != NULL);
+        CK(cap_line(ln, sizeof ln, "fn=ovrp_LocateSpace2 n=9 ", hx, "ok=1 why=none kind=1 flags=0xf p=(0.50,0.75,-1.00) q=(") && strstr(ln, "origin=3 ret=0"));   // plan order
+        snprintf(fr, sizeof fr, "n=100 space=0x8000 ok=0 why=space");
+        CK(cap_line(ln, sizeof ln, "fn=ovrp_LocateSpace2 ", fr, "origin=1 ret=0"));                         // the n=100 line carries the new fields too
+        // [sp-loc-bad]: once per distinct handle, why and kind, capped at 10 in total
+        CK(count_str(g_cap, "[sp-loc-bad]") == 10);
+        CK(count_str(g_cap, "[sp-loc-bad] space=0x7777 kind=0 why=space\n") == 1);
+        snprintf(hx, sizeof hx, "[sp-loc-bad] space=0x%llx kind=4 why=pose\n", (unsigned long long)room);
+        CK(count_str(g_cap, hx) == 1);
+        CK(count_str(g_cap, "[sp-loc-bad] space=0x8000 ") == 1 && count_str(g_cap, "[sp-loc-bad] space=0x8007 ") == 1 && count_str(g_cap, "[sp-loc-bad] space=0x8008 ") == 0);
+        // restore the state the rest of the test expects
+        kl_spatial_room(realroom, 1, NULL, 0);
+        CK(((int32_t(*)(uint64_t *))F("ovrp_DestroySpace"))(&uh) == 0 && kl_spatial_count(KLSP_ANCHOR) == 0);
+    }
     // [sp-sum]: nothing before 5 s, one line after, a Poll-only line while nothing changes, then the PollEvent counters.
     {
         struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
@@ -317,6 +414,24 @@ int main(void) {
         kl_ovrp_sp_note_poll(50);
         t += 6 * sec; kl_ovrp_sp_sum_tick_at(t);
         CK(g_nsum - n0 == 720 && strstr(g_sumlast, " ev50=1"));   // changes still get their line
+        // Window counters: the previous windows drained everything, so this line holds exactly these calls.
+        {
+            typedef int32_t (*floc)(void *, uint64_t *, int32_t);
+            floc L2 = (floc)F("ovrp_LocateSpace2");
+            uint64_t bad = 0x7778;
+            int nl = g_nsum;
+            CK(L2(&loc, &tbl, 1) == 0 && L2(&loc, &tbl, 1) == 0);                     // ok x2
+            CK(L2(&loc, &bad, 1) == 0 && L2(&loc, &bad, 1) == 0 && L2(&loc, &bad, 1) == 0);   // bad space x3
+            kl_spatial_room(U16(61), 0, NULL, 0);
+            uint64_t rh = room;
+            CK(L2(&loc, &rh, 1) == 0);                                                // bad pose x1
+            kl_spatial_room(U16(61), 1, NULL, 0);
+            t += 6 * sec; kl_ovrp_sp_sum_tick_at(t);
+            CK(g_nsum - nl == 1 && strstr(g_sumlast, " LocateSpace2=") && strstr(g_sumlast, " loc_ok=2 loc_bad_space=3 loc_bad_pose=1"));
+            kl_ovrp_sp_note_poll(51);                                                  // (a Poll-alone line would be silent: heartbeat cap spent)
+            t += 6 * sec; kl_ovrp_sp_sum_tick_at(t);
+            CK(g_nsum - nl == 2 && strstr(g_sumlast, " ev51=1") && !strstr(g_sumlast, "loc_"));       // window reset: not repeated
+        }
         kl_ovrp_sp_sum_set_sink(NULL);
     }
     puts(fails ? "FALLA" : "OK");

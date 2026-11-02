@@ -36,6 +36,8 @@
 // Permanent traces, counted against the shared diagnostic budget (kl_ovrp_diag_ok); nothing per frame.
 //   [sp-call] fn=<ovrp_*> n=<k> <key args/outs> ret=<ovrpResult>   the first SP_PER_FN calls of each function, and again at
 //                                                                   the 100th, 1000th and 10000th (outside the budget: 3 lines/fn)
+//   LocateSpace/LocateSpace2 add: space=0x.. ok=0|1 why=none|space|pose kind=<KLSP_*> flags=0x.. p=(x,y,z) q=(x,y,z,w) origin=<arg>
+//   [sp-loc-bad] space=0x.. kind=<KLSP_*> why=space|pose   the first SP_LOCBAD_MAX distinct handles whose locate failed (outside the budget)
 //   [sp-ev] push|polled type=<ovrpEventType> req=<requestId> ...   every event pushed / handed to the guest (SP_PER_EV per type)
 // A function's body is sp_<Name> (always inlined, so the frame the guest-caller lookup in kl_ovrp_hit walks is the
 // wrapper's, as before); the table entry klovrp_<Name> calls it and logs the arguments and the code returned.
@@ -54,7 +56,7 @@
     } while (0)
 static void sp_emit(const char *fn, unsigned k, int32_t ret, const char *fmt, ...) __attribute__((format(printf, 4, 5)));
 static void sp_emit(const char *fn, unsigned k, int32_t ret, const char *fmt, ...) {
-    char b[200];
+    char b[320];
     va_list ap;
     va_start(ap, fmt);
     vsnprintf(b, sizeof b, fmt, ap);
@@ -69,6 +71,7 @@ static void sp_emit(const char *fn, unsigned k, int32_t ret, const char *fmt, ..
 // of type N delivered> ...  (calls and events are totals since the start; only what changed since the last line is
 // listed, except Poll, which is always there: a line with Poll alone = no spatial call and no event in that window,
 // no line at all = the guest stopped polling).
+// loc_ok= loc_bad_space= loc_bad_pose= are the Locate results of THIS window only (reset at every line), listed when any is not 0.
 // A line longer than SP_SUM_LINE is split in several lines of the same instant. The Poll-alone lines (heartbeat) stop at
 // SP_SUM_HEARTBEATS per process (1 h, like [pt-sum]); the lines that carry changes are not counted.
 #define SP_SUM_EVERY_NS 5000000000ull
@@ -115,6 +118,7 @@ static void sp_sum_build(double t, const char *const *tok, unsigned n, size_t ma
 static sp_stat *volatile g_sp_reg[SP_SUM_MAXFN];
 static unsigned g_sp_nreg;
 static unsigned g_sp_poll, g_sp_ev[SP_SUM_MAXEV], g_sp_ev_rep[SP_SUM_MAXEV];
+static unsigned g_sp_loc[3];                               // window counters: ok, bad space, bad pose
 static uint64_t g_sp_t0, g_sp_due;
 static void (*g_sp_sink)(const char *line);                // tests; NULL = stderr
 
@@ -135,8 +139,8 @@ void kl_ovrp_sp_sum_tick_at(uint64_t now_ns) {
     }
     if (now_ns < due || !__atomic_compare_exchange_n(&g_sp_due, &due, now_ns + SP_SUM_EVERY_NS, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
         return;
-    static char tokb[SP_SUM_MAXFN + SP_SUM_MAXEV + 1][56];
-    const char *tok[SP_SUM_MAXFN + SP_SUM_MAXEV + 1];
+    static char tokb[SP_SUM_MAXFN + SP_SUM_MAXEV + 4][56];
+    const char *tok[SP_SUM_MAXFN + SP_SUM_MAXEV + 4];
     static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;  // tokb is shared; the window is already won, this is only the buffer
     pthread_mutex_lock(&mu);
     unsigned n = 0;
@@ -149,6 +153,12 @@ void kl_ovrp_sp_sum_tick_at(uint64_t now_ns) {
         s->rep = c;
         sp_sum_tok_fn(tokb[n], sizeof tokb[n], s->name, c, __atomic_load_n(&s->last, __ATOMIC_RELAXED));
         tok[n] = tokb[n]; n++;
+    }
+    {
+        static const char *const nm[3] = {"loc_ok", "loc_bad_space", "loc_bad_pose"};
+        unsigned lc[3], any = 0;
+        for (int i = 0; i < 3; i++) { lc[i] = __atomic_exchange_n(&g_sp_loc[i], 0u, __ATOMIC_RELAXED); any |= lc[i]; }
+        if (any) for (int i = 0; i < 3; i++) { snprintf(tokb[n], sizeof tokb[n], "%s=%u", nm[i], lc[i]); tok[n] = tokb[n]; n++; }
     }
     unsigned evfirst = n;
     for (unsigned t = 0; t < SP_SUM_MAXEV; t++) {
@@ -597,14 +607,42 @@ static ovrpResult klovrp_EraseSpaces(uint32_t ns, const uint64_t *spaces, uint64
 // ---- spaces: locate / identity ------------------------------------------------------
 // ovrp_LocateSpace(ref Posef location, ref UInt64 space, TrackingOrigin). The plan's
 // order (space, origin, out) is accepted too: there the first argument is not a pointer.
-static ovrpResult locate(uint64_t a0, uint64_t a1, uint64_t a2, int v2) {
+// What one locate did, for the [sp-call] line and the [sp-sum] / [sp-loc-bad] counters. why: 0 none, 1 space, 2 pose.
+typedef struct { uint64_t h, flags; int ok, why, kind; int32_t origin; ovrpPosef p; } sp_loc;
+static const char *const sp_why_s[3] = {"none", "space", "pose"};
+#define SP_LOC_FMT "space=0x%llx ok=%d why=%s kind=%d flags=0x%llx p=(%.2f,%.2f,%.2f) q=(%.3f,%.3f,%.3f,%.3f) origin=%d"
+#define SP_LOC_ARGS(l) ULL((l).h), (l).ok, sp_why_s[(l).why], (l).kind, ULL((l).flags), \
+        (l).p.Position.x, (l).p.Position.y, (l).p.Position.z, \
+        (l).p.Orientation.x, (l).p.Orientation.y, (l).p.Orientation.z, (l).p.Orientation.w, (int)(l).origin
+#define SP_LOCBAD_MAX 10
+// A failed locate: counted, and the first SP_LOCBAD_MAX distinct handles get one [sp-loc-bad] line (not budgeted).
+static void sp_loc_bad(const sp_loc *li) {
+    static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
+    static uint64_t seen[SP_LOCBAD_MAX];
+    static unsigned n;
+    __atomic_add_fetch(&g_sp_loc[li->why], 1, __ATOMIC_RELAXED);
+    if (__atomic_load_n(&n, __ATOMIC_RELAXED) >= SP_LOCBAD_MAX) return;
+    pthread_mutex_lock(&mu);
+    unsigned i = 0;
+    while (i < n && seen[i] != li->h) i++;
+    int fresh = i == n && n < SP_LOCBAD_MAX;
+    if (fresh) { seen[n] = li->h; __atomic_store_n(&n, n + 1, __ATOMIC_RELAXED); }
+    pthread_mutex_unlock(&mu);
+    if (fresh) fprintf(stderr, "  [sp-loc-bad] space=0x%llx kind=%d why=%s\n", ULL(li->h), li->kind, sp_why_s[li->why]);
+}
+static ovrpResult locate(uint64_t a0, uint64_t a1, uint64_t a2, int v2, sp_loc *li) {
     uint64_t out, space;
-    if (isptr(a0)) { out = a0; space = a1; } else { space = a0; out = a2; }
+    memset(li, 0, sizeof *li);
+    if (isptr(a0)) { out = a0; space = a1; li->origin = (int32_t)a2; } else { space = a0; out = a2; li->origin = (int32_t)a1; }
+    li->h = sp_h(space);
     if (!out || !space) return KLOVRP_INVALID_PARAM;
-    kl_uuid id; int kind;
+    kl_uuid id; int kind = 0;
     float m[16];
     space_location *loc = (space_location *)(uintptr_t)out;
-    if (!space_of(space, &id, &kind) || !pose_of(id, kind, m)) {
+    int sok = space_of(space, &id, &kind);
+    if (!sok || !pose_of(id, kind, m)) {
+        li->why = sok ? 2 : 1; li->kind = kind;
+        sp_loc_bad(li);
         if (v2) { memset(loc, 0, sizeof *loc); return KLOVRP_SUCCESS; }
         return KLOVRP_OPERATION_FAILED;
     }
@@ -612,18 +650,23 @@ static ovrpResult locate(uint64_t a0, uint64_t a1, uint64_t a2, int v2) {
     ovrpPosef p; m_to_pose(m, &p);
     if (v2) { loc->flags = tracked ? 0xFull : 0x3ull; loc->pose = p; }
     else *(ovrpPosef *)(uintptr_t)out = p;
+    li->ok = 1; li->kind = kind; li->p = p;
+    if (v2) li->flags = loc->flags;
+    __atomic_add_fetch(&g_sp_loc[0], 1, __ATOMIC_RELAXED);
     return KLOVRP_SUCCESS;
 }
 static ovrpResult klovrp_LocateSpace(uint64_t a0, uint64_t a1, uint64_t a2) {
     kl_ovrp_hit("ovrp_LocateSpace");
-    ovrpResult r = locate(a0, a1, a2, 0);
-    SPT("ovrp_LocateSpace", r, "space=0x%llx", ULL(sp_h(isptr(a0) ? a1 : a0)));
+    sp_loc li;
+    ovrpResult r = locate(a0, a1, a2, 0, &li);
+    SPT("ovrp_LocateSpace", r, SP_LOC_FMT, SP_LOC_ARGS(li));
     return r;
 }
 static ovrpResult klovrp_LocateSpace2(uint64_t a0, uint64_t a1, uint64_t a2) {
     kl_ovrp_hit("ovrp_LocateSpace2");
-    ovrpResult r = locate(a0, a1, a2, 1);
-    SPT("ovrp_LocateSpace2", r, "space=0x%llx", ULL(sp_h(isptr(a0) ? a1 : a0)));
+    sp_loc li;
+    ovrpResult r = locate(a0, a1, a2, 1, &li);
+    SPT("ovrp_LocateSpace2", r, SP_LOC_FMT, SP_LOC_ARGS(li));
     return r;
 }
 SP_IMPL sp_GetSpaceUuid(uint64_t space, kl_uuid *out) {
