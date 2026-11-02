@@ -69,6 +69,7 @@ enum VQLaunch {
         VQOVRPluginVersion.apply(apk: game.apk)
         VQLog.log("Arranque: \(game.id) (\(game.package)) tree=\(choice.prepared.tree.path) dylibs=\(choice.prepared.dylibs.path) "
                   + "files=\(files.path) obb=\(obbRel)")
+        VQLog.setUnrealFiles(game.engine == "Unreal" ? files : nil)
         VQApiScan.run(game: game, tree: choice.prepared.tree)
         VQSession.begin(game: game.id)
         VQCompilerProbe.start()   // only once a guest runs: nothing at app launch
