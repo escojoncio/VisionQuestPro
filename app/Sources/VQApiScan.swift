@@ -178,31 +178,97 @@ enum VQApiScan {
 
     private static let allLock = NSLock()
     nonisolated(unsafe) private static var allRunning = false
+    nonisolated(unsafe) private static var allLatest: [VQGame] = []   // the newest list, guarded by allLock
+    private static let appOpened = Date()
+    /// The inventory is diagnostics: not before this long after the app opens, so the launcher's
+    /// covers and buttons have the File Provider storage to themselves.
+    private static let allDelay: TimeInterval = 60
 
-    /// At app start, in the background: the inventory of EVERY detected game, with no preparation or
-    /// launch. Per game a line in the app log and <cache>/meta-api.txt; then a global summary (the
-    /// unimplemented names of all games, with how many games use each). The same text goes to
-    /// Registros/meta-api.txt, which the share-logs buttons include.
+    /// What the inventory of a game was made from: the APK (name, size, date; its libraries live
+    /// inside it) and this build of the app (the statuses come from Klepton, which changes with it).
+    private static let buildStamp: String = {
+        let info = Bundle.main.infoDictionary ?? [:]
+        let exe = Bundle.main.executableURL.flatMap { try? FileManager.default.attributesOfItem(atPath: $0.path) } ?? [:]
+        let size = (exe[.size] as? NSNumber)?.int64Value ?? 0
+        let date = Int64(((exe[.modificationDate] as? Date) ?? .distantPast).timeIntervalSince1970)
+        return "\(info["CFBundleShortVersionString"] ?? "?")|\(info["CFBundleVersion"] ?? "?")|\(size)|\(date)"
+    }()
+
+    /// Nil when the APK cannot be read: then nothing is cached.
+    private static func inventorySignature(_ game: VQGame) -> String? {
+        guard let attrs = try? FileManager.default.attributesOfItem(atPath: game.apk.path) else { return nil }
+        let size = (attrs[.size] as? NSNumber)?.int64Value ?? 0
+        let date = Int64(((attrs[.modificationDate] as? Date) ?? .distantPast).timeIntervalSince1970)
+        return "\(game.apk.lastPathComponent)|\(size)|\(date)|\(buildStamp)"
+    }
+
+    /// A game is being prepared or is running. Called from a background thread only (it waits for the main one).
+    private static func launching() -> Bool {
+        DispatchQueue.main.sync { MainActor.assumeIsolated { VQModel.shared.busy != nil || VQModel.shared.running } }
+    }
+
+    private static let unimplementedStatus: Set<Substring> = ["stub", "unsupported", "rechazada", "no servida"]
+
+    /// The names without implementation in an inventory text (what `Inventory.unimplemented` held).
+    private static func unimplementedNames(in text: String) -> [String] {
+        var names: [String] = []
+        for line in text.split(separator: "\n").dropFirst() where !line.hasPrefix("#") {
+            guard let tab = line.firstIndex(of: "\t"), unimplementedStatus.contains(line[..<tab]),
+                  let name = line[line.index(after: tab)...].split(separator: " ").first else { continue }
+            names.append(String(name))
+        }
+        return names
+    }
+
+    /// In the background, ~60 s after the app opens and never while a game is being prepared or
+    /// runs: the inventory of EVERY detected game, with no preparation or launch. A game is only
+    /// scanned again when its APK or this build of the app changed (meta-api.sig beside its
+    /// meta-api.txt); otherwise its cached meta-api.txt is read. Per game a line in the app log and
+    /// <cache>/meta-api.txt; then a global summary (the unimplemented names of all games, with how
+    /// many games use each). The same text goes to Registros/meta-api.txt, which the share-logs
+    /// buttons include.
     static func inventoryAll(_ games: [VQGame]) {
+        if games.isEmpty { return }
         allLock.lock()
+        allLatest = games
         let busy = allRunning
         allRunning = true
         allLock.unlock()
-        if busy || games.isEmpty { return }
-        DispatchQueue.global(qos: .utility).async {
+        if busy { return }
+        let wait = max(0, allDelay - Date().timeIntervalSince(appOpened))
+        DispatchQueue.global(qos: .background).asyncAfter(deadline: .now() + wait) {
+            while launching() { Thread.sleep(forTimeInterval: 10) }
             let t0 = Date()
+            allLock.lock()
+            let list = allLatest
+            allLock.unlock()
             var uses: [String: Int] = [:]
             var report = ""
-            for game in games {
+            for game in list {
+                while launching() { Thread.sleep(forTimeInterval: 10) }
                 guard let cache = VQFolder.shared.cache(for: game.id) else { continue }
-                let inv = inventory(game: game, cache: cache)
-                VQLog.log("Meta API: " + inv.summary)
-                try? inv.text.write(to: cache.appendingPathComponent("meta-api.txt"), atomically: true, encoding: .utf8)
-                for n in inv.unimplemented { uses[n, default: 0] += 1 }
-                report += "\n=== \(game.id) ===\n" + inv.text
+                let metaURL = cache.appendingPathComponent("meta-api.txt")
+                let sigURL = cache.appendingPathComponent("meta-api.sig")
+                let sig = inventorySignature(game)
+                let text: String
+                if let sig, (try? String(contentsOf: sigURL, encoding: .utf8)) == sig,
+                   let cached = try? String(contentsOf: metaURL, encoding: .utf8) {
+                    text = cached
+                } else {
+                    let inv = inventory(game: game, cache: cache)
+                    text = inv.text
+                    try? text.write(to: metaURL, atomically: true, encoding: .utf8)
+                    // An empty answer (unreadable APK) is never remembered.
+                    if let sig, inv.names > 0 { try? sig.write(to: sigURL, atomically: true, encoding: .utf8) }
+                    else { try? FileManager.default.removeItem(at: sigURL) }
+                }
+                VQLog.log("Meta API: " + (text.split(separator: "\n", maxSplits: 1).first.map(String.init) ?? ""))
+                for n in unimplementedNames(in: text) { uses[n, default: 0] += 1 }
+                report += "\n=== \(game.id) ===\n" + text
+                Thread.sleep(forTimeInterval: 0.05)   // do not saturate the File Provider
             }
             let ranked = uses.sorted { $0.value != $1.value ? $0.value > $1.value : $0.key < $1.key }
-            let global = "Meta API global: \(games.count) juegos, \(ranked.count) nombres sin implementar: "
+            let global = "Meta API global: \(list.count) juegos, \(ranked.count) nombres sin implementar: "
                 + ranked.map { "\($0.key) (\($0.value))" }.joined(separator: ", ")
                 + String(format: " (%.2f s)", Date().timeIntervalSince(t0))
             VQLog.log(global)

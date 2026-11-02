@@ -20,6 +20,9 @@ final class VQModel: ObservableObject {
     @Published var ended = false { didSet { if ended { VQSession.end() } }}   // the game's immersive space has closed
     @Published var endMessage: String?    // why it closed when the engine asked to quit
     @Published var certificate: String? = VQSigner.current
+    @Published var scanning = false       // the QUEST folder is being read (off the main thread)
+    @Published var prepared: [String: Bool] = [:]   // game id -> converted and up to date; absent until worked out off the main thread
+    private var refreshes = 0             // generation of the last refresh(); an older scan that ends late is dropped
 
     private init() {
         VQLog.start()
@@ -32,11 +35,37 @@ final class VQModel: ObservableObject {
         }
     }
 
+    /// Reads the QUEST folder and its games off the main thread (File Provider storage: opening every
+    /// APK takes seconds) and publishes the result on the main one.
     func refresh() {
-        folderPath = VQFolder.shared.url?.path
-        let found = folderPath == nil ? [] : VQGames.scan()
-        games = found
-        VQApiScan.inventoryAll(found)
+        scanning = true
+        refreshes += 1
+        let generation = refreshes
+        DispatchQueue.global(qos: .userInitiated).async {
+            let path = VQFolder.shared.url?.path
+            let found = path == nil ? [] : VQGames.scan()
+            Task { @MainActor in
+                guard generation == self.refreshes else { return }
+                self.folderPath = path
+                self.games = found
+                self.scanning = false
+                self.updatePrepared(found)
+                VQApiScan.inventoryAll(found)
+            }
+        }
+    }
+
+    /// Whether each game is converted and up to date (reads in File Provider storage), worked out off
+    /// the main thread: the cards only read `prepared`, they never touch the storage themselves.
+    func updatePrepared(_ list: [VQGame]) {
+        DispatchQueue.global(qos: .userInitiated).async {
+            for game in list {
+                let ready = VQPrepare.isPrepared(game)
+                Task { @MainActor in
+                    if self.prepared[game.id] != ready { self.prepared[game.id] = ready }
+                }
+            }
+        }
     }
 
     func choose(_ url: URL) {
@@ -70,6 +99,7 @@ final class VQModel: ObservableObject {
                 }
                 Task { @MainActor in
                     VQLaunch.choice = VQLaunch.Choice(game: game, prepared: prepared)
+                    self.prepared[game.id] = true
                     self.busy = nil
                     self.running = true
                 }
@@ -79,6 +109,7 @@ final class VQModel: ObservableObject {
                 Task { @MainActor in
                     self.busy = nil
                     self.message = text
+                    self.updatePrepared([game])
                 }
             }
         }
@@ -112,7 +143,9 @@ struct VQLauncherView: View {
     var body: some View {
         NavigationStack {
             Group {
-                if model.folderPath == nil {
+                if model.scanning && model.games.isEmpty {
+                    ProgressView()
+                } else if model.folderPath == nil {
                     noFolder
                 } else if model.games.isEmpty {
                     ContentUnavailableView(VQL("No hay juegos", "No games"), systemImage: "shippingbox",
@@ -120,6 +153,12 @@ struct VQLauncherView: View {
                                                                  "Copy each game (its .apk and its data folder) into its own folder inside QUEST/Juegos.")))
                 } else {
                     ScrollView {
+                        Text(VQL("Si un juego tiene caché de shaders, deja que complete al 100 %, sal del juego y vuelve a entrar.",
+                                 "If a game has a shader cache, let it reach 100 %, quit the game and enter again."))
+                            .font(.headline.bold())
+                            .multilineTextAlignment(.center)
+                            .padding(.horizontal, 24)
+                            .padding(.top, 20)
                         LazyVGrid(columns: [GridItem(.adaptive(minimum: 360), spacing: 20)], spacing: 20) {
                             ForEach(model.games) { game in VQGameCard(game: game) }
                         }
@@ -188,7 +227,7 @@ struct VQGameCard: View {
                     Button {
                         model.play(game)
                     } label: {
-                        Label(VQPrepare.isPrepared(game) ? VQL("Jugar", "Play") : VQL("Preparar y jugar", "Prepare and play"),
+                        Label(model.prepared[game.id] == true ? VQL("Jugar", "Play") : VQL("Preparar y jugar", "Prepare and play"),
                               systemImage: "play.fill")
                     }
                     .buttonStyle(.borderedProminent)
