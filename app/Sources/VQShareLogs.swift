@@ -16,7 +16,7 @@ struct VQSaveLogsButton: View {
         Button {
             guard !saving else { return }   // a second press while the copy runs would write the same folder
             saving = true
-            // Off the main thread: it copies tens of MB (and stages an Unreal game's engine log).
+            // Off the main thread: it copies tens of MB (and stages the game's own logs).
             Thread.detachNewThread {
                 let saved = VQLog.saveToQuest("manual") != nil
                 Task { @MainActor in

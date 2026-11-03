@@ -69,10 +69,11 @@ enum VQLaunch {
         VQOVRPluginVersion.apply(apk: game.apk)
         VQLog.log("Arranque: \(game.id) (\(game.package)) tree=\(choice.prepared.tree.path) dylibs=\(choice.prepared.dylibs.path) "
                   + "files=\(files.path) obb=\(obbRel)")
-        VQLog.setUnrealFiles(game.engine == "Unreal" ? files : nil)
+        VQLog.setGameFiles(files)
         VQApiScan.run(game: game, tree: choice.prepared.tree)
         VQSession.begin(game: game.id)
         VQCompilerProbe.start()   // only once a guest runs: nothing at app launch
+        if !VQConformance.isConformance(game) { VQCacheState.start(game: game.id) }   // shader-cache state: HUD line + cache-state.json
         if game.package == VQConformance.openXRPackage { VQConformance.prepareOpenXR() } else { unsetenv("KL_INTENT_EXTRAS"); unsetenv("KL_STATUS_HUD"); unsetenv("KL_XR_STRICT_LAYERS") }
         if VQConformance.isConformance(game) {
             // After applyToEnvironment: the test run is window-only (no immersive space).

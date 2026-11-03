@@ -2441,7 +2441,8 @@ final class KleptonCompositor {
     // KL_STATUS_HUD=1 (the app sets it for the OpenXR CTS, which draws almost nothing): a second line
     // with the run's progress from kl_openxr_status_text, so a black view still says it is working.
     static let statusHudEnabled: Bool = (getenv("KL_STATUS_HUD").map { String(cString: $0) } ?? "0") == "1"
-    static var hudEnabled: Bool { fpsHudEnabled || statusHudEnabled }
+    // The shader-cache notice shows even with the FPS counter off (hudText is nil unless there is something to say).
+    static var hudEnabled: Bool { fpsHudEnabled || statusHudEnabled || VQCacheState.hudText != nil }
     private var hudTex: MTLTexture?
     private var hudWindowStart = Date()
     private var hudPresents = 0, hudGuestFrames = 0
@@ -2470,6 +2471,7 @@ final class KleptonCompositor {
                 let n = kl_openxr_status_text(&buf, Int32(buf.count))
                 lines.append(n > 0 ? String(cString: buf) : String(format: "Esperando al test... (visor %.0f Hz)", comp))
             }
+            if let cache = VQCacheState.hudText { lines.append(cache) }   // shader-cache state (nil unless polled)
             hudLine = lines.joined(separator: "\n")
             hudGuestFrames = 0; hudPresents = 0; hudWindowStart = Date()
             hudTex = makeHudTexture(hudLine) ?? hudTex

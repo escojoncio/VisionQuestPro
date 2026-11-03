@@ -2,6 +2,7 @@
 
 #include <dlfcn.h>
 #include <stdio.h>
+#include <string.h>
 
 // Same layout as vpvk/config.h (VPKEngine); kept local so the app builds without the header.
 typedef struct { int32_t mode; float sharp_zone, periphery, height; } vpvk_foveation;
@@ -106,4 +107,14 @@ uint32_t vq_aot_run(const char *spirv_dir, vq_prewarm_progress progress, void *u
         return 0;
     }
     return f(spirv_dir, progress, user);
+}
+
+_Static_assert(sizeof(struct vq_cache_state) == 36, "vq_cache_state must match VpvkCacheState (9 x uint32)");
+
+int vq_cache_state_get(struct vq_cache_state *out) {
+    if (!out) return 0;
+    memset(out, 0, sizeof(*out));
+    int (*f)(struct vq_cache_state *) = (int (*)(struct vq_cache_state *))dlsym(RTLD_DEFAULT, "vpvk_cache_state");
+    if (!f) return 0;
+    return f(out) == 1 ? 1 : 0;
 }

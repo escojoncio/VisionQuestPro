@@ -22,6 +22,7 @@ final class VQModel: ObservableObject {
     @Published var certificate: String? = VQSigner.current
     @Published var scanning = false       // the QUEST folder is being read (off the main thread)
     @Published var prepared: [String: Bool] = [:]   // game id -> converted and up to date; absent until worked out off the main thread
+    @Published var cacheComplete: [String: Bool] = [:]   // game id -> shader cache complete (cache-state.json); absent: no file / not worked out yet
     private var refreshes = 0             // generation of the last refresh(); an older scan that ends late is dropped
 
     private init() {
@@ -63,6 +64,10 @@ final class VQModel: ObservableObject {
                 let ready = VQPrepare.isPrepared(game)
                 Task { @MainActor in
                     if self.prepared[game.id] != ready { self.prepared[game.id] = ready }
+                }
+                let cache = VQCacheState.isComplete(game: game.id)
+                Task { @MainActor in
+                    if self.cacheComplete[game.id] != cache { self.cacheComplete[game.id] = cache }
                 }
             }
         }
@@ -208,6 +213,11 @@ struct VQGameCard: View {
         VStack(alignment: .leading, spacing: 10) {
             VQCoverView(game: game)
             Text(game.name).font(.title2.bold()).lineLimit(2)
+            if let complete = model.cacheComplete[game.id] {
+                Text(complete ? VQL("Caché completa", "Cache complete")
+                              : VQL("Caché incompleta: juega hasta que termine la precarga", "Cache incomplete: keep playing until the preload finishes"))
+                    .font(.caption).foregroundStyle(complete ? Color.green : Color.orange)
+            }
             Text("\(game.package) · v\(game.version)").font(.caption).foregroundStyle(.secondary)
             HStack(spacing: 8) {
                 tag(game.engine, "cpu")

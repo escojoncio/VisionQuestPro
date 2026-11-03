@@ -38,3 +38,12 @@ uint32_t vq_precompile_run(const char *dir, vq_prewarm_progress progress, void *
 // AOT build (VPVulkan vpvk_aot_build, needs env VPVK_AOT=1): every <spirv_dir>/*.spv + every stored
 // recipe compiled and serialized into the game's Metal binary archive. 0 without VPVulkan / gate off.
 uint32_t vq_aot_run(const char *spirv_dir, vq_prewarm_progress progress, void *user);
+
+// Shader-cache state of the live VPVulkan device (vpvk_cache_state). Mirrors VpvkCacheState in vpvk.h:
+// 9 uint32 in this exact order (36 bytes); it MUST match the engine's struct.
+// reason: 0 ok, 1 no pipelines, 2 recent pipelines, 3 no frames, 4 compiling, 5 unused modules.
+struct vq_cache_state {
+    uint32_t version, pipelines_unique, recipes, modules_created, modules_used, idle_ms, frames_idle, complete, reason;
+};
+// Fills *out and returns 1 when the symbol exists and a device is alive; else 0 (out zeroed). No side effects, never blocks.
+int vq_cache_state_get(struct vq_cache_state *out);

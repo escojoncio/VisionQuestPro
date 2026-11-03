@@ -32,7 +32,7 @@ enum VQLog {
         // BEFORE the rotation below: a launch that plays no game would otherwise push the last
         // game's app.txt out of app-anterior.txt (2026-10-20: AC's log vanished after two launches).
         let archived = archivePreviousSession()
-        try? FileManager.default.removeItem(at: ueLog)  // the staged engine log is archived above; never carried into a new session
+        for old in gameLogs { try? FileManager.default.removeItem(at: old) }  // staged game logs are archived above; never carried into a new session
         refreshSessionFiles()
         let previous = directory.appendingPathComponent("app-anterior.txt")
         try? FileManager.default.removeItem(at: previous)
@@ -65,9 +65,9 @@ enum VQLog {
         [appLog, directory.appendingPathComponent("app-anterior.txt"), bootLog, crashLog,
          directory.appendingPathComponent("conformidad-vulkan.txt"),
          directory.appendingPathComponent("conformidad-detalle.txt"),
-         directory.appendingPathComponent("meta-api.txt"), ueLog]
+         directory.appendingPathComponent("meta-api.txt")]
             .filter { FileManager.default.fileExists(atPath: $0.path) }
-            + captures + crashAttachments
+            + gameLogs + captures + crashAttachments
     }
 
     /// The logs for the share button: the live files plus the last `shareSessions` games, each with
@@ -159,7 +159,7 @@ enum VQLog {
         let name = "\(f.string(from: started))_\(game)_\(commit)"
         do { try fm.createDirectory(at: sessionsDirectory, withIntermediateDirectories: true) } catch { return nil }
         _ = copyTrimmed(appLog, to: sessionsDirectory.appendingPathComponent("\(name)__app.txt"))
-        for src in [bootLog, crashLog, ueLog] {
+        for src in [bootLog, crashLog] + gameLogs {
             // Written after this process began (the guest log is reopened "w" at each game launch);
             // an older one belongs to an earlier session.
             guard let m = (try? fm.attributesOfItem(atPath: src.path))?[.modificationDate] as? Date,
@@ -167,11 +167,11 @@ enum VQLog {
             if copyTrimmed(src, to: sessionsDirectory.appendingPathComponent("\(name)__\(src.lastPathComponent)")),
                src == bootLog { previousSessionTag = "\(game)_\(commit)" }
         }
-        // The staged ue-engine.log above is only as fresh as the last copy; if the process was killed
-        // or crashed, the engine's own log (path stored at launch) is the complete one. Off the main
-        // thread: it resolves the QUEST folder and reads up to 8 MB.
-        if let path = UserDefaults.standard.string(forKey: unrealFilesKey) {
-            DispatchQueue.global(qos: .utility).async { archiveUnrealLog(filesPath: path, as: name, since: started) }
+        // The staged game-*.log above are only as fresh as the last copy; if the process was killed
+        // or crashed, the game's own logs (folder stored at launch) are the complete ones. Off the
+        // main thread: it resolves the QUEST folder and reads up to 8 MB per log.
+        if let path = UserDefaults.standard.string(forKey: gameFilesKey) {
+            DispatchQueue.global(qos: .utility).async { archiveGameLogs(filesPath: path, as: name, since: started) }
         }
         let files = (try? fm.contentsOfDirectory(at: sessionsDirectory, includingPropertiesForKeys: nil)) ?? []
         let keep = Set(Set(files.map { sessionName($0) }).sorted(by: >).prefix(keepSessions))
@@ -270,7 +270,7 @@ enum VQLog {
                 captures = listCaptures(in: quest)
             }
             logCaptures(captures)
-            stageUnrealLog()
+            stageGameLogs()
             attachLock.lock()
             questAttachments = found
             questCaptures = captures
@@ -291,98 +291,142 @@ enum VQLog {
         return out
     }
 
-    // MARK: Unreal engine log
+    // MARK: The game's own logs
 
-    /// UE writes its own log to <files>/UnrealGame|UE4Game/<Project>/<Project>/Saved/Logs/<Project>.log
-    /// (<files> = QUEST/Partidas/<game>, the dir kl_app_configure_game gets; the guest sees it as
-    /// Documents/.f when the path is long) and `-stdout` does not carry it to klepton-boot.log. Set by
-    /// VQLaunch.configure for Unreal games only (nil for any other engine).
-    nonisolated(unsafe) private static var unrealFiles: URL?
-    nonisolated(unsafe) private static var ueStagedStamp = ""
-    private static let ueStageLock = NSLock()
-    private static let ueLogBytes: UInt64 = 8 * 1_048_576
-    static var ueLog: URL { directory.appendingPathComponent("ue-engine.log") }
+    /// A game writes its own logs under its files folder (<files> = QUEST/Partidas/<game>, the dir
+    /// kl_app_configure_game gets; the guest sees it as Documents/.f when the path is long): Unreal's
+    /// Saved/Logs/<Project>.log, Unity's Player.log... and `-stdout` does not carry them to
+    /// klepton-boot.log. Set by VQLaunch.configure for every game; no engine is special-cased.
+    nonisolated(unsafe) private static var gameFiles: URL?
+    nonisolated(unsafe) private static var gameLogStamps: [String: String] = [:]
+    private static let gameLogLock = NSLock()
+    private static let gameLogBytes: UInt64 = 8 * 1_048_576
+    private static let gameLogMax = 5
+    private static let gameLogDepth = 6
+    private static let gameLogVisits = 20_000
+    private static let gameLogSkip: Set<String> = ["Cache", "tree", "obb", "assets", "Engine", "Content"]
+    private static let gameFilesKey = "vq.gameFilesPath"
+    private typealias GameLog = (url: URL, date: Date, size: UInt64)
 
-    private static let unrealFilesKey = "vq.unrealFilesPath"
-    private typealias UnrealLog = (url: URL, date: Date, size: UInt64)
+    /// The copies in Registros/ (game-<name>.log).
+    static var gameLogs: [URL] {
+        ((try? FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)) ?? [])
+            .filter { $0.lastPathComponent.hasPrefix("game-") && $0.pathExtension == "log" }
+            .sorted { $0.lastPathComponent < $1.lastPathComponent }
+    }
 
     /// The path is also stored (UserDefaults): if the process dies, the next launch archives that
-    /// game's engine log (archivePreviousSession). A different game (or none) drops the staged copy,
-    /// so ue-engine.log never carries another game's log.
-    static func setUnrealFiles(_ files: URL?) {
-        ueStageLock.lock(); defer { ueStageLock.unlock() }
-        if files?.path != unrealFiles?.path {
-            ueStagedStamp = ""
-            try? FileManager.default.removeItem(at: ueLog)
+    /// game's logs (archivePreviousSession). A different game drops the staged copies, so Registros
+    /// never carries another game's logs.
+    static func setGameFiles(_ files: URL) {
+        gameLogLock.lock(); defer { gameLogLock.unlock() }
+        if files.path != gameFiles?.path {
+            gameLogStamps = [:]
+            for old in gameLogs { try? FileManager.default.removeItem(at: old) }
         }
-        unrealFiles = files
-        if let files { UserDefaults.standard.set(files.path, forKey: unrealFilesKey) }
-        else { UserDefaults.standard.removeObject(forKey: unrealFilesKey) }
+        gameFiles = files
+        UserDefaults.standard.set(files.path, forKey: gameFilesKey)
     }
 
-    /// Copies this session's newest engine log to Registros/ue-engine.log (the last ueLogBytes when it is
-    /// bigger), so it travels with the other logs (ShareLink, saveToQuest, archived sessions). Reads and
-    /// writes files: never call it from the main thread. Does nothing without an Unreal game or a log.
-    static func stageUnrealLog() {
-        ueStageLock.lock()
-        let note = stageUnrealLogLocked()
-        ueStageLock.unlock()
-        if let note { log(note) }
+    /// Copies this session's game logs to Registros/game-*.log (the last gameLogBytes of each when
+    /// bigger), so they travel with the other logs (ShareLink, saveToQuest, archived sessions). Reads
+    /// and writes files: never call it from the main thread. Does nothing without a game or a log.
+    static func stageGameLogs() {
+        gameLogLock.lock()
+        let notes = stageGameLogsLocked()
+        gameLogLock.unlock()
+        for note in notes { log(note) }
     }
 
-    /// The newest `*.log` (not a -backup- copy) under <files>/{UnrealGame,UE4Game}/*/*/Saved/Logs written
-    /// at or after `since` (nil: any date).
-    private static func newestUnrealLog(in files: URL, since: Date?) -> UnrealLog? {
-        let fm = FileManager.default
-        func list(_ dir: URL) -> [URL] { (try? fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil)) ?? [] }
-        var newest: UnrealLog?
-        for root in ["UnrealGame", "UE4Game"] {
-            for project in list(files.appendingPathComponent(root, isDirectory: true)) {
-                for inner in list(project) {
-                    let logs = inner.appendingPathComponent("Saved", isDirectory: true).appendingPathComponent("Logs", isDirectory: true)
-                    for u in list(logs) where u.pathExtension == "log" && !u.lastPathComponent.contains("-backup-") {
-                        guard let a = try? fm.attributesOfItem(atPath: u.path),
-                              let m = a[.modificationDate] as? Date, since.map({ m >= $0 }) ?? true else { continue }
-                        if newest == nil || m > newest!.date { newest = (u, m, a[.size] as? UInt64 ?? 0) }
-                    }
+    /// File name in Registros for a game log: its last four path components, sanitized (no "__",
+    /// which separates the session name in sesiones/).
+    private static func gameLogName(_ u: URL) -> String {
+        var out = ""
+        for c in u.deletingPathExtension().pathComponents.suffix(4).joined(separator: "_") {
+            if c.isASCII && (c.isLetter || c.isNumber || c == "-" || c == ".") { out.append(c) }
+            else if !out.hasSuffix("_") { out.append("_") }
+        }
+        return "game-" + String(out.suffix(100)) + ".log"
+    }
+
+    /// The newest gameLogMax `*.log` (not -backup- copies) under `files`, at most gameLogDepth deep, written
+    /// at or after `since`. Skips folders that are big or hold no logs (gameLogSkip, Saved/Config, Saved/Crashes).
+    private static func newestGameLogs(in files: URL, since: Date) -> [GameLog] {
+        let keys: [URLResourceKey] = [.isDirectoryKey, .contentModificationDateKey, .fileSizeKey]
+        guard let e = FileManager.default.enumerator(at: files, includingPropertiesForKeys: keys,
+                                                     options: [.skipsHiddenFiles]) else { return [] }
+        var found: [GameLog] = []
+        var visited = 0
+        while let u = e.nextObject() as? URL {
+            visited += 1
+            if visited > gameLogVisits { break }
+            let v = try? u.resourceValues(forKeys: Set(keys))
+            let name = u.lastPathComponent
+            if v?.isDirectory == true {
+                if e.level >= gameLogDepth || gameLogSkip.contains(name)
+                    || ((name == "Config" || name == "Crashes") && u.deletingLastPathComponent().lastPathComponent == "Saved") {
+                    e.skipDescendants()
                 }
+                continue
             }
+            guard u.pathExtension.lowercased() == "log", !name.contains("-backup-"),
+                  let m = v?.contentModificationDate, m >= since else { continue }
+            found.append((url: u, date: m, size: UInt64(v?.fileSize ?? 0)))
         }
-        return newest
+        return Array(found.sorted { $0.date > $1.date }.prefix(gameLogMax))
     }
 
-    /// The log's content, or its last ueLogBytes (cut at a line end, with a marker) when it is bigger.
-    private static func unrealLogData(_ src: UnrealLog) -> Data? {
+    /// The log's content, or its last gameLogBytes (cut at a line end, with a marker) when it is bigger.
+    private static func gameLogData(_ src: GameLog) -> Data? {
         guard let h = try? FileHandle(forReadingFrom: src.url) else { return nil }
         defer { try? h.close() }
-        guard src.size > ueLogBytes else { return h.readDataToEndOfFile() }
-        try? h.seek(toOffset: src.size - ueLogBytes)
+        let size = (try? h.seekToEnd()) ?? 0
+        guard size > gameLogBytes else {
+            try? h.seek(toOffset: 0)
+            return h.readDataToEndOfFile()
+        }
+        try? h.seek(toOffset: size - gameLogBytes)
         var data = h.readDataToEndOfFile()
         if let nl = data.firstIndex(of: 10) { data = Data(data[data.index(after: nl)...]) }
-        return Data("[... recortado: \(src.size) bytes en total, aquí los últimos \(ueLogBytes) ...]\n".utf8) + data
+        return Data("[... recortado: \(size) bytes en total, aquí los últimos \(gameLogBytes) ...]\n".utf8) + data
     }
 
-    private static func stageUnrealLogLocked() -> String? {
-        guard let files = unrealFiles, let src = newestUnrealLog(in: files, since: sessionStart) else { return nil }
-        let stamp = "\(src.url.path)|\(src.size)|\(src.date.timeIntervalSince1970)"
-        if stamp == ueStagedStamp && FileManager.default.fileExists(atPath: ueLog.path) { return nil }
-        guard let data = unrealLogData(src), (try? data.write(to: ueLog, options: .atomic)) != nil else { return nil }
-        ueStagedStamp = stamp
-        return "Registros: log del motor Unreal \(src.url.lastPathComponent) (\(src.size) bytes) -> ue-engine.log (\(data.count) bytes)"
+    private static func stageGameLogsLocked() -> [String] {
+        guard let files = gameFiles else { return [] }
+        let fm = FileManager.default
+        var notes: [String] = []
+        var keep = Set<String>()
+        for src in newestGameLogs(in: files, since: sessionStart) {
+            let name = gameLogName(src.url)
+            let dst = directory.appendingPathComponent(name)
+            keep.insert(name)
+            let stamp = "\(src.url.path)|\(src.size)|\(src.date.timeIntervalSince1970)"
+            if gameLogStamps[name] == stamp && fm.fileExists(atPath: dst.path) { continue }
+            guard let data = gameLogData(src), (try? data.write(to: dst, options: .atomic)) != nil else { continue }
+            if gameLogStamps[name] == nil {
+                notes.append("Registros: log del juego \(src.url.lastPathComponent) (\(src.size) bytes) -> \(name) (\(data.count) bytes)")
+            }
+            gameLogStamps[name] = stamp
+        }
+        for stale in gameLogs where !keep.contains(stale.lastPathComponent) { try? fm.removeItem(at: stale) }
+        return notes
     }
 
-    /// At launch, for the session just archived as `name`: files the engine log of the game that
-    /// ran in the previous process (`filesPath`, stored by setUnrealFiles) as <name>__ue-engine.log.
-    /// A log older than that process's start is an earlier session's and is left out. Does nothing
-    /// without the QUEST folder, the path or a log.
-    private static func archiveUnrealLog(filesPath: String, as name: String, since started: Date) {
-        guard VQFolder.shared.url != nil,   // opens the folder's access before the stored path is read
-              let src = newestUnrealLog(in: URL(fileURLWithPath: filesPath, isDirectory: true), since: started.addingTimeInterval(-5)),
-              let data = unrealLogData(src) else { return }
-        let dst = sessionsDirectory.appendingPathComponent("\(name)__ue-engine.log")
-        guard (try? data.write(to: dst, options: .atomic)) != nil else { return }
+    /// At launch, for the session just archived as `name`: files the logs of the game that ran in the
+    /// previous process (`filesPath`, stored by setGameFiles) as <name>__game-*.log. A log older than
+    /// that process's start is an earlier session's and is left out. Does nothing without the QUEST
+    /// folder, the path or a log.
+    private static func archiveGameLogs(filesPath: String, as name: String, since started: Date) {
+        guard VQFolder.shared.url != nil else { return }   // opens the folder's access before the stored path is read
+        var filed: [String] = []
+        for src in newestGameLogs(in: URL(fileURLWithPath: filesPath, isDirectory: true), since: started.addingTimeInterval(-5)) {
+            let dst = sessionsDirectory.appendingPathComponent("\(name)__\(gameLogName(src.url))")
+            guard let data = gameLogData(src), (try? data.write(to: dst, options: .atomic)) != nil else { continue }
+            filed.append(dst.lastPathComponent)
+        }
+        guard !filed.isEmpty else { return }
         refreshSessionFiles()
-        log("Registros: log del motor Unreal de la sesión anterior (\(src.url.lastPathComponent), \(src.size) bytes) archivado como \(dst.lastPathComponent)")
+        log("Registros: logs del juego de la sesión anterior archivados: \(filed.joined(separator: ", "))")
     }
 
     /// Copies the logs to QUEST/Registros/<date>-<label>/ (Files app): a way to get them that does
@@ -402,7 +446,7 @@ enum VQLog {
             return nil
         }
         var copied = 0
-        stageUnrealLog()
+        stageGameLogs()
         // A crash report older than the boot log belongs to an earlier session: copying it next to
         // a newer log reads as "this session crashed" (2026-10-15: the 09:55 Wwise fault kept
         // reappearing in every later folder).
@@ -607,6 +651,7 @@ enum VQSession {
     }
 
     static func end() {
+        VQCacheState.stop()
         try? FileManager.default.removeItem(at: sentinel)
     }
 }
