@@ -28,6 +28,7 @@ struct VQGame: Identifiable, Equatable {
     var hasVulkan = false   // the build ships Vulkan (manifest feature)
     var hasGLES = false     // the build ships OpenGL ES
     var quest3: Bool
+    var devicesDeclared = false  // the manifest has com.oculus.supportedDevices (quest3 is then meaningful)
     var libraries: [String] // lib/arm64-v8a/*.so entries
     var obbs: [URL]
     var problems: [String]  // why it cannot run; empty when it can
@@ -168,6 +169,7 @@ enum VQGames {
             game.engine = VQL("Tests Khronos (OpenXR)", "Khronos tests (OpenXR)")
         }
         if let devices = metaData(m, "com.oculus.supportedDevices") {
+            game.devicesDeclared = true
             game.quest3 = devices.lowercased().contains("quest3")
         }
         // The build's real API list is only visible through the manifest features (see the header).

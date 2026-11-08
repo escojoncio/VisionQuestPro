@@ -1162,12 +1162,15 @@ static void *capture_thread(void *arg) {
         usleep(step_ms * 1000); waited += step_ms;
     }
     if (kl_spatial_count(KLSP_PLANE) > 0) usleep(settle_ms * 1000);
-    // Quest's Space Setup always ends with a room: with no ARKit planes/room, hand out a synthetic box around the head.
-    int synth = 0;
-    if (kl_spatial_count(KLSP_PLANE) == 0 && kl_spatial_count(KLSP_ROOM) == 0) {
-        float hp[3], hq[4];
+    // Quest's Space Setup always ends with a CLOSED room: without a real room or a complete real set, hand out a synthetic
+    // box (size of the play area) around the head, completing any partial walls.
+    int synth;
+    {
+        float hp[3], hq[4], zw = 3.0f, zd = 3.0f;
         kl_ovrp_get_head_pose(&hp[0], &hp[1], &hp[2], &hq[0], &hq[1], &hq[2], &hq[3]);
-        synth = kl_spatial_synth_room(hp[0], hp[2]);
+        if (!isfinite(hp[0]) || !isfinite(hp[2])) hp[0] = hp[2] = 0.0f;       // a NaN/Inf head would poison the box fit
+        if (!kl_ovrp_boundary(&zw, &zd)) zw = zd = 3.0f;
+        synth = kl_spatial_synth_room(hp[0], hp[2], zw, zd);
         if (synth) fprintf(stderr, "  [sp] capture synthetic room\n");
     }
     ev_simple e; memset(&e, 0, sizeof e);

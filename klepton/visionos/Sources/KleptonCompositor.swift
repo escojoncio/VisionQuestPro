@@ -402,6 +402,14 @@ final class KleptonCompositor {
     private let handTracking = HandTrackingProvider()
     private let controllers = KleptonControllers()
     private var arRunning = false
+    private var arAuthLogged = false   // the authorization states are asked for and logged once per process
+    private var arHandsDenied = false  // .handTracking answered .denied (set once, kept for the re-runs)
+    private var arWorldDenied = false  // .worldSensing answered .denied: no world tracking / scene providers
+
+    // Hand anchors seen by the per-frame poll, logged every 5 s (at most 60 lines per process).
+    private var handLogAt = 0.0
+    private var handLogLines = 0
+    private var handPolls = 0, handLeftSeen = 0, handLeftTracked = 0, handRightSeen = 0, handRightTracked = 0
 
     // How much work reprojection is doing, sampled for the log.
     private var reprojectFrames = 0
@@ -701,11 +709,37 @@ final class KleptonCompositor {
             // kl_openxr guess from the pose we last published.
             Self.headAtTracker = worldTracking
             kl_ovrp_set_head_at(Self.headAt)
-            var providers: [any DataProvider] = [worldTracking]
-            if HandTrackingProvider.isSupported { providers.append(handTracking) }
+            if !arAuthLogged {
+                // Ask for both explicitly (no-op when already decided) and log what the system answered.
+                arAuthLogged = true
+                let kinds: [ARKitSession.AuthorizationType] = [.handTracking, .worldSensing]
+                let before = await arSession.queryAuthorization(for: kinds)
+                let after = await arSession.requestAuthorization(for: kinds)
+                for kind in kinds {
+                    NSLog("[cp] ARKit authorization \(kind): before=\(String(describing: before[kind])) "
+                          + "after=\(String(describing: after[kind]))")
+                }
+                // Only .denied leaves a provider out: .notDetermined is still raised by `run` itself.
+                arHandsDenied = after[.handTracking] == .denied
+                arWorldDenied = after[.worldSensing] == .denied
+            }
+            var providers: [any DataProvider] = []
+            var launched: [String] = []
+            if !arWorldDenied { providers.append(worldTracking); launched.append("world") }
+            if HandTrackingProvider.isSupported, !arHandsDenied { providers.append(handTracking); launched.append("hands") }
             let accessories = await controllers.makeAccessoryProvider()
-            if let accessories { providers.append(accessories) }
-            let spatial = KleptonSpatial.providers()   // planes / rooms / scene (kl_spatial)
+            if let accessories { providers.append(accessories); launched.append("accessories") }
+            var spatial = KleptonSpatial.providers()   // planes / rooms / scene (kl_spatial)
+            if arWorldDenied, !spatial.isEmpty {       // they need .worldSensing
+                KleptonSpatial.dropProviders()
+                spatial = []
+            }
+            if !spatial.isEmpty { launched.append("spatial x\(spatial.count)") }
+            if providers.isEmpty && spatial.isEmpty {
+                NSLog("[cp] ARKit not started: nothing authorized (hands denied: \(arHandsDenied), "
+                      + "worldSensing denied: \(arWorldDenied)) — synthetic standing head kl_ovrp provides")
+                return
+            }
             do {
                 try await arSession.run(providers + spatial)
             } catch where !spatial.isEmpty {
@@ -714,10 +748,11 @@ final class KleptonCompositor {
                 NSLog("[cp] ARKit failed with the spatial providers (\(error)); retrying without them")
                 KleptonSpatial.dropProviders()
                 try await arSession.run(providers)
+                launched.removeAll { $0.hasPrefix("spatial") }
             }
             KleptonSpatial.sessionStarted(arSession)
             arRunning = true
-            NSLog("[cp] ARKit running (hands: \(HandTrackingProvider.isSupported), "
+            NSLog("[cp] ARKit running (providers: \(launched.joined(separator: ", ")), "
                   + "sense: \(controllers.senseConnected))")
             if let accessories {
                 // A fresh anchor stream per provider. The previous one ends
@@ -869,6 +904,7 @@ final class KleptonCompositor {
             let hands = handTracking.handAnchors(at: presentationTime)
             if let a = hands.leftHand,  a.isTracked { left  = a }
             if let a = hands.rightHand, a.isTracked { right = a }
+            noteHandAnchors(hands.leftHand, hands.rightHand)
         }
         controllers.update(leftHand: left, rightHand: right, at: presentationTime)
         // ...and the same seam in the other direction: whatever the guest
@@ -877,6 +913,23 @@ final class KleptonCompositor {
         // output, and the only thing it shares with the input half is being
         // once a frame.
         controllers.pumpHaptics()
+    }
+
+    /// Counts the hand anchors the poll got and logs the counts every 5 s (izq = left, der = right; «seguida» = isTracked).
+    private func noteHandAnchors(_ l: HandAnchor?, _ r: HandAnchor?) {
+        handPolls += 1
+        if let l { handLeftSeen += 1; if l.isTracked { handLeftTracked += 1 } }
+        if let r { handRightSeen += 1; if r.isTracked { handRightTracked += 1 } }
+        let now = CACurrentMediaTime()
+        if handLogAt == 0 { handLogAt = now; return }
+        guard now - handLogAt >= 5 else { return }
+        if handLogLines < 60 {
+            handLogLines += 1
+            NSLog("[hands] 5 s: polls=\(handPolls) izq=\(handLeftSeen) (seguida \(handLeftTracked)) "
+                  + "der=\(handRightSeen) (seguida \(handRightTracked))")
+        }
+        handLogAt = now
+        handPolls = 0; handLeftSeen = 0; handLeftTracked = 0; handRightSeen = 0; handRightTracked = 0
     }
 
     // MARK: - Setup

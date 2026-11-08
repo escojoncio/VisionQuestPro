@@ -21,6 +21,7 @@
 #include "kl_fault.h"
 #include "kl_target.h"
 #include "kl_env.h"
+#include "kl_memrule.h"   // KL_LOWMEM_AT_DEFAULT, kl_lowmem_threshold
 #include "kl_ovrp.h"
 #include "kl_avdec.h"
 #include "kl_egl.h"
@@ -275,25 +276,26 @@ static klj_val klj_DateFormat_is24HourFormat(void *env, void *self, const klj_va
 // would be two answers to one question: a guest that reads `availMem` and then
 // polls /proc would see them disagree, and `lowMemory` would say no while the
 // notification said yes. `threshold` is the level at which Android would start
-// killing background processes, which here is exactly KL_LOWMEM_AT.
+// killing background processes, which here is exactly KL_LOWMEM_AT (default 80 % of the real limit, kl_memrule.h).
 static klj_val klj_ActivityManager_getMemoryInfo(void *env, void *self,
                                                  const klj_val *a, int n) {
     (void)env; (void)self;
     void *mi = n > 0 ? a[0].l : NULL;
     if (!mi) return (klj_val){.j = 0};
     uint64_t total = kl_mem_budget_bytes(), avail = kl_mem_available_bytes();
-    uint64_t thresh = total / 100 * (uint64_t)(100 - kl_env_int("KL_LOWMEM_AT", 65));
-    // Same trigger as kl_mem_pressure_poll's headroom test, so lowMemory agrees with the notification.
-    uint64_t floor = (uint64_t)kl_env_int("KL_LOWMEM_FREE_MB", 384) << 20;
+    uint64_t thresh = kl_lowmem_threshold(total, kl_env_int("KL_LOWMEM_AT", KL_LOWMEM_AT_DEFAULT));
+    // lowMemory is the notification rule itself (real use of the real limit, or the OS headroom floor): the old test
+    // against the guest-visible total said "low" at 65 % of it, long before any real pressure, and a guest that polls
+    // this drops its streaming pools.
+    int low = kl_mem_is_low();
     void *cls = klj_class_object("android/app/ActivityManager$MemoryInfo");
     klj_field_store(mi, klj_want(cls, "availMem",  "J", 'f'), (klj_val){.j = avail});
     klj_field_store(mi, klj_want(cls, "totalMem",  "J", 'f'), (klj_val){.j = total});
     klj_field_store(mi, klj_want(cls, "threshold", "J", 'f'), (klj_val){.j = thresh});
-    klj_field_store(mi, klj_want(cls, "lowMemory", "Z", 'f'),
-                    (klj_val){.j = avail < thresh || avail <= floor});
+    klj_field_store(mi, klj_want(cls, "lowMemory", "Z", 'f'), (klj_val){.j = low});
     KLJ_LOG("ActivityManager.getMemoryInfo -> avail %llu MiB of %llu, threshold %llu, low=%d",
             (unsigned long long)(avail >> 20), (unsigned long long)(total >> 20),
-            (unsigned long long)(thresh >> 20), (int)(avail < thresh || avail <= floor));
+            (unsigned long long)(thresh >> 20), low);
     return (klj_val){.j = 0};
 }
 

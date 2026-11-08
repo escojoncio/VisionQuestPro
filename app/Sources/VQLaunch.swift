@@ -157,6 +157,7 @@ final class VQSettings: ObservableObject {
     /// Head-locked FPS counter in the compositor (KL_FPS_HUD).
     @Published var showFps: Bool { didSet { save() } }
     @Published var aswDisabled: Bool { didSet { save() } }
+    /// Global «Perfil Quest 3 cuando el juego lo tenga»: allows the Quest 3 profile (per game it can be overridden, VQGameProfile).
     @Published var quest3Profile: Bool { didSet { save() } }
     @Published var forceVulkan: Bool { didSet { save() } }
     @Published var diagCaptures: Bool { didSet { save() } }
@@ -222,7 +223,7 @@ final class VQSettings: ObservableObject {
         showFps = d.object(forKey: "vq.showFps") as? Bool ?? false
         aswDisabled = d.object(forKey: "vq.aswOff") as? Bool ?? true
         d.removeObject(forKey: "vq.hapticsGain")  // old setting: vibration is calibrated automatically per controller
-        quest3Profile = d.object(forKey: "vq.quest3v2") as? Bool ?? true  // Quest 3 for every game by default
+        quest3Profile = d.object(forKey: "vq.quest3v2") as? Bool ?? true  // global switch of «Perfil Quest 3 cuando el juego lo tenga»
         forceVulkan = d.object(forKey: "vq.forceVulkan") as? Bool ?? true
         diagCaptures = d.object(forKey: "vq.diagCaptures2") as? Bool ?? false
         includeCaptures = d.object(forKey: "vq.includeCaptures") as? Bool ?? false
@@ -408,6 +409,15 @@ final class VQSettings: ObservableObject {
         setenv("KL_OVRP_EYE_SCALE", String(format: "%.2f", effPct / 100), 1)
         setenv("KL_OVRP_EYE_BASE", "quest3", 1)
         VQLog.log("Gráficos: resolución de ojo \(Int(effPct.rounded())) % (\(res.useGlobal ? "global" : "del juego"))")
+        // «Área de juego», per game (VQGameArea): the play area Klepton reports as the guardian and the size of the synthetic
+        // room (vq_area_resolve clamps it; seated = circle, w = d = its diameter).
+        let area = VQGameArea.load(key: gameKey)
+        var areaW: Float = 0, areaD: Float = 0
+        let areaMode = vq_area_resolve(area.seated ? 1 : 0, Float(area.w), Float(area.d), &areaW, &areaD)
+        setenv("KL_OVRP_BOUNDARY_MODE", String(areaMode), 1)
+        setenv("KL_OVRP_BOUNDARY_W", String(format: "%.2f", areaW), 1)
+        setenv("KL_OVRP_BOUNDARY_D", String(format: "%.2f", areaD), 1)
+        VQLog.log("[area] game=\(game?.id ?? "?") mode=\(areaMode) w=\(String(format: "%.2f", areaW)) d=\(String(format: "%.2f", areaD))")
         // Final eye size from the last run with these settings, pushed BEFORE the guest boots so its
         // first eye layer is built at it (the compositor's first drawable arrives after the guest has
         // started). The compositor pushes the display's request later; the same result changes nothing.
@@ -427,15 +437,22 @@ final class VQSettings: ObservableObject {
                 VQLog.log("Gráficos: tamaño de ojo \(w)x\(h) empujado antes de arrancar el juego")
             }
         }
-        // Quest 3 identity for every game, in every place a title can check it: Android Build
-        // (MODEL/DEVICE eureka), OVRPlugin headset type, OpenXR system name and the GPU.
-        if quest3Profile {
+        // The headset the game is shown, per game (VQGameProfile; vq_quest3_resolve decides), in every place a title can
+        // check it: Android Build (MODEL/DEVICE eureka), OVRPlugin headset type, OpenXR system name and the GPU's name
+        // (VPKEngine and Klepton's kl_vulkan.c read VPVK_QUEST_GPU_NAME; limits and ids stay the Quest 3 profile's).
+        let profileChoice = VQGameProfile.load(key: gameKey)
+        let isQuest3 = vq_quest3_resolve(Int32(profileChoice ?? 0), quest3Profile ? 1 : 0,
+                                         game?.devicesDeclared == true ? 1 : 0, game?.quest3 == true ? 1 : 0) != 0
+        if isQuest3 {
             setenv("KL_QUEST3", "1", 1)
             setenv("KL_OVRP_HEADSET", "11", 1)
             setenv("KL_XR_SYSTEM_NAME", "Meta Quest 3", 1)
+            setenv("VPVK_QUEST_GPU_NAME", "Adreno (TM) 740", 1)
         } else {
             unsetenv("KL_QUEST3"); unsetenv("KL_OVRP_HEADSET"); unsetenv("KL_XR_SYSTEM_NAME")
+            setenv("VPVK_QUEST_GPU_NAME", "Adreno (TM) 650", 1)
         }
+        VQLog.log("[profile] game=\(game?.id ?? "?") quest3=\(isQuest3 ? 1 : 0) source=\(profileChoice == nil ? "auto" : "override") manifest_quest3=\(game?.quest3 == true ? 1 : 0) global=\(quest3Profile ? 1 : 0)")
         // ASW: Klepton serves SpaceWarp storage (ovrp_GetLayerTextureSpaceWarp, KL_VPKTAA_ASW default on; a game
         // that enables SpaceWarp fails without it), whatever KL_VPKTAA is. The setting is passed on for VPVulkan and
         // reaches the compositor's extrapolation (KL_CP_ASW, behind its own gate) as KL_CP_ASW_OFF.
@@ -457,6 +474,10 @@ final class VQSettings: ObservableObject {
         if gameKey.isEmpty { unsetenv("VQ_GAME_KEY") } else { setenv("VQ_GAME_KEY", gameKey, 1) }
         c.msaa_force = Int32(effMSAA)
         setenv("VPVK_MSAA_FORCE", String(effMSAA), 1)  // read by VPVulkan even before the forward
+        let perGameMSAA = VQGameMSAA.load(key: gameKey)
+        VQLog.log("[msaa] game=\(game?.id ?? "?") global=\(msaaForce) perGame=\(perGameMSAA.map(String.init) ?? "-") effective=\(effMSAA) "
+                  + "source=\(effMSAA == 0 ? "game" : (perGameMSAA == nil ? "global" : "perGame")) "
+                  + "env=\(getenv("VPVK_MSAA_FORCE").map { String(cString: $0) } ?? "-")")
         // RCAS (the sharpening pass, fused in the compositor, 3D only): per game, else the global one; 0 = off.
         let effRcas = VQGameRCAS.load(key: gameKey) ?? rcasIntensity
         c.rcas = Float(effRcas)
@@ -475,7 +496,7 @@ final class VQSettings: ObservableObject {
         setenv("KL_FPS_HUD", showFps ? "1" : "0", 1)
         c.render_scale = 1  // eye size comes only from the resolution slider (KL_OVRP_EYE_SCALE)
         c.asw_disabled = aswDisabled ? 1 : 0
-        c.quest3_profile = quest3Profile ? 1 : 0
+        c.quest3_profile = isQuest3 ? 1 : 0
         _ = vq_gfx_config_apply(&c)
         vq_prewarm_set_enabled(precompileShaders ? 1 : 0)
         // Also through the environment: the call above reaches VPVulkan only once it is loaded,
@@ -492,8 +513,6 @@ final class VQSettings: ObservableObject {
         // returned creates as warm (Unreal's PSO precache) must get them ready; asynchronous creation let its loading bar reach
         // 100 % while thousands still compiled (missing effects, low framerate). VPKEngine's own default stays asynchronous (AVP).
         setenv("VPVK_ASYNC_PIPELINES", "0", 1)
-        // Render A/B of this build (remove afterwards): 0 = engine without merging/hoisting/sinking passes, 1 = normal.
-        setenv("VPVK_FRAME_OPT", "0", 1)
         // VPKEngine 454f7cc dead-store elision (heuristic, risks a corrupted frame) — off until the translator marks samples to keep
         unsetenv("VPVK_MSAA_DEAD_STORE")
         // Games: report geometry/tessellation like Adreno so Unity keeps subshaders that need
@@ -501,7 +520,7 @@ final class VQSettings: ObservableObject {
         setenv("VPVK_REPORT_GEOM", "1", 1)
         // The engine's jitter env also switches off the RCAS UI mask (set_jitter still): games never inherit a 0 from an earlier run.
         unsetenv("VPVK_TAA_JITTER")
-        VQLog.log("Gráficos: foveado Quest y propio siempre apagados, MSAA forzado \(effMSAA == 0 ? "el del juego" : "x\(effMSAA)") (juego \(gameKey.isEmpty ? "?" : gameKey), \(VQGameMSAA.load(key: gameKey) == nil ? "global" : "del juego")), Nitidez (RCAS) \(Int(effRcas * 100)) % (\(VQGameRCAS.load(key: gameKey) == nil ? "global" : "del juego")), anisotrópico x\(effAniso), diagnóstico de rendimiento \(perfDiag), diagnóstico de ficheros \(fsDiag), resolución \(Int(effPct.rounded())) %, ASW apagado \(aswDisabled), perfil Quest 3 \(quest3Profile), FPS en pantalla \(showFps)")
+        VQLog.log("Gráficos: foveado Quest y propio siempre apagados, MSAA forzado \(effMSAA == 0 ? "el del juego" : "x\(effMSAA)") (juego \(gameKey.isEmpty ? "?" : gameKey), \(VQGameMSAA.load(key: gameKey) == nil ? "global" : "del juego")), Nitidez (RCAS) \(Int(effRcas * 100)) % (\(VQGameRCAS.load(key: gameKey) == nil ? "global" : "del juego")), anisotrópico x\(effAniso), diagnóstico de rendimiento \(perfDiag), diagnóstico de ficheros \(fsDiag), resolución \(Int(effPct.rounded())) %, ASW apagado \(aswDisabled), perfil Quest 3 \(isQuest3), FPS en pantalla \(showFps)")
         VQLog.log("Ajustes: sin red \(offline), log del juego \(guestLog), vigilante \(Int(watchdogSeconds)) s")
     }
 }
@@ -520,6 +539,22 @@ enum VQGameMSAA {
         guard !key.isEmpty else { return }
         if let level { UserDefaults.standard.set(level, forKey: "vq.msaaForce." + key) }
         else { UserDefaults.standard.removeObject(forKey: "vq.msaaForce." + key) }
+    }
+}
+
+/// Headset shown to one game: nil = automatic (VQSettings.quest3Profile and the game's manifest decide, see
+/// vq_quest3_resolve); 2 = Quest 2; 3 = Quest 3. Saved as vq.quest3Profile.<key>.
+enum VQGameProfile {
+    static func load(key: String) -> Int? {
+        guard !key.isEmpty, let n = UserDefaults.standard.object(forKey: "vq.quest3Profile." + key) as? Int,
+              [2, 3].contains(n) else { return nil }
+        return n
+    }
+
+    static func save(_ choice: Int?, key: String) {
+        guard !key.isEmpty else { return }
+        if let choice { UserDefaults.standard.set(choice, forKey: "vq.quest3Profile." + key) }
+        else { UserDefaults.standard.removeObject(forKey: "vq.quest3Profile." + key) }
     }
 }
 
@@ -576,6 +611,32 @@ struct VQGameRes: Equatable {
     static func approxEye(pct: Double) -> (w: Int, h: Int) {
         let f = factor(pct: pct)
         return (Int((2064.0 * f).rounded()), Int((2208.0 * f).rounded()))
+    }
+}
+
+/// «Área de juego» per game: Libre (roomscale rectangle `w` × `d` m, each 2...6; default 3 × 3) or Sentado (stationary circle).
+/// Saved by game key: vq.area.<key> (0 free, 1 seated), vq.areaW.<key>, vq.areaD.<key>.
+struct VQGameArea: Equatable {
+    var seated = false
+    var w = 3.0
+    var d = 3.0
+
+    static func load(key: String) -> VQGameArea {
+        let d = UserDefaults.standard
+        var r = VQGameArea()
+        guard !key.isEmpty else { return r }
+        r.seated = d.object(forKey: "vq.area." + key) as? Int == 1
+        r.w = min(max(d.object(forKey: "vq.areaW." + key) as? Double ?? 3, 2), 6)
+        r.d = min(max(d.object(forKey: "vq.areaD." + key) as? Double ?? 3, 2), 6)
+        return r
+    }
+
+    func save(key: String) {
+        guard !key.isEmpty else { return }
+        let u = UserDefaults.standard
+        u.set(seated ? 1 : 0, forKey: "vq.area." + key)
+        u.set(w, forKey: "vq.areaW." + key)
+        u.set(d, forKey: "vq.areaD." + key)
     }
 }
 
@@ -838,9 +899,13 @@ enum VQRobust {
     }
 
     /// Whenever the translator version (vpvk_translator_tag) differs from the one stored in <cache>/vq.translator, or the
-    /// file is missing (also caches of earlier builds, made without the VPVK_ROBUST key): recipes, Metal archives and the
-    /// warm stamps go (the next launch rebuilds them). The new tag is written only when every removal succeeded (else it
-    /// retries next launch). nil = same translator, nothing to do.
+    /// file is missing (also caches of earlier builds, made without the VPVK_ROBUST key): the Metal archives and the
+    /// warm stamps go (the next launch rebuilds them). recipes.bin is kept when the stamp exists and differs: it stores
+    /// the SPIR-V and the options of every stage, and the prewarm's RecipeStore::refresh() retranslates each record whose
+    /// translator id is not the current one (and drops the pipelines whose stage no longer translates), so a translator
+    /// bump does not lose the preload. Without a stamp nothing proves the recipes carry the VPVK_ROBUST key: they go too.
+    /// The new tag is written only when every removal succeeded (else it retries next launch). nil = same translator,
+    /// nothing to do.
     static func purgeOnTranslatorChange(cache: URL, tag: String) -> (old: String?, removed: Int, failed: [String], sealed: Bool)? {
         let fm = FileManager.default
         let stamp = cache.appendingPathComponent(translatorFile)
@@ -851,7 +916,8 @@ enum VQRobust {
         for f in (try? fm.contentsOfDirectory(atPath: cache.path)) ?? [] {
             let archive = f.hasPrefix("pipelines") && (f.hasSuffix(".metalar") || f.hasSuffix(".keys"))
             let warm = f.hasPrefix("firstrun.") || f.hasPrefix("aot.")
-            if archive || warm || f == "pipelines.count" || f == "recipes.bin" {
+            let recipes = f == "recipes.bin" && (old ?? "").isEmpty  // with a stamp: kept (retranslated by the prewarm)
+            if archive || warm || f == "pipelines.count" || recipes {
                 do { try fm.removeItem(at: cache.appendingPathComponent(f)); removed += 1 } catch { failed.append("\(f): \(error.localizedDescription)") }
             }
         }

@@ -198,6 +198,8 @@ void kl_mem_report(void);
 // Java, and the two must not answer differently.
 uint64_t kl_mem_budget_bytes(void);
 uint64_t kl_mem_available_bytes(void);
+int  kl_mem_is_low(void);                      // ActivityManager.MemoryInfo.lowMemory: the notification rule is hot (kl_memrule.h)
+void kl_mem_telemetry(uint64_t now_ms);       // heartbeat thread only: the [mem] line, 5 s cadence, 120 lines then only >10 % changes
 void kl_mem_breakdown(char *buf, size_t n);   // heap/internal/compressed/file + ledger tags, for [hb]
 // One line "<prefix> vm regions=N ... top: TAG/kind=res/dirty/swap" (MiB): the whole region map grouped by VM user_tag and
 // file-backed vs anonymous share mode, top 12 + rest, so the groups add up to the footprint. Rate-limited (2 s), cut at 50 ms / 20000 regions

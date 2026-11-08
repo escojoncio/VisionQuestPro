@@ -833,6 +833,7 @@ static void *heartbeat(void *arg) {
         if (now >= next_sec) {
             next_sec = now + 1000;
             kl_sample_threads_baseline();
+            kl_mem_telemetry(now - t0);   // [mem] line: 5 s cadence, 120 lines then only >10 % footprint changes (kl_libc.c)
             char mt[1100];
             size_t mn = kl_vulkan_diag(1, mt, sizeof mt);
             if (mn && mtl_lines < 900) {

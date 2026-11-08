@@ -170,11 +170,30 @@ static const struct { const char *w; int sub; } g_kw[] = {
     { "OVRManager", KL_KW_SUB }, { "MRUK", KL_KW_SUB }, { "anchor", KL_KW_SUB },
 };
 #define KL_KW_N (sizeof g_kw / sizeof *g_kw)
+// Exception / MR-scene words, a third budget of their own (KL_KW_MR_MAX lines in all, g_kw_mr_n, at most KL_LOG_KW_MAX, each
+// line cut at KL_KW_MR_LEN bytes). Only lines no word above takes (or whose words are used up) count against it, so the
+// other two budgets are untouched. mid = also a hit inside a word (ArgumentException, IOException).
+// Scene / Room (very common in Unity) have a cap of KL_KW_MR_WORD lines each, and the two groups that matter keep KL_KW_MR_MIN lines
+// reserved: 1 = Exception / NullReference, 2 = MRUK / OVRPlugin / Boundary / Anchor. A line of one group (or of Scene / Room, group 0)
+// is dropped when it would eat what the other group has not yet used of its reserve; the rest competes for what is left.
+#define KL_KW_MR_MAX 400
+#define KL_KW_MR_LEN 200
+#define KL_KW_MR_MIN 100
+#define KL_KW_MR_WORD 40
+static const struct { const char *w; int mid; int grp; int cap; } g_kw_mr[] = {
+    { "Exception", 1, 1, 0 }, { "NullReference", 0, 1, 0 }, { "MRUK", 0, 2, 0 }, { "OVRPlugin", 0, 2, 0 },
+    { "Scene", 0, 0, KL_KW_MR_WORD }, { "Room", 0, 0, KL_KW_MR_WORD }, { "Boundary", 0, 2, 0 }, { "Anchor", 0, 2, 0 },
+};
+#define KL_KW_MR_N (sizeof g_kw_mr / sizeof *g_kw_mr)
+static int g_kw_mr_n;    // lines printed for the Exception / MR-scene words
+static int g_kw_mr_grp[3];       // ... of them per group (index 0 is never read: Scene / Room only have their own cap)
+static int g_kw_mr_word[KL_KW_MR_N];   // ... of them per word
 static int g_kw_cap = -1;
 static int g_kw_n;       // lines printed for the run-state words (sub 0): budget g_kw_cap
 static int g_kw_new_n;   // lines printed for the words with a sub-cap: budget kl_kw_new_cap()
 static int g_kw_sub_n[KL_KW_N];
 static int kl_kw_new_cap(void) { return g_kw_cap < KL_KW_NEW_MAX ? g_kw_cap : KL_KW_NEW_MAX; }
+static int kl_kw_mr_cap(void) { return g_kw_cap < KL_KW_MR_MAX ? g_kw_cap : KL_KW_MR_MAX; }
 int kl_log_keyword_open(void) {
     if (g_kw_cap < 0) {
         const char *e = getenv("KL_LOG_KW_MAX");
@@ -182,7 +201,8 @@ int kl_log_keyword_open(void) {
         if (g_kw_cap < 0) g_kw_cap = 0;
     }
     return __atomic_load_n(&g_kw_n, __ATOMIC_RELAXED) < g_kw_cap ||
-           __atomic_load_n(&g_kw_new_n, __ATOMIC_RELAXED) < kl_kw_new_cap();
+           __atomic_load_n(&g_kw_new_n, __ATOMIC_RELAXED) < kl_kw_new_cap() ||
+           __atomic_load_n(&g_kw_mr_n, __ATOMIC_RELAXED) < kl_kw_mr_cap();
 }
 // Index into g_kw of the word this line counts against, or -1. A word with a sub-cap that is used up, or any word whose
 // budget (run-state / new words) is used up, is skipped, so the line can still count against a later word that has room.
@@ -203,10 +223,45 @@ static int kl_kw_find(int prio, const char *tag, const char *msg) {
     }
     return -1;
 }
+// May word k of g_kw_mr print now? Its own cap, then the room left once what the other groups still hold in reserve is set aside.
+static int kl_kw_mr_ok(unsigned k, int total, int cap) {
+    int g = g_kw_mr[k].grp, held = 0;
+    if (g_kw_mr[k].cap && __atomic_load_n(&g_kw_mr_word[k], __ATOMIC_RELAXED) >= g_kw_mr[k].cap) return 0;
+    for (int h = 1; h <= 2; h++) {
+        int n = __atomic_load_n(&g_kw_mr_grp[h], __ATOMIC_RELAXED);
+        if (h != g && n < KL_KW_MR_MIN) held += KL_KW_MR_MIN - n;
+    }
+    return total + held < cap || (g && __atomic_load_n(&g_kw_mr_grp[g], __ATOMIC_RELAXED) < KL_KW_MR_MIN);
+}
+// Index into g_kw_mr of the Exception / MR-scene word this line counts against, or -1. Same priority rule as the sub-cap words
+// (INFO and above, or any priority for the Unity / UE4 / UE tags). Only asked once the other two budgets did not take the line.
+static int kl_kw_mr_hit(int prio, const char *tag, const char *msg) {
+    int total = __atomic_load_n(&g_kw_mr_n, __ATOMIC_RELAXED), cap = kl_kw_mr_cap();
+    if (total >= cap) return -1;
+    if (prio < 4 && !(tag && (strstr(tag, "Unity") || !strcmp(tag, "UE4") || !strcmp(tag, "UE")))) return -1;
+    for (const char *c = msg; *c; c++) {
+        int at_start = c == msg || !((c[-1] >= '0' && c[-1] <= '9') || ((c[-1] | 0x20) >= 'a' && (c[-1] | 0x20) <= 'z'));
+        for (unsigned k = 0; k < KL_KW_MR_N; k++)
+            if ((at_start || g_kw_mr[k].mid) && strncasecmp(c, g_kw_mr[k].w, strlen(g_kw_mr[k].w)) == 0 && kl_kw_mr_ok(k, total, cap))
+                return (int)k;
+    }
+    return -1;
+}
 void kl_log_keyword_copy(int prio, const char *tag, const char *msg) {
     if (!msg || !kl_log_keyword_open()) return;
     int k = kl_kw_find(prio, tag, msg);
-    if (k < 0) return;
+    if (k < 0) {
+        int m = kl_kw_mr_hit(prio, tag, msg);
+        if (m < 0) return;
+        int n = __atomic_fetch_add(&g_kw_mr_n, 1, __ATOMIC_RELAXED);
+        if (n >= kl_kw_mr_cap()) return;
+        __atomic_add_fetch(&g_kw_mr_grp[g_kw_mr[m].grp], 1, __ATOMIC_RELAXED);
+        int word_last = g_kw_mr[m].cap && __atomic_add_fetch(&g_kw_mr_word[m], 1, __ATOMIC_RELAXED) == g_kw_mr[m].cap;
+        static const char lv[] = "??VDIWEF";
+        fprintf(stderr, "  [unity-kw] %c/%s: %.*s%s\n", (prio >= 0 && prio < 8) ? lv[prio] : '?', tag ? tag : "", KL_KW_MR_LEN, msg,
+                n + 1 == kl_kw_mr_cap() ? " (kw mr line cap reached)" : word_last ? " (kw mr word cap reached)" : "");
+        return;
+    }
     int cap = g_kw[k].sub ? kl_kw_new_cap() : g_kw_cap;
     int n = __atomic_fetch_add(g_kw[k].sub ? &g_kw_new_n : &g_kw_n, 1, __ATOMIC_RELAXED);
     if (n >= cap) return;

@@ -122,6 +122,7 @@ int   kl_vulkan_aa_gate(void) { return 0; }
 int   kl_vulkan_native_submit(void (*fn)(void *, void *), void *u) { (void)fn; (void)u; return 0; }
 void *kl_vulkan_native_device(void) { return NULL; }
 size_t kl_vulkan_mem_stats(char *out, size_t cap) { (void)out; (void)cap; return 0; }
+size_t kl_vulkan_mem_brief(char *out, size_t cap) { (void)out; (void)cap; return 0; }
 int   kl_vulkan_taa_native_on(void) { return 0; }
 int   kl_vulkan_rcas_on(void) { return 0; }
 int   kl_vulkan_hook_is_taa(void) { return 1; }
@@ -4109,6 +4110,8 @@ static struct {
     int   (*image_zero_clear)(void *mtl);
     // weak: VPKEngine with vpvk_mem_stats (vpvk/config.h)
     size_t (*mem_stats)(char *out, size_t cap);
+    // weak: VPKEngine with vpvk_mem_brief (vpvk/config.h): the same counters minus the object walk, try-locked
+    size_t (*mem_brief)(char *out, size_t cap);
     // weak: VPKEngine with the GPU backlog gauges (vpvk/config.h)
     unsigned (*gpu_backlog_ms)(void);
     unsigned (*gpu_last_splits)(void);
@@ -4159,6 +4162,7 @@ static void klvk_vpvk_resolve(void) {
         g_vpvk.image_zero_pending = (int (*)(void *))dlsym(lib, "vpvk_image_zero_pending");
         g_vpvk.image_zero_clear   = (int (*)(void *))dlsym(lib, "vpvk_image_zero_clear");
         g_vpvk.mem_stats = (size_t (*)(char *, size_t))dlsym(lib, "vpvk_mem_stats");
+        g_vpvk.mem_brief = (size_t (*)(char *, size_t))dlsym(lib, "vpvk_mem_brief");
         g_vpvk.gpu_backlog_ms  = (unsigned (*)(void))dlsym(lib, "vpvk_gpu_backlog_ms");
         g_vpvk.gpu_last_splits = (unsigned (*)(void))dlsym(lib, "vpvk_gpu_last_frame_chunks");
         g_vpvk.gpu_lost        = (int (*)(void))dlsym(lib, "vpvk_gpu_lost");
@@ -4372,6 +4376,12 @@ size_t kl_vulkan_mem_stats(char *out, size_t cap) {
     if (!out || cap < 640) return 0;   // vpvk_mem_stats needs >= 640 bytes
     klvk_vpvk_resolve();
     return g_vpvk.mem_stats ? g_vpvk.mem_stats(out, cap) : 0;
+}
+
+size_t kl_vulkan_mem_brief(char *out, size_t cap) {
+    if (!out || cap < 640) return 0;
+    klvk_vpvk_resolve();
+    return g_vpvk.mem_brief ? g_vpvk.mem_brief(out, cap) : 0;
 }
 
 
@@ -4971,10 +4981,10 @@ void kl_vulkan_trim(const char *why) {
         const int level = (why && (strstr(why, "critical") || !strcmp(why, "headroom"))) ? 2 : 1;
         if (now - last[level] >= 1.0) {
             last[level] = now;
-            char out[256];
+            char out[768];   // the report is ~450 bytes: libs / msaa / args / held / retired, MiB by category
             out[0] = 0;
             size_t freed_b = g_vpvk.trim_memory(level, out, sizeof out);
-            VKI("[mem] trim (%s): VPKEngine released %zu MiB (%s)\n", why ? why : "?",
+            VKI("[mem] trim (%s, level %d): VPKEngine released %zu MiB now (%s)\n", why ? why : "?", level,
                 freed_b >> 20, out[0] ? out : "-");
             // What the guest destroyed and VPKEngine still pins until a frame reuses a slot (a load without
             // frames never reaches that): released now if nothing is in flight (150 ms without a frame).
@@ -7549,7 +7559,9 @@ static void klvk_spoof_props(VkPhysicalDeviceProperties *p) {
     if (!p || !klvk_spoof_gpu()) return;
     p->vendorID = 0x5143;                 // Qualcomm
     p->deviceID = 0x43051401;             // an Adreno 740-class id (plausible)
-    snprintf(p->deviceName, sizeof p->deviceName, "Adreno (TM) 740");
+    // The name follows the headset presented (VQLaunch sets VPVK_QUEST_GPU_NAME: Quest 2 "Adreno (TM) 650"); ids stay.
+    const char *gpu = kl_env_str("VPVK_QUEST_GPU_NAME", "");
+    snprintf(p->deviceName, sizeof p->deviceName, "%s", *gpu ? gpu : "Adreno (TM) 740");
     // Unity 2022's Vulkan detection (libunity: vendor 0x5143 branch) refuses a
     // Qualcomm GPU whose driverVersion lacks bit 31 — real Adreno drivers are
     // 512.x, encoded VK_MAKE_VERSION(512, ...) which sets it. MoltenVK's small

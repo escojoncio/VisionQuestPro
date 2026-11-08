@@ -697,7 +697,8 @@ float kl_ovrp_guest_display_frequency(void);
 
 // The play area both XR APIs report (OVRPlugin boundary, OpenXR STAGE bounds):
 // a width x depth rectangle in metres centred on the tracking origin, on the
-// floor. 0 (and zeros) when KL_OVRP_BOUNDARY=0 — no guardian.
+// floor (seated mode, KL_OVRP_BOUNDARY_MODE=1: a circle, width = depth = its
+// diameter). 0 (and zeros) when KL_OVRP_BOUNDARY=0 — no guardian.
 int   kl_ovrp_boundary(float *width, float *depth);
 
 // The per-eye render target size the guest is told to use

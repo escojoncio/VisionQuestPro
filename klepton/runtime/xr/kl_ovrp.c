@@ -9543,14 +9543,31 @@ static int klovrp_boundary_on(void) {
     }
     return on;
 }
+// Play area per game (launcher "Área de juego"): KL_OVRP_BOUNDARY_MODE 0 free = rectangle KL_OVRP_BOUNDARY_W x
+// KL_OVRP_BOUNDARY_D (each defaults to the KL_OVRP_BOUNDARY_SIZE square, 3 m); 1 seated = circle, diameter =
+// KL_OVRP_BOUNDARY_W (default 2 m: radius 1.0 m, unverified against the Quest guardian). Dimensions of a circle = its diameter.
+static int klovrp_boundary_circle(void) {
+    static int c = -1;
+    if (c < 0) c = kl_env_int("KL_OVRP_BOUNDARY_MODE", 0) == 1;
+    return c;
+}
+static float g_boundary_w, g_boundary_d;                  // written once, under g_boundary_once
+static pthread_once_t g_boundary_once = PTHREAD_ONCE_INIT;
+static void klovrp_boundary_size_init(void) {
+    int circle = klovrp_boundary_circle();
+    float side = kl_env_float("KL_OVRP_BOUNDARY_SIZE", 3.0f);
+    if (!(side >= 1.0f && side <= 20.0f)) side = 3.0f;
+    float sw = kl_env_float("KL_OVRP_BOUNDARY_W", circle ? 2.0f : side);
+    if (!(sw >= 1.0f && sw <= 20.0f)) sw = circle ? 2.0f : side;       // seated: the 2 m default diameter, not the free side
+    float sd = circle ? sw : kl_env_float("KL_OVRP_BOUNDARY_D", side);
+    if (!(sd >= 1.0f && sd <= 20.0f)) sd = side;
+    g_boundary_w = sw; g_boundary_d = sd;
+    fprintf(stderr, "  [ovrp] boundary area: %s %.2f x %.2f\n", circle ? "circle (seated), diameter" : "rectangle (free)", sw, sd);
+}
 static void klovrp_boundary_size(float *w, float *d) {
-    static float side = -1.0f;
-    if (side < 0.0f) {
-        side = kl_env_float("KL_OVRP_BOUNDARY_SIZE", 3.0f);
-        if (!(side >= 1.0f && side <= 20.0f)) side = 3.0f;
-    }
-    if (w) *w = side;
-    if (d) *d = side;
+    pthread_once(&g_boundary_once, klovrp_boundary_size_init);
+    if (w) *w = g_boundary_w;
+    if (d) *d = g_boundary_d;
 }
 int kl_ovrp_boundary(float *width, float *depth) {
     if (!klovrp_boundary_on()) { if (width) *width = 0; if (depth) *depth = 0; return 0; }
@@ -9570,17 +9587,24 @@ static void klovrp_boundary_test_xz(float x, float y, float z, klovrp_boundary_t
     if (!klovrp_boundary_on()) { r->closest_distance = 1000.0f; return; }
     float w, d;
     klovrp_boundary_size(&w, &d);
-    float hw = w * 0.5f, hd = d * 0.5f;
-    float sx = x < 0 ? -1.0f : 1.0f, sz = z < 0 ? -1.0f : 1.0f;
-    float dx = hw - fabsf(x), dz = hd - fabsf(z);
-    if (dx < dz) {
-        r->point[0] = sx * hw; r->point[1] = y; r->point[2] = z;
-        r->normal[0] = -sx;
-        r->closest_distance = dx;
+    if (klovrp_boundary_circle()) {                        // positive inside the circle
+        float rad = w * 0.5f, len = sqrtf(x * x + z * z), ux = len > 1e-6f ? x / len : 1.0f, uz = len > 1e-6f ? z / len : 0.0f;
+        r->point[0] = ux * rad; r->point[1] = y; r->point[2] = uz * rad;
+        r->normal[0] = -ux; r->normal[2] = -uz;
+        r->closest_distance = rad - len;
     } else {
-        r->point[0] = x; r->point[1] = y; r->point[2] = sz * hd;
-        r->normal[2] = -sz;
-        r->closest_distance = dz;
+        float hw = w * 0.5f, hd = d * 0.5f;
+        float sx = x < 0 ? -1.0f : 1.0f, sz = z < 0 ? -1.0f : 1.0f;
+        float dx = hw - fabsf(x), dz = hd - fabsf(z);
+        if (dx < dz) {
+            r->point[0] = sx * hw; r->point[1] = y; r->point[2] = z;
+            r->normal[0] = -sx;
+            r->closest_distance = dx;
+        } else {
+            r->point[0] = x; r->point[1] = y; r->point[2] = sz * hd;
+            r->normal[2] = -sz;
+            r->closest_distance = dz;
+        }
     }
     // Triggered only OUTSIDE the area: nothing draws this guardian, so a title
     // must not be told it is showing while the player is inside.
@@ -9636,16 +9660,18 @@ static uint64_t klovrp_TestBoundaryPoint2(float x, float y, float z, int type,
 static int klovrp_boundary_points(float *pts, int *count) {
     if (!count) return 0;
     if (!klovrp_boundary_on()) { *count = 0; return 1; }
-    if (!pts) { *count = 4; return 1; }
-    if (*count < 4) return 0;
+    int n = klovrp_boundary_circle() ? 32 : 4;            // a circle is a 32-point polygon
+    if (!pts) { *count = n; return 1; }
+    if (*count < n) return 0;
     float w, d;
     klovrp_boundary_size(&w, &d);
     float hw = w * 0.5f, hd = d * 0.5f, y = klovrp_boundary_floor_y();
     const float c[4][2] = { {-hw, -hd}, {hw, -hd}, {hw, hd}, {-hw, hd} };
-    for (int i = 0; i < 4; i++) {
-        pts[i * 3 + 0] = c[i][0]; pts[i * 3 + 1] = y; pts[i * 3 + 2] = c[i][1];
+    for (int i = 0; i < n; i++) {
+        float a = (float)i * (6.2831853f / 32.0f);
+        pts[i * 3 + 0] = n == 32 ? hw * cosf(a) : c[i][0]; pts[i * 3 + 1] = y; pts[i * 3 + 2] = n == 32 ? hw * sinf(a) : c[i][1];
     }
-    *count = 4;
+    *count = n;
     return 1;
 }
 // ovrpBool ovrp_GetBoundaryGeometry2(ovrpBoundaryType, void *points, int *count)

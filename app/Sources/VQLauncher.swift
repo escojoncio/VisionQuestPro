@@ -24,7 +24,7 @@ final class VQModel: ObservableObject {
     @Published var appLogTail = ""        // the end of app.txt for Settings, read off the main thread
     @Published var scanning = false       // the QUEST folder is being read (off the main thread)
     @Published var prepared: [String: Bool] = [:]   // game id -> converted and up to date; absent until worked out off the main thread
-    @Published var cacheComplete: [String: Bool] = [:]   // game id -> shader cache complete (cache-state.json); absent: no file / not worked out yet
+    @Published var cacheInfo: [String: VQCacheState.Info] = [:]   // game id -> shader cache state (cache-state.json); absent: no file / not worked out yet
     private var refreshes = 0             // generation of the last refresh(); an older scan that ends late is dropped
     private var logRefreshes = 0          // same, for refreshLogs()
     private var certificateGen = 0        // bumped by every certificate change; an older read that ends late is dropped
@@ -79,9 +79,9 @@ final class VQModel: ObservableObject {
                 Task { @MainActor in
                     if self.prepared[game.id] != ready { self.prepared[game.id] = ready }
                 }
-                let cache = VQCacheState.isComplete(game: game.id)
+                let cache = VQCacheState.info(game: game.id)
                 Task { @MainActor in
-                    if self.cacheComplete[game.id] != cache { self.cacheComplete[game.id] = cache }
+                    if self.cacheInfo[game.id] != cache { self.cacheInfo[game.id] = cache }
                 }
             }
         }
@@ -295,10 +295,9 @@ struct VQGameCard: View {
         VStack(alignment: .leading, spacing: 10) {
             VQCoverView(game: game)
             Text(game.name).font(.title2.bold()).lineLimit(2)
-            if let complete = model.cacheComplete[game.id] {
-                Text(complete ? VQL("Caché completa", "Cache complete")
-                              : VQL("Caché incompleta: juega hasta que termine la precarga", "Cache incomplete: keep playing until the preload finishes"))
-                    .font(.caption).foregroundStyle(complete ? Color.green : Color.orange)
+            if let cache = model.cacheInfo[game.id] {
+                Text(cacheText(cache))
+                    .font(.caption).foregroundStyle(cache.complete ? Color.green : Color.orange)
             }
             Text("\(game.package) · v\(game.version)").font(.caption).foregroundStyle(.secondary)
             HStack(spacing: 8) {
@@ -338,6 +337,21 @@ struct VQGameCard: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .glassBackgroundEffect()
         .sheet(isPresented: $showGameSettings) { VQGameSettingsView(game: game) }
+    }
+
+    /// «requested» = pipelines the game asked for (served from the cache or compiled); «compiled» (the text says new recipes) = recipes added in the last session, not real compilations.
+    private func cacheText(_ c: VQCacheState.Info) -> String {
+        let compiled = c.new.map { VQL(", \($0) recetas nuevas en la última sesión", ", \($0) new recipes in the last session") } ?? ""
+        if c.complete {
+            return VQL("Caché estable (sin pipelines nuevos en esta sesión; \(c.requested) pedidos\(compiled))",
+                       "Cache stable (no new pipelines this session; \(c.requested) requested\(compiled))")
+        }
+        if c.new == 0 {   // nothing new was compiled: playing more would not change anything the last session did not already see
+            return VQL("Caché sin compilaciones nuevas (\(c.requested) pedidos): la sesión no llegó a estabilizarse",
+                       "Cache with nothing new compiled (\(c.requested) requested): the session did not settle")
+        }
+        return VQL("Caché incompleta (\(c.requested) pedidos\(compiled)): juega hasta que termine la precarga",
+                   "Cache incomplete (\(c.requested) requested\(compiled)): keep playing until the preload finishes")
     }
 
     private func tag(_ text: String, _ symbol: String) -> some View {
@@ -432,7 +446,10 @@ struct VQSettingsView: View {
                     Toggle(VQL("ASW desactivado (todos los frames reales)", "ASW off (every frame real)"), isOn: $settings.aswDisabled)
                     Toggle(VQL("Precompilar shaders antes de jugar", "Precompile shaders before playing"), isOn: $settings.precompileShaders)
                     Toggle(VQL("Shaders AOT (todo compilado antes de jugar, experimental)", "AOT shaders (all compiled before playing, experimental)"), isOn: $settings.aotShaders)
-                    Toggle(VQL("Perfil Quest 3", "Quest 3 profile"), isOn: $settings.quest3Profile)
+                    Toggle(VQL("Perfil Quest 3 cuando el juego lo tenga", "Quest 3 profile when the game has one"), isOn: $settings.quest3Profile)
+                    Text(VQL("Activado: los juegos en «Automático» se presentan como Quest 3 solo si su manifiesto lista Quest 3 (si no declara dispositivos, también como Quest 3); si no, como Quest 2. Desactivado: como Quest 2. Cada juego puede forzar Quest 2 o Quest 3 en sus ajustes. Se aplica al lanzar el juego.",
+                             "On: games set to «Automatic» appear as a Quest 3 only if their manifest lists Quest 3 (if it declares no devices, also as a Quest 3); otherwise as a Quest 2. Off: as a Quest 2. Each game can force Quest 2 or Quest 3 in its own settings. Applied when the game launches."))
+                        .font(.caption)
                     Toggle(VQL("Forzar Vulkan en juegos Unity", "Force Vulkan in Unity games"), isOn: $settings.forceVulkan)
                     Toggle(VQL("OpenGL ES con VPKEngine (experimental)", "OpenGL ES with VPKEngine (experimental)"),
                            isOn: $settings.glesVPK)
@@ -684,7 +701,10 @@ struct VQGameSettingsView: View {
     @State private var aniso: Int
     /// nil = the global «Nitidez (RCAS)»; else this game's own 0...1.
     @State private var rcas: Double?
+    /// 0 = automatic (nothing saved for this game), 2 = Quest 2, 3 = Quest 3.
+    @State private var profile: Int
     @State private var seat: VQGameSeat
+    @State private var area: VQGameArea
     @State private var capture: VQGameCapture
 
     init(game: VQGame) {
@@ -693,7 +713,9 @@ struct VQGameSettingsView: View {
         _res = State(initialValue: VQGameRes.load(key: game.aaKey))
         _aniso = State(initialValue: VQGameAniso.load(key: game.aaKey) ?? -1)
         _rcas = State(initialValue: VQGameRCAS.load(key: game.aaKey))
+        _profile = State(initialValue: VQGameProfile.load(key: game.aaKey) ?? 0)
         _seat = State(initialValue: VQGameSeat.load(key: game.aaKey))
+        _area = State(initialValue: VQGameArea.load(key: game.aaKey))
         _capture = State(initialValue: VQGameCapture.load(key: game.aaKey))
     }
 
@@ -725,6 +747,22 @@ struct VQGameSettingsView: View {
                         VQSeatedControls(seated: $seat.seated, height: $seat.height)
                     }
                 }
+                Section(VQL("Área de juego", "Play area")) {
+                    Picker(VQL("Área de juego", "Play area"), selection: $area.seated) {
+                        Text(VQL("Libre", "Free")).tag(false)
+                        Text(VQL("Sentado", "Seated")).tag(true)
+                    }
+                    .pickerStyle(.segmented)
+                    if !area.seated {
+                        Slider(value: $area.w, in: 2...6, step: 0.25) { Text(VQL("Ancho", "Width")) }
+                        Text(VQL("Ancho: \(String(format: "%.2f", area.w)) m", "Width: \(String(format: "%.2f", area.w)) m")).font(.caption)
+                        Slider(value: $area.d, in: 2...6, step: 0.25) { Text(VQL("Fondo", "Depth")) }
+                        Text(VQL("Fondo: \(String(format: "%.2f", area.d)) m", "Depth: \(String(format: "%.2f", area.d)) m")).font(.caption)
+                    }
+                    Text(VQL("La zona de juego que el juego cree que tienes (guardián) y el tamaño de la sala si pide escanearla. «Libre»: rectángulo de ancho × fondo; «Sentado»: círculo de 1 m de radio.",
+                             "The play area the game believes you have (guardian) and the size of the room if it asks to scan it. «Free»: a width × depth rectangle; «Seated»: a circle of 1 m radius."))
+                        .font(.caption)
+                }
                 Section(VQL("Filtrado anisotrópico", "Anisotropic filtering")) {
                     Picker(VQL("Filtrado anisotrópico", "Anisotropic filtering"), selection: $aniso) {
                         Text(VQL("Global", "Global")).tag(-1)
@@ -736,6 +774,17 @@ struct VQGameSettingsView: View {
                     }
                     Text(VQL("Fuerza el nivel en los samplers de materiales del juego. «Global» usa el ajuste de Ajustes; «Del juego» no toca nada.",
                              "Forces the level on the game's material samplers. «Global» follows Settings; «Game's own» changes nothing."))
+                        .font(.caption)
+                }
+                Section(VQL("Perfil del visor", "Headset profile")) {
+                    Picker(VQL("Perfil del visor", "Headset profile"), selection: $profile) {
+                        Text(VQL("Automático", "Automatic")).tag(0)
+                        Text("Quest 2").tag(2)
+                        Text("Quest 3").tag(3)
+                    }
+                    .pickerStyle(.segmented)
+                    Text(VQL("Qué visor cree el juego que es (modelo, tipo de mando, nombre de la GPU). «Automático»: Quest 3 solo si «Perfil Quest 3 cuando el juego lo tenga» (Ajustes) está activado y el manifiesto del juego lista Quest 3 (si no declara dispositivos, basta el ajuste); si no, Quest 2. Se aplica al lanzar el juego.",
+                             "Which headset the game believes it runs on (model, controller type, GPU name). «Automatic»: Quest 3 only if «Quest 3 profile when the game has one» (Settings) is on and the game's manifest lists Quest 3 (if it declares no devices, the setting alone decides); otherwise Quest 2. Applied when the game launches."))
                         .font(.caption)
                 }
                 Section(VQL("Captura de frames (diagnóstico)", "Frame capture (diagnostics)")) {
@@ -774,9 +823,17 @@ struct VQGameSettingsView: View {
                 new.save(key: game.aaKey)
                 VQLog.log("Ajustes del juego \(game.aaKey): modo sentado \(new.useGlobal ? "global" : (new.seated ? "sí, \(String(format: "%.2f", new.height)) m" : "no"))")
             }
+            .onChange(of: area) { _, new in
+                new.save(key: game.aaKey)
+                VQLog.log("Ajustes del juego \(game.aaKey): área de juego \(new.seated ? "sentado" : "libre \(String(format: "%.2f", new.w)) × \(String(format: "%.2f", new.d)) m")")
+            }
             .onChange(of: rcas) { _, new in
                 VQGameRCAS.save(new, key: game.aaKey)
                 VQLog.log("Ajustes del juego \(game.aaKey): Nitidez (RCAS) \(new.map { "\(Int($0 * 100)) %" } ?? "global")")
+            }
+            .onChange(of: profile) { _, new in
+                VQGameProfile.save(new == 0 ? nil : new, key: game.aaKey)
+                VQLog.log("Ajustes del juego \(game.aaKey): perfil del visor \(new == 0 ? "automático" : "Quest \(new)")")
             }
             .onChange(of: aniso) { _, new in
                 VQGameAniso.save(new < 0 ? nil : new, key: game.aaKey)

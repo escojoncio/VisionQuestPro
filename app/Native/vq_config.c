@@ -1,6 +1,7 @@
 #include "vq_config.h"
 
 #include <dlfcn.h>
+#include <math.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -64,6 +65,20 @@ int vq_gfx_config_apply(const vq_gfx_config *c) {
     return vq_gfx_config_forward();
 }
 
+int vq_quest3_resolve(int32_t choice, int32_t global, int32_t declared, int32_t manifest_quest3) {
+    if (choice == 2) return 0;
+    if (choice == 3) return 1;
+    return global && (!declared || manifest_quest3) ? 1 : 0;
+}
+
+// Seated radius 1.0 m: unverified against the Quest guardian's stationary boundary.
+int vq_area_resolve(int32_t mode, float w, float d, float *out_w, float *out_d) {
+    if (mode == 1) { *out_w = *out_d = 2.0f; return 1; }     // the circle's diameter
+    *out_w = !(w > 0) || !isfinite(w) ? 3.0f : w < 2.0f ? 2.0f : w > 6.0f ? 6.0f : w;
+    *out_d = !(d > 0) || !isfinite(d) ? 3.0f : d < 2.0f ? 2.0f : d > 6.0f ? 6.0f : d;
+    return 0;
+}
+
 void vq_prewarm_set_enabled(int on) {
     void (*f)(int) = (void (*)(int))dlsym(RTLD_DEFAULT, "vpvk_config_set_prewarm");
     if (f) f(on ? 1 : 0);
@@ -117,4 +132,14 @@ int vq_cache_state_get(struct vq_cache_state *out) {
     int (*f)(struct vq_cache_state *) = (int (*)(struct vq_cache_state *))dlsym(RTLD_DEFAULT, "vpvk_cache_state");
     if (!f) return 0;
     return f(out) == 1 ? 1 : 0;
+}
+
+int vq_cache_complete(const struct vq_cache_state *s) {
+    if (!s) return 0;
+    if (s->complete == 1) return 1;
+    return s->reason == 5 && s->pipelines_unique > 0;   // reason 5 is evaluated last: every other criterion held
+}
+
+int vq_cache_persisted_complete(int saved_complete, int complete, uint32_t new_recipes) {
+    return complete || (saved_complete && new_recipes == 0);
 }

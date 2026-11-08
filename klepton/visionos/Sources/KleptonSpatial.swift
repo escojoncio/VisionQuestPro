@@ -89,7 +89,10 @@ enum KleptonSpatial {
     // MARK: authorization and the consumer tasks
 
     private static func monitor(_ session: ARKitSession) async {
-        var status = await session.queryAuthorization(for: [.worldSensing])[.worldSensing]
+        let both = await session.queryAuthorization(for: [.handTracking, .worldSensing])
+        NSLog("[spatial] authorization: handTracking=\(String(describing: both[.handTracking])) "
+              + "worldSensing=\(String(describing: both[.worldSensing]))")
+        var status = both[.worldSensing]
         // `run` already raised the prompt if it was needed: wait for the answer rather than asking twice.
         var waited = 0
         while status == .notDetermined && waited < 180 {

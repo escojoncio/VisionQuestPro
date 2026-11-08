@@ -15,6 +15,8 @@
 // ---- stubs ------------------------------------------------------------------
 static float g_oy = 0.0f;
 float kl_ovrp_guest_origin_y(void) { return g_oy; }
+static float g_bw = 3.0f, g_bd = 3.0f;
+int kl_ovrp_boundary(float *w, float *d) { *w = g_bw; *d = g_bd; return 1; }
 static char g_dir[256];
 const char *kl_jni_files_dir(void) { return g_dir; }
 void kl_ovrp_hit(const char *n) { (void)n; }
@@ -153,6 +155,7 @@ int main(void) {
         CK(((int32_t(*)(uint64_t *, rl0 *))F("ovrp_GetSpaceRoomLayout"))(&rm0, &l0) == 0 && l0.wcount == 4);
         float fw, fh2, gm[16]; int lb;
         CK(kl_spatial_plane_info(l0.floor, &fw, &fh2, &lb, 0, NULL, NULL) && lb == KLSP_LBL_FLOOR);
+        CK(fabsf(fw - 4.0f) < 1e-4f && fabsf(fh2 - 4.0f) < 1e-4f);   // 3 x 3 play area + 0.5 m margin per side
         float cx = 0, cz = 0; int nw = 0;                       // 4 walls around the head XZ
         for (uint32_t i = 0; i < kl_spatial_count(KLSP_PLANE); i++) { kl_uuid pid; int l2;
             if (kl_spatial_get(KLSP_PLANE, i, &pid, gm) && kl_spatial_plane_info(pid, NULL, NULL, &l2, 0, NULL, NULL) && l2 == KLSP_LBL_WALL) { cx += gm[12]; cz += gm[14]; nw++; } }
@@ -188,12 +191,34 @@ int main(void) {
     horiz(m, 0, 2.6f, 0, 1); kl_spatial_plane(U16(2), 0, m, 4, 5, KLSP_LBL_CEILING, NULL, 0);
     horiz(m, 0.5f, 0.75f, -1, 0); kl_spatial_plane(U16(3), 0, m, 1.2f, 0.8f, KLSP_LBL_TABLE, NULL, 0);
     for (int i = 0; i < 4; i++) {
-        ident(m, (i % 2 ? (i == 1 ? 2 : -2) : 0), 5.0f, (i % 2 ? 0 : (i == 0 ? -2.5f : 2.5f))); kl_spatial_plane(U16(10 + i), 0, m, 4, 2.6f, KLSP_LBL_WALL, NULL, 0);
-        if (i == 1) CK(kl_spatial_count(KLSP_PLANE) == 11);     // real floor + 2 walls: synthetic set (6) still there
-        if (i == 2) CK(kl_spatial_count(KLSP_PLANE) == 6);      // real floor + 3 walls: synthetic purged
+        ident(m, (i % 2 ? (i == 1 ? 2 : -2) : 0), 5.0f, (i % 2 ? 0 : (i == 0 ? -2.5f : 2.5f)));
+        if (i % 2) { m[0] = 0; m[2] = 1; }                      // side walls run along Z: the four walls close a 4 x 5 ring
+        m[4] = -m[2]; m[5] = 0; m[6] = m[0]; m[10] = 0; m[9] = -1;   // wall frame: Z down, normal (Y) left of the tangent; walls 2 and 3 face outward
+        kl_spatial_plane(U16(10 + i), 0, m, i % 2 ? 5.0f : 4.0f, 2.6f, KLSP_LBL_WALL, NULL, 0);
+        if (i == 2) CK(kl_spatial_count(KLSP_PLANE) == 12);     // real floor + ceiling + 3 walls: synthetic set (6) still there
+        if (i == 3) CK(kl_spatial_count(KLSP_PLANE) == 7);      // real floor + ceiling + 4 closing walls: synthetic purged
     }
     CK(kl_spatial_count(KLSP_PLANE) == 7);
     CK(kl_spatial_count(KLSP_ROOM) == 1);                          // synthetic
+    {   // the purge hands over the real walls turned inward and chained end -> start, like the synthetic ones
+        float wx[4], wz[4], nx[4], nz[4], tx[4], tz[4], hl[4]; int nw = 0;
+        for (uint32_t i = 0; i < kl_spatial_count(KLSP_PLANE) && nw < 4; i++) {
+            kl_uuid pid; float gm[16], pw; int lb;
+            if (!kl_spatial_get(KLSP_PLANE, i, &pid, gm) || !kl_spatial_plane_info(pid, &pw, NULL, &lb, 0, NULL, NULL) || lb != KLSP_LBL_WALL) continue;
+            wx[nw] = gm[12]; wz[nw] = gm[14]; tx[nw] = gm[0]; tz[nw] = gm[2]; nx[nw] = gm[4]; nz[nw] = gm[6]; hl[nw] = pw * 0.5f; nw++;
+        }
+        CK(nw == 4);
+        for (int k = 0; k < nw; k++) {
+            CK(nx[k] * -wx[k] + nz[k] * -wz[k] > 0);                // normal toward the room centre (0, 0)
+            CK(fabsf(nx[k] + tz[k]) < 1e-5f && fabsf(nz[k] - tx[k]) < 1e-5f);   // and left of the tangent
+            int found = 0;
+            for (int j = 0; j < nw; j++) {                          // this wall's end is the start of another one
+                float ex = wx[k] + tx[k] * hl[k], ez = wz[k] + tz[k] * hl[k];
+                found |= fabsf(ex - (wx[j] - tx[j] * hl[j])) < 1e-4f && fabsf(ez - (wz[j] - tz[j] * hl[j])) < 1e-4f;
+            }
+            CK(found);                                              // closed 4 x 5 ring: every end is the start of the next wall
+        }
+    }
 
     // --- query by component Bounded2D (3): 7 planes + 1 room? room has no Bounded2D
     typedef struct { int32_t qt, mx; double to; int32_t loc, act, ft; void *ids; int32_t nids; void *comps; int32_t ncomps; } qi;

@@ -1281,6 +1281,14 @@ build/t_memdiag: tests/t_memdiag.c runtime/libc/kl_libc.c visionos/Sources/kl_ap
 memdiag: build/t_memdiag
 	@./build/t_memdiag
 
+# Guest low-memory rule + [mem] telemetry throttle (runtime/kl_memrule.h, pure; used by kl_libc.c and kl_jni_android.c). Plain C.
+build/t_lowmem: tests/t_lowmem.c runtime/kl_memrule.h
+	@mkdir -p build
+	$(CC) -g -fsanitize=address,undefined -Wall -Wextra -Iruntime -o $@ tests/t_lowmem.c
+.PHONY: lowmem
+lowmem: build/t_lowmem
+	@./build/t_lowmem
+
 # Linux-semantics fixes of the libc/pthread shims (affinity mask, MADV_DONTNEED split, cond/mutex maps, mallocx flags).
 # Cut out of kl_libc.c / kl_pthread.c / kl_shim.c by their KL-TEST markers; plain C, Linux or macOS.
 build/t_libc_sem: tests/t_libc_sem.c runtime/libc/kl_libc.c runtime/libc/kl_pthread.c runtime/libc/kl_shim.c

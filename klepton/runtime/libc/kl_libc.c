@@ -52,6 +52,7 @@ int getentropy(void *buf, size_t buflen);
 #include "kl_target.h"      /* kl_guest_kind / KL_GUEST_UNITY */
 #include "kl_jni.h"     // kl_jni_build_string — the Build.* half of the system
 #include "kl_fault.h"   // kl_fault_print_frames — who called exit()
+#include "kl_memrule.h"  // guest low-memory rule + [mem] telemetry throttle (pure, tested on Linux)
                         // properties below, so the two cannot drift apart
 
 static void warn_once(const char *what) {
@@ -1154,6 +1155,10 @@ static uint64_t kl_mem_total(void) {
 // way, so the two modes agree at the end and diverge at the top.
 static _Atomic uint64_t g_mem_peak;
 
+// Guest mmap totals for the [mem] telemetry. Cumulative: munmap is forwarded straight to libc (KL_FWD), so what is still mapped
+// is not known here; the region map (kl_mem_vm_print, tag guest_mmap) is the live view.
+static _Atomic uint64_t g_gmmap_calls, g_gmmap_anon_bytes, g_gmmap_file_bytes;
+
 static void kl_mem_log_maybe_start(void);
 static uint64_t kl_mem_footprint(void) {
     kl_mem_log_maybe_start();
@@ -1295,10 +1300,13 @@ int klb_sysinfo(void *out) {
 //     visionOS is the only warning that arrives before jetsam does.
 //
 // KL_LOWMEM_AT is the footprint percentage (of the REAL process limit, see
-// kl_mem_real_limit) that fires source 1 (default 65, 0 disables), KL_LOWMEM_CRIT the
-// second tier (default 80). Each re-arms only after the footprint falls back below
-// KL_LOWMEM_CLEAR (55) / KL_LOWMEM_CRIT_CLEAR (70), so a guest that cannot free anything
-// is asked once per tier rather than every frame.
+// kl_mem_real_limit) that fires source 1 (default 80, 0 disables), KL_LOWMEM_CRIT the
+// second tier (default 90). Each re-arms only after the footprint falls back below
+// KL_LOWMEM_CLEAR (70) / KL_LOWMEM_CRIT_CLEAR (80), so a guest that cannot free anything
+// is asked once per tier rather than every frame. The guest answers a notification by dropping
+// streaming pools and LODs, so it is told only what is true: real OS pressure or real use of the
+// real limit (kl_memrule.h). The footprint slope never tells it anything by default
+// (KL_LOWMEM_RATE_S, default 0).
 static _Atomic int g_lowmem_armed = 1;
 static _Atomic uint64_t g_lowmem_fired;
 static _Atomic int g_lowmem_untold;   // last attempt found no nativeLowMemory registered yet
@@ -1332,6 +1340,7 @@ void kl_mem_pressure_fire(const char *why) {
 }
 
 static _Atomic int g_lowmem_crit_armed = 1;
+static uint64_t kl_mem_real_limit(uint64_t used, uint64_t avail);   // below
 
 // GAME THREAD ONLY (kl_driver_frame, between frames). Consumes the pending notification and
 // calls the guest. kl_jni_env() and the local-frame stack are per thread (TLS); the frame
@@ -1361,19 +1370,26 @@ void kl_mem_pressure_deliver(void) {
     }
     atomic_store(&g_lowmem_untold, 0);
     uint64_t n = atomic_fetch_add(&g_lowmem_fired, 1) + 1;
-    fprintf(stderr, "  [mem] low memory (%s): told the guest (%llu MiB of %llu, "
-                    "notification %llu)\n", why,
-            (unsigned long long)(kl_mem_footprint() >> 20),
-            (unsigned long long)(kl_mem_total() >> 20), (unsigned long long)n);
+    if (n <= 20) {   // every notification the guest got, with the figures behind it (cap: 20 lines per run)
+        uint64_t used = kl_mem_footprint(), avail = kl_proc_available();
+        uint64_t limit = kl_mem_real_limit(used, avail);
+        fprintf(stderr, "  [mem] low memory #%llu (%s): told the guest: footprint %llu MiB of %llu MiB real limit (%d%%), "
+                        "OS headroom %llu MiB, guest-visible total %llu MiB\n",
+                (unsigned long long)n, why, (unsigned long long)(used >> 20), (unsigned long long)(limit >> 20),
+                limit ? (int)(used * 100 / limit) : -1, (unsigned long long)(avail >> 20),
+                (unsigned long long)(kl_mem_total() >> 20));
+    }
 }
 
 // Rate-based pressure. The thresholds below only see a level; the AC Nexus wall is a SLOPE: +2.3 GB of graphics
 // memory in ~4 s (1.4 GB/s) climbing from 5.3 GB, so the 65 % warning arrives with ~2 s to the jetsam line and
 // whatever the trim frees has no time to matter. Every ~100 ms the footprint slope is measured over the last
-// 300-600 ms; when headroom / slope < KL_LOWMEM_RATE_S (6 s; 0 = off) and the slope is at least
-// KL_LOWMEM_RATE_MIN_MB (128 MiB/s) the host-side trim runs at once (kl_vulkan_trim: retired OpenXR images,
-// VPKEngine's vpvk_trim_memory, its graveyard drain), and the guest gets its nativeLowMemory once per episode
-// (re-armed when the slope falls under half the minimum). The same timer drains VPKEngine's graveyard every
+// 300-600 ms; when headroom / slope < KL_TRIM_RATE_S (default 6) and the slope is at least KL_LOWMEM_RATE_MIN_MB
+// (128 MiB/s) the host-side trim runs at once (kl_vulkan_trim: retired OpenXR images, VPKEngine's vpvk_trim_memory, its
+// graveyard drain); that path never tells the guest. Only when headroom / slope < KL_LOWMEM_RATE_S (default 0 = off: a
+// steep climb is not pressure, and telling the guest made it drop streaming/LOD for nothing) does the guest also get its
+// nativeLowMemory once per episode (re-armed when the slope falls under half the minimum). The decision is
+// kl_rate_decide (kl_memrule.h). The same timer drains VPKEngine's graveyard every
 // KL_IDLE_DRAIN_MS (500; 0 = off) after that long without a frame: a long load submits none, and the textures
 // and buffers the guest destroys meanwhile would stay pinned until the next one.
 /* KL-TEST-BEGIN rate */
@@ -1418,8 +1434,9 @@ static void kl_mem_rate_poll(void) {
         kl_vulkan_idle_drain((unsigned)idle_ms, "idle");
     }
 
-    const int rate_s = kl_env_int("KL_LOWMEM_RATE_S", 6);
-    if (rate_s > 0 && used && avail) {
+    const int warn_rate_s = kl_env_int("KL_LOWMEM_RATE_S", KL_LOWMEM_RATE_S_DEFAULT);   // tells the guest
+    const int trim_rate_s = kl_env_int("KL_TRIM_RATE_S", KL_TRIM_RATE_S_DEFAULT);       // host trim only
+    if ((warn_rate_s > 0 || trim_rate_s > 0) && used && avail) {
         const uint64_t min_slope = (uint64_t)kl_env_int("KL_LOWMEM_RATE_MIN_MB", 128) << 20;
         // The newest sample that is at least 300 ms older than this one (up to the ring's reach).
         uint64_t old_ns = 0, old_used = 0;
@@ -1429,18 +1446,20 @@ static void kl_mem_rate_poll(void) {
         }
         uint64_t slope = 0;
         const double ttl = old_ns ? kl_rate_ttl(old_used, used, now - old_ns, avail, &slope) : -1.0;
-        if (ttl >= 0 && slope >= min_slope && ttl < (double)rate_s) {
+        const kl_rate_dec dec = kl_rate_decide(ttl, slope, min_slope, trim_rate_s, warn_rate_s);
+        if (dec.trim || dec.warn) {
             quiet_since = 0;
             if (now - trig_ns >= 2000000000ull) {
                 trig_ns = now;
                 if (said < 24) {
                     said++;
                     fprintf(stderr, "  [mem] rate trigger: footprint +%llu MiB/s over %llu ms, OS headroom %llu MiB "
-                                    "-> %.1f s left (footprint %llu MiB)\n",
+                                    "-> %.1f s left (footprint %llu MiB)%s\n",
                             (unsigned long long)(slope >> 20), (unsigned long long)((now - old_ns) / 1000000ull),
-                            (unsigned long long)(avail >> 20), ttl, (unsigned long long)(used >> 20));
+                            (unsigned long long)(avail >> 20), ttl, (unsigned long long)(used >> 20),
+                            dec.warn ? " [guest told]" : " [host trim only]");
                 }
-                if (armed) { armed = 0; kl_mem_pressure_fire("footprint rate"); }
+                if (dec.warn && armed) { armed = 0; kl_mem_pressure_fire("footprint rate"); }
                 else kl_vulkan_trim("footprint rate");
             }
         } else if (slope < min_slope / 2) {   // not rising fast (or falling): re-arm after a quiet second
@@ -1466,48 +1485,29 @@ static uint64_t kl_mem_real_limit(uint64_t used, uint64_t avail) {
 // Cheap enough for once a frame: one task_info call.
 // Two tiers on the REAL limit, one notification each per episode (the guest's
 // nativeLowMemory has no level argument, so the second one is a repeat ask at a worse moment):
-//   warning  KL_LOWMEM_AT   (default 65 %), re-arms below KL_LOWMEM_CLEAR (default 55 %)
-//   critical KL_LOWMEM_CRIT (default 80 %) or OS headroom <= KL_LOWMEM_FREE_MB (384),
-//            re-arms below KL_LOWMEM_CRIT_CLEAR (default 70 %) and 1.5x the floor.
-// Why 65/80 of ~8190: a synchronous load adds ~1.8 GB/s of graphics/IOKit memory that no
-// allocator counter sees, so from 80 % (6.5 GB) there are under 1 s left; the warning at
-// 65 % (5.3 GB) gives UnloadUnusedAssets a few seconds of room.
+//   warning  KL_LOWMEM_AT   (default 80 %), re-arms below KL_LOWMEM_CLEAR (default 70 %)
+//   critical KL_LOWMEM_CRIT (default 90 %) or OS headroom <= KL_LOWMEM_FREE_MB (384),
+//            re-arms below KL_LOWMEM_CRIT_CLEAR (default 80 %) and 1.5x the floor.
+// Why not earlier: the guest answers by dropping streaming pools and LODs, and a notification at 65 % of
+// the limit (5.3 GB) with the OS content told ITR2 / Maestro to unload geometry that did not come back.
+// The decision is kl_lowmem_eval_levels (kl_memrule.h, tested on Linux).
 void kl_mem_pressure_poll(void) {
     kl_mem_rate_poll();   // slope trigger + idle graveyard drain: own switches, independent of KL_LOWMEM_AT
-    int at = kl_env_int("KL_LOWMEM_AT", 65);
+    int at = kl_env_int("KL_LOWMEM_AT", KL_LOWMEM_AT_DEFAULT);
     if (at <= 0) return;
-    int clear = kl_env_int("KL_LOWMEM_CLEAR", 55);
-    int crit = kl_env_int("KL_LOWMEM_CRIT", 80);
-    int crit_clear = kl_env_int("KL_LOWMEM_CRIT_CLEAR", 70);
+    int clear = kl_env_int("KL_LOWMEM_CLEAR", KL_LOWMEM_CLEAR_DEFAULT);
+    int crit = kl_env_int("KL_LOWMEM_CRIT", KL_LOWMEM_CRIT_DEFAULT);
+    int crit_clear = kl_env_int("KL_LOWMEM_CRIT_CLEAR", KL_LOWMEM_CRIT_CLEAR_DEFAULT);
 
     uint64_t avail = kl_proc_available();
     uint64_t used = kl_mem_footprint();
     uint64_t limit = kl_mem_real_limit(used, avail);
     int pct = (limit && used) ? (int)((used * 100) / limit) : -1;
-    int warn_hot = 0, warn_cold = 1, crit_hot = 0, crit_cold = 1;
-    const char *why = "footprint";
-    if (avail) {
-        uint64_t floor = (uint64_t)kl_env_int("KL_LOWMEM_FREE_MB", 384) << 20;
-        uint64_t clearf = floor + (floor >> 1);          // re-arm at 1.5x the floor
-        if (avail <= floor) { crit_hot = 1; why = "headroom"; }
-        if (avail < clearf) { warn_cold = 0; crit_cold = 0; }
-    }
-    if (pct >= 0) {
-        if (pct >= at) warn_hot = 1;
-        if (pct >= clear) warn_cold = 0;
-        if (pct >= crit) crit_hot = 1;
-        if (pct >= crit_clear) crit_cold = 0;
-    }
-    if (crit_hot) warn_hot = 1;   // never reach critical without the warning having fired
-    int fire = 0;
-    if (crit_hot && atomic_exchange(&g_lowmem_crit_armed, 0)) {
-        atomic_store(&g_lowmem_armed, 0);
-        fire = 1;
-        if (!strcmp(why, "footprint")) why = "footprint critical";
-    } else if (warn_hot && atomic_exchange(&g_lowmem_armed, 0)) {
-        fire = 1;
-        why = "footprint warning";
-    }
+    kl_lowmem_eval ev;
+    kl_lowmem_eval_levels(used, avail, limit, at, clear, crit, crit_clear,
+                          kl_lowmem_floor_bytes(kl_env_int("KL_LOWMEM_FREE_MB", KL_LOWMEM_FREE_MB_DEFAULT)), &ev);
+    const char *why = ev.why;
+    const int fire = kl_lowmem_step(&g_lowmem_armed, &g_lowmem_crit_armed, &ev, &why);
     if (fire) {
         if (!atomic_load(&g_lowmem_untold))
             fprintf(stderr, "  [mem] threshold (%s): footprint %llu MiB of %llu MiB real limit "
@@ -1520,8 +1520,50 @@ void kl_mem_pressure_poll(void) {
         kl_mem_pressure_fire(why);
         if (atomic_load(&g_lowmem_untold)) atomic_store(&g_lowmem_crit_armed, 1);
     }
-    if (!crit_hot && crit_cold) atomic_store(&g_lowmem_crit_armed, 1);
-    if (!warn_hot && warn_cold) atomic_store(&g_lowmem_armed, 1);
+}
+
+// ActivityManager.getMemoryInfo().lowMemory: true exactly when the notification rule is hot (real use of the real limit, or
+// the OS's headroom floor), so the flag a guest polls never says "low" before the notification would.
+int kl_mem_is_low(void) {
+    uint64_t avail = kl_proc_available(), used = kl_mem_footprint();
+    return kl_lowmem_is_low(used, avail, kl_mem_real_limit(used, avail), kl_env_int("KL_LOWMEM_AT", KL_LOWMEM_AT_DEFAULT),
+                            kl_env_int("KL_LOWMEM_CLEAR", KL_LOWMEM_CLEAR_DEFAULT),
+                            kl_env_int("KL_LOWMEM_CRIT", KL_LOWMEM_CRIT_DEFAULT),
+                            kl_env_int("KL_LOWMEM_CRIT_CLEAR", KL_LOWMEM_CRIT_CLEAR_DEFAULT),
+                            kl_lowmem_floor_bytes(kl_env_int("KL_LOWMEM_FREE_MB", KL_LOWMEM_FREE_MB_DEFAULT)));
+}
+
+size_t kl_vulkan_mem_brief(char *out, size_t cap);   // kl_vulkan.c: VPKEngine's memory counters, try-locked
+
+// [mem] telemetry: ONE line per 5 s from the heartbeat thread (the only caller; no thread of its own, no lock of ours).
+// 120 lines per run, then only when the footprint moved more than 10 % from the last printed one (kl_tele_due). Footprint,
+// OS headroom, graphics ledger, compressed; VPKEngine's GPU memory by category (vpvk_mem_brief: one try-lock, a busy device
+// skips only the gpu part) with pso / fn / lib counts; guest mmap totals (calls and bytes, cumulative).
+void kl_mem_telemetry(uint64_t now_ms) {
+    static kl_tele_state st;
+    if (st.started && now_ms - st.last_ms < 5000) return;   // cheap exit: no syscall between samples
+    uint64_t led[4];
+    if (!kl_mem_ledger(led)) return;
+    if (!kl_tele_due(&st, now_ms, led[0], 120, 5000)) return;
+    char g[1024];
+    g[0] = 0;
+    if (!kl_vulkan_mem_brief(g, sizeof g)) g[0] = 0;   // no VPKEngine / no device yet / device mutex busy: gpu part shows (n/a)
+    const uint64_t M = 1048576;
+    fprintf(stderr, "  [mem] t=%llus foot=%lluM peak=%lluM avail=%lluM gfx=%lluM comp=%lluM | "
+                    "gpu%s alloc=%lluM tex astc/color/depth/msaa=%llu/%llu/%llu/%lluM buf own/guest=%llu/%lluM args=%lluM "
+                    "held=%lluM staging=%lluM | pso=%llu fn=%llu lib=%llu | guest mmap n=%llu anon=%lluM file=%lluM (cumulative)\n",
+            (unsigned long long)(now_ms / 1000), (unsigned long long)(led[0] / M),
+            (unsigned long long)(atomic_load(&g_mem_peak) / M), (unsigned long long)(kl_proc_available() / M),
+            (unsigned long long)(led[1] / M), (unsigned long long)(led[2] / M),
+            g[0] ? "" : "(n/a)", (unsigned long long)(kl_kv_u64(g, "alloc") / M), (unsigned long long)(kl_kv_u64(g, "tex_astc") / M),
+            (unsigned long long)(kl_kv_u64(g, "tex_color") / M), (unsigned long long)(kl_kv_u64(g, "tex_depth") / M),
+            (unsigned long long)(kl_kv_u64(g, "tex_msaa") / M), (unsigned long long)(kl_kv_u64(g, "buf_own") / M),
+            (unsigned long long)(kl_kv_u64(g, "buf_guest") / M), (unsigned long long)(kl_kv_u64(g, "args_b") / M),
+            (unsigned long long)(kl_kv_u64(g, "held_b") / M), (unsigned long long)(kl_kv_u64(g, "buf_int_b") / M),
+            (unsigned long long)kl_kv_u64(g, "pso"), (unsigned long long)kl_kv_u64(g, "fn"),
+            (unsigned long long)kl_kv_u64(g, "lib"),
+            (unsigned long long)atomic_load(&g_gmmap_calls), (unsigned long long)(atomic_load(&g_gmmap_anon_bytes) / M),
+            (unsigned long long)(atomic_load(&g_gmmap_file_bytes) / M));
 }
 
 void kl_mem_pressure_init(void) {
@@ -5102,6 +5144,10 @@ void *klb_mmap(void *addr, size_t len, int prot, int flags, int fd, off_t off) {
     // (kl_mem_vm_print) then tells the guest's mappings from ours. Separate from `fd`, which stays -1 below.
     int mfd = (df & MAP_ANON) ? (int)((unsigned)KL_VM_TAG_GUEST_MMAP << 24) : fd;
     void *p = mmap(addr, len, prot, df, mfd, off); // PROT_* match on both sides
+    if (p != MAP_FAILED) {
+        atomic_fetch_add(&g_gmmap_calls, 1);
+        atomic_fetch_add((df & MAP_ANON) ? &g_gmmap_anon_bytes : &g_gmmap_file_bytes, (uint64_t)len);
+    }
     if (p != MAP_FAILED && fd >= 0) kl_fstat_mmap(fd, len);
     // __builtin_return_address(0) is the GUEST here: mmap is not variadic, so
     // nothing of ours sits between this frame and the caller's.

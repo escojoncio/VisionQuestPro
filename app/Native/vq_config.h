@@ -22,6 +22,15 @@ int vq_gfx_config_apply(const vq_gfx_config *c);
 // Re-push the stored config (call after the driver is dlopen'ed).
 int vq_gfx_config_forward(void);
 
+// Quest profile of one game: 1 = present a Quest 3, 0 = a Quest 2. choice is the game's own setting: 0 automatic, 2 Quest 2,
+// 3 Quest 3. Automatic: Quest 3 only if the global setting is on and, when the manifest declares com.oculus.supportedDevices
+// (declared), it lists quest3 (manifest_quest3); a manifest that declares nothing follows the global setting alone.
+int vq_quest3_resolve(int32_t choice, int32_t global, int32_t declared, int32_t manifest_quest3);
+
+// Play area of one game: mode 0 free (roomscale rectangle w x d, each side clamped to 2..6 m, default 3 for NaN / <= 0),
+// 1 seated (circle; w = d = its diameter, 2 m). Unknown modes are free. Returns the resolved mode. Pure.
+int vq_area_resolve(int32_t mode, float w, float d, float *out_w, float *out_d);
+
 // Shader precompilation (VPVulkan only; no-ops returning 0 on the MoltenVK path).
 // set_enabled also turns the driver's own prewarm at vkCreateDevice on/off.
 void vq_prewarm_set_enabled(int on);
@@ -41,9 +50,16 @@ uint32_t vq_aot_run(const char *spirv_dir, vq_prewarm_progress progress, void *u
 
 // Shader-cache state of the live VPVulkan device (vpvk_cache_state). Mirrors VpvkCacheState in vpvk.h:
 // 9 uint32 in this exact order (36 bytes); it MUST match the engine's struct.
-// reason: 0 ok, 1 no pipelines, 2 recent pipelines, 3 no frames, 4 compiling, 5 unused modules.
+// reason: 0 ok, 1 no pipelines, 2 recent pipelines, 3 no frames, 4 compiling, 5 unused modules (the app ignores
+// this one: see vq_cache_complete).
 struct vq_cache_state {
     uint32_t version, pipelines_unique, recipes, modules_created, modules_used, idle_ms, frames_idle, complete, reason;
 };
 // Fills *out and returns 1 when the symbol exists and a device is alive; else 0 (out zeroed). No side effects, never blocks.
 int vq_cache_state_get(struct vq_cache_state *out);
+// Complete = no pipelines compiling and no new keys this session. The engine's unused-module criterion
+// (reason 5) is NOT used: it never holds when a game has many unused recipes. Pure; 1 complete, 0 not.
+int vq_cache_complete(const struct vq_cache_state *s);
+// The `complete` to store on disk: a complete=1 saved by an earlier session is kept while this session added no new
+// recipes (a short session that only serves keys from the cache); with new recipes it follows `complete`. Pure.
+int vq_cache_persisted_complete(int saved_complete, int complete, uint32_t new_recipes);

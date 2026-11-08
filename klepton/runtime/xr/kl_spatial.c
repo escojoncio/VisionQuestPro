@@ -159,6 +159,151 @@ static void purge_synth_locked(void) {
         else i++;
     }
 }
+
+// ---- closed box room: pure geometry (host test t_closed_room) ----
+// KL-TEST-BEGIN closedroom
+#define KLSP_MIN_WALL 0.3f       // m: narrower wall planes are not walls of a room
+#define KLSP_MIN_AREA 1.0f       // m2: smallest ring that counts as a room
+#define KLSP_MIN_SIDE 1.0f       // m: smallest side of the box that holds the ring
+typedef struct { float x0, z0, x1, z1; } klsp_seg;           // wall footprint on the floor (x, z)
+typedef struct { float cx, cz, w, d, yaw; } klsp_rect;       // box centre, sides along its X (w) and Z (d), turn about Y
+static void klsp_world(const klsp_rect *r, float lx, float lz, float *x, float *z) {
+    float c = cosf(r->yaw), sn = sinf(r->yaw);
+    *x = r->cx + c * lx - sn * lz; *z = r->cz + sn * lx + c * lz;
+}
+// The four walls in ascending atan2(z, x) around the centre (clockwise seen from above with Y up); wall k ends where wall k+1 starts.
+static void klsp_box_walls(const klsp_rect *r, klsp_seg s[4]) {
+    static const float kx[4] = {-1, 1, 1, -1}, kz[4] = {-1, -1, 1, 1};
+    float px[4], pz[4];
+    for (int k = 0; k < 4; k++) klsp_world(r, kx[k] * r->w * 0.5f, kz[k] * r->d * 0.5f, &px[k], &pz[k]);
+    for (int k = 0; k < 4; k++) s[k] = (klsp_seg){px[k], pz[k], px[(k + 1) % 4], pz[(k + 1) % 4]};
+}
+static float klsp_pt_seg(float px, float pz, const klsp_seg *s) {
+    float dx = s->x1 - s->x0, dz = s->z1 - s->z0, l2 = dx * dx + dz * dz;
+    float t = l2 > 1e-12f ? ((px - s->x0) * dx + (pz - s->z0) * dz) / l2 : 0.0f;
+    t = t < 0 ? 0 : t > 1 ? 1 : t;
+    return hypotf(px - (s->x0 + t * dx), pz - (s->z0 + t * dz));
+}
+static klsp_rect klsp_fit_rect(const klsp_seg *s, int n, float hx, float hz, float zw, float zd);
+// 1 when the left normal (-dz, dx) of the wall (start -> end) points away from (cx, cz): the side a wall with Z down has
+// its plane normal on. Flipping such a wall (start <-> end, normal and tangent negated) points it inward, and for a convex
+// ring in ascending angle order the walls then chain end -> start like the synthetic ones.
+static int klsp_wall_outward(const klsp_seg *s, float cx, float cz) {
+    float dx = s->x1 - s->x0, dz = s->z1 - s->z0;
+    return -dz * (cx - (s->x0 + s->x1) * 0.5f) + dx * (cz - (s->z0 + s->z1) * 0.5f) < 0.0f;
+}
+// 1 when the n (4..64) walls, in angle order around the room, form a valid room: every end point finite, every wall at least
+// KLSP_MIN_WALL long, each wall touching the next (the last the first) within tol with its ends in either order, and the
+// ring -- corners = midpoint of the closest ends of neighbours -- convex (a few degrees of slack, so a wall split in two
+// pieces is fine), of positive area (the angle order) >= KLSP_MIN_AREA, in a box (turned to the longest wall) at least
+// KLSP_MIN_SIDE on both sides. So NaN, degenerate, collinear, duplicated and thin rings are rejected, and so is any
+// non-convex room (an L is never "complete": the synthetic box stays, fitted around its real walls).
+static int klsp_ring_closed(const klsp_seg *s, int n, float tol) {
+    if (n < 4 || n > 64) return 0;
+    float px[64] = {0}, pz[64] = {0}, mx = 0, mz = 0;
+    for (int k = 0; k < n; k++) {
+        const klsp_seg *a = &s[k], *b = &s[(k + 1) % n];
+        if (!isfinite(a->x0) || !isfinite(a->z0) || !isfinite(a->x1) || !isfinite(a->z1)) return 0;
+        if (!(hypotf(a->x1 - a->x0, a->z1 - a->z0) >= KLSP_MIN_WALL)) return 0;
+        if (!isfinite(b->x0) || !isfinite(b->z0) || !isfinite(b->x1) || !isfinite(b->z1)) return 0;
+        float m = fminf(fminf(klsp_pt_seg(a->x0, a->z0, b), klsp_pt_seg(a->x1, a->z1, b)),
+                        fminf(klsp_pt_seg(b->x0, b->z0, a), klsp_pt_seg(b->x1, b->z1, a)));
+        if (!(m <= tol)) return 0;
+        float ax[2] = {a->x0, a->x1}, az[2] = {a->z0, a->z1}, bx[2] = {b->x0, b->x1}, bz[2] = {b->z0, b->z1}, best = 1e30f;
+        for (int i = 0; i < 2; i++)
+            for (int j = 0; j < 2; j++) {
+                float d = hypotf(ax[i] - bx[j], az[i] - bz[j]);
+                if (d < best) { best = d; px[k] = (ax[i] + bx[j]) * 0.5f; pz[k] = (az[i] + bz[j]) * 0.5f; }
+            }
+        mx += px[k]; mz += pz[k];
+    }
+    float area = 0;
+    for (int k = 0; k < n; k++) {
+        int j = (k + 1) % n, l = (k + 2) % n;
+        area += px[k] * pz[j] - px[j] * pz[k];
+        float ux = px[j] - px[k], uz = pz[j] - pz[k], vx = px[l] - px[j], vz = pz[l] - pz[j];
+        if (ux * vz - uz * vx < -0.15f * hypotf(ux, uz) * hypotf(vx, vz)) return 0;
+    }
+    if (!(area * 0.5f >= KLSP_MIN_AREA)) return 0;
+    klsp_rect b = klsp_fit_rect(s, n, mx / n, mz / n, 0.0f, 0.0f);
+    return b.w >= KLSP_MIN_SIDE && b.d >= KLSP_MIN_SIDE;
+}
+// Smallest box, turned to the longest wall, that holds every wall end point and the zone (zw x zd, same turn) around
+// the head (hx, hz). With no walls: the zone itself, not turned.
+static klsp_rect klsp_fit_rect(const klsp_seg *s, int n, float hx, float hz, float zw, float zd) {
+    klsp_rect r = {0, 0, 0, 0, 0}, zr = {hx, hz, zw, zd, 0};
+    float best = -1.0f;
+    for (int k = 0; k < n; k++) {
+        float l = hypotf(s[k].x1 - s[k].x0, s[k].z1 - s[k].z0);
+        if (l > best) { best = l; r.yaw = atan2f(s[k].z1 - s[k].z0, s[k].x1 - s[k].x0); }
+    }
+    zr.yaw = r.yaw;
+    float c = cosf(r.yaw), sn = sinf(r.yaw), lo[2] = {1e30f, 1e30f}, hi[2] = {-1e30f, -1e30f};
+    for (int i = 0; i < 2 * n + 4; i++) {
+        float x, z, u, v;
+        int j = i - 2 * n;
+        if (j < 0) { x = i % 2 ? s[i / 2].x1 : s[i / 2].x0; z = i % 2 ? s[i / 2].z1 : s[i / 2].z0; }
+        else klsp_world(&zr, (j & 1 ? 0.5f : -0.5f) * zw, (j & 2 ? 0.5f : -0.5f) * zd, &x, &z);
+        u = c * x + sn * z; v = -sn * x + c * z;
+        lo[0] = fminf(lo[0], u); hi[0] = fmaxf(hi[0], u); lo[1] = fminf(lo[1], v); hi[1] = fmaxf(hi[1], v);
+    }
+    r.w = hi[0] - lo[0]; r.d = hi[1] - lo[1];
+    float mu = (lo[0] + hi[0]) * 0.5f, mv = (lo[1] + hi[1]) * 0.5f;
+    r.cx = c * mu - sn * mv; r.cz = sn * mu + c * mv;
+    return r;
+}
+// KL-TEST-END closedroom
+
+// A real wall plane as a footprint (tangent = plane X axis, length = w: ARKit frame as kl_spatial.h promises); 0 when it is
+// not a usable wall (not a real wall plane, narrower than KLSP_MIN_WALL, or not finite).
+static int real_wall_seg(const ent *p, klsp_seg *s) {
+    if (p->kind != KLSP_PLANE || is_synth(p->id) || p->label != KLSP_LBL_WALL || !(p->w >= KLSP_MIN_WALL)) return 0;
+    float hw = p->w * 0.5f;
+    *s = (klsp_seg){p->m[12] - p->m[0] * hw, p->m[14] - p->m[2] * hw, p->m[12] + p->m[0] * hw, p->m[14] + p->m[2] * hw};
+    return isfinite(s->x0) && isfinite(s->z0) && isfinite(s->x1) && isfinite(s->z1);
+}
+// 1 when the real (ARKit) planes alone hold a floor, a ceiling and a valid closed room of walls (klsp_ring_closed): only
+// then do they replace the synthetic room.
+static int real_set_complete_locked(void) {
+    typedef struct { float ang; klsp_seg s; } rw;
+    rw w[64];
+    int nw = 0, fl = 0, ce = 0;
+    float cx = 0, cz = 0;
+    for (uint32_t i = 0; i < g_n; i++) {
+        const ent *p = &g_e[i];
+        if (p->kind != KLSP_PLANE || is_synth(p->id)) continue;
+        fl += p->label == KLSP_LBL_FLOOR; ce += p->label == KLSP_LBL_CEILING;
+        if (nw >= 64 || !real_wall_seg(p, &w[nw].s)) continue;
+        cx += p->m[12]; cz += p->m[14]; nw++;
+    }
+    if (!fl || !ce || nw < 4) return 0;
+    cx /= nw; cz /= nw;
+    for (int k = 0; k < nw; k++) {                     // insertion sort by angle around the walls' centroid
+        w[k].ang = atan2f((w[k].s.z0 + w[k].s.z1) * 0.5f - cz, (w[k].s.x0 + w[k].s.x1) * 0.5f - cx);
+        for (int j = k; j > 0 && w[j].ang < w[j - 1].ang; j--) { rw t = w[j]; w[j] = w[j - 1]; w[j - 1] = t; }
+    }
+    klsp_seg ring[64];
+    for (int k = 0; k < nw; k++) ring[k] = w[k].s;
+    return klsp_ring_closed(ring, nw, 0.35f);
+}
+// Turns every real wall to face inward, like the synthetic ones, before a complete real set replaces them: a wall whose
+// normal (plane Y) points out of the room is rolled 180 deg about its local Z (down, kl_spatial.h): tangent and normal
+// negated, so start <-> end swap and the walls chain end -> start. Idempotent; the polygon's X follows the roll.
+static void real_walls_inward_locked(void) {
+    klsp_seg s;
+    float cx = 0, cz = 0;
+    int n = 0;
+    for (uint32_t i = 0; i < g_n; i++) if (real_wall_seg(&g_e[i], &s)) { cx += g_e[i].m[12]; cz += g_e[i].m[14]; n++; }
+    if (!n) return;
+    cx /= n; cz /= n;
+    for (uint32_t i = 0; i < g_n; i++) {
+        ent *p = &g_e[i];
+        if (!real_wall_seg(p, &s) || !klsp_wall_outward(&s, cx, cz)) continue;
+        for (int c = 0; c < 7; c++) if (c != 3) p->m[c] = -p->m[c];                 // columns X and Y
+        for (int k = 0; k < p->npoly; k++) p->poly[2 * k] = -p->poly[2 * k];
+    }
+}
+
 static ent *upsert_locked(int kind, kl_uuid id) {
     ent *e = find_locked(id);
     if (e) return e->kind == kind ? e : NULL;       // a uuid never changes kind
@@ -289,18 +434,14 @@ void kl_spatial_plane(kl_uuid id, int removed, const float m4[16], float w, floa
     if (e) {
         memcpy(e->m, m4, sizeof e->m);
         e->w = w; e->h = h; e->label = label; e->tracked = 1;
-        if (!is_synth(id)) {        // real planes replace the synthetic room once they hold a floor and 3+ walls
-            int fl = 0, wl = 0;
-            for (uint32_t i = 0; i < g_n; i++) if (g_e[i].kind == KLSP_PLANE && !is_synth(g_e[i].id)) {
-                fl += g_e[i].label == KLSP_LBL_FLOOR; wl += g_e[i].label == KLSP_LBL_WALL;
-            }
-            if (fl >= 1 && wl >= 3) purge_synth_locked();
-        }
         free(e->poly); e->poly = NULL; e->npoly = 0;
         if (poly2d && npoly >= 3 && npoly <= KLSP_POLY_MAX) {
             e->poly = (float *)malloc((size_t)npoly * 2 * sizeof(float));
             if (e->poly) { memcpy(e->poly, poly2d, (size_t)npoly * 2 * sizeof(float)); e->npoly = npoly; }
         }
+        // A complete real set (floor, ceiling, closed walls) replaces the synthetic room, its walls turned inward first;
+        // last, as the purge moves entries.
+        if (!is_synth(id) && real_set_complete_locked()) { real_walls_inward_locked(); purge_synth_locked(); }
     }
     pthread_mutex_unlock(&g_mu);
     once(&lg, "first plane received");
@@ -720,37 +861,54 @@ int kl_spatial_raycast(const float o[3], const float d[3], float maxd, float *hi
     return 1;
 }
 
-// ---- synthetic box room (no ARKit data: Space Setup must still end with a room) ----
-// Floor at the tracking floor, ceiling 2.5 m, four walls of a 4x4 m box centred on (hx, hz) (guest space).
+int kl_spatial_is_synthetic(kl_uuid id) { return is_synth(id); }
+
+// ---- synthetic box room (no usable ARKit room: Space Setup must still end with a closed room) ----
+// Floor, ceiling 2.5 m and four walls forming a closed rectangle (klsp_box_walls), zw x zd + 0.5 m margin per side, centred
+// on guest (hx, hz). Partial real walls turn and grow the box (klsp_fit_rect); a known real floor sets its height.
 // Planes use the ARKit frame (normal +Y; walls: local Z points down so Meta +Y is up, see kl_spatial.h).
-// Returns 1 when a synthetic room is present now, 0 when real planes/rooms exist (they win, nothing is added).
-int kl_spatial_synth_room(float hx, float hz) {
-    const float W = 4.0f, H = 2.5f, oy = kl_ovrp_guest_origin_y(), fy = -oy;
+// Returns 1 when a synthetic room is present now, 0 when a real room or a complete real set exists (they win, nothing is added).
+int kl_spatial_synth_room(float hx, float hz, float zw, float zd) {
+    const float H = 2.5f, M = 0.5f, oy = kl_ovrp_guest_origin_y();
+    float fy = -oy, rfy = 1e30f;
+    klsp_seg ws[64];
+    int nws = 0;
     pthread_mutex_lock(&g_mu);
     int synth = 0;
     for (uint32_t i = 0; i < g_n; i++) {
         if (g_e[i].kind == KLSP_ROOM) { pthread_mutex_unlock(&g_mu); return 0; }
-        if (g_e[i].kind == KLSP_PLANE) { if (!is_synth(g_e[i].id)) { pthread_mutex_unlock(&g_mu); return 0; } synth++; }
+        if (g_e[i].kind != KLSP_PLANE) continue;
+        if (is_synth(g_e[i].id)) { synth++; continue; }
+        float g[16], hw = g_e[i].w * 0.5f;
+        to_guest_locked(g_e[i].m, g);
+        if (g_e[i].label == KLSP_LBL_FLOOR && g[13] < rfy) rfy = g[13];
+        if (g_e[i].label == KLSP_LBL_WALL && nws < 64) ws[nws++] = (klsp_seg){g[12] - g[0] * hw, g[14] - g[2] * hw, g[12] + g[0] * hw, g[14] + g[2] * hw};
     }
+    if (real_set_complete_locked()) { pthread_mutex_unlock(&g_mu); return 0; }
     if (synth == 6) { pthread_mutex_unlock(&g_mu); return 1; }
     purge_synth_locked();                              // incomplete set: rebuild
-    // inward normals: +Z, -X, -Z, +X; tangent t = (nz, 0, -nx)
-    static const float nn[4][2] = {{0, 1}, {-1, 0}, {0, -1}, {1, 0}};
+    if (rfy < 1e29f) fy = rfy;
+    klsp_rect r = klsp_fit_rect(ws, nws, hx, hz, zw + 2 * M, zd + 2 * M);
+    klsp_seg sg[4];
+    klsp_box_walls(&r, sg);
+    float c = cosf(r.yaw), sn = sinf(r.yaw);
     for (int k = 0; k < 6; k++) {
         float g[16] = {0};
         g[15] = 1;
-        int label; float w = W, h = H;
+        int label; float w = r.w, h = H;
         if (k < 2) {                                   // 0 floor (normal up), 1 ceiling (normal down)
-            label = k ? KLSP_LBL_CEILING : KLSP_LBL_FLOOR; h = W;
-            g[0] = 1; g[5] = k ? -1.0f : 1.0f; g[10] = k ? -1.0f : 1.0f;
-            g[12] = hx; g[13] = fy + (k ? H : 0.0f); g[14] = hz;
+            label = k ? KLSP_LBL_CEILING : KLSP_LBL_FLOOR; h = r.d;
+            g[0] = c; g[2] = sn; g[5] = k ? -1.0f : 1.0f; g[8] = k ? sn : -sn; g[10] = k ? -c : c;
+            g[12] = r.cx; g[13] = fy + (k ? H : 0.0f); g[14] = r.cz;
         } else {
             label = KLSP_LBL_WALL;
-            float nx = nn[k - 2][0], nz = nn[k - 2][1];
-            g[0] = nz; g[2] = -nx;                     // X = tangent
-            g[4] = nx; g[6] = nz;                      // Y = inward normal
+            const klsp_seg *q = &sg[k - 2];
+            float dx = q->x1 - q->x0, dz = q->z1 - q->z0;
+            w = hypotf(dx, dz);
+            g[0] = dx / w; g[2] = dz / w;              // X = tangent
+            g[4] = -dz / w; g[6] = dx / w;             // Y = inward normal (left of the tangent; the walls run clockwise seen from above)
             g[9] = -1.0f;                              // Z = down
-            g[12] = hx - nx * W * 0.5f; g[13] = fy + H * 0.5f; g[14] = hz - nz * W * 0.5f;
+            g[12] = (q->x0 + q->x1) * 0.5f; g[13] = fy + H * 0.5f; g[14] = (q->z0 + q->z1) * 0.5f;
         }
         float a[16], ri[16];
         g[13] += oy;                                   // as kl_spatial_from_guest, already under the lock
@@ -764,5 +922,7 @@ int kl_spatial_synth_room(float hx, float hz) {
         e->w = w; e->h = h; e->label = label; e->tracked = 1;
     }
     pthread_mutex_unlock(&g_mu);
+    fprintf(stderr, "  [spatial] synthetic room %.2fx%.2f turn=%.2f centre=%.2f,%.2f floor_y=%.2f partial_walls=%d\n",
+            r.w, r.d, r.yaw, r.cx, r.cz, fy, nws);
     return 1;
 }

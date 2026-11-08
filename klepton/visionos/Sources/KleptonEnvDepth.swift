@@ -323,7 +323,8 @@ enum KleptonEnvDepth {
             var drawPlanes: [(simd_float4x4, Float, Float)] = []
             for i in 0..<nPlane {
                 var id = kl_uuid()
-                guard kl_spatial_get(Int32(KLSP_PLANE), i, &id, &m4) != 0 else { continue }
+                guard kl_spatial_get(Int32(KLSP_PLANE), i, &id, &m4) != 0,
+                      kl_spatial_is_synthetic(id) == 0 else { continue }   // synthetic room (fixed 2.5 m ceiling) is not real geometry to occlude with
                 var pw: Float = 0, ph: Float = 0
                 var label: Int32 = 0
                 var np: UInt32 = 0
