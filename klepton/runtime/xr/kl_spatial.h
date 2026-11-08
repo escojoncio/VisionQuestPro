@@ -83,7 +83,9 @@ int      kl_spatial_room_info(kl_uuid id, kl_uuid *floor, kl_uuid *ceiling,
                               uint32_t mcap, kl_uuid *members, uint32_t *nmembers);
 // Synthetic CLOSED box room (floor, 2.5 m ceiling, 4 walls running clockwise seen from above, ends touching), zw x zd + 0.5 m per side,
 // centred on guest (hx, hz), for a scene capture without a usable ARKit room. Partial real walls turn/grow the box.
-// 1 = synthetic room present; 0 = a real room or a complete real set (floor, ceiling, closed walls) exists (untouched).
+// A set that is not complete (also a RoomAnchor whose walls are fragments) is replaced by a room built from the measured planes /
+// scene mesh (hull of their footprint, one wall per edge, real ceiling height), or by the box when that gives < 4 walls.
+// 1 = synthetic room present; 0 = a complete real set (floor, ceiling, closed walls) exists (untouched).
 int      kl_spatial_synth_room(float hx, float hz, float zw, float zd);
 // 1 when the plane is one of the synthetic room's (not measured geometry: kept out of the environment depth).
 int      kl_spatial_is_synthetic(kl_uuid id);

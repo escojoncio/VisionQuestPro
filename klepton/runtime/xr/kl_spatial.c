@@ -153,7 +153,9 @@ static void del_locked(ent *e) {
 }
 // Synthetic box-room planes (kl_spatial_synth_room) carry this uuid prefix; real ARKit data replaces them.
 static int is_synth(kl_uuid id) { return memcmp(id.b, "KLSYNTH", 7) == 0; }
+static uint32_t g_synth_n;          // planes of the synthetic room as built (6 for the box; 2 + walls when built from real data)
 static void purge_synth_locked(void) {
+    g_synth_n = 0;
     for (uint32_t i = 0; i < g_n; ) {
         if (g_e[i].kind == KLSP_PLANE && is_synth(g_e[i].id)) del_locked(&g_e[i]);
         else i++;
@@ -478,7 +480,7 @@ void kl_spatial_room(kl_uuid id, int removed, const kl_uuid *plane_ids, uint32_t
     pthread_mutex_lock(&g_mu);
     ent *e = find_locked(id);
     if (removed) { if (e && e->kind == KLSP_ROOM) del_locked(e); pthread_mutex_unlock(&g_mu); return; }
-    purge_synth_locked();           // a real room replaces the synthetic one
+    if (real_set_complete_locked()) purge_synth_locked();   // a complete real room replaces the synthetic one; fragments do not
     e = upsert_locked(KLSP_ROOM, id);
     if (e) {
         free(e->mem); e->mem = NULL; e->nmem = 0;
@@ -663,8 +665,8 @@ static int room_info_locked(kl_uuid id, kl_uuid *floor, kl_uuid *ceiling,
     for (uint32_t i = 0; i < g_n; i++) {
         ent *p = &g_e[i];
         if (p->kind != KLSP_PLANE) continue;
-        if (!room && !is_synth(p->id) && has_synth && (p->label == KLSP_LBL_FLOOR || p->label == KLSP_LBL_CEILING || p->label == KLSP_LBL_WALL)) continue;
-        if (restrict_to_room) {
+        if (!is_synth(p->id) && has_synth && (p->label == KLSP_LBL_FLOOR || p->label == KLSP_LBL_CEILING || p->label == KLSP_LBL_WALL)) continue;
+        if (restrict_to_room && !is_synth(p->id)) {
             int in = 0;
             for (uint32_t k = 0; k < room->nmem; k++) if (uuid_eq(room->mem[k], p->id)) { in = 1; break; }
             if (!in) continue;
@@ -734,8 +736,9 @@ int kl_spatial_get(int kind, uint32_t i, kl_uuid *id, float m4[16]) {
             ok = 1;
         }
         if (ok && m4) {          // a room sits at the floor under the centroid of its planes
-            float cx = 0, cz = 0, fy = 1e30f; int n = 0;
-            for (uint32_t k = 0; k < g_n; k++) if (g_e[k].kind == KLSP_PLANE) {
+            float cx = 0, cz = 0, fy = 1e30f; int n = 0, syn = 0;
+            for (uint32_t k = 0; k < g_n; k++) syn |= g_e[k].kind == KLSP_PLANE && is_synth(g_e[k].id);
+            for (uint32_t k = 0; k < g_n; k++) if (g_e[k].kind == KLSP_PLANE && (!syn || is_synth(g_e[k].id))) {     // one source: the synthetic set when there is one
                 cx += g_e[k].m[12]; cz += g_e[k].m[14]; n++;
                 if (g_e[k].label == KLSP_LBL_FLOOR && g_e[k].m[13] < fy) fy = g_e[k].m[13];
             }
@@ -863,36 +866,187 @@ int kl_spatial_raycast(const float o[3], const float d[3], float maxd, float *hi
 
 int kl_spatial_is_synthetic(kl_uuid id) { return is_synth(id); }
 
+// ---- room built from real data: convex hull of what ARKit measured ----
+#define KLSP_MAX_WALLS 64        // = what klsp_ring_closed accepts
+typedef struct { float x, z; } klsp_pt;
+static int klsp_pt_cmp(const void *a, const void *b) {
+    const klsp_pt *p = (const klsp_pt *)a, *q = (const klsp_pt *)b;
+    return p->x < q->x ? -1 : p->x > q->x ? 1 : p->z < q->z ? -1 : p->z > q->z;
+}
+static float klsp_cross(const klsp_pt *o, const klsp_pt *a, const klsp_pt *b) {
+    return (a->x - o->x) * (b->z - o->z) - (a->z - o->z) * (b->x - o->x);
+}
+// Convex hull (Andrew's monotone chain) of the n points, sorted in place; out holds 2n + 2. Counter-clockwise in (x, z) with x
+// right and z up (positive area, ascending angle: the walls' order) -- 0 when fewer than 3 points leave an area.
+static int klsp_hull(klsp_pt *p, int n, klsp_pt *out) {
+    if (n < 3) return 0;
+    qsort(p, (size_t)n, sizeof *p, klsp_pt_cmp);
+    int k = 0;
+    for (int i = 0; i < n; i++) {
+        while (k >= 2 && klsp_cross(&out[k - 2], &out[k - 1], &p[i]) <= 0) k--;
+        out[k++] = p[i];
+    }
+    for (int i = n - 2, t = k + 1; i >= 0; i--) {
+        while (k >= t && klsp_cross(&out[k - 2], &out[k - 1], &p[i]) <= 0) k--;
+        out[k++] = p[i];
+    }
+    return k - 1 >= 3 ? k - 1 : 0;
+}
+// Fuses the short edges of the hull h (n vertices): while an edge is under KLSP_MIN_WALL, a vertex lies within 3 cm of the line
+// of its neighbours or there are more than KLSP_MAX_WALLS vertices, the vertex that costs least area goes (a subset of a convex
+// polygon's vertices is convex). Stops at 3 vertices; returns the new count.
+static int klsp_hull_fuse(klsp_pt *h, int n) {
+    while (n > 3) {
+        int best = -1;
+        float bc = 1e30f;
+        for (int i = 0; i < n; i++) {
+            const klsp_pt *a = &h[(i + n - 1) % n], *b = &h[i], *c = &h[(i + 1) % n];
+            float cr = fabsf(klsp_cross(a, b, c));         // twice the area of the triangle a, b, c
+            int bad = hypotf(b->x - a->x, b->z - a->z) < KLSP_MIN_WALL || hypotf(c->x - b->x, c->z - b->z) < KLSP_MIN_WALL
+                      || cr < 0.03f * hypotf(c->x - a->x, c->z - a->z) || n > KLSP_MAX_WALLS;
+            if (bad && cr < bc) { bc = cr; best = i; }
+        }
+        if (best < 0) break;
+        memmove(&h[best], &h[best + 1], (size_t)(n - best - 1) * sizeof *h);
+        n--;
+    }
+    return n;
+}
+// What the built room was made from: a change in any of these rebuilds it (kl_spatial_synth_room). bb = bounding box of the
+// points in 5 cm units (x0, z0, x1, z1); built = a hull room came out (0 = the box).
+typedef struct { int nplanes, nmem, nmesh, bb[4], built; } klsp_sig;
+static klsp_sig g_synth_sig;
+// The footprint of the room from measured data only (guest space): corners of the real FLOOR / CEILING / WALL planes -- the
+// members of the first RoomAnchor that lists planes, else all of them -- and the vertices of the scene meshes that lie between
+// ylo and yhi and within 0.5 m of those planes' box, rounded to 2 cm, as a fused convex hull h (room for 2 * points + 2). Without
+// such planes the mesh alone is not used. Returns the vertex count, or 0 when the walls would be fewer than 4, the ring is not
+// a valid room (klsp_ring_closed) or the head (hx, hz) lies outside it. *npts = points used; *sig = what they were. Caller
+// holds g_mu.
+static int built_footprint_locked(float ylo, float yhi, float hx, float hz, klsp_pt *h, int *npts, klsp_sig *sig) {
+    const ent *room = NULL;
+    size_t cap = 0;
+    for (uint32_t i = 0; i < g_n; i++) {
+        if (g_e[i].kind == KLSP_ROOM && !room && g_e[i].nmem) room = &g_e[i];
+        cap += g_e[i].kind == KLSP_PLANE ? 4 : g_e[i].kind == KLSP_MESH ? g_e[i].nv : 0;
+    }
+    memset(sig, 0, sizeof *sig);
+    *npts = 0;
+    klsp_pt *p = (klsp_pt *)malloc((cap ? cap : 1) * sizeof *p);
+    if (!p) return 0;
+    int n = 0;
+    float lo[2] = {1e30f, 1e30f}, hi[2] = {-1e30f, -1e30f};
+    sig->nmem = room ? (int)room->nmem : 0;
+    for (uint32_t i = 0; i < g_n; i++) {
+        const ent *e = &g_e[i];
+        if (e->kind != KLSP_PLANE || is_synth(e->id) || !(e->label == KLSP_LBL_FLOOR || e->label == KLSP_LBL_CEILING || e->label == KLSP_LBL_WALL)) continue;
+        if (room) {
+            int in = 0;
+            for (uint32_t k = 0; k < room->nmem; k++) if (uuid_eq(room->mem[k], e->id)) { in = 1; break; }
+            if (!in) continue;
+        }
+        float g[16];
+        to_guest_locked(e->m, g);
+        for (int c = 0; c < 4; c++) {                       // the rectangle's corners (a wall's are its two ends, twice)
+            float sx = (c & 1 ? 0.5f : -0.5f) * e->w, sz = (c & 2 ? 0.5f : -0.5f) * e->h;
+            float x = g[12] + g[0] * sx + g[8] * sz, z = g[14] + g[2] * sx + g[10] * sz;
+            if (!isfinite(x) || !isfinite(z)) continue;
+            p[n++] = (klsp_pt){roundf(x * 50.0f) / 50.0f, roundf(z * 50.0f) / 50.0f};
+            lo[0] = fminf(lo[0], x); hi[0] = fmaxf(hi[0], x); lo[1] = fminf(lo[1], z); hi[1] = fmaxf(hi[1], z);
+        }
+        sig->nplanes++;
+    }
+    for (uint32_t i = 0; n > 0 && i < g_n; i++) {
+        const ent *e = &g_e[i];
+        float g[16];
+        if (e->kind != KLSP_MESH) continue;
+        to_guest_locked(e->m, g);
+        for (uint32_t k = 0; k < e->nv; k++) {
+            const float *v = e->v + 3 * (size_t)k;
+            float x = g[0] * v[0] + g[4] * v[1] + g[8] * v[2] + g[12];
+            float y = g[1] * v[0] + g[5] * v[1] + g[9] * v[2] + g[13];
+            float z = g[2] * v[0] + g[6] * v[1] + g[10] * v[2] + g[14];
+            if (!isfinite(x) || !isfinite(z) || y < ylo || y > yhi) continue;
+            if (x < lo[0] - 0.5f || x > hi[0] + 0.5f || z < lo[1] - 0.5f || z > hi[1] + 0.5f) continue;     // far geometry is not this room
+            p[n++] = (klsp_pt){roundf(x * 50.0f) / 50.0f, roundf(z * 50.0f) / 50.0f};
+            sig->nmesh++;
+        }
+    }
+    if (n > 0) {
+        float bl[2] = {1e30f, 1e30f}, bh[2] = {-1e30f, -1e30f};
+        for (int i = 0; i < n; i++) {
+            bl[0] = fminf(bl[0], p[i].x); bh[0] = fmaxf(bh[0], p[i].x); bl[1] = fminf(bl[1], p[i].z); bh[1] = fmaxf(bh[1], p[i].z);
+        }
+        sig->bb[0] = (int)lroundf(bl[0] * 20.0f); sig->bb[1] = (int)lroundf(bl[1] * 20.0f);
+        sig->bb[2] = (int)lroundf(bh[0] * 20.0f); sig->bb[3] = (int)lroundf(bh[1] * 20.0f);
+    }
+    klsp_pt *hull = (klsp_pt *)malloc(((size_t)n * 2 + 2) * sizeof *hull);
+    int nh = hull ? klsp_hull(p, n, hull) : 0;
+    free(p);
+    if (nh) nh = klsp_hull_fuse(hull, nh);
+    klsp_seg sg[KLSP_MAX_WALLS];
+    if (nh >= 4 && nh <= KLSP_MAX_WALLS) {
+        for (int k = 0; k < nh; k++) sg[k] = (klsp_seg){hull[k].x, hull[k].z, hull[(k + 1) % nh].x, hull[(k + 1) % nh].z};
+        if (!klsp_ring_closed(sg, nh, 0.35f)) nh = 0;
+        klsp_pt head = {hx, hz};
+        for (int k = 0; nh && k < nh; k++)                  // the player must stand inside the walls (5 cm slack)
+            if (klsp_cross(&hull[k], &hull[(k + 1) % nh], &head) < -0.05f * hypotf(sg[k].x1 - sg[k].x0, sg[k].z1 - sg[k].z0)) nh = 0;
+    } else nh = 0;
+    if (nh) memcpy(h, hull, (size_t)nh * sizeof *h);
+    free(hull);
+    *npts = n; sig->built = nh > 0;
+    return nh;
+}
+
 // ---- synthetic box room (no usable ARKit room: Space Setup must still end with a closed room) ----
 // Floor, ceiling 2.5 m and four walls forming a closed rectangle (klsp_box_walls), zw x zd + 0.5 m margin per side, centred
 // on guest (hx, hz). Partial real walls turn and grow the box (klsp_fit_rect); a known real floor sets its height.
 // Planes use the ARKit frame (normal +Y; walls: local Z points down so Meta +Y is up, see kl_spatial.h).
-// Returns 1 when a synthetic room is present now, 0 when a real room or a complete real set exists (they win, nothing is added).
+// When the real set is not a complete room -- also with a RoomAnchor whose walls are fragments -- the room is built from the
+// measured data instead (built_footprint_locked): one wall per edge of their convex hull, the real ceiling height (2.4 m without
+// one), floor and ceiling as that polygon; with fewer than 4 useful edges it stays the box above.
+// Returns 1 when a synthetic room is present now, 0 when a complete real set exists (it wins, nothing is added).
 int kl_spatial_synth_room(float hx, float hz, float zw, float zd) {
-    const float H = 2.5f, M = 0.5f, oy = kl_ovrp_guest_origin_y();
-    float fy = -oy, rfy = 1e30f;
+    const float M = 0.5f, oy = kl_ovrp_guest_origin_y();
+    float H = 2.5f, fy = -oy, rfy = 1e30f, cey = -1e30f;
     klsp_seg ws[64];
     int nws = 0;
     pthread_mutex_lock(&g_mu);
-    int synth = 0;
+    int synth = 0, have_room = 0;
     for (uint32_t i = 0; i < g_n; i++) {
-        if (g_e[i].kind == KLSP_ROOM) { pthread_mutex_unlock(&g_mu); return 0; }
+        if (g_e[i].kind == KLSP_ROOM) have_room = 1;
         if (g_e[i].kind != KLSP_PLANE) continue;
         if (is_synth(g_e[i].id)) { synth++; continue; }
         float g[16], hw = g_e[i].w * 0.5f;
         to_guest_locked(g_e[i].m, g);
         if (g_e[i].label == KLSP_LBL_FLOOR && g[13] < rfy) rfy = g[13];
+        if (g_e[i].label == KLSP_LBL_CEILING && g[13] > cey) cey = g[13];
         if (g_e[i].label == KLSP_LBL_WALL && nws < 64) ws[nws++] = (klsp_seg){g[12] - g[0] * hw, g[14] - g[2] * hw, g[12] + g[0] * hw, g[14] + g[2] * hw};
     }
     if (real_set_complete_locked()) { pthread_mutex_unlock(&g_mu); return 0; }
-    if (synth == 6) { pthread_mutex_unlock(&g_mu); return 1; }
-    purge_synth_locked();                              // incomplete set: rebuild
     if (rfy < 1e29f) fy = rfy;
-    klsp_rect r = klsp_fit_rect(ws, nws, hx, hz, zw + 2 * M, zd + 2 * M);
-    klsp_seg sg[4];
-    klsp_box_walls(&r, sg);
+    klsp_rect r;
+    klsp_seg sg[KLSP_MAX_WALLS];
+    klsp_pt hull[KLSP_MAX_WALLS];
+    klsp_sig sig;
+    int nwall = 4, npts = 0;
+    float hb = cey > -1e29f && cey - fy >= 1.5f && cey - fy <= 6.0f ? cey - fy : 2.4f;     // real ceiling over the floor, else 2.4 m
+    int nh = built_footprint_locked(fy - 0.3f, fy + hb + 0.3f, hx, hz, hull, &npts, &sig);
+    if (synth && synth == (int)g_synth_n && !memcmp(&sig, &g_synth_sig, sizeof sig)) { pthread_mutex_unlock(&g_mu); return 1; }   // same input: keep it
+    purge_synth_locked();                              // new or changed data: rebuild (same ids, one source at a time, under this lock)
+    if (nh) {                                          // walls = hull edges (counter-clockwise: inward on the left, like the box)
+        float lo[2] = {1e30f, 1e30f}, hi[2] = {-1e30f, -1e30f};
+        for (int k = 0; k < nh; k++) {
+            sg[k] = (klsp_seg){hull[k].x, hull[k].z, hull[(k + 1) % nh].x, hull[(k + 1) % nh].z};
+            lo[0] = fminf(lo[0], hull[k].x); hi[0] = fmaxf(hi[0], hull[k].x); lo[1] = fminf(lo[1], hull[k].z); hi[1] = fmaxf(hi[1], hull[k].z);
+        }
+        nwall = nh; H = hb;
+        r = (klsp_rect){(lo[0] + hi[0]) * 0.5f, (lo[1] + hi[1]) * 0.5f, hi[0] - lo[0], hi[1] - lo[1], 0.0f};
+    } else {
+        r = klsp_fit_rect(ws, nws, hx, hz, zw + 2 * M, zd + 2 * M);
+        klsp_box_walls(&r, sg);
+    }
     float c = cosf(r.yaw), sn = sinf(r.yaw);
-    for (int k = 0; k < 6; k++) {
+    for (int k = 0; k < 2 + nwall; k++) {
         float g[16] = {0};
         g[15] = 1;
         int label; float w = r.w, h = H;
@@ -906,7 +1060,7 @@ int kl_spatial_synth_room(float hx, float hz, float zw, float zd) {
             float dx = q->x1 - q->x0, dz = q->z1 - q->z0;
             w = hypotf(dx, dz);
             g[0] = dx / w; g[2] = dz / w;              // X = tangent
-            g[4] = -dz / w; g[6] = dx / w;             // Y = inward normal (left of the tangent; the walls run clockwise seen from above)
+            g[4] = -dz / w; g[6] = dx / w;             // Y = inward normal (left of the tangent, as the walls run in ascending angle)
             g[9] = -1.0f;                              // Z = down
             g[12] = (q->x0 + q->x1) * 0.5f; g[13] = fy + H * 0.5f; g[14] = (q->z0 + q->z1) * 0.5f;
         }
@@ -920,9 +1074,20 @@ int kl_spatial_synth_room(float hx, float hz, float zw, float zd) {
         if (!e) { purge_synth_locked(); pthread_mutex_unlock(&g_mu); return 0; }
         memcpy(e->m, a, sizeof e->m);
         e->w = w; e->h = h; e->label = label; e->tracked = 1;
+        float *pl = (nh && k < 2) ? (float *)malloc((size_t)nh * 2 * sizeof(float)) : NULL;
+        if (pl) {                                      // floor / ceiling = the hull polygon, counter-clockwise in plane XY (Meta y = -local Z)
+            for (int j = 0; j < nh; j++) {
+                const klsp_pt *q = &hull[k ? j : nh - 1 - j];
+                pl[2 * j] = q->x - r.cx; pl[2 * j + 1] = (k ? 1.0f : -1.0f) * (q->z - r.cz);
+            }
+            free(e->poly); e->poly = pl; e->npoly = nh;
+        }
     }
+    g_synth_n = (uint32_t)(2 + nwall); g_synth_sig = sig;
     pthread_mutex_unlock(&g_mu);
     fprintf(stderr, "  [spatial] synthetic room %.2fx%.2f turn=%.2f centre=%.2f,%.2f floor_y=%.2f partial_walls=%d\n",
             r.w, r.d, r.yaw, r.cx, r.cz, fy, nws);
+    if (nh) fprintf(stderr, "  [room] built from real: walls=%d hull_pts=%d h=%.2f floor_y=%.2f src=%s\n",
+                    nh, npts, H, fy, have_room ? "roomanchor" : "planes");
     return 1;
 }

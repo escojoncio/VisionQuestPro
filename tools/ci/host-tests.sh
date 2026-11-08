@@ -41,6 +41,7 @@ klepton_tests() {
   run t_ovrp_misc -Wno-unused-function -I.. -I../.. tests/t_ovrp_misc.c
   run spatial_test -I.. -I../jni -I../libc -I../gfx -I. -I../media -I../guest -I../diag \
       tests/spatial_test.c kl_spatial.c kl_ovrp_spatial.c -lm -lpthread
+  run t_room_build -I.. -I../jni -I../libc -I../gfx -I. -I../media -I../guest -I../diag tests/t_room_build.c -lm -lpthread
   cd "$ROOT/klepton" || return 1
   run t_ptw tests/t_ptw.c runtime/gfx/kl_reproject_ptw.c -lm
   run t_bg -rdynamic -Iruntime/gfx tests/t_bg.c runtime/gfx/kl_bg.c -lpthread -ldl
