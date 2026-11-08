@@ -19,16 +19,30 @@ final class VQModel: ObservableObject {
     @Published var running = false        // BootView is showing
     @Published var ended = false { didSet { if ended { VQSession.end() } }}   // the game's immersive space has closed
     @Published var endMessage: String?    // why it closed when the engine asked to quit
-    @Published var certificate: String? = VQSigner.current
+    @Published var certificate: String?   // filled off the main thread (the keychain / PKCS#12 import is slow)
+    @Published var shareable: [URL] = []  // what the share buttons offer, worked out off the main thread (disk)
+    @Published var appLogTail = ""        // the end of app.txt for Settings, read off the main thread
     @Published var scanning = false       // the QUEST folder is being read (off the main thread)
     @Published var prepared: [String: Bool] = [:]   // game id -> converted and up to date; absent until worked out off the main thread
     @Published var cacheComplete: [String: Bool] = [:]   // game id -> shader cache complete (cache-state.json); absent: no file / not worked out yet
     private var refreshes = 0             // generation of the last refresh(); an older scan that ends late is dropped
+    private var logRefreshes = 0          // same, for refreshLogs()
+    private var certificateGen = 0        // bumped by every certificate change; an older read that ends late is dropped
+    private let certificateQueue = DispatchQueue(label: "vq.certificate", qos: .userInitiated)   // keychain / PKCS#12, one at a time
 
     private init() {
         VQLog.start()
         VQSession.startup()
         refresh()
+        refreshLogs()
+        let generation = certificateGen
+        certificateQueue.async {
+            let current = VQSigner.current
+            Task { @MainActor in
+                guard generation == self.certificateGen else { return }
+                self.certificate = current
+            }
+        }
         // Off the main thread and well after the UI is up: copying the previous session's logs
         // into the QUEST folder (File Provider storage, tens of MB) must never hold up the launch.
         DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 10) {
@@ -73,6 +87,48 @@ final class VQModel: ObservableObject {
         }
     }
 
+    /// Works out the share list and the log tail off the main thread (they stat / read files) and
+    /// publishes them on the main one: the views only read `shareable` and `appLogTail`.
+    func refreshLogs() {
+        logRefreshes += 1
+        let generation = logRefreshes
+        DispatchQueue.global(qos: .utility).async {
+            let items = VQLog.shareable
+            let tail = VQLog.tail(VQLog.appLog)
+            Task { @MainActor in
+                guard generation == self.logRefreshes else { return }
+                if self.shareable != items { self.shareable = items }
+                if self.appLogTail != tail { self.appLogTail = tail }
+            }
+        }
+    }
+
+    /// Stores the .p12 and reads the certificate back off the main thread (keychain / PKCS#12);
+    /// `done` runs on the main one with the text to show and whether it worked.
+    func storeCertificate(p12: Data, password: String, done: @escaping @MainActor (String, Bool) -> Void) {
+        certificateGen += 1
+        let generation = certificateGen
+        certificateQueue.async {
+            do {
+                let text = try VQSigner.store(p12: p12, password: password)
+                let current = VQSigner.current
+                Task { @MainActor in
+                    if generation == self.certificateGen { self.certificate = current }
+                    done(text, true)
+                }
+            } catch {
+                let text = error.localizedDescription
+                Task { @MainActor in done(text, false) }
+            }
+        }
+    }
+
+    func removeCertificate() {
+        certificateGen += 1
+        certificate = nil
+        certificateQueue.async { VQSigner.remove() }
+    }
+
     func choose(_ url: URL) {
         if let problem = VQFolder.shared.choose(url) { message = problem } else { message = nil }
         refresh()
@@ -80,21 +136,33 @@ final class VQModel: ObservableObject {
 
     func play(_ game: VQGame) {
         guard busy == nil else { return }
-        guard VQSigner.current != nil else {
-            message = VQSigner.Problem.missing.errorDescription
-            return
-        }
         busy = game.id
         progress = 0
         progressText = VQL("Preparando…", "Preparing…")
         message = nil
         Thread.detachNewThread {
+            // The keychain / PKCS#12 read is off the main thread; no certificate = same message as before.
+            guard VQSigner.current != nil else {
+                let text = VQSigner.Problem.missing.errorDescription
+                Task { @MainActor in
+                    self.busy = nil
+                    self.message = text
+                }
+                return
+            }
             // The previous game's logs, BEFORE this one starts and overwrites them. The delayed
             // copy in init() fired 10 s after launch, i.e. inside the NEW session when a game was
             // started quickly: QUEST/Registros then held 10 s of the new run instead of the old
             // one (2026-10-15). Guarded by the boot log's date, so it never copies twice.
-            VQLog.savePreviousSessionToQuest()
-            VQLog.archiveStaleCrashLogs()
+            // On its own thread (File Provider storage can be slow): preparing does not wait for
+            // it, and the game starts after it ends or after 60 s, whichever comes first.
+            let logsSaved = DispatchSemaphore(value: 0)
+            Thread.detachNewThread {
+                VQLog.savePreviousSessionToQuest()
+                VQLog.archiveStaleCrashLogs()
+                logsSaved.signal()
+                Task { @MainActor in self.refreshLogs() }
+            }
             do {
                 let prepared = try VQPrepare.prepare(game) { fraction, text in
                     Task { @MainActor in
@@ -102,11 +170,23 @@ final class VQModel: ObservableObject {
                         self.progressText = text
                     }
                 }
+                // The game must not start until the copy has ended: the guest opens klepton-boot.log
+                // for writing (truncating it) and archiveStaleCrashLogs could move the NEW game's
+                // crash report. Long cap, background thread only; busy stays set meanwhile.
+                if logsSaved.wait(timeout: .now()) == .timedOut {
+                    let saving = VQL("Guardando registro anterior…", "Saving previous log…")
+                    Task { @MainActor in self.message = saving }
+                    if logsSaved.wait(timeout: .now() + 60) == .timedOut {
+                        VQLog.log("Registros: la copia del registro anterior no terminó en 60 s; se inicia el juego")
+                    }
+                }
                 Task { @MainActor in
                     VQLaunch.choice = VQLaunch.Choice(game: game, prepared: prepared)
                     self.prepared[game.id] = true
+                    self.message = nil
                     self.busy = nil
                     self.running = true
+                    self.refreshLogs()
                 }
             } catch {
                 VQLog.log("Preparar: \(game.id) falló: \(error.localizedDescription)")
@@ -115,6 +195,7 @@ final class VQModel: ObservableObject {
                     self.busy = nil
                     self.message = text
                     self.updatePrepared([game])
+                    self.refreshLogs()
                 }
             }
         }
@@ -180,10 +261,11 @@ struct VQLauncherView: View {
             .toolbar {
                 ToolbarItemGroup(placement: .topBarTrailing) {
                     Button { model.refresh() } label: { Label(VQL("Actualizar", "Refresh"), systemImage: "arrow.clockwise") }
-                    ShareLink(items: VQLog.shareable) { Label(VQL("Registros", "Logs"), systemImage: "doc.text") }
+                    ShareLink(items: model.shareable) { Label(VQL("Registros", "Logs"), systemImage: "doc.text") }
                     Button { showSettings = true } label: { Label(VQL("Ajustes", "Settings"), systemImage: "gearshape") }
                 }
             }
+            .onAppear { model.refreshLogs() }
             .sheet(isPresented: $showSettings) { VQSettingsView() }
             .fileImporter(isPresented: $pickingFolder, allowedContentTypes: [.folder]) { result in
                 if case .success(let url) = result { model.choose(url) }
@@ -286,16 +368,15 @@ struct VQSettingsView: View {
                     if p12 != nil {
                         SecureField(VQL("Contraseña", "Password"), text: $password)
                         Button(VQL("Guardar certificado", "Save certificate")) {
-                            do {
-                                result = try VQSigner.store(p12: p12!, password: password)
-                                model.certificate = VQSigner.current
-                                p12 = nil; password = ""
-                            } catch { result = error.localizedDescription }
+                            model.storeCertificate(p12: p12!, password: password) { text, ok in
+                                result = text
+                                if ok { p12 = nil; password = "" }
+                            }
                         }
                     }
                     if model.certificate != nil {
                         Button(VQL("Borrar certificado", "Remove certificate"), role: .destructive) {
-                            VQSigner.remove(); model.certificate = nil
+                            model.removeCertificate()
                         }
                     }
                     if let result { Text(result).font(.caption) }
@@ -369,15 +450,18 @@ struct VQSettingsView: View {
                     if case .success(let url) = r { model.choose(url) }
                 }
                 Section(VQL("Registros", "Logs")) {
-                    ShareLink(items: VQLog.shareable) { Label(VQL("Compartir registros", "Share logs"), systemImage: "square.and.arrow.up") }
+                    ShareLink(items: model.shareable) { Label(VQL("Compartir registros", "Share logs"), systemImage: "square.and.arrow.up") }
                     Toggle(VQL("Incluir capturas (.vpcap)", "Include captures (.vpcap)"), isOn: $settings.includeCaptures)
-                        .onChange(of: settings.includeCaptures) { _, _ in VQLog.refreshQuestAttachments(force: true) }
+                        .onChange(of: settings.includeCaptures) { _, _ in
+                            VQLog.refreshQuestAttachments(force: true)
+                            model.refreshLogs()
+                        }
                     Text(VQL("Añade a «Compartir registros» las capturas de frames de QUEST/capturas. Pueden ocupar mucho.",
                              "Adds the frame captures in QUEST/capturas to “Share logs”. They can be large."))
                         .font(.caption)
                     VQSaveLogsButton()
                     ScrollView {
-                        Text(VQLog.tail(VQLog.appLog)).font(.system(.caption2, design: .monospaced)).textSelection(.enabled)
+                        Text(model.appLogTail).font(.system(.caption2, design: .monospaced)).textSelection(.enabled)
                             .frame(maxWidth: .infinity, alignment: .leading)
                     }
                     .frame(height: 220)
@@ -385,6 +469,7 @@ struct VQSettingsView: View {
             }
             .navigationTitle(VQL("Ajustes", "Settings"))
             .toolbar { Button(VQL("Hecho", "Done")) { dismiss() } }
+            .onAppear { model.refreshLogs() }
             .fileImporter(isPresented: $importing, allowedContentTypes: [UTType(filenameExtension: "p12") ?? .data, .data]) { r in
                 if case .success(let url) = r {
                     let scoped = url.startAccessingSecurityScopedResource()
@@ -409,6 +494,7 @@ struct VQLoadingView: View {
     let showLog: () -> Void
     @State private var pulse = false
     @ObservedObject private var prewarm = VQPrewarm.shared
+    @ObservedObject private var model = VQModel.shared
 
     private var failed: Bool { finished && !succeeded }
     private var phrase: String {
@@ -461,19 +547,23 @@ struct VQLoadingView: View {
             HStack(spacing: 16) {
                 Button(action: showLog) { Label(VQL("Ver registro", "Show log"), systemImage: "doc.text.magnifyingglass") }
                     .buttonStyle(.bordered)
-                ShareLink(items: VQLog.shareable) { Label(VQL("Compartir registros", "Share logs"), systemImage: "square.and.arrow.up") }
+                ShareLink(items: model.shareable) { Label(VQL("Compartir registros", "Share logs"), systemImage: "square.and.arrow.up") }
                     .buttonStyle(.bordered)
             }
             .font(.callout)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .padding(32)
+        .onAppear { model.refreshLogs() }
+        .onChange(of: finished) { _, _ in model.refreshLogs() }
     }
 }
 
 /// Shown when the game's immersive space has closed. The runtime boots a guest once per process,
 /// so playing again needs the app to start again.
 struct VQEndedView: View {
+    @ObservedObject private var model = VQModel.shared
+
     var body: some View {
         VStack(spacing: 24) {
             Spacer()
@@ -487,7 +577,7 @@ struct VQEndedView: View {
                 .font(.title3).foregroundStyle(.secondary).multilineTextAlignment(.center)
             Spacer()
             HStack(spacing: 16) {
-                ShareLink(items: VQLog.shareable) { Label(VQL("Compartir registros", "Share logs"), systemImage: "square.and.arrow.up") }
+                ShareLink(items: model.shareable) { Label(VQL("Compartir registros", "Share logs"), systemImage: "square.and.arrow.up") }
                     .buttonStyle(.bordered)
                 Button {
                     VQLog.log("Cerrar app tras la partida")
@@ -500,6 +590,7 @@ struct VQEndedView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .padding(32)
+        .onAppear { model.refreshLogs() }
     }
 }
 

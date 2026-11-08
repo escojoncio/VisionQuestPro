@@ -27,13 +27,20 @@ final class VQFolder: @unchecked Sendable {
 
     private let lock = NSLock()
     private var opened: URL?
+    private var generation = 0          // bumped (under `lock`) by choose() and forget(); url() drops what they overtook
+    private let persistLock = NSLock()  // serialises the marker writes (settings + keychain); taken before `lock`, never inside it
 
     private init() {}
 
     /// The folder, opened for this process (nil: not chosen yet, or the bookmark no longer opens).
+    /// The lock is held only to read / set `opened`: the keychain, the bookmark, the File Provider
+    /// and the log run outside it, so a caller on the main thread never waits for them.
     var url: URL? {
-        lock.lock(); defer { lock.unlock() }
-        if let opened { return opened }
+        lock.lock()
+        let current = opened
+        let startGeneration = generation
+        lock.unlock()
+        if let current { return current }
         let stored: [(String, Data?)] = [("ajustes", UserDefaults.standard.data(forKey: Self.defaultsKey)),
                                          ("llavero", Self.keychainBookmark())]
         for (source, data) in stored {
@@ -48,11 +55,31 @@ final class VQFolder: @unchecked Sendable {
                 VQLog.log("QUEST: sin acceso a \(resolved.path) (\(source))")
                 continue
             }
-            if stale || source != "ajustes",
-               let fresh = try? resolved.bookmarkData(options: [], includingResourceValuesForKeys: nil, relativeTo: nil) {
-                Self.save(fresh)
+            lock.lock()
+            if let winner = opened {
+                // Another thread (or choose()) opened it while this one resolved: keep that one.
+                lock.unlock()
+                if accessing { resolved.stopAccessingSecurityScopedResource() }
+                return winner
+            }
+            if generation != startGeneration {
+                // forget() ran while this one resolved: do not reopen what the player just forgot.
+                lock.unlock()
+                if accessing { resolved.stopAccessingSecurityScopedResource() }
+                return nil
             }
             opened = resolved
+            lock.unlock()
+            // Only the winner refreshes the saved marker, and not if choose() / forget() got in first.
+            if stale || source != "ajustes",
+               let fresh = try? resolved.bookmarkData(options: [], includingResourceValuesForKeys: nil, relativeTo: nil) {
+                persistLock.lock()
+                lock.lock()
+                let unchanged = generation == startGeneration
+                lock.unlock()
+                if unchanged { Self.save(fresh) }
+                persistLock.unlock()
+            }
             Self.makeSubfolders(resolved)
             VQLog.log("QUEST: \(resolved.path) (\(source))")
             return resolved
@@ -74,23 +101,29 @@ final class VQFolder: @unchecked Sendable {
             picked.stopAccessingSecurityScopedResource()
             return VQL("No se pudo recordar la carpeta QUEST.", "The QUEST folder could not be remembered.")
         }
+        persistLock.lock()
         Self.save(data)
         lock.lock()
         opened?.stopAccessingSecurityScopedResource()
         opened = picked
+        generation += 1
         lock.unlock()
+        persistLock.unlock()
         Self.makeSubfolders(picked)
         VQLog.log("QUEST: elegida \(picked.path)")
         return nil
     }
 
     func forget() {
+        persistLock.lock()
         lock.lock()
         opened?.stopAccessingSecurityScopedResource()
         opened = nil
+        generation += 1
         lock.unlock()
         UserDefaults.standard.removeObject(forKey: Self.defaultsKey)
         SecItemDelete(Self.keychainQuery() as CFDictionary)
+        persistLock.unlock()
         VQLog.log("QUEST: olvidada")
     }
 
