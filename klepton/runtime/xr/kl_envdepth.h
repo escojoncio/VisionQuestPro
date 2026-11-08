@@ -73,6 +73,7 @@ void kl_envdepth_rebase(kl_envdepth_frame *f, const float eye0_rel[7]);
 typedef struct {
     int      slot;                // image being rendered
     uint32_t gen;                 // the image set it belongs to (job_done ignores a stale one)
+    uint32_t seq;                 // which job it is (job_done ignores one that timed out and was replaced)
     int      w, h;
     void    *mtl_tex;             // Vulkan guest: the image's MTLTexture (2D array, depth16). NULL for GL
     uint16_t *cpu;                // GL guest: 2 layers of w*h depth16 to fill, layer 0 first, row 0 = top
@@ -80,7 +81,8 @@ typedef struct {
     float    pose[2][7];
     float    tan[2][4];
 } kl_envdepth_job;
-// 1 when a picture is due (started, images exist, newest one old or taken).
+// 1 when a picture is due (started, images exist, newest one old or taken). A job the
+// compositor never finishes is given up after KLED_JOB_TIMEOUT_S and a new one may start.
 int  kl_envdepth_job_begin(kl_envdepth_job *j);
 // The render finished (ok = 0 abandons the slot).
 void kl_envdepth_job_done(const kl_envdepth_job *j, int ok);

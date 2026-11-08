@@ -20,9 +20,9 @@
 //     uploads it on the guest's GL thread).
 //
 // Geometry. ARKit meshes are copied (vertices + triangles) into shared MTLBuffers
-// on a background queue: counts are checked twice a second, everything is
-// re-read every ~5 s (a mesh anchor that changed without changing its sizes),
-// and the per-frame work is one draw per mesh with its CURRENT pose
+// on a background queue (one job at a time): counts are checked every
+// `refreshInterval` (~0.1 s), everything is re-read every `fullCopyInterval`
+// (~2 s; a mesh anchor that changed without changing its sizes), and the per-frame work is one draw per mesh with its CURRENT pose
 // (kl_spatial_get, guest space: recenter and origin height already applied).
 //
 // Also here: the compositor's recenter is handed to kl_spatial (every consumer
@@ -123,7 +123,9 @@ enum KleptonEnvDepth {
         var meshes: [Key: Mesh] = [:]
         var refreshing = false
         var lastRefresh: CFTimeInterval = 0
-        var refreshCount = 0
+        var lastFull: CFTimeInterval = 0
+        static let refreshInterval: CFTimeInterval = 0.1     // geometry check (counts) at most this often
+        static let fullCopyInterval: CFTimeInterval = 2.0    // full re-copy even when the sizes did not change
         let geo = DispatchQueue(label: "klepton.envdepth.geometry", qos: .utility)
 
         init?() {
@@ -176,9 +178,10 @@ enum KleptonEnvDepth {
         func refreshIfDue() {
             let now = CACurrentMediaTime()
             lock.lock()
-            let due = !refreshing && now - lastRefresh > 0.5
-            if due { refreshing = true; lastRefresh = now; refreshCount += 1 }
-            let full = refreshCount % 10 == 1
+            let due = !refreshing && now - lastRefresh > Renderer.refreshInterval
+            let full = due && now - lastFull > Renderer.fullCopyInterval
+            if due { refreshing = true; lastRefresh = now }
+            if full { lastFull = now }
             let old = meshes
             lock.unlock()
             guard due else { return }

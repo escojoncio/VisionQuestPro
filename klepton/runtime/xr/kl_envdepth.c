@@ -48,7 +48,29 @@
 
 #define ONCE(msg) do { static int _o; if (!_o) { _o = 1; fprintf(stderr, "  [envdepth] %s\n", (msg)); } } while (0)
 
-enum { S_FREE, S_RENDER, S_READY, S_HELD };
+enum { S_FREE, S_RENDER, S_READY, S_HELD, S_LOST };   // S_LOST: its job timed out, the GPU may still write it
+
+// KL-TEST-BEGIN envdepthjob (extracted by tools/ci/host-tests.sh into klepton/tests/t_envdepth_job.c)
+// A job that has not finished this long after it began is given up (a command buffer that never completes).
+#define KLED_JOB_TIMEOUT_S 2.0
+// Has the job in flight (if any) been running past the timeout? Clocks are CLOCK_MONOTONIC seconds.
+static int kled_job_expired(int rendering, double began_s, double at_s, double timeout_s) {
+    return rendering && at_s - began_s >= timeout_s;
+}
+// Is a finishing job the one in flight? A late finish of a job that timed out (and maybe was replaced) is not,
+// so it must not clear the flag of the newer job. seq is bumped on every job_begin.
+static int kled_job_is_current(int rendering, uint32_t job_seq, uint32_t cur_seq) {
+    return rendering && job_seq == cur_seq;
+}
+// What job_done does with a finishing job: it is the one in flight (CURRENT), or it is a late finish of a job given
+// up whose slot is still S_LOST (FREE_LOST: the slot is free again), or it is a late finish whose slot is no longer
+// S_LOST (IGNORE). Only CURRENT may touch rendering and the ready/held bookkeeping of the newer job.
+enum { KLED_DONE_CURRENT, KLED_DONE_FREE_LOST, KLED_DONE_IGNORE };
+static int kled_done_action(int rendering, uint32_t job_seq, uint32_t cur_seq, int slot_lost) {
+    if (kled_job_is_current(rendering, job_seq, cur_seq)) return KLED_DONE_CURRENT;
+    return slot_lost ? KLED_DONE_FREE_LOST : KLED_DONE_IGNORE;
+}
+// KL-TEST-END envdepthjob
 enum { API_NONE, API_VULKAN, API_GL };
 
 static pthread_mutex_t g_mu = PTHREAD_MUTEX_INITIALIZER;
@@ -62,8 +84,27 @@ static struct {
     int state[KLED_IMAGES];
     kl_envdepth_frame fr[KLED_IMAGES];
     int ready, held, prev, rendering;
+    uint32_t job_seq;                     // seq of the job in flight (bumps on every job_begin)
+    int job_slot;                         // its slot
+    double job_t;                         // CLOCK_MONOTONIC seconds when it began
     int inflight;                         // jobs handed to the compositor and not yet done (stale ones too)
 } g = { .ready = -1, .held = -1, .prev = -1 };
+static int g_lost_last;                   // S_LOST count at the last lost_note log
+static double g_lost_t = -1e9;            // when it was logged
+
+// Slots that stay S_LOST are not reusable while the GPU may write them; with held and prev that can leave no free
+// slot and freeze the depth. Log (not ONCE) when 2+ are lost or job_begin is starved: at most every 5 s, always when
+// the count changes. Called with g_mu held.
+static void lost_note(double t, int starved) {
+    int n = 0;
+    for (int i = 0; i < KLED_IMAGES; i++) if (g.state[i] == S_LOST) n++;
+    if (n < 2 && !starved) { g_lost_last = n; return; }
+    if (n == g_lost_last && t - g_lost_t < 5.0) return;
+    g_lost_last = n;
+    g_lost_t = t;
+    fprintf(stderr, "  [envdepth] %d of %d depth slots lost to hung jobs%s\n", n, KLED_IMAGES,
+            starved ? ", no free slot: depth not refreshed" : "");
+}
 
 // ---- GL gateway (only for a GL guest) ---------------------------------------
 static void (*gl_GenTextures)(int32_t, uint32_t *);
@@ -259,6 +300,7 @@ int kl_envdepth_alloc(void) {
     }
     g.ready = g.held = g.prev = -1;
     g.rendering = 0;
+    g_lost_last = 0;
     g.api = api;
     pthread_mutex_unlock(&g_mu);
     fprintf(stderr, "  [envdepth] %d depth images %dx%dx2 D16 (%s)\n", KLED_IMAGES, KLED_W, KLED_H,
@@ -357,13 +399,21 @@ void kl_envdepth_rebase(kl_envdepth_frame *f, const float eye0_rel[7]) {
 int kl_envdepth_job_begin(kl_envdepth_job *j) {
     if (!j) return 0;
     pthread_mutex_lock(&g_mu);
-    if (!g.started || g.api == API_NONE || g.rendering) { pthread_mutex_unlock(&g_mu); return 0; }
+    if (!g.started || g.api == API_NONE) { pthread_mutex_unlock(&g_mu); return 0; }
     double t = now_s();
+    if (g.rendering) {
+        if (!kled_job_expired(g.rendering, g.job_t, t, KLED_JOB_TIMEOUT_S)) { pthread_mutex_unlock(&g_mu); return 0; }
+        // Lost: its slot is left alone until the late job_done (the GPU may still write it); a new job may start.
+        if (g.state[g.job_slot] == S_RENDER) g.state[g.job_slot] = S_LOST;
+        g.rendering = 0;
+        ONCE("a depth job did not finish in time: given up, a new one starts");
+        lost_note(t, 0);
+    }
     if (g.ready >= 0 && t - g.fr[g.ready].time_s < 0.033) { pthread_mutex_unlock(&g_mu); return 0; }
     int s = -1;
     for (int i = 0; i < KLED_IMAGES; i++)
         if (g.state[i] == S_FREE && i != g.held && i != g.prev) { s = i; break; }
-    if (s < 0) { pthread_mutex_unlock(&g_mu); return 0; }
+    if (s < 0) { lost_note(t, 1); pthread_mutex_unlock(&g_mu); return 0; }
     memset(j, 0, sizeof *j);
     j->slot = s;
     j->gen = g.gen;
@@ -373,8 +423,11 @@ int kl_envdepth_job_begin(kl_envdepth_job *j) {
     if (!j->mtl_tex && !j->cpu) { pthread_mutex_unlock(&g_mu); return 0; }
     j->near_z = KLED_NEAR; j->far_z = KLED_FAR;
     for (int e = 0; e < 2; e++) eye_view(e, j->pose[e], j->tan[e]);
+    j->seq = ++g.job_seq;
     g.state[s] = S_RENDER;
     g.rendering = 1;
+    g.job_slot = s;
+    g.job_t = t;
     g.inflight++;
     g.fr[s].index = s;
     g.fr[s].time_s = t;
@@ -390,6 +443,12 @@ void kl_envdepth_job_done(const kl_envdepth_job *j, int ok) {
     pthread_mutex_lock(&g_mu);
     if (g.inflight > 0) g.inflight--;
     if (j->gen != g.gen || g.api == API_NONE) { pthread_mutex_unlock(&g_mu); return; }
+    int act = kled_done_action(g.rendering, j->seq, g.job_seq, g.state[j->slot] == S_LOST);
+    if (act != KLED_DONE_CURRENT) {
+        if (act == KLED_DONE_FREE_LOST) { g.state[j->slot] = S_FREE; lost_note(now_s(), 0); }   // late finish: slot free again
+        pthread_mutex_unlock(&g_mu);
+        return;
+    }
     g.rendering = 0;
     if (ok) {
         if (g.ready >= 0) g.state[g.ready] = S_FREE;

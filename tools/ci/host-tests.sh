@@ -120,6 +120,8 @@ klepton_tests() {
   run t_perm_queue -Wno-unused-function -I"$T/newt" tests/t_perm_queue.c -lpthread
   awk '/KL-TEST-BEGIN spsum/{p=1;next} /KL-TEST-END spsum/{p=0} p' runtime/xr/kl_ovrp_spatial.c > "$T/newt/spsum.inc"
   run t_sp_sum -Wno-unused-function -I"$T/newt" tests/t_sp_sum.c
+  awk '/KL-TEST-BEGIN envdepthjob/{p=1;next} /KL-TEST-END envdepthjob/{p=0} p' runtime/xr/kl_envdepth.c > "$T/newt/envdepthjob.inc"
+  run t_envdepth_job -Wno-unused-function -I"$T/newt" tests/t_envdepth_job.c
   return $rc
 }
 
