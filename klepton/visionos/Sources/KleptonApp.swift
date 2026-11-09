@@ -164,6 +164,9 @@ enum Lifecycle {
         }
         guard klEnvOn("KL_EXIT_ON_BACKGROUND", default: true) else { return }
         NSLog("[app] no window to return to — exiting")
+        // The flush below may take seconds: a launcher window the system brings back meanwhile shows "game ended" instead of
+        // starting a game this process can no longer boot (kl_app_boot runs once per process).
+        VQModel.shared.ended = true
         // exit() would run C++ static destructors (std::mutex globals) while guest threads still
         // run and lock them -> "mutex lock failed" abort. Save caches, flush logs, then _exit.
         // The flush writes the pipeline archive to disk: not on the main thread. The exit follows it, from the same thread.

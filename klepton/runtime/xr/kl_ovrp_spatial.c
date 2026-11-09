@@ -240,7 +240,7 @@ static int isptr(uint64_t a) { return a >= PTR_MIN; }
 static uint64_t U(uint64_t a) { return isptr(a) ? *(const uint64_t *)(uintptr_t)a : a; }
 static uint64_t sp_h(uint64_t a) { return a ? U(a) : 0; }                     // a space handle as logged
 static uint64_t sp_out(uint64_t a2, uint64_t a3) {                              // SaveSpaces: the requestId it wrote
-    uint64_t o = isptr(a3) ? a3 : (isptr(a2) ? a2 : 0);
+    uint64_t o = isptr(a2) ? a2 : (isptr(a3) ? a3 : 0);
     return o ? *(const uint64_t *)(uintptr_t)o : 0;
 }
 static int space_of(uint64_t arg, kl_uuid *id, int *kind) {
@@ -262,11 +262,18 @@ typedef struct { uint64_t requestId; uint64_t space; int32_t result; kl_uuid uui
 typedef struct { uint64_t requestId; int32_t result; kl_uuid uuid; int32_t location; } ev_erase;                // 32
 typedef struct { uint64_t requestId; int32_t result; int32_t _p; } ev_simple;                                   // 16
 typedef struct { uint64_t space; kl_uuid uuid; } qresult;                                                       // 24
+// OVRPlugin.SpaceQueryInfo: the filters are INLINE arrays (SpaceFilterInfoIds {Guid Ids[1024]; int NumIds},
+// SpaceFilterInfoComponents {int Components[16]; int NumComponents}), Ids at offset 28, 16488 bytes in all.
+#define QINFO_MAX_IDS   1024
+#define QINFO_MAX_COMPS 16
 typedef struct {
     int32_t QueryType, MaxQuerySpaces; double Timeout;
     int32_t Location, ActionType, FilterType;
-    void *Ids; int32_t NumIds; void *Components; int32_t NumComponents;
+    kl_uuid Ids[QINFO_MAX_IDS]; int32_t NumIds;
+    int32_t Components[QINFO_MAX_COMPS]; int32_t NumComponents;
 } qinfo;
+_Static_assert(__builtin_offsetof(qinfo, Ids) == 28 && __builtin_offsetof(qinfo, NumIds) == 16412 &&
+               __builtin_offsetof(qinfo, NumComponents) == 16480 && sizeof(qinfo) == 16488, "OVRPlugin.SpaceQueryInfo layout");
 typedef struct { int32_t cap, count; void *data; } cap_list;       // {capacityInput, countOutput, ptr}
 typedef struct { kl_uuid floor, ceiling; int32_t wcap, wcount; kl_uuid *walls; } room_layout;
 typedef struct { float x, y, w, h; } rectf;
@@ -552,7 +559,9 @@ static ovrpResult klovrp_SaveSpaceList(const uint64_t *spaces, uint32_t n, int32
 // pointer-sized argument (the optional location is a small int, never a pointer).
 SP_IMPL sp_SaveSpaces(uint32_t n, const uint64_t *spaces, uint64_t a2, uint64_t a3) {
     kl_ovrp_hit("ovrp_SaveSpaces");
-    uint64_t *out = isptr(a3) ? (uint64_t *)(uintptr_t)a3 : (isptr(a2) ? (uint64_t *)(uintptr_t)a2 : NULL);
+    // ovrp_SaveSpaces(uint n, ulong *spaces, out ulong requestId): a2 is the out pointer; a3 is read only when a2 is a
+    // location (a stray a3 that looks like a pointer must not be written).
+    uint64_t *out = isptr(a2) ? (uint64_t *)(uintptr_t)a2 : (isptr(a3) ? (uint64_t *)(uintptr_t)a3 : NULL);
     int32_t loc = isptr(a2) ? STORAGE_LOCAL : (int32_t)a2;
     return save_list(spaces, n, loc, out);
 }
@@ -907,8 +916,8 @@ SP_IMPL sp_QuerySpaces(const qinfo *q, uint64_t *req_out) {
     if (!q || !req_out) return KLOVRP_INVALID_PARAM;
     *req_out = 0;
     const kl_uuid *ids = NULL; int nids = 0; const int32_t *want = NULL; int nw = 0;
-    if (q->FilterType == FILTER_IDS && plausible_array(q->Ids, q->NumIds)) { ids = (const kl_uuid *)q->Ids; nids = q->NumIds; }
-    else if (q->FilterType == FILTER_COMPONENTS && plausible_array(q->Components, q->NumComponents)) { want = (const int32_t *)q->Components; nw = q->NumComponents; }
+    if (q->FilterType == FILTER_IDS && q->NumIds > 0 && q->NumIds <= QINFO_MAX_IDS) { ids = q->Ids; nids = q->NumIds; }
+    else if (q->FilterType == FILTER_COMPONENTS && q->NumComponents > 0 && q->NumComponents <= QINFO_MAX_COMPS) { want = q->Components; nw = q->NumComponents; }
     uint64_t req = kl_spatial_new_request();
     run_query(req, q->MaxQuerySpaces, ids, nids, want, nw, q->Location);
     *req_out = req;
@@ -933,7 +942,7 @@ static void sp_qlog(const char *fn, unsigned *cnt, const void *info, int len, in
 static ovrpResult klovrp_QuerySpaces(const qinfo *q, uint64_t *req_out) {
     ovrpResult r = sp_QuerySpaces(q, req_out);
     static unsigned qn;
-    if (q) sp_qlog("ovrp_QuerySpaces", &qn, q, 64, q->FilterType, q->FilterType == FILTER_IDS ? q->Ids : q->Components,
+    if (q) sp_qlog("ovrp_QuerySpaces", &qn, q, 64, q->FilterType, q->FilterType == FILTER_IDS ? (const void *)q->Ids : (const void *)q->Components,
                    q->FilterType == FILTER_IDS ? q->NumIds : q->NumComponents, -1, -1);   // exclude fields: not in this layout (see info64)
     SPT("ovrp_QuerySpaces", r, "req=%llu max=%d filter=%d loc=%d results=%d", ULL(req_out ? *req_out : 0), q ? q->MaxQuerySpaces : -1, q ? q->FilterType : -1, q ? q->Location : -1, req_out ? sp_qcount(*req_out) : -1);
     return r;
@@ -994,9 +1003,12 @@ static ovrpResult klovrp_RetrieveSpaceQueryResults(uint64_t req, int32_t cap, in
     return r;
 }
 // Discovery (XR_META_spatial_entity_discovery): same store, filters ignored.
-SP_IMPL sp_DiscoverSpaces(const void *filters, uint32_t n, uint64_t *req_out) {
+// ovrp_DiscoverSpaces(in SpaceDiscoveryInfo {uint NumFilters; Header** Filters}, out ulong requestId): two arguments (a
+// third one read as the out pointer is a stray register: the guest never got its id, and 8 bytes went to a wild address).
+typedef struct { uint32_t n; uint32_t _p; const void *const *filters; } dinfo;
+SP_IMPL sp_DiscoverSpaces(const dinfo *info, uint64_t *req_out) {
     kl_ovrp_hit("ovrp_DiscoverSpaces");
-    (void)filters; (void)n;
+    (void)info;
     if (!req_out) return KLOVRP_INVALID_PARAM;
     *req_out = 0;
     uint64_t req = kl_spatial_new_request();
@@ -1010,18 +1022,26 @@ SP_IMPL sp_DiscoverSpaces(const void *filters, uint32_t n, uint64_t *req_out) {
     ONCE("DiscoverSpaces: event type numbers are unverified guesses");
     return KLOVRP_SUCCESS;
 }
-static ovrpResult klovrp_DiscoverSpaces(const void *filters, uint32_t n, uint64_t *req_out) {
-    ovrpResult r = sp_DiscoverSpaces(filters, n, req_out);
-    SPT("ovrp_DiscoverSpaces", r, "n=%u req=%llu results=%d", n, ULL(req_out ? *req_out : 0), req_out ? sp_qcount(*req_out) : -1);
+static ovrpResult klovrp_DiscoverSpaces(const dinfo *info, uint64_t *req_out) {
+    ovrpResult r = sp_DiscoverSpaces(info, req_out);
+    SPT("ovrp_DiscoverSpaces", r, "filters=%d req=%llu results=%d", info ? (int)info->n : -1, ULL(req_out ? *req_out : 0),
+        req_out ? sp_qcount(*req_out) : -1);
     return r;
 }
-SP_IMPL sp_RetrieveSpaceDiscoveryResults(uint64_t req, int32_t cap, int32_t *count, qresult *out) {
+// ovrp_RetrieveSpaceDiscoveryResults(ulong requestId, ref SpaceDiscoveryResults): capacity 0 / no array asks the count.
+typedef struct { uint32_t cap, count; qresult *results; } dresults;
+SP_IMPL sp_RetrieveSpaceDiscoveryResults(uint64_t req, dresults *res) {
     kl_ovrp_hit("ovrp_RetrieveSpaceDiscoveryResults");
-    return retrieve(req, cap, count, out);
+    if (!res) return KLOVRP_INVALID_PARAM;
+    int32_t n = 0;
+    ovrpResult r = retrieve(req, res->results ? (int32_t)res->cap : 0, &n, res->results);
+    res->count = (uint32_t)n;
+    return r;
 }
-static ovrpResult klovrp_RetrieveSpaceDiscoveryResults(uint64_t req, int32_t cap, int32_t *count, qresult *out) {
-    ovrpResult r = sp_RetrieveSpaceDiscoveryResults(req, cap, count, out);
-    SPT("ovrp_RetrieveSpaceDiscoveryResults", r, "req=%llu cap=%d count=%d", ULL(U(req)), cap, count ? *count : -1);
+static ovrpResult klovrp_RetrieveSpaceDiscoveryResults(uint64_t req, dresults *res) {
+    ovrpResult r = sp_RetrieveSpaceDiscoveryResults(req, res);
+    SPT("ovrp_RetrieveSpaceDiscoveryResults", r, "req=%llu cap=%d count=%d", ULL(req), res ? (int)res->cap : -1,
+        res ? (int)res->count : -1);
     return r;
 }
 
@@ -1147,6 +1167,39 @@ static ovrpResult klovrp_GetSpaceTriangleMesh(uint64_t space, int32_t vcap, int3
 }
 
 // ---- scene capture ------------------------------------------------------------------
+// Diagnostics, once per capture: every room as the game reads it (layout floor / ceiling / walls, container members with label,
+// size and polygon points) and the planes an unfiltered query also returns that no room holds. Positions are guest space.
+static uint64_t dump_h(kl_uuid id) { static const kl_uuid z; return memcmp(&id, &z, sizeof id) ? kl_spatial_handle_for(id) : 0; }
+static void room_dump(void) {
+    enum { MW = 64, MM = 256 };
+    kl_uuid w[MW], mem[MM];                        // ~5 KB of the capture thread's 128 KB stack
+    uint32_t nr = kl_spatial_count(KLSP_ROOM), np = kl_spatial_count(KLSP_PLANE), inroom = 0;
+    for (uint32_t r = 0; r < nr && r < 4; r++) {
+        kl_uuid id, fl, ce; float m[16]; uint32_t nw = 0, nm = 0;
+        if (!kl_spatial_get(KLSP_ROOM, r, &id, m) || !kl_spatial_room_info(id, &fl, &ce, MW, w, &nw, MM, mem, &nm)) continue;
+        fprintf(stderr, "  [room-dump] room 0x%llx%s floor 0x%llx ceiling 0x%llx walls=%u members=%u\n", ULL(dump_h(id)),
+                kl_spatial_is_synthetic(id) ? " (synthetic)" : "", ULL(dump_h(fl)), ULL(dump_h(ce)), nw, nm);
+        for (uint32_t k = 0; k < nm && k < MM; k++) {
+            float pw = 0, ph = 0; int lbl = KLSP_LBL_OTHER; uint32_t npl = 0, wall = 0;
+            kl_spatial_plane_info(mem[k], &pw, &ph, &lbl, 0, NULL, &npl);
+            for (uint32_t j = 0; j < nw && j < MW; j++) if (!memcmp(&w[j], &mem[k], sizeof w[j])) wall = j + 1;
+            fprintf(stderr, "  [room-dump]   0x%llx %s %.2fx%.2f poly=%u%s%s\n", ULL(kl_spatial_handle_for(mem[k])), label_name(lbl), pw, ph, npl,
+                    wall ? " layout_wall" : "", kl_spatial_is_synthetic(mem[k]) ? " synthetic" : "");
+        }
+        inroom = nm < MM ? nm : MM;
+    }
+    for (uint32_t i = 0; i < np; i++) {            // what an unfiltered query adds (against the last room's members)
+        kl_uuid id; float m[16];
+        if (!kl_spatial_get(KLSP_PLANE, i, &id, m)) continue;
+        int found = 0;
+        for (uint32_t k = 0; k < inroom && !found; k++) found = !memcmp(&mem[k], &id, sizeof id);
+        if (found) continue;
+        float pw = 0, ph = 0; int lbl = KLSP_LBL_OTHER;
+        kl_spatial_plane_info(id, &pw, &ph, &lbl, 0, NULL, NULL);
+        fprintf(stderr, "  [room-dump]   outside any room: 0x%llx %s %.2fx%.2f at %.2f,%.2f,%.2f\n", ULL(kl_spatial_handle_for(id)),
+                label_name(lbl), pw, ph, m[12], m[13], m[14]);
+    }
+}
 // Quest opens its scanning app. visionOS scans on its own, so success is immediate and the
 // completion event waits for data (planes or a room), then a short settle so the first
 // query sees more than one wall; or a timeout, with whatever there is.
@@ -1180,6 +1233,7 @@ static void *capture_thread(void *arg) {
     push(EV_SCENE_CAPTURE, &e, sizeof e);
     fprintf(stderr, "  [ovrp-spatial] scene capture %llu complete after %d ms: %u planes, %u rooms, %u meshes\n",
             (unsigned long long)req, waited, kl_spatial_count(KLSP_PLANE), kl_spatial_count(KLSP_ROOM), kl_spatial_count(KLSP_MESH));
+    room_dump();
     return NULL;
 }
 SP_IMPL sp_RequestSceneCapture(const void *request, uint64_t *req_out) {

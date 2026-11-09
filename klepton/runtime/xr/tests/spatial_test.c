@@ -144,8 +144,9 @@ int main(void) {
     CK(g_nev == 1 && g_ev[0].type == 100);
     { int32_t r100 = -1; memcpy(&r100, g_ev[0].d + 8, 4); CK(r100 == 0); }
     {
-        typedef struct { int32_t qt, mx; double to; int32_t loc, act, ft; void *ids; int32_t nids; void *comps; int32_t ncomps; } qi0;
-        int32_t w6[1] = {6}; qi0 q0 = {0, 100, 0, 1, 0, 2, NULL, 0, w6, 1};
+        typedef struct { int32_t qt, mx; double to; int32_t loc, act, ft; kl_uuid ids[1024]; int32_t nids; int32_t comps[16]; int32_t ncomps; } qi0;
+        static qi0 q0; memset(&q0, 0, sizeof q0);
+        q0.mx = 100; q0.loc = 1; q0.ft = 2; q0.comps[0] = 6; q0.ncomps = 1;
         struct { uint64_t space; kl_uuid u; } r0[16]; int32_t c0 = -1; uint64_t rq0 = 0;
         CK(((int32_t(*)(const qi0 *, uint64_t *))F("ovrp_QuerySpaces"))(&q0, &rq0) == 0);
         CK(((int32_t(*)(uint64_t *, int32_t, int32_t *, void *))F("ovrp_RetrieveSpaceQueryResults"))(&rq0, 16, &c0, r0) == 0 && c0 >= 1);
@@ -221,9 +222,11 @@ int main(void) {
     }
 
     // --- query by component Bounded2D (3): 7 planes + 1 room? room has no Bounded2D
-    typedef struct { int32_t qt, mx; double to; int32_t loc, act, ft; void *ids; int32_t nids; void *comps; int32_t ncomps; } qi;
-    int32_t want[1] = {3};
-    qi q = {0, 100, 0, 1, 0, 2, NULL, 0, want, 1};
+    // OVRPlugin.SpaceQueryInfo: inline filter arrays (Guid Ids[1024]; int NumIds; int Components[16]; int NumComponents)
+    typedef struct { int32_t qt, mx; double to; int32_t loc, act, ft; kl_uuid ids[1024]; int32_t nids; int32_t comps[16]; int32_t ncomps; } qi;
+    static qi q; memset(&q, 0, sizeof q);
+    q.mx = 100; q.loc = 1; q.ft = 2; q.comps[0] = 3; q.ncomps = 1;
+    int32_t *want = q.comps;
     g_nev = 0;
     CK(((int32_t(*)(const qi *, uint64_t *))F("ovrp_QuerySpaces"))(&q, &req) == 0 && req);
     CK(g_nev == 2 && g_ev[0].type == 51 && g_ev[1].type == 52);
@@ -231,6 +234,20 @@ int main(void) {
     CK(((int32_t(*)(uint64_t *, int32_t, int32_t *, void *))F("ovrp_RetrieveSpaceQueryResults"))(&req, 0, &cnt, NULL) == 0 && cnt == 7);
     struct { uint64_t space; kl_uuid u; } res[16];
     CK(((int32_t(*)(uint64_t *, int32_t, int32_t *, void *))F("ovrp_RetrieveSpaceQueryResults"))(&req, 16, &cnt, res) == 0 && cnt == 7);
+
+    // discovery (OVRAnchor.FetchAnchorsAsync): ovrp_DiscoverSpaces(in SpaceDiscoveryInfo, out ulong requestId) and
+    // ovrp_RetrieveSpaceDiscoveryResults(ulong requestId, ref SpaceDiscoveryResults {cap, count, results*})
+    {
+        struct { uint32_t n; const void *const *filters; } di = {0, NULL};
+        uint64_t dreq = 0;
+        CK(((int32_t(*)(const void *, uint64_t *))F("ovrp_DiscoverSpaces"))(&di, &dreq) == 0 && dreq);
+        struct { uint32_t cap, count; void *results; } dr = {0, 0, NULL};
+        CK(((int32_t(*)(uint64_t, void *))F("ovrp_RetrieveSpaceDiscoveryResults"))(dreq, &dr) == 0 && dr.count >= 7);
+        uint32_t all = dr.count;
+        dr.cap = 16; dr.results = res; memset(res, 0, sizeof res);
+        CK(((int32_t(*)(uint64_t, void *))F("ovrp_RetrieveSpaceDiscoveryResults"))(dreq, &dr) == 0 && dr.count == (all < 16 ? all : 16) && res[0].space);
+        CK(((int32_t(*)(uint64_t, void *))F("ovrp_RetrieveSpaceDiscoveryResults"))(dreq, NULL) != 0);
+    }
 
     // room query by RoomLayout (6)
     want[0] = 6; g_nev = 0;
@@ -247,6 +264,12 @@ int main(void) {
     typedef struct { int32_t cap, count; void *p; } cl;
     kl_uuid mem[16]; cl cont = {16, 0, mem};
     CK(((int32_t(*)(uint64_t *, cl *))F("ovrp_GetSpaceContainer"))(&room, &cont) == 0 && cont.count == 7);
+    // query by ids (OVRSceneManager: the container's children): exactly the ids asked
+    q.ft = 1; q.ids[0] = walls[0]; q.ids[1] = walls[1]; q.nids = 2;
+    CK(((int32_t(*)(const qi *, uint64_t *))F("ovrp_QuerySpaces"))(&q, &req) == 0);
+    CK(((int32_t(*)(uint64_t *, int32_t, int32_t *, void *))F("ovrp_RetrieveSpaceQueryResults"))(&req, 16, &cnt, res) == 0 && cnt == 2);
+    CK(!memcmp(&res[0].u, &walls[0], 16) || !memcmp(&res[1].u, &walls[0], 16));
+    q.ft = 2; q.nids = 0;
 
     // semantic label + boxes on the table plane
     uint64_t tbl = kl_spatial_handle_for(U16(3));
