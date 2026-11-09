@@ -19,9 +19,11 @@
 // No handedness flip: ARKit and the Oculus tracking space are both right
 // handed, +Y up (see KleptonCompositor.decompose).
 //
-// Nothing is requested unless the game asked for it (kl_spatial_set_policy, set
-// from the APK manifest) or KL_SPATIAL=1 forces it; the world-sensing prompt
-// is therefore never shown to a game that does not need it.
+// The providers run in every immersive session (KL_ENV_CAPTURE, the app setting «Captura de
+// entorno», default on) so the Guardian gets the floor and the room (KleptonGuardian.swift,
+// kl_guardian). What the GAME sees is still decided by the manifest (kl_spatial_set_policy) or
+// KL_SPATIAL=1: kl_spatial_set_available is told only the exposed part. With the setting off,
+// nothing is requested unless the game asked for it, as before.
 import ARKit
 import simd
 import QuartzCore
@@ -32,6 +34,7 @@ enum KleptonSpatial {
     nonisolated(unsafe) private static var room: RoomTrackingProvider?
     nonisolated(unsafe) private static var started = false
     nonisolated(unsafe) private static var wantsAnchors = false
+    nonisolated(unsafe) private static var exposesScene = false   // the game may see planes / mesh / rooms (policy or KL_SPATIAL=1)
     nonisolated(unsafe) private static var pendingMesh: [UUID: MeshAnchor] = [:]
     nonisolated(unsafe) private static var meshStamp: [UUID: CFTimeInterval] = [:]
     private static let meshLock = NSLock()
@@ -43,16 +46,16 @@ enum KleptonSpatial {
     }
 
     /// Extra providers to add to the ARKit session's `run` (the set is fixed at
-    /// `run`). Empty unless the game asked for scene / anchors (kl_spatial_set_policy)
-    /// and the user authorised world sensing, so no prompt appears for games
-    /// that do not need it.
+    /// `run`). Empty unless environment capture is on (KL_ENV_CAPTURE, default on) or the
+    /// game asked for scene / anchors (kl_spatial_set_policy), and the user authorised world sensing.
     static func providers() -> [any DataProvider] {
         var wantsScene: Int32 = 0
         var wantsAnch: Int32 = 0
         kl_spatial_policy(&wantsScene, &wantsAnch)
         let force = envOn("KL_SPATIAL", false)
         wantsAnchors = wantsAnch != 0 || force
-        guard wantsScene != 0 || force else { return [] }
+        exposesScene = wantsScene != 0 || force
+        guard exposesScene || envOn("KL_ENV_CAPTURE", true) else { return [] }
         var list: [any DataProvider] = []
         if plane == nil, PlaneDetectionProvider.isSupported {
             plane = PlaneDetectionProvider(alignments: [.horizontal, .vertical])
@@ -107,9 +110,14 @@ enum KleptonSpatial {
         }
         let tracker = KleptonCompositor.headAtTracker
         let anchorsOk = tracker != nil && WorldTrackingProvider.isSupported
-        kl_spatial_set_available(plane != nil ? 1 : 0, scene != nil ? 1 : 0,
-                                 room != nil ? 1 : 0, anchorsOk ? 1 : 0)
-        NSLog("[spatial] running: planes=\(plane != nil) mesh=\(scene != nil) room=\(room != nil) anchors=\(anchorsOk)")
+        // Captured always, exposed to the game only if its manifest (or KL_SPATIAL=1) asked: a game without
+        // USE_SCENE sees no planes / mesh / rooms, one without USE_SCENE and USE_ANCHOR_API no anchors.
+        let exposeScene = exposesScene
+        let exposeAnchors = anchorsOk && (exposeScene || wantsAnchors)
+        kl_spatial_set_available(exposeScene && plane != nil ? 1 : 0, exposeScene && scene != nil ? 1 : 0,
+                                 exposeScene && room != nil ? 1 : 0, exposeAnchors ? 1 : 0)
+        NSLog("[spatial] running: planes=\(plane != nil) mesh=\(scene != nil) room=\(room != nil) anchors=\(anchorsOk) "
+              + "exposed to the game: scene=\(exposeScene) anchors=\(exposeAnchors)")
         if let plane {
             Task.detached { for await u in plane.anchorUpdates { handlePlane(u) } }
         }
@@ -120,7 +128,7 @@ enum KleptonSpatial {
             Task.detached { for await u in scene.anchorUpdates { handleMesh(u) } }
             Task.detached { await flushMeshes() }
         }
-        if anchorsOk, let tracker {
+        if exposeAnchors, let tracker {
             Task.detached { for await u in tracker.anchorUpdates { handleWorldAnchor(u) } }
         }
     }
@@ -186,6 +194,7 @@ enum KleptonSpatial {
     }
 
     private static func handlePlane(_ u: AnchorUpdate<PlaneAnchor>) {
+        KLFloorEstimator.plane(u)                       // the Guardian's automatic floor
         let a = u.anchor
         let id = uuid(a.id)
         var m = a.originFromAnchorTransform * a.geometry.extent.anchorFromExtentTransform
@@ -208,6 +217,8 @@ enum KleptonSpatial {
         ids.withUnsafeBufferPointer { b in
             kl_spatial_room(uuid(r.id), removed, b.baseAddress, UInt32(b.count))
         }
+        // The room outline is the guardian's default play space whether or not the game asks for the scene (rate-limited in C).
+        if removed == 0, let head = KLGuardian.headPosition() { _ = kl_spatial_update_guardian_default(head.x, head.z) }
     }
 
     // MARK: scene mesh

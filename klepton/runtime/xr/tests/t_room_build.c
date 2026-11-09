@@ -356,6 +356,34 @@ int main(void) {
         for (uint32_t k = 0; k < nw; k++) CK(ws[k].b[0] >= 10 && ws[k].b[0] <= 13);
     }
 
+    // --- 7. The guardian's default play space from the room alone (no game asked for the scene, kl_spatial_synth_room not called):
+    //        kl_spatial_update_guardian_default stores the 4 x 3 outline; a second call within 2 s is rate-limited; a user boundary wins.
+    reset();
+    kl_guardian_clear();
+    g_gd_last_ns = 0;
+    {
+        float m[16], p[8] = {-1.0f, -1.0f, 1.0f, -1.0f, 1.0f, 1.0f, -1.0f, 1.0f};
+        horiz(m, 0, 0, 0, 0);    real_plane(1, m, 4, 3, KLSP_LBL_FLOOR);
+        horiz(m, 0, 2.6f, 0, 1); real_plane(2, m, 4, 3, KLSP_LBL_CEILING);
+        wallm(m, 0.0f, 1.3f, -1.5f, 0); real_plane(10, m, 0.6f, 2.6f, KLSP_LBL_WALL);
+        wallm(m, 2.0f, 1.3f, 0.0f, 1);  real_plane(11, m, 0.4f, 2.6f, KLSP_LBL_WALL);
+        wallm(m, 0.3f, 1.3f, 1.5f, 0);  real_plane(12, m, 0.1f, 2.6f, KLSP_LBL_WALL);
+        wallm(m, -2.0f, 1.3f, 0.2f, 1); real_plane(13, m, 0.25f, 2.6f, KLSP_LBL_WALL);
+        kl_uuid ids[6] = {U16(1), U16(2), U16(10), U16(11), U16(12), U16(13)};
+        kl_spatial_room(U16(60), 0, ids, 6);
+        CK(!kl_guardian_configured());
+        CK(kl_spatial_update_guardian_default(0.0f, 0.0f) == 1);
+        float w = 0, d = 0;
+        CK(kl_guardian_boundary_source() == KLG_BSRC_ROOM && kl_guardian_playspace_ok() && kl_guardian_playspace(&w, &d, NULL, NULL, NULL));
+        CK(fabsf(fmaxf(w, d) - 4.0f) < 0.1f && fabsf(fminf(w, d) - 3.0f) < 0.1f);
+        uint32_t gen = kl_guardian_generation();
+        CK(kl_spatial_update_guardian_default(0.0f, 0.0f) == 0 && kl_guardian_generation() == gen);   // rate-limited
+        g_gd_last_ns = 0;
+        kl_guardian_set_boundary(p, 4, KLG_MODE_ROOMSCALE, 0);                                          // user boundary
+        CK(kl_spatial_update_guardian_default(0.0f, 0.0f) == 0 && kl_guardian_boundary_source() == KLG_BSRC_USER);
+        kl_guardian_clear();
+    }
+
     puts(fails ? "t_room_build: FAILED" : "t_room_build: ok");
     return fails != 0;
 }

@@ -88,6 +88,9 @@ int      kl_spatial_room_info(kl_uuid id, kl_uuid *floor, kl_uuid *ceiling,
 // scene mesh (hull of their footprint, one wall per edge, real ceiling height), or by the box when that gives < 4 walls.
 // 1 = synthetic room present; 0 = a complete real set (floor, ceiling, closed walls) exists (untouched).
 int      kl_spatial_synth_room(float hx, float hz, float zw, float zd);
+// The guardian's default play space from the room ARKit has now (kl_guardian_default_from_room), for a head at guest (hx, hz);
+// at most once per 2 s. Returns the guardian's answer (1 = stored), 0 when rate-limited / no valid footprint / a user boundary exists.
+int      kl_spatial_update_guardian_default(float hx, float hz);
 // 1 when the plane is one of the synthetic room's (not measured geometry: kept out of the environment depth).
 int      kl_spatial_is_synthetic(kl_uuid id);
 

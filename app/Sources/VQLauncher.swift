@@ -398,6 +398,10 @@ struct VQSettingsView: View {
                 Section(VQL("Juego", "Game")) {
                     Toggle(VQL("Sin conexión (el juego no intenta conectarse)", "Offline (the game does not try to connect)"), isOn: $settings.offline)
                     Toggle(VQL("Guardar el registro del juego en archivo", "Save the game log to a file"), isOn: $settings.guestLog)
+                    Toggle(VQL("Definir el guardián antes de cada juego", "Set the guardian before each game"), isOn: $settings.guardianAsk)
+                    Text(VQL("Con el juego aún sin arrancar y la sala ya escaneándose, una ventana deja ajustar el suelo y la zona de juego. Apagado: se usa lo guardado de ese juego o lo automático.",
+                             "With the game not started yet and the room already being scanned, a window lets you adjust the floor and the play area. Off: the game's saved definition or the automatic one is used."))
+                        .font(.caption)
                     Stepper(VQL("Vigilante de arranque: \(Int(settings.watchdogSeconds)) s", "Boot watchdog: \(Int(settings.watchdogSeconds)) s"),
                             value: $settings.watchdogSeconds, in: 30...600, step: 30)
                 }
@@ -444,6 +448,7 @@ struct VQSettingsView: View {
                     }
                     .pickerStyle(.segmented)
                     Toggle(VQL("ASW desactivado (todos los frames reales)", "ASW off (every frame real)"), isOn: $settings.aswDisabled)
+                    Toggle(VQL("Captura de entorno (suelo, sala y profundidad)", "Environment capture (floor, room and depth)"), isOn: $settings.envCapture)
                     Toggle(VQL("Precompilar shaders antes de jugar", "Precompile shaders before playing"), isOn: $settings.precompileShaders)
                     Toggle(VQL("Shaders AOT (todo compilado antes de jugar, experimental)", "AOT shaders (all compiled before playing, experimental)"), isOn: $settings.aotShaders)
                     Toggle(VQL("Perfil Quest 3 cuando el juego lo tenga", "Quest 3 profile when the game has one"), isOn: $settings.quest3Profile)
@@ -706,6 +711,7 @@ struct VQGameSettingsView: View {
     @State private var seat: VQGameSeat
     @State private var area: VQGameArea
     @State private var capture: VQGameCapture
+    @State private var d24: Bool
 
     init(game: VQGame) {
         self.game = game
@@ -717,6 +723,7 @@ struct VQGameSettingsView: View {
         _seat = State(initialValue: VQGameSeat.load(key: game.aaKey))
         _area = State(initialValue: VQGameArea.load(key: game.aaKey))
         _capture = State(initialValue: VQGameCapture.load(key: game.aaKey))
+        _d24 = State(initialValue: VQGameD24.load(key: game.aaKey))
     }
 
     var body: some View {
@@ -774,6 +781,11 @@ struct VQGameSettingsView: View {
                     }
                     Text(VQL("Fuerza el nivel en los samplers de materiales del juego. «Global» usa el ajuste de Ajustes; «Del juego» no toca nada.",
                              "Forces the level on the game's material samplers. «Global» follows Settings; «Game's own» changes nothing."))
+                        .font(.caption)
+                }
+                Section(VQL("Emular profundidad de 24 bits (experimental)", "Emulate 24-bit depth (experimental)")) {
+                    Toggle(VQL("Emular profundidad de 24 bits (experimental)", "Emulate 24-bit depth (experimental)"), isOn: $d24)
+                    Text(VQL("Para Into The Radius 2 y juegos con z-fighting; puede costar rendimiento", "For Into The Radius 2 and games with z-fighting; it may cost performance"))
                         .font(.caption)
                 }
                 Section(VQL("Perfil del visor", "Headset profile")) {
@@ -834,6 +846,10 @@ struct VQGameSettingsView: View {
             .onChange(of: profile) { _, new in
                 VQGameProfile.save(new == 0 ? nil : new, key: game.aaKey)
                 VQLog.log("Ajustes del juego \(game.aaKey): perfil del visor \(new == 0 ? "automático" : "Quest \(new)")")
+            }
+            .onChange(of: d24) { _, new in
+                VQGameD24.save(new, key: game.aaKey)
+                VQLog.log("Ajustes del juego \(game.aaKey): profundidad de 24 bits emulada \(new ? "sí" : "no")")
             }
             .onChange(of: aniso) { _, new in
                 VQGameAniso.save(new < 0 ? nil : new, key: game.aaKey)

@@ -16,11 +16,13 @@
 #include "kl_spatial.h"
 #include "kl_ovrp.h"      // kl_ovrp_guest_origin_y
 #include "kl_jni.h"       // kl_jni_files_dir
+#include "kl_guardian.h"  // floor height, room rules
 #include <math.h>
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #define KLSP_MAX_ENT        4096
 #define KLSP_MAX_HANDLES    8192
@@ -1014,6 +1016,20 @@ static int built_footprint_locked(float ylo, float yhi, float hx, float hz, klsp
     return nh;
 }
 
+// 1 when the n hull vertices h (counter-clockwise), as walls from floor fy up H, are a room the Quest accepts (kl_guardian: V1
+// counts, wall quads in a closed ring, ceiling above the floor; plus a real outline: finite, area >= 0.01 m2, 1.5-6 m high).
+static int klsp_hull_room_valid(const klsp_pt *h, int n, float fy, float H) {
+    float q[KLSP_MAX_WALLS * 12];
+    if (n < 3 || n > KLSP_MAX_WALLS) return 0;
+    for (int k = 0; k < n; k++) {
+        const klsp_pt *a = &h[k], *b = &h[(k + 1) % n];
+        float *w = q + 12 * k;
+        w[0] = a->x; w[1] = fy;     w[2] = a->z;  w[3] = a->x; w[4] = fy + H; w[5] = a->z;
+        w[6] = b->x; w[7] = fy + H; w[8] = b->z;  w[9] = b->x; w[10] = fy;    w[11] = b->z;
+    }
+    return kl_guardian_hull_ok(&h[0].x, n, H) && kl_guardian_room_v1_valid(n, 1, 1, fy, fy + H) && kl_guardian_roombox_valid(q, n, fy, fy + H);
+}
+
 // ---- synthetic box room (no usable ARKit room: Space Setup must still end with a closed room) ----
 // Floor, ceiling 2.5 m and four walls forming a closed rectangle (klsp_box_walls), zw x zd + 0.5 m margin per side, centred
 // on guest (hx, hz). Partial real walls turn and grow the box (klsp_fit_rect); a known real floor sets its height.
@@ -1024,7 +1040,9 @@ static int built_footprint_locked(float ylo, float yhi, float hx, float hz, klsp
 // Returns 1 when a synthetic room is present now, 0 when a complete real set exists (it wins, nothing is added).
 int kl_spatial_synth_room(float hx, float hz, float zw, float zd) {
     const float M = 0.5f, oy = kl_ovrp_guest_origin_y();
-    float H = 2.5f, fy = -oy, rfy = 1e30f, cey = -1e30f;
+    float H = 2.5f, gfy = 0.0f, rfy = 1e30f, cey = -1e30f;
+    int gsrc = kl_guardian_get_floor(&gfy);            // the guardian's floor (visionOS world) when there is one
+    float fy = gfy - oy;
     klsp_seg ws[64];
     int nws = 0;
     pthread_mutex_lock(&g_mu);
@@ -1040,7 +1058,7 @@ int kl_spatial_synth_room(float hx, float hz, float zw, float zd) {
         if (g_e[i].label == KLSP_LBL_WALL && nws < 64) ws[nws++] = (klsp_seg){g[12] - g[0] * hw, g[14] - g[2] * hw, g[12] + g[0] * hw, g[14] + g[2] * hw};
     }
     if (real_set_complete_locked()) { pthread_mutex_unlock(&g_mu); return 0; }
-    if (rfy < 1e29f) fy = rfy;
+    if (rfy < 1e29f && !gsrc) fy = rfy;
     klsp_rect r;
     klsp_seg sg[KLSP_MAX_WALLS];
     klsp_pt hull[KLSP_MAX_WALLS];
@@ -1048,6 +1066,7 @@ int kl_spatial_synth_room(float hx, float hz, float zw, float zd) {
     int nwall = 4, npts = 0;
     float hb = cey > -1e29f && cey - fy >= 1.5f && cey - fy <= 6.0f ? cey - fy : 2.4f;     // real ceiling over the floor, else 2.4 m
     int nh = built_footprint_locked(fy - 0.3f, fy + hb + 0.3f, hx, hz, hull, &npts, &sig);
+    if (nh && !klsp_hull_room_valid(hull, nh, fy, hb)) { nh = 0; sig.built = 0; }   // not a V1 room: keep the box
     if (synth && synth == (int)g_synth_n && !memcmp(&sig, &g_synth_sig, sizeof sig)) { pthread_mutex_unlock(&g_mu); return 1; }   // same input: keep it
     purge_synth_locked();                              // new or changed data: rebuild (same ids, one source at a time, under this lock)
     if (nh) {                                          // walls = hull edges (counter-clockwise: inward on the left, like the box)
@@ -1102,9 +1121,45 @@ int kl_spatial_synth_room(float hx, float hz, float zw, float zd) {
     }
     g_synth_n = (uint32_t)(2 + nwall); g_synth_sig = sig;
     pthread_mutex_unlock(&g_mu);
+    if (nh) kl_guardian_default_from_room(&hull[0].x, nh);     // the floor outline is the default play space (a user one wins)
     fprintf(stderr, "  [spatial] synthetic room %.2fx%.2f turn=%.2f centre=%.2f,%.2f floor_y=%.2f partial_walls=%d\n",
             r.w, r.d, r.yaw, r.cx, r.cz, fy, nws);
     if (nh) fprintf(stderr, "  [room] built from real: walls=%d hull_pts=%d h=%.2f floor_y=%.2f src=%s\n",
                     nh, npts, H, fy, have_room ? "roomanchor" : "planes");
     return 1;
+}
+
+// The guardian's default play space from the room ARKit has NOW, without a game asking for the scene (kl_spatial_synth_room does the
+// same when one does): the footprint of the measured planes / scene mesh around guest (hx, hz) goes to kl_guardian_default_from_room
+// (a user boundary wins; nothing changes when it does not fit 1.15 m). At most once per 2 s (the build walks every scene-mesh vertex).
+// Returns kl_guardian_default_from_room's answer, 0 when rate-limited or when no valid footprint exists.
+static uint64_t g_gd_last_ns;
+int kl_spatial_update_guardian_default(float hx, float hz) {
+    if (!isfinite(hx) || !isfinite(hz)) return 0;
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    uint64_t now = (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec, prev = __atomic_load_n(&g_gd_last_ns, __ATOMIC_RELAXED);
+    if (prev && now - prev < 2000000000ull) return 0;
+    __atomic_store_n(&g_gd_last_ns, now, __ATOMIC_RELAXED);
+    const float oy = kl_ovrp_guest_origin_y();
+    float gfy = 0.0f, rfy = 1e30f, cey = -1e30f;
+    int gsrc = kl_guardian_get_floor(&gfy);            // same floor / ceiling rules as kl_spatial_synth_room
+    float fy = gfy - oy;
+    klsp_pt hull[KLSP_MAX_WALLS];
+    klsp_sig sig;
+    int npts = 0;
+    pthread_mutex_lock(&g_mu);
+    for (uint32_t i = 0; i < g_n; i++) {
+        if (g_e[i].kind != KLSP_PLANE || is_synth(g_e[i].id)) continue;
+        float g[16];
+        to_guest_locked(g_e[i].m, g);
+        if (g_e[i].label == KLSP_LBL_FLOOR && g[13] < rfy) rfy = g[13];
+        if (g_e[i].label == KLSP_LBL_CEILING && g[13] > cey) cey = g[13];
+    }
+    if (rfy < 1e29f && !gsrc) fy = rfy;
+    float hb = cey > -1e29f && cey - fy >= 1.5f && cey - fy <= 6.0f ? cey - fy : 2.4f;
+    int nh = built_footprint_locked(fy - 0.3f, fy + hb + 0.3f, hx, hz, hull, &npts, &sig);
+    if (nh && !klsp_hull_room_valid(hull, nh, fy, hb)) nh = 0;
+    pthread_mutex_unlock(&g_mu);
+    return nh ? kl_guardian_default_from_room(&hull[0].x, nh) : 0;   // outside g_mu: the guardian has its own locks
 }

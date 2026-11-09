@@ -722,6 +722,9 @@ final class KleptonCompositor {
                 // Only .denied leaves a provider out: .notDetermined is still raised by `run` itself.
                 arHandsDenied = after[.handTracking] == .denied
                 arWorldDenied = after[.worldSensing] == .denied
+                KLGuardian.worldTrackingDenied = arWorldDenied
+                // A manual floor means nothing without world tracking (it is neither confirmed nor saved): drop a restored one.
+                if arWorldDenied, KLGuardian.floorSource() == .manual { KLGuardian.setFloor(0, source: .unset) }
             }
             var providers: [any DataProvider] = []
             var launched: [String] = []
@@ -1647,6 +1650,10 @@ final class KleptonCompositor {
     private var quitForceEnd = false
     private let quitLock = NSLock()
     private func setQuitForceEnd() { quitLock.lock(); quitForceEnd = true; quitLock.unlock() }
+    // The user cancelled (guardian screen) or the game could not start: the render loop treats it like an engine quit
+    // request, so it gets the same safety net (force end after 5 s). Written from the main actor, read by the render loop.
+    private var userQuitReason: String?
+    private func requestUserQuit(_ reason: String) { quitLock.lock(); userQuitReason = reason; quitLock.unlock() }
 
     private func renderLoop() {
         layerRenderer.waitUntilRunning()
@@ -1687,9 +1694,34 @@ final class KleptonCompositor {
                 NSLog("[cp] lifecycle_begin failed: \(String(cString: kl_app_status()))")
                 return
             }
-        } else if kl_app_guest_start() != 0 {
-            NSLog("[cp] guest thread failed to start: \(String(cString: kl_app_status()))")
-            return
+        } else if let game = VQLaunch.choice?.game, VQGuardianGate.applies(to: game) {
+            // VisionQuestPro: the guardian is defined HERE -- the space is open and ARKit is capturing (startARKit above), the game is
+            // not started yet. The loop keeps presenting meanwhile (same as while the guest boots); the guest starts when the guardian
+            // screen ends, and Cancel closes the space through the engine-quit path (the launcher comes back via immersiveEnded).
+            Task { @MainActor [weak self] in
+                let outcome = await VQGuardianGate.run(game: game)
+                // The space can have ended while the screen was up (VQGuardianGate.cancelAndClose from immersiveEnded): never
+                // start a guest into a closed space.
+                guard !Lifecycle.spaceEnded else {
+                    NSLog("[cp] guardian ended (\(outcome)) but the immersive space already ended — the game is not started")
+                    return
+                }
+                if outcome == .cancelled {
+                    self?.requestUserQuit("cancelled by the user on the guardian screen")
+                    return
+                }
+                KLGuardian.recenterRestored()
+                if kl_app_guest_start() != 0 {
+                    NSLog("[cp] guest thread failed to start: \(String(cString: kl_app_status()))")
+                    self?.requestUserQuit("the guest thread failed to start")
+                }
+            }
+        } else {
+            KLGuardian.recenterRestored()   // same as the guardian-screen branch above: a restored rectangle is centred on the head
+            if kl_app_guest_start() != 0 {
+                NSLog("[cp] guest thread failed to start: \(String(cString: kl_app_status()))")
+                return
+            }
         }
 
         // This loop's own liveness, logged on a wall clock rather than a frame
@@ -1707,12 +1739,16 @@ final class KleptonCompositor {
         loop: while true {
             // The engine asked to terminate (fatal error): close the space instead of freezing on its
             // last picture. Checked here, not in renderFrame, so the sync and async guest paths share it.
-            if !quitDispatched && kl_app_quit_requested() != 0 {
-                quitDispatched = true
-                quitAt = Date()
-                Task { @MainActor [weak self] in
-                    let ok = await Lifecycle.engineQuit()
-                    if !ok { self?.setQuitForceEnd() }
+            if !quitDispatched {
+                quitLock.lock(); let userReason = userQuitReason; quitLock.unlock()
+                if kl_app_quit_requested() != 0 || userReason != nil {
+                    quitDispatched = true
+                    quitAt = Date()
+                    if let userReason { NSLog("[cp] quit requested by the user side, not the engine: \(userReason)") }
+                    Task { @MainActor [weak self] in
+                        let ok = await Lifecycle.engineQuit(userReason: userReason)
+                        if !ok { self?.setQuitForceEnd() }
+                    }
                 }
             }
             if quitDispatched {

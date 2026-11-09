@@ -55,6 +55,8 @@
 #include <dlfcn.h>
 // ...and the spatial store (planes, meshes, rooms, anchors) ARKit feeds: kl_spatial.
 #import "kl_spatial.h"
+// ...and the Guardian core (floor, play space): KleptonGuardian.swift.
+#import "kl_guardian.h"
 // ...and the environment depth ring KleptonEnvDepth.swift renders into: kl_envdepth.
 #import "kl_envdepth.h"
 // ...and the live-Metal-object registry the heartbeat's gpu.attr line reads: kl_mtl_attr.

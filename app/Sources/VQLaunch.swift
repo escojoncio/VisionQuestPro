@@ -87,6 +87,7 @@ enum VQLaunch {
         let wantsAnchors = manifest.contains("\"com.oculus.permission.USE_ANCHOR_API\"")
         let wantsScene = manifest.contains("\"com.oculus.permission.USE_SCENE\"")
         kl_spatial_set_policy(wantsScene ? 1 : 0, wantsAnchors ? 1 : 0)
+        KLGuardian.restore(game: game)   // this game's saved floor / play space, before the guest starts
         let rc = kl_app_configure_game(game.id, choice.prepared.tree.path, game.apk.path, choice.prepared.dylibs.path,
                                        files.path, obbRel, documents)
         VQLog.log("Arranque: kl_app_configure_game -> \(rc): \(String(cString: kl_app_status()))")
@@ -157,6 +158,12 @@ final class VQSettings: ObservableObject {
     /// Head-locked FPS counter in the compositor (KL_FPS_HUD).
     @Published var showFps: Bool { didSet { save() } }
     @Published var aswDisabled: Bool { didSet { save() } }
+    /// «Captura de entorno (suelo, sala y profundidad)»: ARKit scans floor, room and depth in every game, for the Guardian
+    /// (KL_ENV_CAPTURE). Off: only what the game's manifest asks for. The game still sees only what its manifest declares.
+    @Published var envCapture: Bool { didSet { save() } }
+    /// «Definir el guardián antes de cada juego»: the guardian screen (VQGuardianSetupView) stops the start of every game, with the
+    /// immersive space already open. Off: the game's saved definition (KLGuardian.restore) or the automatic one is used.
+    @Published var guardianAsk: Bool { didSet { save() } }
     /// Global «Perfil Quest 3 cuando el juego lo tenga»: allows the Quest 3 profile (per game it can be overridden, VQGameProfile).
     @Published var quest3Profile: Bool { didSet { save() } }
     @Published var forceVulkan: Bool { didSet { save() } }
@@ -222,6 +229,8 @@ final class VQSettings: ObservableObject {
         }
         showFps = d.object(forKey: "vq.showFps") as? Bool ?? false
         aswDisabled = d.object(forKey: "vq.aswOff") as? Bool ?? true
+        envCapture = d.object(forKey: "vq.envCapture") as? Bool ?? true
+        guardianAsk = d.object(forKey: "vq.guardianAsk") as? Bool ?? true
         d.removeObject(forKey: "vq.hapticsGain")  // old setting: vibration is calibrated automatically per controller
         quest3Profile = d.object(forKey: "vq.quest3v2") as? Bool ?? true  // global switch of «Perfil Quest 3 cuando el juego lo tenga»
         forceVulkan = d.object(forKey: "vq.forceVulkan") as? Bool ?? true
@@ -277,6 +286,8 @@ final class VQSettings: ObservableObject {
         d.set(resolutionPct, forKey: "vq.resPct")
         d.set(showFps, forKey: "vq.showFps")
         d.set(aswDisabled, forKey: "vq.aswOff")
+        d.set(envCapture, forKey: "vq.envCapture")
+        d.set(guardianAsk, forKey: "vq.guardianAsk")
         d.set(quest3Profile, forKey: "vq.quest3v2")
         d.set(forceVulkan, forKey: "vq.forceVulkan")
         d.set(diagCaptures, forKey: "vq.diagCaptures2")
@@ -328,6 +339,7 @@ final class VQSettings: ObservableObject {
         setenv("VPVK_QUEST_IDENTITY", "1", 0)  // Quest/Adreno 740 identity, always on (before VPVulkan loads; also covers GLES)
         selectDriver()
         setenv("KL_NET_OFFLINE", offline ? "1" : "0", 1)
+        setenv("KL_ENV_CAPTURE", envCapture ? "1" : "0", 1)
         setenv("KL_LOG_FILE", guestLog ? "1" : "0", 1)
         setenv("KL_ALARM", String(Int(watchdogSeconds)), 1)
         // The launcher already decided; BootView must boot straight away.
@@ -414,10 +426,17 @@ final class VQSettings: ObservableObject {
         let area = VQGameArea.load(key: gameKey)
         var areaW: Float = 0, areaD: Float = 0
         let areaMode = vq_area_resolve(area.seated ? 1 : 0, Float(area.w), Float(area.d), &areaW, &areaD)
-        setenv("KL_OVRP_BOUNDARY_MODE", String(areaMode), 1)
-        setenv("KL_OVRP_BOUNDARY_W", String(format: "%.2f", areaW), 1)
-        setenv("KL_OVRP_BOUNDARY_D", String(format: "%.2f", areaD), 1)
-        VQLog.log("[area] game=\(game?.id ?? "?") mode=\(areaMode) w=\(String(format: "%.2f", areaW)) d=\(String(format: "%.2f", areaD))")
+        // Any of these variables makes kl_ovrp skip the room outline of the guardian, so they are exported only when the
+        // user chose an area other than the default (free 3 x 3); otherwise they are removed and the room outline rules.
+        let areaIsDefault = area == VQGameArea()
+        if areaIsDefault {
+            for k in ["KL_OVRP_BOUNDARY_MODE", "KL_OVRP_BOUNDARY_W", "KL_OVRP_BOUNDARY_D", "KL_OVRP_BOUNDARY_SIZE"] { unsetenv(k) }
+        } else {
+            setenv("KL_OVRP_BOUNDARY_MODE", String(areaMode), 1)
+            setenv("KL_OVRP_BOUNDARY_W", String(format: "%.2f", areaW), 1)
+            setenv("KL_OVRP_BOUNDARY_D", String(format: "%.2f", areaD), 1)
+        }
+        VQLog.log("[area] game=\(game?.id ?? "?") mode=\(areaMode) w=\(String(format: "%.2f", areaW)) d=\(String(format: "%.2f", areaD)) \(areaIsDefault ? "default: env not exported" : "user area: env exported")")
         // Final eye size from the last run with these settings, pushed BEFORE the guest boots so its
         // first eye layer is built at it (the compositor's first drawable arrives after the guest has
         // started). The compositor pushes the display's request later; the same result changes nothing.
@@ -489,6 +508,10 @@ final class VQSettings: ObservableObject {
         setenv("VPVK_ANISO", String(effAniso), 1)  // read by VPVulkan even if the dlsym forward misses
         setenv("VPVK_FORCE_ANISO", String(effAniso), 1)  // VPVulkan: wins over VPVK_ANISO, 0 = the game's own
         VQLog.log("Gráficos: anisotrópico por juego x\(effAniso) (\(VQGameAniso.load(key: gameKey) == nil ? "global" : "del juego"))")
+        // «Emular profundidad de 24 bits (experimental)», per game (VQGameD24): off unless the game asks for it.
+        let d24 = VQGameD24.load(key: gameKey)
+        if d24 { setenv("VPVK_D24_EMUL", "1", 1) } else { unsetenv("VPVK_D24_EMUL") }
+        VQLog.log("Gráficos: profundidad de 24 bits emulada \(d24)")
         // Per-pass GPU timing in VPKEngine (gpu.passtime lines, one rendering frame every 90).
         if perfDiag { setenv("VP_PASS_TIMING", "90", 1) } else { unsetenv("VP_PASS_TIMING") }
         if fsDiag { setenv("KL_TRACE_FS", "1", 1) } else { unsetenv("KL_TRACE_FS") }
@@ -663,6 +686,19 @@ struct VQGameSeat: Equatable {
         if useGlobal { d.removeObject(forKey: "vq.seatMode." + key) } else { d.set("game", forKey: "vq.seatMode." + key) }
         d.set(seated, forKey: "vq.seatOn." + key)
         d.set(height, forKey: "vq.seatH." + key)
+    }
+}
+
+/// «Emular profundidad de 24 bits (experimental)» per game, off by default (VPVK_D24_EMUL). Saved as vq.d24emul.<key>.
+enum VQGameD24 {
+    static func load(key: String) -> Bool {
+        !key.isEmpty && UserDefaults.standard.object(forKey: "vq.d24emul." + key) as? Bool == true
+    }
+
+    static func save(_ on: Bool, key: String) {
+        guard !key.isEmpty else { return }
+        if on { UserDefaults.standard.set(true, forKey: "vq.d24emul." + key) }
+        else { UserDefaults.standard.removeObject(forKey: "vq.d24emul." + key) }
     }
 }
 

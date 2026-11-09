@@ -115,6 +115,9 @@ enum Lifecycle {
     // (so it does not float over the game). Main-thread state.
     /// True between a successful openImmersiveSpace and the end of the compositor's loop.
     static var immersiveOpen = false
+    /// True once immersiveEnded ran (the compositor loop is over). Separate from !immersiveOpen, which is also true before
+    /// spaceOpened ran (the compositor can start its loop first).
+    static var spaceEnded = false
     static var lastPhase: ScenePhase = .active
     /// Captured from BootView before the launcher window is dismissed, to bring it back.
     static var reopenLauncher: OpenWindowAction?
@@ -125,11 +128,16 @@ enum Lifecycle {
     /// The engine asked to terminate (UnityPlayer.kill ...): close the space once, so the run ends
     /// through the normal path (compositor loop over -> immersiveEnded -> launcher with the reason).
     /// Returns false when there was no dismiss action to use, so the caller ends the loop itself.
-    @MainActor static func engineQuit() async -> Bool {
+    @MainActor static func engineQuit(userReason: String? = nil) async -> Bool {
         guard !quitDispatched else { return true }
         quitDispatched = true
+        if let userReason { VQModel.shared.endMessage = userReason }   // the launcher shows why (immersiveEnded keeps it)
         kl_bg_shutdown()   // a guest blocked while backgrounded must be free to wind down
-        NSLog("[app] the engine asked to end — closing the immersive space: \(String(cString: kl_app_quit_reason()))")
+        if let userReason {
+            NSLog("[app] user cancellation (not the engine) — closing the immersive space: \(userReason)")
+        } else {
+            NSLog("[app] the engine asked to end — closing the immersive space: \(String(cString: kl_app_quit_reason()))")
+        }
         guard let dismiss = dismissSpace else {
             NSLog("[app] engine quit: no dismiss action captured — the compositor ends its own loop")
             return false
@@ -145,6 +153,9 @@ enum Lifecycle {
     /// the background (nothing left to show it in), exit as before.
     @MainActor static func immersiveEnded() {
         immersiveOpen = false
+        spaceEnded = true
+        KLGuardianLive.shared.stop()
+        VQGuardianGate.cancelAndClose()   // a guardian screen still up must not outlive the space
         NSLog("[app] immersive space ended (phase \(lastPhase))")
         // The guest was stopped (kl_bg_shutdown released VPKEngine's background gate for its wind-down):
         // backgrounded, nothing may reach Metal any more — Metal refuses every command buffer.
@@ -153,7 +164,7 @@ enum Lifecycle {
         // The game's logs, complete, to QUEST/Registros before anything else can end the process
         // (waited for only on the path that _exit()s below).
         let reopening = lastPhase != .background && reopenLauncher != nil
-        VQModel.shared.endMessage = kl_app_quit_requested() != 0 ? String(cString: kl_app_quit_reason()) : nil
+        if kl_app_quit_requested() != 0 { VQModel.shared.endMessage = String(cString: kl_app_quit_reason()) }
         VQLog.saveSessionEnd(VQLaunch.choice?.game.id, wait: !reopening)
         if reopening, let open = reopenLauncher {
             flushEngineCaches(then: nil)   // the process stays: a later kill from the launcher must not lose the pipelines
@@ -282,6 +293,13 @@ struct KleptonApp: App {
             // not be treated as it. The log line above every decision is what
             // makes that distinction checkable on a device rather than assumed.
             .onChange(of: scenePhase) { _, phase in Lifecycle.scenePhaseChanged(to: phase) }
+
+        // VisionQuestPro: the guardian screen, opened (Lifecycle.reopenLauncher) while the game's space is up and the game
+        // has not started (VQGuardianGate). Never opened at launch and never restored.
+        Window(VQL("Guardián", "Guardian"), id: VQGuardianGate.windowID) { VQGuardianSetupView() }
+            .defaultSize(width: 760, height: 900)
+            .defaultLaunchBehavior(.suppressed)
+            .restorationBehavior(.disabled)
 
         // The on-demand text-entry window (KL_KBD_WINDOW). Additive: it exists in
         // the scene graph but nothing opens it unless the flag is on and the guest
@@ -510,6 +528,7 @@ struct BootView: View {
     private func spaceOpened(_ result: OpenImmersiveSpaceAction.Result) {
         guard case .opened = result else { return }
         Lifecycle.immersiveOpen = true
+        Lifecycle.spaceEnded = false
         Lifecycle.reopenLauncher = openWindow
         Lifecycle.dismissSpace = dismissImmersiveSpace
         NSLog("[app] immersive space open — dismissing the launcher window")

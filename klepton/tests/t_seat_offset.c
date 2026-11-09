@@ -46,6 +46,22 @@ int main(void) {
     // An origin outside 0/1/2 (4 = view) is left alone.
     CHECK(klovrp_guest_origin_calc(4, 1, 1, 0.992f, 0.0f) == 0.0f, "other origin: 0");
 
+    // A guardian floor at gy (world frame): the raise is measured over it, since the origin adds gy (no double count).
+    {
+        float gy = 0.1f, head = 1.0f;                      // head 1.0 over the world origin, floor 0.1 above it
+        float m = klovrp_seat_measured(head, 0, 1, gy);
+        CHECK(NEAR(m, 0.9f), "measured over the guardian floor");
+        float so = klovrp_seat_offset_calc(1, 1, 1.65f, m);
+        float org = klovrp_guest_origin_calc(1, 1, 1, 0.0f, so) + gy;     // klovrp_guest_origin_y
+        CHECK(NEAR(head - org, 1.65f), "guest head Y = standing height");
+        // the old way (raise measured over the world origin, gy still added to the origin) lands short by gy
+        float old = klovrp_seat_offset_calc(1, 1, 1.65f, head), org_old = klovrp_guest_origin_calc(1, 1, 1, 0.0f, old) + gy;
+        CHECK(NEAR(head - org_old, 1.65f - gy), "old: standing height missed by gy");
+        CHECK(NEAR(klovrp_seat_measured(head, 0, 0, gy), head), "no floor: unchanged");
+        CHECK(NEAR(klovrp_seat_measured(head, 1, 1, gy), head), "eye-height override: already over the floor");
+        CHECK(klovrp_seat_measured(0.0f, 0, 1, gy) == 0.0f, "unmeasured stays 0");
+    }
+
     // The stand height setting: default and sanity range.
     CHECK(NEAR(klovrp_stand_height_clamp(1.65f), 1.65f), "stand height kept");
     CHECK(NEAR(klovrp_stand_height_clamp(0.0f), 1.65f), "0 -> default");

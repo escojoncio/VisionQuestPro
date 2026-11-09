@@ -36,6 +36,7 @@
 #include <stdlib.h>
 #include <errno.h>
 #include <stdint.h>
+#include <limits.h>
 #include <string.h>
 #include <time.h>
 #include <math.h>
@@ -47,6 +48,7 @@
 #include <ctype.h>
 #include "kl_jni.h"
 #include "kl_ovrp.h"
+#include "kl_guardian.h"   // floor the guardian knows (STAGE / LOCAL_FLOOR origin)
 #include "kl_ovrp_eyesize.h"   // the app's resolution slider (KL_OVRP_EYE_BASE=quest3)
 #include "kl_egl.h"
 #include "kl_glfb.h"
@@ -3635,6 +3637,25 @@ static float klxr_stage_origin_y(void) {
     return -(float)__atomic_load_n(&g_xr_seat_mm, __ATOMIC_ACQUIRE) / 1000.0f;
 }
 
+// The guardian's floor is part of the STAGE / LOCAL_FLOOR origin (see klxr_space_pose_ex below): when it moves by more than 1 cm (ARKit finds
+// it, the user adjusts it) the same change-pending event as a recenter is posted for both spaces. kl_guardian_generation rises with
+// every floor or boundary change, so an unchanged generation costs nothing; the first answer is the baseline (no event).
+static int g_xr_floor_mm = INT_MIN;           // latched guardian floor in mm (0 = none); INT_MIN = no baseline yet
+static uint32_t g_xr_floor_gen = UINT32_MAX;  // guardian generation last looked at
+static void klxr_guardian_floor_watch(void) {
+    uint32_t gen = kl_guardian_generation();
+    if (gen == __atomic_exchange_n(&g_xr_floor_gen, gen, __ATOMIC_ACQ_REL)) return;
+    float gy = 0.0f;
+    kl_guardian_get_floor(&gy);               // 0 without a floor, as klxr_space_pose_ex uses it
+    int mm = (int)lrintf(gy * 1000.0f);
+    int cur = __atomic_load_n(&g_xr_floor_mm, __ATOMIC_ACQUIRE);
+    if (cur == INT_MIN) { __atomic_compare_exchange_n(&g_xr_floor_mm, &cur, mm, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE); return; }
+    if (abs(mm - cur) > 10 && __atomic_compare_exchange_n(&g_xr_floor_mm, &cur, mm, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+        klxr_space_changed(KLXR_REF_SPACE_STAGE, (float)cur / 1000.0f, (float)mm / 1000.0f);
+        klxr_space_changed(KLXR_REF_SPACE_LOCAL_FLOOR, (float)cur / 1000.0f, (float)mm / 1000.0f);
+    }
+}
+
 static float klxr_local_origin_y(void) {
     static int legacy = -1;
     if (legacy < 0) legacy = kl_env_on("KL_XR_LOCAL_LEGACY", 0);
@@ -3709,7 +3730,10 @@ static XrPosef klxr_space_pose_ex(const klxr_space *sp, int *tracked,
         // «Sentado»: the floor spaces sit LOWER than the tracking space by the raise, so
         // everything located in them (head, hands, layers) reads that much higher. Same
         // number as the OVRPlugin guest's origin; 0 unless the setting is on.
-        base.position.y = klxr_stage_origin_y();
+        // The guardian's floor (ARKit or the user's) is the floor origin, as for the OVRPlugin guest (klovrp_guest_origin_y).
+        float gy = 0.0f;
+        klxr_guardian_floor_watch();
+        base.position.y = klxr_stage_origin_y() + (kl_guardian_get_floor(&gy) ? gy : 0.0f);
     } else if (sp->reference_type == KLXR_REF_SPACE_EXTERNAL) {
         // A spatial-entity space: the owner places it in the tracking space.
         float q[4] = {0, 0, 0, 1}, p[3] = {0, 0, 0};

@@ -162,6 +162,8 @@ enum VQGames {
             if g == "exe" { game.engine = VQL("Tests Khronos", "Khronos tests") }
         }
         var vulkan = m.contains("android.hardware.vulkan.version") || m.contains("android.hardware.vulkan.level")
+        // An Unreal build that ships its own libvulkan.so uses Vulkan even when the manifest does not declare the feature.
+        if !vulkan && game.engine == "Unreal" && libNames.contains("libvulkan.so") { vulkan = true }
         // The Khronos OpenXR CTS: a NativeActivity whose graphics plugin is chosen at launch
         // (VQConformance passes Vulkan2), so its GLES-only manifest does not decide anything.
         if game.package == VQConformance.openXRPackage {

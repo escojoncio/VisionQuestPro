@@ -17,6 +17,7 @@
 #include "kl_ovrp.h"
 #include "kl_ovrp_priv.h"   // batch seam: registration, events, pose helpers
 #include "kl_ovrp_eyesize.h"   // the app's resolution slider: target size, desc compensation
+#include "kl_guardian.h"        // floor / play space the user confirmed
 #include "../guest/kl_driver.h"
 #include "../guest/kl_slink.h"
 #include "../guest/kl_il2cpp.h"   // kl_il2cpp_method_at, for ovrp_log_chain
@@ -2682,6 +2683,12 @@ static float klovrp_guest_origin_calc(int origin, int eyelevel_zero, int head_se
     // No published head yet: the default head is already y = 0 under EyeLevel.
     return head_set ? measured : 0.0f;
 }
+// The measured eye height is the head over the visionOS world origin; the guest origin already adds the guardian floor gy
+// (klovrp_guest_origin_y), so the raise must be measured over that floor too, or gy is counted twice. A KL_OVRP_EYE_HEIGHT override
+// is already "over the floor".
+static float klovrp_seat_measured(float measured, int overridden, int has_floor, float gy) {
+    return (!overridden && has_floor && measured > 0.0f && isfinite(gy)) ? measured - gy : measured;
+}
 // KL-TEST-END seatoff
 static int klovrp_seated_on(void) {
     static int on = -1;
@@ -2695,8 +2702,10 @@ static float klovrp_stand_height(void) {
 }
 static float klovrp_seat_offset_for(int origin) {
     if (!klovrp_seated_on()) return 0.0f;
+    float gy = 0.0f;
+    int has_floor = kl_guardian_get_floor(&gy) != 0;
     return klovrp_seat_offset_calc(1, origin, klovrp_stand_height(),
-                                   kl_ovrp_measured_eye_height_or0());
+                                   klovrp_seat_measured(kl_ovrp_measured_eye_height_or0(), klovrp_eye_override() > 0.0f, has_floor, gy));
 }
 // For the guest's current OVRPlugin origin.
 static float klovrp_seat_offset(void) { return klovrp_seat_offset_for(g_tracking_origin); }
@@ -2704,10 +2713,13 @@ static float klovrp_seat_offset(void) { return klovrp_seat_offset_for(g_tracking
 float kl_ovrp_seat_offset_stage(void) { return klovrp_seat_offset_for(1); }
 
 float klovrp_guest_origin_y(void) {
-    return klovrp_guest_origin_calc(g_tracking_origin, klovrp_eyelevel_zero(),
-                                    __atomic_load_n(&g_head_set, __ATOMIC_ACQUIRE),
-                                    g_tracking_origin == 0 ? klovrp_measured_eye_height() : 0.0f,
-                                    klovrp_seat_offset());
+    float o = klovrp_guest_origin_calc(g_tracking_origin, klovrp_eyelevel_zero(),
+                                       __atomic_load_n(&g_head_set, __ATOMIC_ACQUIRE),
+                                       g_tracking_origin == 0 ? klovrp_measured_eye_height() : 0.0f,
+                                       klovrp_seat_offset());
+    float gy;
+    if ((g_tracking_origin == 1 || g_tracking_origin == 2) && kl_guardian_get_floor(&gy)) o += gy;   // the guardian's floor is the floor origin
+    return o;
 }
 float kl_ovrp_guest_origin_y(void) {
     if (!__atomic_load_n(&g_ovrp_space_used, __ATOMIC_ACQUIRE)) return 0.0f;
@@ -9569,15 +9581,31 @@ static int klovrp_boundary_on(void) {
 // Play area per game (launcher "Área de juego"): KL_OVRP_BOUNDARY_MODE 0 free = rectangle KL_OVRP_BOUNDARY_W x
 // KL_OVRP_BOUNDARY_D (each defaults to the KL_OVRP_BOUNDARY_SIZE square, 3 m); 1 seated = circle, diameter =
 // KL_OVRP_BOUNDARY_W (default 2 m: radius 1.0 m, unverified against the Quest guardian). Dimensions of a circle = its diameter.
+// The guardian (kl_guardian.c) answers instead when the user/room configured it; a boundary taken from the room only
+// (source 1) gives way to a per-game override above. 1 + circle/size, or 0 = the values above.
+static int klovrp_guardian_area(int *circle, float *w, float *d) {
+    if (kl_guardian_boundary_source() == KLG_BSRC_ROOM
+        && (kl_env_int("KL_OVRP_BOUNDARY_MODE", -1) >= 0 || kl_env_float("KL_OVRP_BOUNDARY_W", 0.0f) > 0.0f
+            || kl_env_float("KL_OVRP_BOUNDARY_D", 0.0f) > 0.0f || kl_env_float("KL_OVRP_BOUNDARY_SIZE", 0.0f) > 0.0f)) return 0;
+    int c;
+    float gw, gd;
+    if (!kl_guardian_effective(&c, &gw, &gd)) return 0;
+    if (circle) *circle = c;
+    if (w) *w = gw;
+    if (d) *d = gd;
+    return 1;
+}
 static int klovrp_boundary_circle(void) {
-    static int c = -1;
-    if (c < 0) c = kl_env_int("KL_OVRP_BOUNDARY_MODE", 0) == 1;
-    return c;
+    int c;
+    if (klovrp_guardian_area(&c, NULL, NULL)) return c;
+    static int cc = -1;
+    if (cc < 0) cc = kl_env_int("KL_OVRP_BOUNDARY_MODE", 0) == 1;
+    return cc;
 }
 static float g_boundary_w, g_boundary_d;                  // written once, under g_boundary_once
 static pthread_once_t g_boundary_once = PTHREAD_ONCE_INIT;
 static void klovrp_boundary_size_init(void) {
-    int circle = klovrp_boundary_circle();
+    int circle = kl_env_int("KL_OVRP_BOUNDARY_MODE", 0) == 1;   // not the guardian: this runs once and the guardian can change
     float side = kl_env_float("KL_OVRP_BOUNDARY_SIZE", 3.0f);
     if (!(side >= 1.0f && side <= 20.0f)) side = 3.0f;
     float sw = kl_env_float("KL_OVRP_BOUNDARY_W", circle ? 2.0f : side);
@@ -9588,6 +9616,7 @@ static void klovrp_boundary_size_init(void) {
     fprintf(stderr, "  [ovrp] boundary area: %s %.2f x %.2f\n", circle ? "circle (seated), diameter" : "rectangle (free)", sw, sd);
 }
 static void klovrp_boundary_size(float *w, float *d) {
+    if (klovrp_guardian_area(NULL, w, d)) return;
     pthread_once(&g_boundary_once, klovrp_boundary_size_init);
     if (w) *w = g_boundary_w;
     if (d) *d = g_boundary_d;
@@ -9598,7 +9627,11 @@ int kl_ovrp_boundary(float *width, float *depth) {
     return 1;
 }
 // The floor in the guest's tracking space (y = -eye height under EyeLevel).
-static float klovrp_boundary_floor_y(void) { return -klovrp_guest_origin_y(); }
+static float klovrp_boundary_floor_y(void) {
+    float gy = 0.0f;
+    kl_guardian_get_floor(&gy);                            // 0 without a guardian floor
+    return gy - klovrp_guest_origin_y();
+}
 // [boundary]: the first 16 guardian reads, in order with the [sp-call] / [room-dump] lines (a game that checks its room
 // against the guardian reads it around each scene load). count = points written / asked (Configured2: the flag).
 static void klovrp_boundary_note(const char *fn, int type, int count) {
@@ -9610,17 +9643,26 @@ static void klovrp_boundary_note(const char *fn, int type, int count) {
             on ? "" : "none ", (double)w, (double)d, klovrp_boundary_circle() ? " circle" : "", (double)klovrp_boundary_floor_y());
 }
 
+// ovrpBoundaryType (OVRPlugin): OuterBoundary = 0x0001 (the whole outline), PlayArea = 0x0100 (the inscribed rectangle).
+// Any other value is answered as the outline, as before. Without a roomscale guardian both are the same env rectangle / circle.
+#define KLOVRP_BOUNDARY_PLAYAREA 0x0100
 typedef struct {
     int32_t is_triggering; float closest_distance;
     float point[3]; float normal[3];
 } klovrp_boundary_test;   // ovrpBoundaryTestResult, 32 bytes
 
-static void klovrp_boundary_test_xz(float x, float y, float z, klovrp_boundary_test *r) {
+static void klovrp_boundary_test_xz(float x, float y, float z, int type, klovrp_boundary_test *r) {
     memset(r, 0, sizeof *r);
     if (!klovrp_boundary_on()) { r->closest_distance = 1000.0f; return; }
-    float w, d;
+    float w, d, gdist, gpx, gpz, gnx, gnz;
     klovrp_boundary_size(&w, &d);
-    if (klovrp_boundary_circle()) {                        // positive inside the circle
+    if (klovrp_guardian_area(NULL, NULL, NULL)
+        && (type == KLOVRP_BOUNDARY_PLAYAREA ? kl_guardian_playarea_test(x, z, &gdist, &gpx, &gpz, &gnx, &gnz)
+                                             : kl_guardian_polygon_test(x, z, &gdist, &gpx, &gpz, &gnx, &gnz))) {   // roomscale polygon / its rectangle
+        r->point[0] = gpx; r->point[1] = y; r->point[2] = gpz;
+        r->normal[0] = gnx; r->normal[2] = gnz;
+        r->closest_distance = gdist;
+    } else if (klovrp_boundary_circle()) {                 // positive inside the circle
         float rad = w * 0.5f, len = sqrtf(x * x + z * z), ux = len > 1e-6f ? x / len : 1.0f, uz = len > 1e-6f ? z / len : 0.0f;
         r->point[0] = ux * rad; r->point[1] = y; r->point[2] = uz * rad;
         r->normal[0] = -ux; r->normal[2] = -uz;
@@ -9656,17 +9698,15 @@ static int klovrp_node_position(int node, float *p) {
 }
 uint64_t klovrp_TestBoundaryNode_impl(int node, int type, klovrp_boundary_test *out) {
     ovrp_hit("ovrp_TestBoundaryNode");
-    (void)type;
     float p[3] = {0, 0, 0};
     klovrp_node_position(node, p);
-    klovrp_boundary_test_xz(p[0], p[1], p[2], out);
+    klovrp_boundary_test_xz(p[0], p[1], p[2], type, out);
     return OVRP_SUCCESS;
 }
 uint64_t klovrp_TestBoundaryPoint_impl(int type, klovrp_boundary_test *out,
                                        float x, float y, float z) {
     ovrp_hit("ovrp_TestBoundaryPoint");
-    (void)type;
-    klovrp_boundary_test_xz(x, y, z, out);
+    klovrp_boundary_test_xz(x, y, z, type, out);
     return OVRP_SUCCESS;
 }
 void klovrp_TestBoundaryNode_entry(void);
@@ -9676,8 +9716,7 @@ static uint64_t klovrp_TestBoundaryNode2(int node, int type, klovrp_boundary_tes
     if (!out) return OVRP_FAIL_INVALID_PARAM;
     float p[3] = {0, 0, 0};
     if (!klovrp_node_position(node, p)) return OVRP_FAIL_INVALID_PARAM;
-    (void)type;
-    klovrp_boundary_test_xz(p[0], p[1], p[2], out);
+    klovrp_boundary_test_xz(p[0], p[1], p[2], type, out);
     return OVRP_SUCCESS;
 }
 // (ovrpVector3f point, ovrpBoundaryType, ovrpBoundaryTestResult*): the point
@@ -9685,14 +9724,34 @@ static uint64_t klovrp_TestBoundaryNode2(int node, int type, klovrp_boundary_tes
 static uint64_t klovrp_TestBoundaryPoint2(float x, float y, float z, int type,
                                           klovrp_boundary_test *out) {
     ovrp_hit("ovrp_TestBoundaryPoint2");
-    (void)type;
     if (!out) return OVRP_FAIL_INVALID_PARAM;
-    klovrp_boundary_test_xz(x, y, z, out);
+    klovrp_boundary_test_xz(x, y, z, type, out);
     return OVRP_SUCCESS;
 }
-static int klovrp_boundary_points(float *pts, int *count) {
+static int klovrp_boundary_points(int type, float *pts, int *count) {
     if (!count) return 0;
     if (!klovrp_boundary_on()) { *count = 0; return 1; }
+    if (klovrp_guardian_area(NULL, NULL, NULL) && !klovrp_boundary_circle()) {    // the guardian's own polygon (guest x, z)
+        float rc[8];
+        if (type == KLOVRP_BOUNDARY_PLAYAREA && kl_guardian_playarea_corners(rc)) {   // PlayArea: its inscribed rectangle
+            if (!pts) { *count = 4; return 1; }
+            if (*count < 4) return 0;
+            float y = klovrp_boundary_floor_y();
+            for (int i = 0; i < 4; i++) { pts[i * 3 + 0] = rc[2 * i]; pts[i * 3 + 1] = y; pts[i * 3 + 2] = rc[2 * i + 1]; }
+            *count = 4;
+            return 1;
+        }
+        int gn = kl_guardian_get_boundary(NULL, 0);
+        if (gn >= 3) {
+            if (!pts) { *count = gn; return 1; }
+            if (*count < gn) return 0;
+            float y = klovrp_boundary_floor_y();
+            gn = kl_guardian_get_boundary(pts, gn);           // x,z pairs first, then spread to x,y,z from the back
+            for (int i = gn - 1; i >= 0; i--) { float x = pts[2 * i], z = pts[2 * i + 1]; pts[i * 3 + 0] = x; pts[i * 3 + 1] = y; pts[i * 3 + 2] = z; }
+            *count = gn;
+            return 1;
+        }
+    }
     int n = klovrp_boundary_circle() ? 32 : 4;            // a circle is a 32-point polygon
     if (!pts) { *count = n; return 1; }
     if (*count < n) return 0;
@@ -9710,7 +9769,7 @@ static int klovrp_boundary_points(float *pts, int *count) {
 // ovrpBool ovrp_GetBoundaryGeometry2(ovrpBoundaryType, void *points, int *count)
 static uint64_t klovrp_GetBoundaryGeometry2(int type, float *pts, int *count) {
     ovrp_hit("ovrp_GetBoundaryGeometry2");
-    uint64_t r = (uint64_t)klovrp_boundary_points(pts, count);
+    uint64_t r = (uint64_t)klovrp_boundary_points(type, pts, count);
     klovrp_boundary_note(pts ? "ovrp_GetBoundaryGeometry2(points)" : "ovrp_GetBoundaryGeometry2(count)", type, count ? *count : -1);
     return r;
 }
@@ -9718,16 +9777,16 @@ static uint64_t klovrp_GetBoundaryGeometry2(int type, float *pts, int *count) {
 static uint64_t klovrp_GetBoundaryGeometry3(int type, float *pts, int *count) {
     ovrp_hit("ovrp_GetBoundaryGeometry3");
     if (!count) return OVRP_FAIL_INVALID_PARAM;
-    uint64_t r = klovrp_boundary_points(pts, count) ? OVRP_SUCCESS : OVRP_FAIL_INVALID_PARAM;
+    uint64_t r = klovrp_boundary_points(type, pts, count) ? OVRP_SUCCESS : OVRP_FAIL_INVALID_PARAM;
     klovrp_boundary_note(pts ? "ovrp_GetBoundaryGeometry3(points)" : "ovrp_GetBoundaryGeometry3(count)", type, *count);
     return r;
 }
 static uint64_t klovrp_GetBoundaryDimensions2(int type, float *dims) {
     ovrp_hit("ovrp_GetBoundaryDimensions2");
-    (void)type;
     if (!dims) return OVRP_FAIL_INVALID_PARAM;
     float w = 0, d = 0;
-    kl_ovrp_boundary(&w, &d);
+    if (kl_ovrp_boundary(&w, &d) && type != KLOVRP_BOUNDARY_PLAYAREA && klovrp_guardian_area(NULL, NULL, NULL)
+        && !klovrp_boundary_circle()) kl_guardian_outer_size(&w, &d);      // the outline's extent, not the inscribed rectangle
     dims[0] = w; dims[1] = 0.0f; dims[2] = d;
     return OVRP_SUCCESS;
 }
