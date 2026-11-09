@@ -50,6 +50,19 @@
 
 enum { S_FREE, S_RENDER, S_READY, S_HELD, S_LOST };   // S_LOST: its job timed out, the GPU may still write it
 
+// The depth convention of the images (kl_envdepth.h): REVERSED-Z, as Meta's Environment Depth hands it out (1 = at the near plane, 0 = at
+// the far plane or no geometry). d(z) for a view-axis distance z, and the projection terms that give it (clip.z = a * eyeZ + b,
+// clip.w = -eyeZ, eyeZ = -z); KleptonEnvDepth.swift builds its matrix from the same two numbers. KL-TEST envdepthz.
+// KL-TEST-BEGIN envdepthz
+static float kled_depth_rev(float z, float n, float f) {
+    if (!(z > 0.0f) || !(f > n) || !(n > 0.0f)) return 0.0f;
+    if (z <= n) return 1.0f;
+    if (z >= f) return 0.0f;
+    return n * (f - z) / (z * (f - n));
+}
+static void kled_proj_ab(float n, float f, float *a, float *b) { *a = n / (f - n); *b = n * f / (f - n); }
+// KL-TEST-END envdepthz
+
 // KL-TEST-BEGIN envdepthjob (extracted by tools/ci/host-tests.sh into klepton/tests/t_envdepth_job.c)
 // A job that has not finished this long after it began is given up (a command buffer that never completes).
 #define KLED_JOB_TIMEOUT_S 2.0

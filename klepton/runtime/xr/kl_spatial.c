@@ -150,7 +150,9 @@ static void ent_free(ent *e) {
     if (e->kind == KLSP_MESH) g_mesh_verts -= e->nv;
     free(e->poly); free(e->v); free(e->t); free(e->mem);
 }
+static uint32_t g_gen;              // rises with every write to the store (upsert / delete); read unlocked via kl_spatial_generation
 static void del_locked(ent *e) {
+    __atomic_add_fetch(&g_gen, 1, __ATOMIC_RELAXED);
     ent_free(e);
     *e = g_e[--g_n];
 }
@@ -310,6 +312,7 @@ static void real_walls_inward_locked(void) {
 }
 
 static ent *upsert_locked(int kind, kl_uuid id) {
+    __atomic_add_fetch(&g_gen, 1, __ATOMIC_RELAXED);
     ent *e = find_locked(id);
     if (e) return e->kind == kind ? e : NULL;       // a uuid never changes kind
     if (g_n >= KLSP_MAX_ENT) return NULL;
@@ -649,9 +652,20 @@ int kl_spatial_uuid_for_handle(uint64_t h, kl_uuid *id, int *kind) {
 }
 
 // ---- rooms ------------------------------------------------------------------
+// Planes are handed out FLOOR, CEILING, WALL, the rest, OTHER last (arrival order within each): a game that gives up at the first
+// plane it cannot classify (HLVR: "Unknown classification: OTHER") has seen the room before it does. Handles are given in listing order
+// on first sight and never change (kl_spatial_handle_for), so a later reordering renumbers nothing. KL-TEST t_plane_order.
+static int plane_rank(int label) {
+    return label == KLSP_LBL_FLOOR ? 0 : label == KLSP_LBL_CEILING ? 1 : label == KLSP_LBL_WALL ? 2 : label == KLSP_LBL_OTHER ? 4 : 3;
+}
 typedef struct { float ang; kl_uuid id; } wall_ang;
 static int wall_cmp(const void *a, const void *b) {
     float x = ((const wall_ang *)a)->ang, y = ((const wall_ang *)b)->ang;
+    return x < y ? -1 : x > y;
+}
+typedef struct { kl_uuid id; uint64_t key; } mem_ord_t;
+static int mem_cmp(const void *a, const void *b) {
+    uint64_t x = ((const mem_ord_t *)a)->key, y = ((const mem_ord_t *)b)->key;
     return x < y ? -1 : x > y;
 }
 static int room_info_locked(kl_uuid id, kl_uuid *floor, kl_uuid *ceiling,
@@ -679,6 +693,8 @@ static int room_info_locked(kl_uuid id, kl_uuid *floor, kl_uuid *ceiling,
         restrict_to_room = any;
     }
     float wx[1024], wz[1024]; uint32_t wi[1024];
+    mem_ord_t *mo = (mem_ord_t *)calloc(g_n ? g_n : 1, sizeof(mem_ord_t));
+    if (!mo) { free(wa); return 0; }
     int has_synth = 0;
     for (uint32_t i = 0; i < g_n; i++) if (g_e[i].kind == KLSP_PLANE && is_synth(g_e[i].id)) has_synth = 1;
     for (uint32_t i = 0; i < g_n; i++) {
@@ -690,7 +706,7 @@ static int room_info_locked(kl_uuid id, kl_uuid *floor, kl_uuid *ceiling,
             for (uint32_t k = 0; k < room->nmem; k++) if (uuid_eq(room->mem[k], p->id)) { in = 1; break; }
             if (!in) continue;
         }
-        if (members && cnt < mcap) members[cnt] = p->id;
+        mo[cnt].id = p->id; mo[cnt].key = ((uint64_t)plane_rank(p->label) << 32) | (1u + i);   // arrival order within the category
         cnt++;
         if (p->label == KLSP_LBL_FLOOR && p->m[13] < fly) { fly = p->m[13]; fl = p->id; }
         if (p->label == KLSP_LBL_CEILING && p->m[13] > cey) { cey = p->m[13]; ce = p->id; }
@@ -701,6 +717,15 @@ static int room_info_locked(kl_uuid id, kl_uuid *floor, kl_uuid *ceiling,
     if (nw) { cx /= nw; cz /= nw; }
     for (uint32_t k = 0; k < nw; k++) { wa[k].ang = atan2f(wz[k] - cz, wx[k] - cx); wa[k].id = g_e[wi[k]].id; }
     qsort(wa, nw, sizeof(wall_ang), wall_cmp);
+    // Container order: the chosen floor and ceiling first, then the rest of their kind, the walls in the room's order, the other planes,
+    // OTHER last (plane_rank).
+    for (uint32_t c = 0; c < cnt; c++) {
+        if (uuid_eq(mo[c].id, fl) || uuid_eq(mo[c].id, ce)) mo[c].key &= ~(uint64_t)0xffffffffu;
+        for (uint32_t k = 0; k < nw; k++) if (uuid_eq(mo[c].id, wa[k].id)) mo[c].key = (2ull << 32) | (1u + k);
+    }
+    qsort(mo, cnt, sizeof(mem_ord_t), mem_cmp);
+    if (members) for (uint32_t c = 0; c < cnt && c < mcap; c++) members[c] = mo[c].id;
+    free(mo);
     if (floor) *floor = fl;
     if (ceiling) *ceiling = ce;
     if (walls) for (uint32_t k = 0; k < nw && k < wcap; k++) walls[k] = wa[k].id;
@@ -728,6 +753,12 @@ static int visible(const ent *e) { return e->kind != KLSP_ANCHOR || e->mine; }
 
 // i-th visible entity of a kind (rooms: real ones, then the synthetic one).
 static ent *nth_locked(int kind, uint32_t i) {
+    if (kind == KLSP_PLANE) {
+        for (int r = 0; r < 5; r++)
+            for (uint32_t k = 0; k < g_n; k++)
+                if (g_e[k].kind == KLSP_PLANE && plane_rank(g_e[k].label) == r && i-- == 0) return &g_e[k];
+        return NULL;
+    }
     for (uint32_t k = 0; k < g_n; k++) {
         if (g_e[k].kind != kind || !visible(&g_e[k])) continue;
         if (i-- == 0) return &g_e[k];
@@ -935,6 +966,7 @@ static int klsp_hull_fuse(klsp_pt *h, int n) {
 // points in 5 cm units (x0, z0, x1, z1); built = a hull room came out (0 = the box).
 typedef struct { int nplanes, nmem, nmesh, bb[4], built; } klsp_sig;
 static klsp_sig g_synth_sig;
+static int klsp_sig_significant(const klsp_sig *a, const klsp_sig *b);
 // The footprint of the room from measured data only (guest space): corners of the real FLOOR / CEILING / WALL planes -- the
 // members of the first RoomAnchor that lists planes, else all of them -- and the vertices of the scene meshes that lie between
 // ylo and yhi and within 0.5 m of those planes' box, rounded to 2 cm, as a fused convex hull h (room for 2 * points + 2). Without
@@ -1038,8 +1070,11 @@ static int klsp_hull_room_valid(const klsp_pt *h, int n, float fy, float H) {
 // measured data instead (built_footprint_locked): one wall per edge of their convex hull, the real ceiling height (2.4 m without
 // one), floor and ceiling as that polygon; with fewer than 4 useful edges it stays the box above.
 // Returns 1 when a synthetic room is present now, 0 when a complete real set exists (it wins, nothing is added).
-int kl_spatial_synth_room(float hx, float hz, float zw, float zd) {
+// keep != NULL (live update): a synthetic room already built from `keep` stays as it is while the new input does not differ
+// significantly from it -- no silent change of geometry for jitter or a few mesh points.
+static int synth_room_impl(float hx, float hz, float zw, float zd, klsp_sig *out, const klsp_sig *keep) {
     const float M = 0.5f, oy = kl_ovrp_guest_origin_y();
+    memset(out, 0, sizeof *out);
     float H = 2.5f, gfy = 0.0f, rfy = 1e30f, cey = -1e30f;
     int gsrc = kl_guardian_get_floor(&gfy);            // the guardian's floor (visionOS world) when there is one
     float fy = gfy - oy;
@@ -1067,7 +1102,7 @@ int kl_spatial_synth_room(float hx, float hz, float zw, float zd) {
     float hb = cey > -1e29f && cey - fy >= 1.5f && cey - fy <= 6.0f ? cey - fy : 2.4f;     // real ceiling over the floor, else 2.4 m
     int nh = built_footprint_locked(fy - 0.3f, fy + hb + 0.3f, hx, hz, hull, &npts, &sig);
     if (nh && !klsp_hull_room_valid(hull, nh, fy, hb)) { nh = 0; sig.built = 0; }   // not a V1 room: keep the box
-    if (synth && synth == (int)g_synth_n && !memcmp(&sig, &g_synth_sig, sizeof sig)) { pthread_mutex_unlock(&g_mu); return 1; }   // same input: keep it
+    if (synth && synth == (int)g_synth_n && (!memcmp(&sig, &g_synth_sig, sizeof sig) || (keep && !klsp_sig_significant(&sig, keep)))) { *out = sig; pthread_mutex_unlock(&g_mu); return 1; }   // same input: keep it
     purge_synth_locked();                              // new or changed data: rebuild (same ids, one source at a time, under this lock)
     if (nh) {                                          // walls = hull edges (counter-clockwise: inward on the left, like the box)
         float lo[2] = {1e30f, 1e30f}, hi[2] = {-1e30f, -1e30f};
@@ -1119,7 +1154,7 @@ int kl_spatial_synth_room(float hx, float hz, float zw, float zd) {
             free(e->poly); e->poly = pl; e->npoly = nh;
         }
     }
-    g_synth_n = (uint32_t)(2 + nwall); g_synth_sig = sig;
+    g_synth_n = (uint32_t)(2 + nwall); g_synth_sig = sig; *out = sig;
     pthread_mutex_unlock(&g_mu);
     if (nh) kl_guardian_default_from_room(&hull[0].x, nh);     // the floor outline is the default play space (a user one wins)
     fprintf(stderr, "  [spatial] synthetic room %.2fx%.2f turn=%.2f centre=%.2f,%.2f floor_y=%.2f partial_walls=%d\n",
@@ -1127,6 +1162,72 @@ int kl_spatial_synth_room(float hx, float hz, float zw, float zd) {
     if (nh) fprintf(stderr, "  [room] built from real: walls=%d hull_pts=%d h=%.2f floor_y=%.2f src=%s\n",
                     nh, npts, H, fy, have_room ? "roomanchor" : "planes");
     return 1;
+}
+
+// What the game was last handed (kl_spatial_synth_room), and what the live update compares against: a real complete set (synth 0) or a
+// synthetic room built from `sig`. Guarded by g_mu.
+static struct { int valid, synth; klsp_sig sig; } g_given;
+int kl_spatial_synth_room(float hx, float hz, float zw, float zd) {
+    klsp_sig sig;
+    int r = synth_room_impl(hx, hz, zw, zd, &sig, NULL);
+    pthread_mutex_lock(&g_mu);
+    g_given.valid = 1; g_given.synth = r; g_given.sig = sig;
+    pthread_mutex_unlock(&g_mu);
+    return r;
+}
+
+// ---- live room: the scene keeps being captured after the game has its room ----
+// A change that matters (the set of walls / floor / ceiling, the footprint by >= 10 cm, the scene-mesh points inside it by > 25 %) is
+// what a new room is; a table, ARKit jitter or a few mesh triangles are not. The user's floor is only read (synth_room_impl), never set.
+static int klsp_sig_significant(const klsp_sig *a, const klsp_sig *b) {
+    if (a->built != b->built || a->nplanes != b->nplanes || a->nmem != b->nmem) return 1;
+    for (int i = 0; i < 4; i++) if (abs(a->bb[i] - b->bb[i]) >= 2) return 1;          // bb is in 5 cm units
+    int dm = abs(a->nmesh - b->nmesh), top = a->nmesh > b->nmesh ? a->nmesh : b->nmesh;
+    return dm > 64 && dm * 4 > top;
+}
+static void (*g_room_cb)(void);
+static uint32_t g_room_gen, g_live_gen;
+static int g_live_gen_valid;
+static uint64_t g_live_ns;
+void kl_spatial_set_room_listener(void (*fn)(void)) {
+    pthread_mutex_lock(&g_mu);
+    g_room_cb = fn;
+    pthread_mutex_unlock(&g_mu);
+}
+uint32_t kl_spatial_room_generation(void) { return __atomic_load_n(&g_room_gen, __ATOMIC_RELAXED); }
+uint32_t kl_spatial_generation(void) { return __atomic_load_n(&g_gen, __ATOMIC_RELAXED); }
+int kl_spatial_live_update_at(float hx, float hz, float zw, float zd, uint64_t now_ns) {
+    if (!isfinite(hx) || !isfinite(hz)) return 0;
+    uint32_t gen = kl_spatial_generation();
+    pthread_mutex_lock(&g_mu);
+    int run = g_given.valid && !(g_live_gen_valid && gen == g_live_gen) && (!g_live_ns || now_ns >= g_live_ns + 2000000000ull);
+    if (run) g_live_ns = now_ns;
+    pthread_mutex_unlock(&g_mu);
+    if (!run) return 0;
+    klsp_sig given, sig;
+    pthread_mutex_lock(&g_mu);
+    given = g_given.sig;
+    pthread_mutex_unlock(&g_mu);
+    int r = synth_room_impl(hx, hz, zw, zd, &sig, &given);
+    uint32_t after = kl_spatial_generation();
+    void (*cb)(void) = NULL;
+    pthread_mutex_lock(&g_mu);
+    g_live_gen = after; g_live_gen_valid = 1;
+    int changed = r != g_given.synth || (r && klsp_sig_significant(&sig, &g_given.sig));
+    if (changed) {
+        g_given.synth = r; g_given.sig = sig;
+        __atomic_add_fetch(&g_room_gen, 1, __ATOMIC_RELAXED);
+        cb = g_room_cb;
+    }
+    pthread_mutex_unlock(&g_mu);
+    if (changed) fprintf(stderr, "  [spatial] room changed (%s, planes=%d mesh_pts=%d): rebuilt, game notified\n", r ? "synthetic" : "real set", sig.nplanes, sig.nmesh);
+    if (cb) cb();                                       // outside g_mu: the listener may query the store
+    return changed;
+}
+int kl_spatial_live_update(float hx, float hz, float zw, float zd) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return kl_spatial_live_update_at(hx, hz, zw, zd, (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec);
 }
 
 // The guardian's default play space from the room ARKit has NOW, without a game asking for the scene (kl_spatial_synth_room does the

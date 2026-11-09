@@ -19,8 +19,13 @@ int  kl_passthrough_mode(void);
 void kl_passthrough_note_frame(int present, int layer, int underlay, int unpremultiplied);
 
 // Host side. 1 when the guest asked for passthrough on its last frame (or the
-// mode forces it), 0 otherwise; mode "off" always answers 0.
+// mode forces it), 0 otherwise; mode "off" always answers 0 -- except while the
+// host itself forces it (kl_passthrough_force), which wins over every mode.
 int  kl_passthrough_active(void);
+// Host side: forces passthrough on (non-zero) or hands it back to the guest/mode (0). Used while the guardian screen is up (no
+// guest frames exist yet, and a black screen cannot be used to place the floor). kl_passthrough_forced() reads it back.
+void kl_passthrough_force(int on);
+int  kl_passthrough_forced(void);
 // 1 when the eye layer's alpha is straight (unpremultiplied).
 int  kl_passthrough_unpremultiplied(void);
 

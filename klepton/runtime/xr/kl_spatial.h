@@ -88,6 +88,19 @@ int      kl_spatial_room_info(kl_uuid id, kl_uuid *floor, kl_uuid *ceiling,
 // scene mesh (hull of their footprint, one wall per edge, real ceiling height), or by the box when that gives < 4 walls.
 // 1 = synthetic room present; 0 = a complete real set (floor, ceiling, closed walls) exists (untouched).
 int      kl_spatial_synth_room(float hx, float hz, float zw, float zd);
+// Live room. kl_spatial_synth_room records what the game was last handed; from then on the scene capture keeps running and
+// kl_spatial_live_update re-checks it (no-op until a room was handed out, when nothing was written to the store since the last
+// check, and at most once per 2 s). When the room changed significantly -- walls / floor / ceiling set, footprint by >= 10 cm, scene-mesh
+// points in it by > 25 %, or a real complete set replaced the synthetic one -- it is rebuilt (the user's guardian floor is only read),
+// kl_spatial_room_generation rises and the listener (kl_spatial_set_room_listener) is called, outside the store lock. Returns 1 when notified.
+// kl_spatial_live_update_at takes the clock (host tests). kl_spatial_generation rises with every write to the store (UI caches).
+int      kl_spatial_live_update(float hx, float hz, float zw, float zd);
+int      kl_spatial_live_update_at(float hx, float hz, float zw, float zd, uint64_t now_ns);
+void     kl_spatial_set_room_listener(void (*fn)(void));
+uint32_t kl_spatial_room_generation(void);
+uint32_t kl_spatial_generation(void);
+// kl_ovrp_spatial.c: the periodic call (Swift, ~1 Hz) for a game that sees the scene: kl_spatial_live_update with the head and play area.
+int      kl_ovrp_spatial_live_tick(void);
 // The guardian's default play space from the room ARKit has now (kl_guardian_default_from_room), for a head at guest (hx, hz);
 // at most once per 2 s. Returns the guardian's answer (1 = stored), 0 when rate-limited / no valid footprint / a user boundary exists.
 int      kl_spatial_update_guardian_default(float hx, float hz);

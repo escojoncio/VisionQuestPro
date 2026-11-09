@@ -41,6 +41,7 @@ static void *F(const char *name) { for (size_t i = 0; i < g_ntab; i++) if (!strc
 // "[sp-sum]" sink (kl_ovrp_spatial.c): the lines it would write to stderr.
 void kl_ovrp_sp_sum_set_sink(void (*sink)(const char *line));
 void kl_ovrp_sp_sum_tick_at(uint64_t now_ns);
+void kl_ovrp_sp_kids_reset(void);
 static char g_sum[8][1100];
 static char g_sumlast[1100];
 static int g_nsum;
@@ -341,6 +342,7 @@ int main(void) {
     typedef struct { int32_t cap, count; void *p; } cl;
     kl_uuid mem[16]; cl cont = {16, 0, mem};
     CK(((int32_t(*)(uint64_t *, cl *))F("ovrp_GetSpaceContainer"))(&room, &cont) == 0 && cont.count == 7);
+    CK(!memcmp(&mem[0], &lay.floor, 16) && !memcmp(&mem[1], &lay.ceil, 16));       // the container starts with the floor, then the ceiling
     // query by ids (OVRSceneManager: the container's children): exactly the ids asked
     q.ft = 1; q.ids[0] = walls[0]; q.ids[1] = walls[1]; q.nids = 2;
     CK(((int32_t(*)(const qi *, uint64_t *))F("ovrp_QuerySpaces"))(&q, &req) == 0);
@@ -649,6 +651,53 @@ int main(void) {
         CK(L2(&loc, &h70, 1) == 0 && loc.flags == 0xF);
         kl_spatial_plane(U16(70), 1, m, 1, 1, KLSP_LBL_TABLE, NULL, 0);
         CK(L2(&loc, &h70, 1) == 0 && loc.flags == 0x3 && fabsf(loc.p.Position.x - 0.4f) < 1e-6f && fabsf(loc.p.Position.y - 0.8f) < 1e-6f);
+    }
+    // --- [sp-sum] kids=<asked>/<handed out>: how many of the planes the game was given it has looked at
+    {
+        const uint64_t sec = 1000000000ull, base = 800000000000000ull;
+        unsigned ka = 99, kd = 0, ka2 = 99, kd2 = 0;
+        uint64_t kreq = 0;
+        kl_ovrp_sp_kids_reset();
+        CK(((int32_t(*)(const void *, uint64_t *))F("ovrp_DiscoverSpaces"))(NULL, &kreq) == 0);   // hands every plane out
+        kl_ovrp_sp_sum_set_sink(sum_sink);
+        kl_ovrp_sp_sum_tick_at(base);
+        kl_ovrp_sp_sum_tick_at(base + 6 * sec);
+        const char *k = strstr(g_sumlast, " kids=");
+        CK(k && sscanf(k, " kids=%u/%u", &ka, &kd) == 2 && kd > 0 && ka == 0);          // handed out, none looked at
+        uint64_t hf = kl_spatial_handle_for(U16(1));
+        char l1[32]; typedef struct { int32_t cap, count; void *p; } cl2; cl2 c1 = {32, 0, l1};
+        CK(hf && ((int32_t(*)(uint64_t *, cl2 *))F("ovrp_GetSpaceSemanticLabels"))(&hf, &c1) == 0);   // the game looks at the floor
+        kl_ovrp_sp_sum_tick_at(base + 12 * sec);
+        k = strstr(g_sumlast, " kids=");
+        CK(k && sscanf(k, " kids=%u/%u", &ka2, &kd2) == 2 && kd2 == kd && ka2 == 1);
+        int n0 = g_nsum;
+        kl_ovrp_sp_sum_tick_at(base + 18 * sec);
+        if (g_nsum > n0) CK(!strstr(g_sumlast, "kids="));                    // unchanged: not repeated
+        kl_ovrp_sp_sum_set_sink(NULL);
+    }
+
+    // --- live room: a significant change after the game has its room is rebuilt silently; the discovery events (300 + 301, a fresh
+    // request) are sent only with KL_SPATIAL_LIVE_NOTIFY=1
+    {
+        float wm[16];
+        g_nev = 0;
+        CK(kl_spatial_live_update_at(g_head[0], g_head[2], 3, 3, 900000000000000ull) == 0 && g_nev == 0);   // nothing changed since the last check
+        memset(wm, 0, sizeof wm); wm[0] = wm[5] = wm[10] = wm[15] = 1;
+        kl_spatial_plane(U16(10), 1, wm, 4, 2.6f, KLSP_LBL_WALL, NULL, 0);                 // one real wall goes: the set is no longer complete
+        uint32_t rg0 = kl_spatial_room_generation();
+        CK(kl_spatial_live_update_at(g_head[0], g_head[2], 3, 3, 900010000000000ull) == 1 && kl_spatial_room_generation() == rg0 + 1);
+        CK(g_nev == 0);                                                                     // default: rebuilt, nobody told
+        setenv("KL_SPATIAL_LIVE_NOTIFY", "1", 1);
+        kl_spatial_plane(U16(11), 1, wm, 5, 2.6f, KLSP_LBL_WALL, NULL, 0);
+        CK(kl_spatial_live_update_at(g_head[0], g_head[2], 3, 3, 900020000000000ull) == 1);
+        int n300 = 0, n301 = 0;
+        for (int i = 0; i < g_nev; i++) { n300 += g_ev[i].type == 300; n301 += g_ev[i].type == 301; }
+        CK(n300 == 1 && n301 == 1);
+        setenv("KL_SPATIAL_LIVE_NOTIFY", "0", 1);
+        g_nev = 0;
+        kl_spatial_plane(U16(12), 1, wm, 4, 2.6f, KLSP_LBL_WALL, NULL, 0);
+        CK(kl_spatial_live_update_at(g_head[0], g_head[2], 3, 3, 900030000000000ull) == 1 && g_nev == 0);
+        unsetenv("KL_SPATIAL_LIVE_NOTIFY");
     }
     puts(fails ? "FALLA" : "OK");
     snprintf(cmd, sizeof cmd, "rm -rf %s", g_dir); if (system(cmd)) {}

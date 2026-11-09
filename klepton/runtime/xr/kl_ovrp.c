@@ -2006,10 +2006,11 @@ static float klovrp_GetUserIPD(void) {
 // whether it is applied (EyeLevel ignores it). Honours a KL_OVRP_EYE_HEIGHT
 // override for tuning.
 float klovrp_measured_eye_height(void);
+static float klovrp_eye_over_floor(void);
 static uint64_t klovrp_GetUserEyeHeight2(float *out) {
     ovrp_hit("ovrp_GetUserEyeHeight2");
     if (!out) return OVRP_FAIL_INVALID_PARAM;
-    *out = klovrp_measured_eye_height();
+    *out = klovrp_eye_over_floor();         // the user's eye height ABOVE THE FLOOR the guardian has (the head is measured over the world origin)
     return OVRP_SUCCESS;
 }
 
@@ -2415,6 +2416,25 @@ float kl_ovrp_measured_eye_height_or0(void) {
     if (ov > 0.0f) return ov;
     return (float)__atomic_load_n(&g_eye_mm, __ATOMIC_ACQUIRE) / 1000.0f;
 }
+// Eye height over the GUARDIAN floor. The head is measured over the visionOS world origin (g_eye_mm); when the user placed the floor
+// elsewhere (kl_guardian: grabbed on the guardian screen, or ARKit's own floor plane is not at y = 0) the eye is that much higher or
+// lower over it. This is what the guest is told about the floor relative to the eye (EyeLevel <-> floor/stage poses, GetUserEyeHeight2),
+// consistent with the guest origin that already adds the guardian floor for floor/stage (klovrp_guest_origin_y). Not measured yet
+// (the default is not a head height), an override (already "over the floor") or an implausible result keep the plain measure.
+// Y = 0 under EyeLevel stays the eye, as on a Quest: only the distance to the floor follows the guardian.
+// KL-TEST-BEGIN flooreye
+static float klovrp_eye_over_floor_calc(float measured, int real, int overridden, int has_floor, float gy) {
+    if (!real || overridden || !has_floor || !isfinite(gy) || !(measured > 0.0f)) return measured;
+    float h = measured - gy;
+    return (h >= 0.3f && h <= 3.0f) ? h : measured;
+}
+// KL-TEST-END flooreye
+static float klovrp_eye_over_floor(void) {
+    float gy = 0.0f;
+    int has_floor = kl_guardian_get_floor(&gy) != 0;
+    return klovrp_eye_over_floor_calc(klovrp_measured_eye_height(), kl_ovrp_measured_eye_height_or0() > 0.0f,
+                                      klovrp_eye_override() > 0.0f, has_floor, gy);
+}
 static void klovrp_origin_note(const char *why);
 static void klovrp_eye_latch(float y, const char *why) {
     int old = __atomic_exchange_n(&g_eye_mm, (int)lrintf(y * 1000.0f), __ATOMIC_ACQ_REL);
@@ -2725,6 +2745,31 @@ float kl_ovrp_guest_origin_y(void) {
     if (!__atomic_load_n(&g_ovrp_space_used, __ATOMIC_ACQUIRE)) return 0.0f;
     return klovrp_guest_origin_y();
 }
+// [floor]: the guardian floor and what the guest is told about it, one line per change (origin, eye height, or the guardian's floor once it
+// has settled for 0.5 s -- sliding it on the guardian screen changes it every frame). floor_in_guest_y is where the floor lies in the guest's
+// tracking space (0 under floor/stage = the floor IS y 0; -eye height over the floor under EyeLevel, as GetTrackingTransformRelativePose
+// answers); eye_over_floor is the number GetUserEyeHeight2 and that pose use. An OpenXR guest (Lambda1VR/hl1 is one) never sets the
+// OVRPlugin origin: its floor is the STAGE / LOCAL_FLOOR space origin, logged by kl_openxr.c as [floor] xr.
+static float klovrp_boundary_floor_y(void);
+static void klovrp_floor_log(const char *why) {
+    float gy = 0.0f;
+    int src = kl_guardian_get_floor(&gy);
+    float pref = kl_guardian_get_user_preferred_floor();
+    fprintf(stderr, "  [floor] why=%s guardian_floor_y=%.3f src=%s confirmed=%s | ovrp origin=%d guest_origin_y=%.3f floor_in_guest_y=%.3f "
+                    "eye_over_floor=%.3f head_over_world_origin=%.3f seated_raise=%.3f\n",
+            why, (double)gy, src == KLG_FLOOR_MANUAL ? "manual" : src == KLG_FLOOR_AUTO ? "auto" : "none",
+            isnan(pref) ? "no" : "yes", g_tracking_origin, (double)klovrp_guest_origin_y(), (double)klovrp_boundary_floor_y(),
+            (double)klovrp_eye_over_floor(), (double)klovrp_measured_eye_height(), (double)klovrp_seat_offset());
+}
+static void klovrp_floor_watch(void) {
+    static uint32_t gen = UINT32_MAX;
+    static uint64_t changed_ns;
+    static int pending;
+    uint32_t g = kl_guardian_generation();
+    uint64_t now = klovrp_mono_ns();
+    if (g != gen) { gen = g; changed_ns = now; pending = 1; }
+    if (pending && now - changed_ns >= 500000000ull) { pending = 0; klovrp_floor_log("guardian changed"); }
+}
 // [origin]: one line whenever the guest's tracking origin or the measured eye height changes. head_display_y is the
 // head over the visionOS world origin, which sits on the floor ARKit detects (compare with the [spatial] floor plane
 // line: |y| ~ 0 there means this IS the height over the real floor); guest_head_y is what an OVRPlugin guest reads
@@ -2738,6 +2783,7 @@ static void klovrp_origin_note(const char *why) {
                     "guest_origin_y=%.3f eye_height=%.3f%s seated_raise=%.3f posture=%s\n",
             why, g_tracking_origin, (double)hy, hs ? "" : " (no head yet)", (double)(hy - oy), (double)oy,
             (double)eh, eh > 0.0f ? "" : " (unmeasured)", (double)klovrp_seat_offset(), pn[klovrp_posture()]);
+    klovrp_floor_log(why);
 }
 
 // --- One pose per guest frame, and why the live one is wrong ---------------
@@ -3018,6 +3064,7 @@ void kl_ovrp_set_head_pose(float px, float py, float pz,
     klovrp_pose_write(&g_head_pose, &v);
     __atomic_store_n(&g_head_set, 1, __ATOMIC_RELEASE);
     klovrp_posture_feed(py);
+    klovrp_floor_watch();
     // Pose trace, once a second: the pushed head Y + tracking-origin frame
     // (liminal's "floor drops" bug) and the head YAW (missioniss "can't look
     // around" bug — if yaw does not move as the user turns, the rotation we feed
@@ -4888,10 +4935,10 @@ static uint64_t klovrp_GetTrackingTransformRelativePose(float *out, int origin) 
         // Latched inside klovrp_measured_eye_height only once the headset has
         // reported a real height (1.6 m until then, never frozen at a default).
         // + the «Sentado» raise: the guest's floor space is lifted by it (0 when off).
-        out[5] = klovrp_measured_eye_height() + klovrp_seat_offset();
+        out[5] = klovrp_eye_over_floor() + klovrp_seat_offset();
     } else if ((origin == 1 || origin == 2) && cur == 0 && klovrp_eyelevel_zero()) {
         // ...and the mirror: under EyeLevel the floor is one eye height BELOW.
-        out[5] = -klovrp_measured_eye_height();
+        out[5] = -klovrp_eye_over_floor();
     } else if (origin == 4) {
         klovrp_pose h = klovrp_step_head(-1);
         out[0] = h.qx; out[1] = h.qy; out[2] = h.qz; out[3] = h.qw;

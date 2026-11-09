@@ -93,6 +93,28 @@ int main(void) {
     CK(NEAR(kl_guardian_get_user_preferred_floor(), 0.55f, 1e-5f));   // the live floor moved, the confirmed one did not
     kl_guardian_set_floor(0.0f, KLG_FLOOR_NONE);
 
+    // floor grab (Quest: grip on the floor grid, slide it to the real floor up or down, let go to keep it): while held the floor
+    // IS the hand height, clamped to [head - 2.5, head - 0.1524]; releasing keeps it; AUTO cannot take it back; NaN is ignored.
+    kl_guardian_set_floor(-0.005f, KLG_FLOOR_AUTO);                   // the proposed floor
+    CK(!kl_guardian_floor_grabbing());
+    CK(kl_guardian_floor_grab(0, 0.3f, 1.6f) == 0 && kl_guardian_get_floor(&y) == KLG_FLOOR_AUTO);   // nothing held: untouched
+    CK(kl_guardian_floor_grab(1, 0.4f, 1.6f) == 1 && kl_guardian_floor_grabbing());
+    CK(kl_guardian_get_floor(&y) == KLG_FLOOR_MANUAL && NEAR(y, 0.4f, 1e-6f));              // raised
+    CK(kl_guardian_floor_grab(1, -0.3f, 1.6f) == 1 && kl_guardian_get_floor(&y) == KLG_FLOOR_MANUAL && NEAR(y, -0.3f, 1e-6f));   // lowered
+    CK(kl_guardian_floor_grab(1, 1.5f, 1.6f) == 1 && kl_guardian_get_floor(&y) && NEAR(y, 1.6f - 0.1524f, 1e-5f));   // head cap
+    CK(kl_guardian_floor_grab(1, -5.0f, 1.6f) == 1 && kl_guardian_get_floor(&y) && NEAR(y, 1.6f - 2.5f, 1e-5f));     // 2.5 m cap
+    CK(kl_guardian_floor_grab(1, 0.1f, 1.6f) == 1);
+    CK(kl_guardian_floor_grab(1, NAN, 1.6f) == 1 && kl_guardian_get_floor(&y) && NEAR(y, 0.1f, 1e-6f));   // lost tracking: stays
+    CK(kl_guardian_floor_grab(1, 0.1f, NAN) == 1 && kl_guardian_get_floor(&y) && NEAR(y, 0.1f, 1e-6f));
+    uint32_t gg = kl_guardian_generation();
+    CK(kl_guardian_floor_grab(1, 0.1f, 1.6f) == 1 && kl_guardian_generation() == gg);        // same height: no new generation
+    CK(kl_guardian_floor_grab(0, 0.9f, 1.6f) == 0 && !kl_guardian_floor_grabbing());          // released: kept where it was
+    CK(kl_guardian_get_floor(&y) == KLG_FLOOR_MANUAL && NEAR(y, 0.1f, 1e-6f));
+    CK(kl_guardian_set_floor(-0.5f, KLG_FLOOR_AUTO) == 0 && kl_guardian_get_floor(&y) == KLG_FLOOR_MANUAL && NEAR(y, 0.1f, 1e-6f));
+    CK(kl_guardian_floor_grab(1, 0.2f, 1.6f) == 1);                                           // grab again, from a manual floor
+    CK(kl_guardian_floor_grab(0, 0.2f, 1.6f) == 0 && NEAR(kl_guardian_get_user_preferred_floor(), 0.55f, 1e-5f));   // confirm is separate
+    kl_guardian_set_floor(0.0f, KLG_FLOOR_NONE);
+
     // inscribed rectangle
     float p[8];
     rect(p, 1.1f, 1.1f);

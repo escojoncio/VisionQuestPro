@@ -11,10 +11,12 @@
 // The image the guest gets:
 //   * D16_UNORM (VK_FORMAT_D16_UNORM / GL_DEPTH_COMPONENT16), 2 array layers,
 //     one per eye (layer 0 left), KLED_W x KLED_H;
-//   * NON-linear depth, forward-Z, window range [0,1]:
-//         d = far * (z - near) / (z * (far - near))      z = distance along the view axis
-//     with near = KLED_NEAR and far = KLED_FAR (finite). Anything with no
-//     geometry reads 1.0, i.e. "far away - occludes nothing";
+//   * NON-linear depth, REVERSED-Z (as Meta's Environment Depth hands it out; the game's own depth is reversed too), window range [0,1]:
+//         d = near * (far - z) / (z * (far - near))      z = distance along the view axis
+//     with near = KLED_NEAR and far = KLED_FAR (finite): z = near -> 1 (close), z = far -> 0. Anything with no
+//     geometry reads 0.0 (the image is cleared to 0), i.e. "infinitely far - occludes nothing". (The forward-Z form this replaced
+//     cleared to 1.0, which a reversed-Z reader takes as "touching the camera" and hides the whole scene.) UNVERIFIED against Meta's SDK;
+//     the compositor logs the convention once: "[envdepth] ... reversed-Z, clear 0";
 //   * rendered with the usual perspective for the eye's pose and asymmetric
 //     field of view, so the guest reprojects it exactly as it would on Quest.
 //     Vulkan: row 0 is the top of the view. GL: row 0 is the bottom (uploaded

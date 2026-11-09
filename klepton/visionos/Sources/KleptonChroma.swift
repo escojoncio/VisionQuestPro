@@ -157,6 +157,16 @@ final class KleptonChroma: ObservableObject {
         }
     }
 
+    /// Follows kl_passthrough_active() at once, without the 0.5 s debounce above (that one hides one-frame gaps in a guest's layer
+    /// list). For the host's own switch: the guardian screen forces passthrough (kl_passthrough_force) and releases it.
+    func followPassthroughNow() {
+        let want = kl_passthrough_active() != 0
+        ptSince = .distantPast
+        guard want != passthroughLive else { return }
+        passthroughLive = want
+        NSLog("[pt] immersion -> %@ (host switch)", want ? "mixed (passthrough)" : "full (VR)")
+    }
+
     private func publish() {
         var rgb = [settings.color.x, settings.color.y, settings.color.z]
         kl_reproject_set_chroma(settings.enabled ? 1 : 0, &rgb,

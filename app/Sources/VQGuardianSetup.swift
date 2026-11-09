@@ -3,6 +3,10 @@
 // It appears with the game's immersive space already open (ARKit is capturing floor and room) and the game NOT started: the
 // compositor (KleptonCompositor.renderLoop) waits for VQGuardianGate.run before kl_app_guest_start. The rules (the 0.1524 m
 // cap under the head, the 1.15 m minimum side, the stationary fallback) live in kl_guardian.c; this file only asks for them.
+//
+// As on a Quest: passthrough is on while the screen is up (kl_passthrough_force, nothing of the game is drawn yet), the room's mesh and a
+// grid at the floor are drawn in the space (KleptonGuardianDraw.swift), and the player sets the floor by grabbing that grid with the
+// controller's grip (or a hand's pinch without controllers) and sliding it to the real floor, up or down; letting go keeps it.
 
 import GameController
 import SwiftUI
@@ -38,6 +42,10 @@ enum VQGuardianGate {
             return .skipped
         }
         shown = false
+        // Real passthrough and the room mesh / floor grid while the screen is up; released below whatever ends it.
+        kl_passthrough_force(1)
+        KLGuardianScene.active = true
+        KleptonChroma.shared.followPassthroughNow()
         VQLog.log("Guardián: pantalla de definición para \(game.aaKey) (guardada: \(KLGuardian.hasSaved(game: game) ? "sí" : "no"))")
         let outcome: Outcome = await withCheckedContinuation { (c: CheckedContinuation<Outcome, Never>) in
             waiter = c
@@ -50,6 +58,9 @@ enum VQGuardianGate {
                 }
             }
         }
+        KLGuardianScene.active = false
+        kl_passthrough_force(0)
+        KleptonChroma.shared.followPassthroughNow()
         VQLog.log("Guardián: \(outcome)")
         return outcome
     }
@@ -66,6 +77,7 @@ enum VQGuardianGate {
 
     /// Ends the wait (once; later calls do nothing).
     @MainActor static func finish(_ outcome: Outcome) {
+        KLGuardian.grabFloor(pressed: false, handY: .nan, headY: .nan)   // whatever ends the screen, no grab is left held in C
         guard let c = waiter else { return }
         waiter = nil
         c.resume(returning: outcome)
@@ -87,11 +99,7 @@ struct VQGuardianSetupView: View {
     @State private var radius: Double
     @State private var head: SIMD3<Float>?
     @State private var floorY: Float?
-    @State private var sliderCenter: Float?
-    @State private var handsAvailable = false
-    @State private var touchUntil: Date?
-    @State private var touchLeft = 0
-    @State private var touchLowest: Float = .infinity
+    @State private var grabHand: Int?         // the hand (0 left, 1 right) holding the floor grid
     @State private var finished = false
     @State private var floorTouched = false   // the user moved the floor on this screen (not confirmed until Confirm)
 
@@ -120,7 +128,6 @@ struct VQGuardianSetupView: View {
                 } else if hasSaved && !redefining {
                     savedSection
                 } else {
-                    statusSection
                     floorSection
                     mapSection
                     areaSection
@@ -183,18 +190,26 @@ struct VQGuardianSetupView: View {
         return VQL("Automática", "Automatic")
     }
 
-    // MARK: status and floor
+    // MARK: floor
 
     private var headY: Float { head?.y ?? live.headY }
     /// No world tracking (ARKit .worldSensing denied): the floor cannot be set or saved manually.
     private var noWorld: Bool { KLGuardian.worldTrackingDenied }
 
-    private var statusSection: some View {
-        Section(VQL("Estado", "Status")) {
-            LabeledContent(VQL("Altura de la cabeza", "Head height"), value: head == nil ? VQL("Sin datos", "No data") : meters(headY))
-            LabeledContent(VQL("Suelo detectado", "Detected floor"), value: floorY.map(meters) ?? VQL("Sin detectar", "Not detected"))
-            LabeledContent(VQL("Fuente del suelo", "Floor source"), value: sourceText)
-            if let f = floorY, head != nil, !KLGuardian.plausible(floorY: f, headY: headY) {
+    /// Quest's floor step: no numbers, no sliders; the grid in the room is the floor and the player moves it with the hand.
+    private var floorSection: some View {
+        Section(VQL("Suelo", "Floor")) {
+            LabeledContent(VQL("Altura del suelo", "Floor height"), value: floorY.map(meters) ?? VQL("Sin detectar", "Not detected"))
+            Text(grabHand != nil
+                 ? VQL("Mueve la mano hasta el suelo real y suelta para fijarlo.", "Move your hand to the real floor and let go to set it.")
+                 : VQL("Agarra la rejilla del suelo con el grip del mando (o pellizca con la mano si no usas mandos) y deslízala hasta el suelo real, hacia arriba o hacia abajo. Al soltar queda fijada.",
+                       "Grab the floor grid with the controller's grip (or pinch with your hand if you have no controllers) and slide it to the real floor, up or down. Letting go sets it."))
+                .font(.caption)
+            if noWorld {
+                Text(VQL("Sin permiso de seguimiento del entorno: el suelo no se puede fijar ni guardar.",
+                         "No world-sensing permission: the floor cannot be set or saved."))
+                    .font(.caption).foregroundStyle(.orange)
+            } else if let f = floorY, head != nil, !KLGuardian.plausible(floorY: f, headY: headY) {
                 Text(VQL("El suelo no parece plausible respecto a tu cabeza (debe estar entre 0,7 y 2,5 m por debajo). Ajústalo.",
                          "The floor does not look plausible against your head (it should be 0.7 to 2.5 m below). Adjust it."))
                     .font(.caption).foregroundStyle(.orange)
@@ -202,101 +217,40 @@ struct VQGuardianSetupView: View {
         }
     }
 
-    private var sourceText: String {
-        switch live.floorSource {
-        case .auto: return VQL("Vision Pro (automático)", "Vision Pro (automatic)")
-        case .manual: return VQL("Manual", "Manual")
-        case .unset: return VQL("Sin suelo", "No floor")
-        }
-    }
+    /// A grab (grip or pinch) starts only with the hand / controller near the grid, as on a Quest where you reach for it: a pinch that
+    /// presses a button in this window must not drag the floor.
+    private static let grabReach: Float = 0.25
 
-    private var floorSection: some View {
-        let center = sliderCenter ?? live.detectedFloorY ?? floorY ?? (headY - 1.15)
-        return Section(VQL("Ajuste de suelo", "Floor adjustment")) {
-            HStack {
-                Button(VQL("Bajar 1 cm", "Lower 1 cm")) { moveFloor(-0.01) }.buttonStyle(.bordered)
-                Button(VQL("Subir 1 cm", "Raise 1 cm")) { moveFloor(0.01) }.buttonStyle(.bordered)
-            }
-            .disabled(head == nil || noWorld)
-            HStack {
-                Button(VQL("Bajar 5 cm", "Lower 5 cm")) { moveFloor(-0.05) }.buttonStyle(.bordered)
-                Button(VQL("Subir 5 cm", "Raise 5 cm")) { moveFloor(0.05) }.buttonStyle(.bordered)
-            }
-            .disabled(head == nil || noWorld)
-            Slider(value: Binding(get: { floorY ?? center }, set: { setManualFloor($0) }), in: (center - 1)...(center + 1))
-                .disabled(head == nil || noWorld)
-            if noWorld {
-                Text(VQL("Sin permiso de seguimiento del entorno: el suelo no se puede fijar ni guardar.",
-                         "No world-sensing permission: the floor cannot be set or saved."))
-                    .font(.caption).foregroundStyle(.orange)
-            }
-            Text(VQL("También con el stick vertical derecho de un mando conectado. El suelo no puede quedar a menos de 0,15 m de la cabeza.",
-                     "Also with the right vertical stick of a connected controller. The floor cannot be closer than 0.15 m to the head."))
-                .font(.caption)
-            if handsAvailable {
-                Button(touchUntil == nil ? VQL("Tocar el suelo con el mando", "Touch the floor with the controller")
-                                         : VQL("Apoya el mando en el suelo… \(touchLeft) s", "Rest the controller on the floor… \(touchLeft) s")) {
-                    touchLowest = .infinity
-                    touchLeft = 5
-                    touchUntil = Date().addingTimeInterval(5)
-                }
-                .buttonStyle(.bordered)
-                .disabled(touchUntil != nil || noWorld)
-                Text(VQL("Al pulsar, tienes 5 s para apoyar el mando (o la mano) en el suelo; el suelo baja hasta lo más bajo que alcance.",
-                         "After pressing, you have 5 s to rest the controller (or hand) on the floor; the floor lowers to the lowest point reached."))
-                    .font(.caption)
-            }
-        }
-    }
-
-    /// The floor the user sets, never closer than 0.1524 m to the head (kl_guardian.h) nor farther than the plausible 2.5 m.
-    private func setManualFloor(_ y: Float) {
-        guard head != nil, !noWorld else { return }
-        KLGuardian.setFloor(min(max(y, headY - 2.5), headY - 0.1524), source: .manual)
-        floorY = KLGuardian.floorY()
-        floorTouched = true
-        if sliderCenter == nil { sliderCenter = live.detectedFloorY ?? floorY }
-    }
-
-    private func moveFloor(_ delta: Float) { setManualFloor((floorY ?? (headY - 1.15)) + delta) }
-
-    /// Lowest tracked controller / hand height (the pose kl_ovrp publishes, the head's frame); nil when none is tracked.
-    private func lowestHandY() -> Float? {
-        var best: Float?
-        for hand in 0..<2 {
-            var pos: [Float] = [0, 0, 0]
-            guard kl_ovrp_hand_motion(Int32(hand), &pos, nil, nil, nil) != 0, pos[1].isFinite else { continue }
-            best = min(best ?? pos[1], pos[1])
-        }
-        return best
-    }
-
-    /// 60 Hz: reads the head, the floor and the hands; applies the right stick and the "touch the floor" countdown.
+    /// 60 Hz: reads the head and the floor, and moves the floor with the grabbing hand (kl_guardian_floor_grab keeps the rules).
     private func tick() {
         if let h = KLGuardian.headPosition(), head == nil || simd_distance(h, head!) > 0.005 { head = h }
         let f = KLGuardian.floorY()
         if f != floorY { floorY = f }
-        let lowest = lowestHandY()
-        if (lowest != nil) != handsAvailable { handsAvailable = lowest != nil }
-        guard let h = head else { return }
-        if let until = touchUntil {
-            if let y = lowest { touchLowest = min(touchLowest, y) }
-            let left = max(0, Int(until.timeIntervalSinceNow.rounded(.up)))
-            if left != touchLeft { touchLeft = left }
-            if Date() >= until {
-                touchUntil = nil
-                if touchLowest.isFinite { KLGuardian.lowerFloorTo(touchLowest); floorY = KLGuardian.floorY(); floorTouched = true }
-                touchLowest = .infinity
-            }
-            return
+        guard let h = head, !noWorld else { return }
+        let noControllers = GCController.controllers().isEmpty
+        let reference = floorY ?? (h.y - 1.15)
+        var holding: (hand: Int, y: Float)?
+        for hand in (grabHand == 1 ? [1, 0] : [0, 1]) {
+            var pos: [Float] = [0, 0, 0]
+            var buttons: UInt32 = 0
+            var index: Float = 0, grip: Float = 0
+            guard kl_ovrp_hand_motion(Int32(hand), &pos, nil, nil, nil) != 0, pos[1].isFinite,
+                  kl_ovrp_controller_input(Int32(hand), &buttons, nil, &index, &grip, nil, nil) != 0 else { continue }
+            let gripDown = grip > 0.5 || buttons & (hand == 0 ? OVRPRawButton.lHandTrigger : OVRPRawButton.rHandTrigger) != 0
+            let pinch = noControllers && index > 0.5
+            // A hand with no controller pose is skipped above; without controllers connected the pinch takes the grip's place.
+            let started = grabHand == hand || abs(pos[1] - reference) <= Self.grabReach
+            if (gripDown || pinch) && started { holding = (hand, pos[1]); break }
         }
-        // Only with the stick moved: nudge also pulls the floor to a hand below it and marks it manual.
-        let stick = GCController.controllers().first?.extendedGamepad?.rightThumbstick.yAxis.value ?? 0
-        if abs(stick) >= 0.1, !noWorld {
-            KLGuardian.nudge(stickY: stick, headY: h.y, controllerY: lowest ?? .nan)
-            floorY = KLGuardian.floorY()
+        if let hold = holding {
+            grabHand = hold.hand
+            KLGuardian.grabFloor(pressed: true, handY: hold.y, headY: h.y)
             floorTouched = true
+        } else if grabHand != nil {
+            KLGuardian.grabFloor(pressed: false, handY: .nan, headY: h.y)
+            grabHand = nil
         }
+        floorY = KLGuardian.floorY()
     }
 
     // MARK: map
@@ -438,7 +392,12 @@ struct VQGuardianSetupView: View {
 
     private func confirm() {
         guard let game else { return }
-        if !noWorld { KLGuardian.confirmFloor() }
+        if !noWorld {
+            // Confirming accepts the floor as shown: ARKit's proposal becomes the player's (manual), so it is saved and ARKit's later
+            // estimates no longer move it during the game.
+            if KLGuardian.floorSource() == .auto, let y = KLGuardian.floorY() { KLGuardian.setFloor(y, source: .manual) }
+            KLGuardian.confirmFloor()
+        }
         let result: Int
         let saved: KLGuardian.SavedArea
         switch choice {

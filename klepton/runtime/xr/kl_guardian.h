@@ -32,6 +32,13 @@ float kl_guardian_floor_nudge(float stickY, float headY, float controllerY);
 // [Swift] a tracked controller/hand at y under the floor lowers the floor to y. Returns the floor.
 float kl_guardian_floor_lower_to(float y);
 
+// [Swift] Quest's floor setup: the player grabs the floor grid (grip of a controller, pinch of a hand) and slides it to the real
+// floor, up or down; letting go keeps it. Call once per frame with `pressed` = the grab button state: while it is non-zero the floor
+// is handY, marked manual and clamped to [headY - 2.5, headY - 0.1524] (a non-finite handY/headY leaves it where it is); when it
+// drops to 0 the floor stays. Returns 1 while grabbing. The confirmed floor (floor_confirm) is a separate step.
+int   kl_guardian_floor_grab(int pressed, float handY, float headY);
+int   kl_guardian_floor_grabbing(void);      // [Swift] last `pressed` given to floor_grab
+
 // ---- boundary ----
 // [Swift] points = x,z pairs (n >= 3 for roomscale; above 4096 an evenly spaced 4096 are kept), mode 0/1, radius for stationary (<= 0 = default).
 // Validates (finite, within 1e4 m, non-zero area), copies, normalises to counter-clockwise, computes the inscribed rectangle.

@@ -50,15 +50,12 @@ enum KLGuardian {
         kl_guardian_floor_plausible(floorY, headY, fromSLAM ? 1 : 0) != 0
     }
 
-    /// Manual adjust, once per frame; marks the floor manual. NaN controllerY = no hand data. Returns the new floor.
+    /// Quest's floor setup: while `pressed` (grip of a controller, pinch of a hand) the floor is `handY` (clamped under the head),
+    /// marked manual; releasing keeps it. Once per frame. Returns true while grabbing.
     @discardableResult
-    static func nudge(stickY: Float, headY: Float, controllerY: Float = .nan) -> Float {
-        kl_guardian_floor_nudge(stickY, headY, controllerY)
-    }
+    static func grabFloor(pressed: Bool, handY: Float, headY: Float) -> Bool { kl_guardian_floor_grab(pressed ? 1 : 0, handY, headY) != 0 }
 
-    /// A tracked controller/hand at `y` under the floor lowers the floor to it. Returns the floor.
-    @discardableResult
-    static func lowerFloorTo(_ y: Float) -> Float { kl_guardian_floor_lower_to(y) }
+    static var floorGrabbing: Bool { kl_guardian_floor_grabbing() != 0 }
 
     // MARK: boundary
 

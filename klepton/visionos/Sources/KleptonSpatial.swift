@@ -131,6 +131,18 @@ enum KleptonSpatial {
         if exposeAnchors, let tracker {
             Task.detached { for await u in tracker.anchorUpdates { handleWorldAnchor(u) } }
         }
+        // Live room: the capture keeps running while the game plays, so the room the game was handed is re-checked about once a
+        // second (kl_spatial.c rate-limits to 2 s, skips when the store did not change, and tells the game when it changed for real).
+        // Only a game that sees the scene is concerned; the guardian's floor is never written by it.
+        if exposeScene && (plane != nil || room != nil || scene != nil) {
+            Task.detached {
+                while !Task.isCancelled {
+                    try? await Task.sleep(nanoseconds: 1_000_000_000)
+                    if Task.isCancelled { break }
+                    _ = kl_ovrp_spatial_live_tick()
+                }
+            }
+        }
     }
 
     // MARK: matrix plumbing

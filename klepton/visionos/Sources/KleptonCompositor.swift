@@ -3171,6 +3171,7 @@ final class KleptonCompositor {
                              originFromHead: originFromHead,
                              writeDepth: visible == 0)
         drawFpsHud(enc, viewIndices: viewIndices, drawable: drawable, originFromHead: originFromHead)
+        drawGuardianScene(enc, viewIndices: viewIndices, drawable: drawable, originFromHead: originFromHead)
         enc.endEncoding()
         // "How many eyes got a picture", which is what the caller counts black
         // frames with — and a panel IS a picture. Without this a guest that
@@ -3178,6 +3179,20 @@ final class KleptonCompositor {
         // its menu correctly, which is an instrument contradicting the display.
         if visible > 0 { return visible }
         return panels > 0 ? viewIndices.count : 0
+    }
+
+    /// The guardian screen's room mesh and floor grid (KleptonGuardianDraw.swift), in this pass after the overlays. Nothing but a flag
+    /// test unless the screen is up (VQGuardianGate). View-projection per view in the pass's order, the same chain as the overlays.
+    private func drawGuardianScene(_ enc: MTLRenderCommandEncoder, viewIndices: [Int],
+                                   drawable: LayerRenderer.Drawable, originFromHead: simd_float4x4) {
+        guard KLGuardianScene.active, let first = viewIndices.first else { KLGuardianScene.releaseIfIdle(); return }
+        let viewProj = viewIndices.map { vi -> simd_float4x4 in
+            let originFromView = originFromHead * Self.headFromView(drawable.views[vi].transform, midpoint: eyeMidpointInDevice)
+            return drawable.computeProjection(viewIndex: vi) * originFromView.inverse
+        }
+        let tex = drawable.colorTextures[drawable.views[first].textureMap.textureIndex]
+        KLGuardianScene.draw(enc, device: device, colorFormat: tex.pixelFormat, amplification: amplification,
+                             depthState: overlayOrderState, viewProj: viewProj)
     }
 
     /// VPKEngine's R8 UI mask of the newest eye pass of `eye`, as a 1-slice 2DArray view the composite shader can

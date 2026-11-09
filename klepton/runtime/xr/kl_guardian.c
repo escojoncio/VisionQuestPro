@@ -83,6 +83,23 @@ float kl_guardian_floor_lower_to(float y) {
     return f;
 }
 
+static int g_grab;
+int kl_guardian_floor_grab(int pressed, float handY, float headY) {
+    pthread_mutex_lock(&g_mu);
+    g_grab = pressed != 0;
+    if (g_grab && isfinite(handY) && isfinite(headY))
+        floor_set_locked(fminf(fmaxf(handY, headY - 2.5f), headY - 0.1524f), KLG_FLOOR_MANUAL);   // up or down; never above head - 0.1524
+    int r = g_grab;
+    pthread_mutex_unlock(&g_mu);
+    return r;
+}
+int kl_guardian_floor_grabbing(void) {
+    pthread_mutex_lock(&g_mu);
+    int r = g_grab;
+    pthread_mutex_unlock(&g_mu);
+    return r;
+}
+
 // ---- largest oriented rectangle inside a polygon ----
 // For each turn (5 degree steps over 90) the polygon is rasterised (even-odd, cell centres) into a bitmap and the largest
 // all-inside block of cells is found with the histogram stack method. Cells are 2 cm up to a 7.6 m room, then bigger (the

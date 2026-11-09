@@ -43,8 +43,11 @@ klepton_tests() {
       tests/spatial_test.c kl_spatial.c kl_guardian.c kl_ovrp_spatial.c -lm -lpthread
   run t_room_build -I.. -I../jni -I../libc -I../gfx -I. -I../media -I../guest -I../diag tests/t_room_build.c kl_guardian.c -lm -lpthread
   run t_guardian -I. tests/t_guardian.c kl_guardian.c -lm -lpthread
+  run t_room_live -I.. -I../jni -I../libc -I../gfx -I. -I../media -I../guest -I../diag tests/t_room_live.c kl_spatial.c kl_guardian.c -lm -lpthread
+  run t_plane_order -I.. -I../jni -I../libc -I../gfx -I. -I../media -I../guest -I../diag tests/t_plane_order.c kl_spatial.c kl_guardian.c -lm -lpthread
   cd "$ROOT/klepton" || return 1
   run t_ptw tests/t_ptw.c runtime/gfx/kl_reproject_ptw.c -lm
+  run t_pt_force -Iruntime/xr tests/t_pt_force.c runtime/xr/kl_passthrough.c
   run t_bg -rdynamic -Iruntime/gfx tests/t_bg.c runtime/gfx/kl_bg.c -lpthread -ldl
   run t_frame_boundary -rdynamic -Iruntime/gfx tests/t_frame_boundary.c runtime/gfx/kl_bg.c -lpthread -ldl
   run t_frame_boundary_nosym -DNO_SYM -rdynamic -Iruntime/gfx tests/t_frame_boundary.c runtime/gfx/kl_bg.c -lpthread -ldl
@@ -98,6 +101,8 @@ klepton_tests() {
   run t_forcequit -Wno-unused-function -I"$T/newt" tests/t_forcequit.c
   awk '/KL-TEST-BEGIN seatoff/{p=1;next} /KL-TEST-END seatoff/{p=0} p' runtime/xr/kl_ovrp.c > "$T/newt/seatoff.inc"
   run t_seat_offset -Wno-unused-function -I"$T/newt" tests/t_seat_offset.c -lm
+  awk '/KL-TEST-BEGIN flooreye/{p=1;next} /KL-TEST-END flooreye/{p=0} p' runtime/xr/kl_ovrp.c > "$T/newt/flooreye.inc"
+  run t_floor_eye -Wno-unused-function -I"$T/newt" tests/t_floor_eye.c -lm
   awk '/KL-TEST-BEGIN ovrpfallback/{p=1;next} /KL-TEST-END ovrpfallback/{p=0} p' runtime/xr/kl_ovrp.c > "$T/newt/ovrpfallback.inc"
   run t_ovrp_fallback -Wno-unused-function -I"$T/newt" tests/t_ovrp_fallback.c
   mkdir -p "$T/vmlog"
@@ -125,6 +130,8 @@ klepton_tests() {
   run t_sp_sum -Wno-unused-function -I"$T/newt" tests/t_sp_sum.c
   awk '/KL-TEST-BEGIN envdepthjob/{p=1;next} /KL-TEST-END envdepthjob/{p=0} p' runtime/xr/kl_envdepth.c > "$T/newt/envdepthjob.inc"
   run t_envdepth_job -Wno-unused-function -I"$T/newt" tests/t_envdepth_job.c
+  awk '/KL-TEST-BEGIN envdepthz/{p=1;next} /KL-TEST-END envdepthz/{p=0} p' runtime/xr/kl_envdepth.c > "$T/newt/envdepthz.inc"
+  run t_envdepth_z -Wno-unused-function -I"$T/newt" tests/t_envdepth_z.c -lm
   run t_quest_profile -I"$ROOT/app/Native" tests/t_quest_profile.c "$ROOT/app/Native/vq_config.c" -ldl
   run t_cache_complete -I"$ROOT/app/Native" tests/t_cache_complete.c "$ROOT/app/Native/vq_config.c" -ldl
   run t_vq_area -I"$ROOT/app/Native" tests/t_vq_area.c "$ROOT/app/Native/vq_config.c" -ldl

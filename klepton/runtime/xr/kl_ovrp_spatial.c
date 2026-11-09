@@ -35,7 +35,10 @@
 
 // Permanent traces, counted against the shared diagnostic budget (kl_ovrp_diag_ok); nothing per frame.
 //   [sp-call] fn=<ovrp_*> n=<k> <key args/outs> ret=<ovrpResult>   the first SP_PER_FN calls of each function, and again at
-//                                                                   the 100th, 1000th and 10000th (outside the budget: 3 lines/fn)
+//                                                                   the 100th, 1000th and 10000th (outside the budget: 3 lines/fn);
+//                                                                   the FIRST call of every function is always written, even once the budget is spent
+//   [sp-label] fn=<LocateSpace|LocateSpace2|GetSpaceSemanticLabels> space=0x.. kind=<KLSP_*> label=<text> y=<pose Y>   the first SP_LABEL_MAX of each (not budgeted)
+//   [sp-sum] ... kids=<planes handed out that the game asked about>/<planes handed out>   (a game that stops at its first OTHER plane shows 1/N)
 //   LocateSpace/LocateSpace2 add: space=0x.. ok=0|1 why=none|space|pose|cached (ok=0 for cached) kind=<KLSP_*> flags=0x.. p=(x,y,z) q=(x,y,z,w) origin=<arg>
 //                                 (why=cached: the plane left the live registry, the last pose given for the handle is returned, flags 0x3)
 //   [sp-loc-bad] space=0x.. kind=<KLSP_*> why=space|pose   the first SP_LOCBAD_MAX distinct handles whose locate failed (outside the budget)
@@ -53,7 +56,7 @@
         int32_t _r = (int32_t)(ret); \
         unsigned _k = __atomic_add_fetch(&_c, 1, __ATOMIC_RELAXED); \
         sp_note(&_s, fn, _r); \
-        if ((_k <= SP_PER_FN && kl_ovrp_diag_ok()) || SP_REPEAT(_k)) sp_emit(fn, _k, _r, __VA_ARGS__); \
+        if ((_k <= SP_PER_FN && kl_ovrp_diag_ok()) || SP_REPEAT(_k) || _k == 1) sp_emit(fn, _k, _r, __VA_ARGS__); \
     } while (0)
 static void sp_emit(const char *fn, unsigned k, int32_t ret, const char *fmt, ...) __attribute__((format(printf, 4, 5)));
 static void sp_emit(const char *fn, unsigned k, int32_t ret, const char *fmt, ...) {
@@ -116,6 +119,8 @@ static void sp_sum_build(double t, const char *const *tok, unsigned n, size_t ma
 }
 // KL-TEST-END spsum
 
+static void kids_counts(unsigned *asked, unsigned *delivered);
+static unsigned g_kids_last_a = ~0u, g_kids_last_d = ~0u;
 static sp_stat *volatile g_sp_reg[SP_SUM_MAXFN];
 static unsigned g_sp_nreg;
 static unsigned g_sp_poll, g_sp_ev[SP_SUM_MAXEV], g_sp_ev_rep[SP_SUM_MAXEV];
@@ -140,8 +145,8 @@ void kl_ovrp_sp_sum_tick_at(uint64_t now_ns) {
     }
     if (now_ns < due || !__atomic_compare_exchange_n(&g_sp_due, &due, now_ns + SP_SUM_EVERY_NS, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
         return;
-    static char tokb[SP_SUM_MAXFN + SP_SUM_MAXEV + 4][56];
-    const char *tok[SP_SUM_MAXFN + SP_SUM_MAXEV + 4];
+    static char tokb[SP_SUM_MAXFN + SP_SUM_MAXEV + 10][56];
+    const char *tok[SP_SUM_MAXFN + SP_SUM_MAXEV + 10];
     static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;  // tokb is shared; the window is already won, this is only the buffer
     pthread_mutex_lock(&mu);
     unsigned n = 0;
@@ -160,6 +165,14 @@ void kl_ovrp_sp_sum_tick_at(uint64_t now_ns) {
         unsigned lc[4], any = 0;
         for (int i = 0; i < 4; i++) { lc[i] = __atomic_exchange_n(&g_sp_loc[i], 0u, __ATOMIC_RELAXED); any |= lc[i]; }
         if (any) for (int i = 0; i < 4; i++) { snprintf(tokb[n], sizeof tokb[n], "%s=%u", nm[i], lc[i]); tok[n] = tokb[n]; n++; }
+    }
+    {
+        unsigned ka, kd;                                           // g_kids_last_*: under mu
+        kids_counts(&ka, &kd);
+        if (kd && (ka != g_kids_last_a || kd != g_kids_last_d)) {
+            g_kids_last_a = ka; g_kids_last_d = kd;
+            snprintf(tokb[n], sizeof tokb[n], "kids=%u/%u", ka, kd); tok[n] = tokb[n]; n++;
+        }
     }
     unsigned evfirst = n;
     for (unsigned t = 0; t < SP_SUM_MAXEV; t++) {
@@ -244,11 +257,40 @@ static uint64_t sp_out(uint64_t a2, uint64_t a3) {                              
     uint64_t o = isptr(a2) ? a2 : (isptr(a3) ? a3 : 0);
     return o ? *(const uint64_t *)(uintptr_t)o : 0;
 }
+// ---- kids: how many of the planes handed out has the game looked at ---------------------------------------------------
+// Planes a query / discovery / container returned (delivered) and planes any per-space call named (asked); handles, distinct, first SP_KIDS_MAX.
+#define SP_KIDS_MAX 512
+static uint64_t g_kd[SP_KIDS_MAX], g_ka[SP_KIDS_MAX];
+static unsigned g_nkd, g_nka;
+static pthread_mutex_t g_kmu = PTHREAD_MUTEX_INITIALIZER;
+static void kids_add(uint64_t *arr, unsigned *n, uint64_t h) {
+    pthread_mutex_lock(&g_kmu);
+    unsigned i = 0;
+    while (i < *n && arr[i] != h) i++;
+    if (i == *n && *n < SP_KIDS_MAX) arr[(*n)++] = h;
+    pthread_mutex_unlock(&g_kmu);
+}
+// asked-and-delivered / delivered
+static void kids_counts(unsigned *asked, unsigned *delivered) {
+    pthread_mutex_lock(&g_kmu);
+    unsigned a = 0;
+    for (unsigned i = 0; i < g_nka; i++) for (unsigned j = 0; j < g_nkd; j++) if (g_ka[i] == g_kd[j]) { a++; break; }
+    *asked = a; *delivered = g_nkd;
+    pthread_mutex_unlock(&g_kmu);
+}
+// Test hook: forget which planes were handed out / asked about.
+void kl_ovrp_sp_kids_reset(void) {
+    pthread_mutex_lock(&g_kmu);
+    g_nkd = g_nka = 0;
+    g_kids_last_a = g_kids_last_d = ~0u;
+    pthread_mutex_unlock(&g_kmu);
+}
 static int space_of(uint64_t arg, kl_uuid *id, int *kind) {
     if (!arg) return 0;
     int k = 0;
     if (!kl_spatial_uuid_for_handle(U(arg), id, &k) || !k) return 0;
     if (kind) *kind = k;
+    if (k == KLSP_PLANE) kids_add(g_ka, &g_nka, U(arg));
     return 1;
 }
 
@@ -662,7 +704,7 @@ static ovrpResult klovrp_EraseSpaces(uint32_t ns, const uint64_t *spaces, uint64
 // ovrp_LocateSpace(ref Posef location, ref UInt64 space, TrackingOrigin). The plan's
 // order (space, origin, out) is accepted too: there the first argument is not a pointer.
 // What one locate did, for the [sp-call] line and the [sp-sum] / [sp-loc-bad] counters. why: 0 none, 1 space, 2 pose, 3 cached.
-typedef struct { uint64_t h, flags; int ok, why, kind; int32_t origin; ovrpPosef p; } sp_loc;
+typedef struct { uint64_t h, flags; int ok, why, kind; int32_t origin; ovrpPosef p; int label; } sp_loc;   // label: KLSP_LBL_* of a located plane, -1 otherwise
 static const char *const sp_why_s[4] = {"none", "space", "pose", "cached"};
 #define SP_LOC_FMT "space=0x%llx ok=%d why=%s kind=%d flags=0x%llx p=(%.2f,%.2f,%.2f) q=(%.3f,%.3f,%.3f,%.3f) origin=%d"
 #define SP_LOC_ARGS(l) ULL((l).h), (l).ok, sp_why_s[(l).why], (l).kind, ULL((l).flags), \
@@ -684,9 +726,17 @@ static void sp_loc_bad(const sp_loc *li) {
     pthread_mutex_unlock(&mu);
     if (fresh) fprintf(stderr, "  [sp-loc-bad] space=0x%llx kind=%d why=%s\n", ULL(li->h), li->kind, sp_why_s[li->why]);
 }
+// The first SP_LABEL_MAX Locate (either) and GetSpaceSemanticLabels calls, one line each with the label as text: which planes the game
+// looks at and in what order (the [sp-call] budget can be spent long before a game gets to them). Not budgeted.
+#define SP_LABEL_MAX 40
+static void sp_label_line(const char *fn, unsigned *cnt, uint64_t h, int kind, const char *label, float y) {
+    if (__atomic_add_fetch(cnt, 1, __ATOMIC_RELAXED) > SP_LABEL_MAX) return;
+    fprintf(stderr, "  [sp-label] fn=%s n=%u space=0x%llx kind=%d label=%s y=%.3f\n", fn, *cnt, ULL(h), kind, label, (double)y);
+}
 static ovrpResult locate(uint64_t a0, uint64_t a1, uint64_t a2, int v2, sp_loc *li) {
     uint64_t out, space;
     memset(li, 0, sizeof *li);
+    li->label = -1;
     if (isptr(a0)) { out = a0; space = a1; li->origin = (int32_t)a2; } else { space = a0; out = a2; li->origin = (int32_t)a1; }
     li->h = sp_h(space);
     if (!out || !space) return KLOVRP_INVALID_PARAM;
@@ -714,6 +764,7 @@ static ovrpResult locate(uint64_t a0, uint64_t a1, uint64_t a2, int v2, sp_loc *
     else *(ovrpPosef *)(uintptr_t)out = p;
     if (kind != KLSP_ANCHOR) lp_put(li->h, &p);           // anchors are not remembered: a destroyed/erased one keeps failing
     li->ok = 1; li->kind = kind; li->p = p;
+    if (kind == KLSP_PLANE) li->label = plane_label(id);
     if (v2) li->flags = loc->flags;
     __atomic_add_fetch(&g_sp_loc[0], 1, __ATOMIC_RELAXED);
     return KLOVRP_SUCCESS;
@@ -722,6 +773,7 @@ static ovrpResult klovrp_LocateSpace(uint64_t a0, uint64_t a1, uint64_t a2) {
     kl_ovrp_hit("ovrp_LocateSpace");
     sp_loc li;
     ovrpResult r = locate(a0, a1, a2, 0, &li);
+    { static unsigned lc; sp_label_line("LocateSpace", &lc, li.h, li.kind, li.label >= 0 ? label_name(li.label) : "-", li.p.Position.y); }
     SPT("ovrp_LocateSpace", r, SP_LOC_FMT, SP_LOC_ARGS(li));
     return r;
 }
@@ -729,6 +781,7 @@ static ovrpResult klovrp_LocateSpace2(uint64_t a0, uint64_t a1, uint64_t a2) {
     kl_ovrp_hit("ovrp_LocateSpace2");
     sp_loc li;
     ovrpResult r = locate(a0, a1, a2, 1, &li);
+    { static unsigned lc; sp_label_line("LocateSpace2", &lc, li.h, li.kind, li.label >= 0 ? label_name(li.label) : "-", li.p.Position.y); }
     SPT("ovrp_LocateSpace2", r, SP_LOC_FMT, SP_LOC_ARGS(li));
     return r;
 }
@@ -867,6 +920,7 @@ static ovrpResult klovrp_SetSpaceComponentStatus(uint64_t space, int32_t type, o
 }
 
 // ---- queries ------------------------------------------------------------------------
+static void room_dump(void);
 #define QRES_MAX 2048
 #define QSLOTS 8
 typedef struct { uint64_t req; uint32_t n; qresult *r; } qslot;
@@ -896,12 +950,18 @@ static int has_any(kl_uuid id, int kind, const int32_t *want, int nw) {
 // (MRUK discovery, no RequestSceneCapture) gets the same room; the child queries by id that follow never rebuild it.
 // A capture builds it even with nothing scanned (the box); a load does not (the game captures or asks again).
 // Returns kl_spatial_synth_room's answer (1 = a synthetic room is there), or 0 when nothing was built.
-static int scene_room_build(void) {
-    float hp[3], hq[4], zw = 3.0f, zd = 3.0f;
+static void scene_room_args(float *hx, float *hz, float *zw, float *zd) {
+    float hp[3], hq[4];
+    *zw = *zd = 3.0f;
     kl_ovrp_get_head_pose(&hp[0], &hp[1], &hp[2], &hq[0], &hq[1], &hq[2], &hq[3]);
     if (!isfinite(hp[0]) || !isfinite(hp[2])) hp[0] = hp[2] = 0.0f;       // a NaN/Inf head would poison the box fit
-    if (!kl_ovrp_boundary(&zw, &zd)) zw = zd = 3.0f;
-    return kl_spatial_synth_room(hp[0], hp[2], zw, zd);
+    if (!kl_ovrp_boundary(zw, zd)) *zw = *zd = 3.0f;
+    *hx = hp[0]; *hz = hp[2];
+}
+static int scene_room_build(void) {
+    float hx, hz, zw, zd;
+    scene_room_args(&hx, &hz, &zw, &zd);
+    return kl_spatial_synth_room(hx, hz, zw, zd);
 }
 // A load refreshes it at most every 2 s: the build walks every scene-mesh vertex, and a game may re-query rooms often.
 static int scene_room_refresh(void) {
@@ -922,6 +982,7 @@ static int wants_room(const int32_t *want, int nw) {
 static void run_query(uint64_t req, int maxn, const kl_uuid *ids, int nids, const int32_t *want, int nw, int32_t location) {
     qresult *r = (qresult *)calloc(QRES_MAX, sizeof(qresult));
     uint32_t n = 0;
+    int saw_room = 0;
     if (maxn <= 0 || maxn > QRES_MAX) maxn = QRES_MAX;
     static const int kinds[4] = {KLSP_ANCHOR, KLSP_ROOM, KLSP_PLANE, KLSP_MESH};
     if (r && IS_LOCAL_LOC(location))
@@ -938,6 +999,8 @@ static void run_query(uint64_t req, int maxn, const kl_uuid *ids, int nids, cons
                     if (nw && !has_any(id, kind, want, nw)) continue;
                 }
                 r[n].space = kl_spatial_handle_for(id); r[n].uuid = id; n++;
+                if (kind == KLSP_PLANE) kids_add(g_kd, &g_nkd, r[n - 1].space);
+                if (kind == KLSP_ROOM) saw_room = 1;
             }
         }
     pthread_mutex_lock(&g_mu);
@@ -945,6 +1008,9 @@ static void run_query(uint64_t req, int maxn, const kl_uuid *ids, int nids, cons
     free(s->r);
     s->req = req; s->n = n; s->r = r;
     pthread_mutex_unlock(&g_mu);
+    // The first time a game is handed a room (a game that never captures, as HLVR: discovery only) say what it is: no budget.
+    static int dumped;
+    if (saw_room && !__atomic_exchange_n(&dumped, 1, __ATOMIC_ACQ_REL)) room_dump();
 }
 static void query_events(uint64_t req) {
     ev_qres a = {req};
@@ -1163,6 +1229,14 @@ SP_IMPL sp_GetSpaceSemanticLabels(uint64_t space, cap_list *out) {
 }
 static ovrpResult klovrp_GetSpaceSemanticLabels(uint64_t space, cap_list *out) {
     ovrpResult r = sp_GetSpaceSemanticLabels(space, out);
+    {
+        static unsigned lc;
+        kl_uuid id; int kind = 0;
+        float y = 0.0f, m[16];
+        int have = space_of(space, &id, &kind);
+        if (have && kind == KLSP_PLANE && pose_of(id, kind, m)) y = m[13];
+        sp_label_line("GetSpaceSemanticLabels", &lc, sp_h(space), kind, have && kind == KLSP_PLANE ? label_name(plane_label(id)) : "-", y);
+    }
     SPT("ovrp_GetSpaceSemanticLabels", r, "space=0x%llx cap=%d count=%d", ULL(sp_h(space)), out ? out->cap : -1, out ? out->count : -1);
     return r;
 }
@@ -1240,6 +1314,7 @@ static ovrpResult klovrp_GetSpaceTriangleMesh(uint64_t space, int32_t vcap, int3
 // ---- scene capture ------------------------------------------------------------------
 // Diagnostics, once per capture: every room as the game reads it (layout floor / ceiling / walls, container members with label,
 // size and polygon points) and the planes an unfiltered query also returns that no room holds. Positions are guest space.
+static int uuid_zero_ok(kl_uuid id) { static const kl_uuid z; return !memcmp(&id, &z, sizeof id); }
 static uint64_t dump_h(kl_uuid id) { static const kl_uuid z; return memcmp(&id, &z, sizeof id) ? kl_spatial_handle_for(id) : 0; }
 static void room_dump(void) {
     enum { MW = 64, MM = 256 };
@@ -1257,6 +1332,13 @@ static void room_dump(void) {
         if (!kl_spatial_get(KLSP_ROOM, r, &id, m) || !kl_spatial_room_info(id, &fl, &ce, MW, w, &nw, MM, mem, &nm)) continue;
         fprintf(stderr, "  [room-dump] room 0x%llx%s floor 0x%llx ceiling 0x%llx walls=%u members=%u at %.2f,%.2f,%.2f\n", ULL(dump_h(id)),
                 kl_spatial_is_synthetic(id) ? " (synthetic)" : "", ULL(dump_h(fl)), ULL(dump_h(ce)), nw, nm, m[12], m[13], m[14]);
+        {   // the three numbers a game's room loader depends on: the floor's and ceiling's size, the floor's Boundary2D, and the layout's walls
+            float fw = 0, fh = 0, cw = 0, ch = 0; uint32_t fpts = 0, cpts = 0;
+            if (!uuid_zero_ok(fl)) kl_spatial_plane_info(fl, &fw, &fh, NULL, 0, NULL, &fpts);
+            if (!uuid_zero_ok(ce)) kl_spatial_plane_info(ce, &cw, &ch, NULL, 0, NULL, &cpts);
+            fprintf(stderr, "  [room-dump] floor %.2fx%.2f boundary2d_pts=%u | ceiling %.2fx%.2f boundary2d_pts=%u | layout wcount=%u (GetSpaceRoomLayout)\n",
+                    (double)fw, (double)fh, fpts, (double)cw, (double)ch, cpts, nw);
+        }
         for (uint32_t k = 0; k < nm && k < MM; k++) {
             float pw = 0, ph = 0; int lbl = KLSP_LBL_OTHER; uint32_t npl = 0, wall = 0;
             kl_spatial_plane_info(mem[k], &pw, &ph, &lbl, 0, NULL, &npl);
@@ -1607,6 +1689,24 @@ static const char *const k_refused[] = {
     NULL,
 };
 
+// The room the game was handed changed (kl_spatial_live_update). The room itself is always rebuilt (the next query sees it); telling the
+// game is OPT-IN, KL_SPATIAL_LIVE_NOTIFY=1, because nothing guarantees a game ignores a space discovery it did not ask for. When on, it
+// learns it the way it learns of any discovery: a discovery with no filter completes (SpaceDiscoveryResultsAvailable 300 +
+// SpaceDiscoveryComplete 301, a fresh request id) and its results include the rebuilt room.
+static void room_changed(void) {
+    const char *e = getenv("KL_SPATIAL_LIVE_NOTIFY");
+    if (!e || strcmp(e, "1")) return;
+    uint64_t req = 0;
+    sp_DiscoverSpaces(NULL, &req);
+}
+// ~1 Hz from the host while a game that sees the scene runs (KleptonSpatial.swift); rate limit and change test are kl_spatial's.
+int kl_ovrp_spatial_live_tick(void) {
+    if (!kl_spatial_available(KLSP_CAP_PLANES) && !kl_spatial_available(KLSP_CAP_MESH) && !kl_spatial_available(KLSP_CAP_ROOM)) return 0;
+    float hx, hz, zw, zd;
+    scene_room_args(&hx, &hz, &zw, &zd);
+    return kl_spatial_live_update(hx, hz, zw, zd);
+}
 void kl_ovrp_spatial_register(void) {
+    kl_spatial_set_room_listener(room_changed);
     kl_ovrp_register(k_tab, sizeof k_tab / sizeof k_tab[0], k_refused);
 }

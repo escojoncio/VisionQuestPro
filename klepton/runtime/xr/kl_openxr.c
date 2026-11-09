@@ -3640,6 +3640,19 @@ static float klxr_stage_origin_y(void) {
 // The guardian's floor is part of the STAGE / LOCAL_FLOOR origin (see klxr_space_pose_ex below): when it moves by more than 1 cm (ARKit finds
 // it, the user adjusts it) the same change-pending event as a recenter is posted for both spaces. kl_guardian_generation rises with
 // every floor or boundary change, so an unchanged generation costs nothing; the first answer is the baseline (no event).
+// [floor] xr: the guardian floor and the floor the guest can derive in each reference space. STAGE / LOCAL_FLOOR carry it as their origin
+// (the guest reads the floor at y = 0 there); LOCAL's origin is the head height at the first measure, so its floor is that much below.
+static void klxr_floor_log(const char *why) {
+    float gy = 0.0f;
+    int src = kl_guardian_get_floor(&gy);
+    float stage = -(float)kl_ovrp_seat_offset_stage() + (src ? gy : 0.0f);
+    float local = (float)__atomic_load_n(&g_xr_local_mm, __ATOMIC_ACQUIRE) / 1000.0f;
+    fprintf(stderr, "  [floor] xr %s: guardian_floor_y=%.3f src=%s confirmed=%s | STAGE/LOCAL_FLOOR origin y=%.3f (floor = y 0 there) "
+                    "LOCAL origin y=%.3f (floor %.3f below it; 0 = head not measured yet)\n",
+            why, (double)gy, src == KLG_FLOOR_MANUAL ? "manual" : src == KLG_FLOOR_AUTO ? "auto" : "none",
+            isnan(kl_guardian_get_user_preferred_floor()) ? "no" : "yes", (double)stage, (double)local,
+            (double)(local > 0.0f ? local - stage : 0.0f));
+}
 static int g_xr_floor_mm = INT_MIN;           // latched guardian floor in mm (0 = none); INT_MIN = no baseline yet
 static uint32_t g_xr_floor_gen = UINT32_MAX;  // guardian generation last looked at
 static void klxr_guardian_floor_watch(void) {
@@ -3649,8 +3662,12 @@ static void klxr_guardian_floor_watch(void) {
     kl_guardian_get_floor(&gy);               // 0 without a floor, as klxr_space_pose_ex uses it
     int mm = (int)lrintf(gy * 1000.0f);
     int cur = __atomic_load_n(&g_xr_floor_mm, __ATOMIC_ACQUIRE);
-    if (cur == INT_MIN) { __atomic_compare_exchange_n(&g_xr_floor_mm, &cur, mm, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE); return; }
+    if (cur == INT_MIN) {
+        if (__atomic_compare_exchange_n(&g_xr_floor_mm, &cur, mm, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) klxr_floor_log("first STAGE/LOCAL_FLOOR pose");
+        return;
+    }
     if (abs(mm - cur) > 10 && __atomic_compare_exchange_n(&g_xr_floor_mm, &cur, mm, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+        klxr_floor_log("floor changed");
         klxr_space_changed(KLXR_REF_SPACE_STAGE, (float)cur / 1000.0f, (float)mm / 1000.0f);
         klxr_space_changed(KLXR_REF_SPACE_LOCAL_FLOOR, (float)cur / 1000.0f, (float)mm / 1000.0f);
     }
@@ -3836,6 +3853,8 @@ static XrResult klxr_CreateReferenceSpace(void *session,
     fprintf(stderr, "  [xr] reference space %s at (%.3f %.3f %.3f)\n",
             klxr_ref_space_name(sp->reference_type),
             sp->offset.position.x, sp->offset.position.y, sp->offset.position.z);
+    if (sp->reference_type == KLXR_REF_SPACE_LOCAL || sp->reference_type == KLXR_REF_SPACE_STAGE ||
+        sp->reference_type == KLXR_REF_SPACE_LOCAL_FLOOR) klxr_floor_log("space created");
     *space = sp;
     return KLXR_SUCCESS;
 }
