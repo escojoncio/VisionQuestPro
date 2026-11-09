@@ -394,6 +394,60 @@ int main(void) {
         kl_guardian_clear();
     }
 
+    // global calibration: the zone stored in a world anchor's frame comes back into this session's guest space (translation + yaw)
+    {
+        const float pi = 3.14159265f;
+        float loc[8] = {-1.5f, -1.0f, 1.5f, -1.0f, 1.5f, 1.0f, -1.5f, 1.0f};      // 3 x 2 m around the anchor, counter-clockwise
+        float out[8], mark[8], bw, bd;
+        double area_in = 0, area_out = 0;
+        for (int k = 0; k < 4; k++) { int j = (k + 1) % 4; area_in += (double)loc[2*k] * loc[2*j+1] - (double)loc[2*j] * loc[2*k+1]; }
+        CK(area_in > 0);
+        // translation only
+        CK(kl_guardian_zone_from_anchor(10.0f, -4.0f, 0.0f, loc, 4, out) == 4);
+        CK(NEAR(out[0], 8.5f, 1e-5f) && NEAR(out[1], -5.0f, 1e-5f) && NEAR(out[4], 11.5f, 1e-5f) && NEAR(out[5], -3.0f, 1e-5f));
+        // a quarter turn: local +x goes to guest -z, local +z to guest +x (guest = a + (cos*lx + sin*lz, -sin*lx + cos*lz))
+        CK(kl_guardian_zone_from_anchor(1.0f, 2.0f, pi / 2, loc, 4, out) == 4);
+        CK(NEAR(out[0], 1.0f - 1.0f, 1e-5f) && NEAR(out[1], 2.0f + 1.5f, 1e-5f));          // (-1.5,-1) -> (a.x-1, a.z+1.5)
+        CK(NEAR(out[2], 0.0f, 1e-5f) && NEAR(out[3], 2.0f - 1.5f, 1e-5f));                 // ( 1.5,-1) -> (a.x-1, a.z-1.5)
+        // any yaw: winding, area and every edge length are kept, and the result is a valid boundary of the same size
+        for (int s = 0; s < 8; s++) {
+            float yaw = -pi + 2 * pi * (float)s / 8 + 0.3f;
+            CK(kl_guardian_zone_from_anchor(-2.5f, 3.5f, yaw, loc, 4, out) == 4);
+            area_out = 0;
+            for (int k = 0; k < 4; k++) { int j = (k + 1) % 4; area_out += (double)out[2*k] * out[2*j+1] - (double)out[2*j] * out[2*k+1]; }
+            CK(area_out > 0 && fabs(area_out - area_in) < 1e-4);
+            CK(NEAR(hypotf(out[2] - out[0], out[3] - out[1]), 3.0f, 1e-4f) && NEAR(hypotf(out[4] - out[2], out[5] - out[3]), 2.0f, 1e-4f));
+            CK(NEAR((out[0] + out[4]) / 2, -2.5f, 1e-4f) && NEAR((out[1] + out[5]) / 2, 3.5f, 1e-4f));    // the anchor stays the centre
+            kl_guardian_clear();
+            CK(kl_guardian_set_boundary(out, 4, KLG_MODE_ROOMSCALE, 0) == 1 && kl_guardian_playspace(&bw, &bd, NULL, NULL, NULL));
+            CK(NEAR(fmaxf(bw, bd), 3.0f, 0.2f) && NEAR(fminf(bw, bd), 2.0f, 0.2f));
+        }
+        // a clockwise zone stays clockwise
+        {
+            float cw[8] = {-1.5f, 1.0f, 1.5f, 1.0f, 1.5f, -1.0f, -1.5f, -1.0f};
+            CK(kl_guardian_zone_from_anchor(0.0f, 0.0f, 1.0f, cw, 4, out) == 4);
+            area_out = 0;
+            for (int k = 0; k < 4; k++) { int j = (k + 1) % 4; area_out += (double)out[2*k] * out[2*j+1] - (double)out[2*j] * out[2*k+1]; }
+            CK(area_out < 0);
+        }
+        // refusals leave out_xz alone: NaN / inf / beyond 1e4 m in the anchor, the yaw or any vertex; n < 3; NULL; over the cap
+        memset(mark, 0x5a, sizeof mark); memcpy(out, mark, sizeof out);
+        float bad[8]; memcpy(bad, loc, sizeof bad); bad[5] = NAN;
+        CK(kl_guardian_zone_from_anchor(0, 0, 0, bad, 4, out) == -1);
+        bad[5] = INFINITY; CK(kl_guardian_zone_from_anchor(0, 0, 0, bad, 4, out) == -1);
+        bad[5] = 2e4f;     CK(kl_guardian_zone_from_anchor(0, 0, 0, bad, 4, out) == -1);
+        CK(kl_guardian_zone_from_anchor(NAN, 0, 0, loc, 4, out) == -1);
+        CK(kl_guardian_zone_from_anchor(0, INFINITY, 0, loc, 4, out) == -1);
+        CK(kl_guardian_zone_from_anchor(0, 0, NAN, loc, 4, out) == -1);
+        CK(kl_guardian_zone_from_anchor(9999.0f, 0, 0, loc, 4, out) == -1);       // a vertex lands beyond 1e4 m
+        CK(kl_guardian_zone_from_anchor(0, 0, 0, loc, 2, out) == -1);
+        CK(kl_guardian_zone_from_anchor(0, 0, 0, loc, 0, out) == -1);
+        CK(kl_guardian_zone_from_anchor(0, 0, 0, loc, KLG_MAX_POINTS + 1, out) == -1);
+        CK(kl_guardian_zone_from_anchor(0, 0, 0, NULL, 4, out) == -1 && kl_guardian_zone_from_anchor(0, 0, 0, loc, 4, NULL) == -1);
+        CK(!memcmp(out, mark, sizeof out));
+        kl_guardian_clear();
+    }
+
     printf(fails ? "t_guardian: %d FAILED\n" : "t_guardian: all passed\n", fails);
     return fails != 0;
 }

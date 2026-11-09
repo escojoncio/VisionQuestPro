@@ -344,6 +344,9 @@ extension KLGuardian {
         }
     }
 
+    /// Forgets a restored rectangle (the global calibration, VQCalibration, replaced the area it stood for).
+    static func dropPendingRect() { pendingRect = nil }
+
     /// Centres a restored rectangle on the head as it is now (call right before the game starts, when the head pose exists).
     static func recenterRestored() {
         guard let r = pendingRect, let h = headPosition() else { return }

@@ -1699,7 +1699,7 @@ final class KleptonCompositor {
             // not started yet. The loop keeps presenting meanwhile (same as while the guest boots); the guest starts when the guardian
             // screen ends, and Cancel closes the space through the engine-quit path (the launcher comes back via immersiveEnded).
             Task { @MainActor [weak self] in
-                let outcome = await VQGuardianGate.run(game: game)
+                let outcome = await VQGuardianGate.launch(game: game)
                 // The space can have ended while the screen was up (VQGuardianGate.cancelAndClose from immersiveEnded): never
                 // start a guest into a closed space.
                 guard !Lifecycle.spaceEnded else {

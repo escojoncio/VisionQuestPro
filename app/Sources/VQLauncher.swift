@@ -369,6 +369,7 @@ struct VQSettingsView: View {
     @State private var password = ""
     @State private var result: String?
     @State private var pickingFolder = false
+    @State private var calibNote: String?
 
     var body: some View {
         NavigationStack {
@@ -399,9 +400,19 @@ struct VQSettingsView: View {
                     Toggle(VQL("Sin conexión (el juego no intenta conectarse)", "Offline (the game does not try to connect)"), isOn: $settings.offline)
                     Toggle(VQL("Guardar el registro del juego en archivo", "Save the game log to a file"), isOn: $settings.guestLog)
                     Toggle(VQL("Definir el guardián antes de cada juego", "Set the guardian before each game"), isOn: $settings.guardianAsk)
-                    Text(VQL("Con el juego aún sin arrancar y la sala ya escaneándose, una ventana deja ajustar el suelo y la zona de juego. Apagado: se usa lo guardado de ese juego o lo automático.",
-                             "With the game not started yet and the room already being scanned, a window lets you adjust the floor and the play area. Off: the game's saved definition or the automatic one is used."))
+                    Text(VQL("Con el juego aún sin arrancar y la sala ya escaneándose, una ventana deja ajustar el suelo y la zona de juego. Apagado: se usa lo guardado de ese juego o lo automático. Con una calibración ya guardada (suelo y zona, la misma para todos los juegos) se aplica sola y la ventana no sale.",
+                             "With the game not started yet and the room already being scanned, a window lets you adjust the floor and the play area. Off: the game's saved definition or the automatic one is used. With a calibration already saved (floor and play area, the same for every game) it is applied by itself and the window does not appear."))
                         .font(.caption)
+                    Button(VQL("Recalibrar espacio", "Recalibrate space")) {
+                        VQCalibration.redo = true
+                        calibNote = VQL("La ventana saldrá en el próximo juego y al confirmar sustituye la calibración.",
+                                        "The window shows on the next game and Confirm replaces the calibration.")
+                    }
+                    Button(VQL("Borrar calibración", "Delete calibration"), role: .destructive) {
+                        Task { await VQCalibration.remove() }
+                        calibNote = VQL("Calibración borrada.", "Calibration deleted.")
+                    }
+                    if let calibNote { Text(calibNote).font(.caption) }
                     Stepper(VQL("Vigilante de arranque: \(Int(settings.watchdogSeconds)) s", "Boot watchdog: \(Int(settings.watchdogSeconds)) s"),
                             value: $settings.watchdogSeconds, in: 30...600, step: 30)
                 }

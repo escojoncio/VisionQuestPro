@@ -390,6 +390,21 @@ int kl_guardian_default_from_room(const float *xz, int n) {
     pthread_mutex_unlock(&g_calc_mu);
     return r;
 }
+int kl_guardian_zone_from_anchor(float ax, float az, float yaw, const float *local_xz, int n, float *out_xz) {
+    if (!local_xz || !out_xz || n < 3 || n > KLG_MAX_POINTS || !isfinite(yaw) || !(fabsf(ax) <= 1e4f) || !(fabsf(az) <= 1e4f)) return -1;
+    float cs = cosf(yaw), sn = sinf(yaw);
+    for (int k = 0; k < n; k++) {            // check every result first so a refusal leaves out_xz alone
+        float lx = local_xz[2 * k], lz = local_xz[2 * k + 1];
+        if (!(fabsf(lx) <= 1e4f) || !(fabsf(lz) <= 1e4f)) return -1;
+        if (!(fabsf(ax + cs * lx + sn * lz) <= 1e4f) || !(fabsf(az - sn * lx + cs * lz) <= 1e4f)) return -1;
+    }
+    for (int k = 0; k < n; k++) {
+        float lx = local_xz[2 * k], lz = local_xz[2 * k + 1];
+        out_xz[2 * k] = ax + cs * lx + sn * lz;
+        out_xz[2 * k + 1] = az - sn * lx + cs * lz;
+    }
+    return n;
+}
 int kl_guardian_configured(void) { pthread_mutex_lock(&g_mu); int c = g_configured; pthread_mutex_unlock(&g_mu); return c; }
 int kl_guardian_boundary_source(void) { pthread_mutex_lock(&g_mu); int c = g_configured ? g_bsrc : 0; pthread_mutex_unlock(&g_mu); return c; }
 int kl_guardian_get_mode(void) { pthread_mutex_lock(&g_mu); int c = g_mode; pthread_mutex_unlock(&g_mu); return c; }

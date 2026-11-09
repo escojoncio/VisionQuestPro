@@ -9,7 +9,8 @@
 // controller's grip (or a hand's pinch without controllers) and sliding it to the real floor, up or down; letting go keeps it.
 // Then the player DRAWS his play area on that floor: the controller's ray against the floor plane, trigger (or pinch without
 // controllers) places a vertex, getting within 0.3 m of the first one or «Cerrar» closes it (kl_guardian_zone_*, which validates and sets the
-// boundary); or he picks «Estacionario», the small circle. The drawn polygon is never saved (the world origin changes every session).
+// boundary); or he picks «Estacionario», the small circle. Confirm stores the floor and the zone as the global calibration, anchored to a
+// WorldAnchor (VQCalibration), which later launches apply by themselves without this screen; the per-game save keeps no polygon.
 
 import GameController
 import SwiftUI
@@ -26,9 +27,17 @@ enum VQGuardianGate {
     /// Closes the guardian window; set by the window while it is up.
     @MainActor static var closeWindow: (() -> Void)?
 
-    /// True when this game stops at the guardian screen (callable from the compositor thread).
+    /// True when this game goes through `launch` before it starts (callable from the compositor thread): the guardian screen is on or a
+    /// redo was asked, or a global calibration (VQCalibration) is waiting to be applied.
     static func applies(to game: VQGame) -> Bool {
-        VQSettings.shared.guardianAsk && !VQConformance.isConformance(game)
+        (VQSettings.shared.guardianAsk || VQCalibration.redo || VQCalibration.exists) && !VQConformance.isConformance(game)
+    }
+
+    /// The global calibration first: when it applies the screen is skipped. Otherwise the screen, if it is on («Definir el guardián antes de
+    /// cada juego») or a redo was asked; with it off and no calibration the game goes on with the game's saved definition or the automatic one.
+    @MainActor static func launch(game: VQGame) async -> Outcome {
+        if await VQCalibration.applyAtLaunch() { return .skipped }
+        return VQSettings.shared.guardianAsk || VQCalibration.redo ? await run(game: game) : .skipped
     }
 
     /// Opens the guardian window and returns when it ends. Without a window to open, or if it never shows, the game goes on
@@ -120,7 +129,7 @@ struct VQGuardianSetupView: View {
         hasSaved = saved
         // Only a saved stationary circle can be reused as it is: a drawn polygon is never saved (and an older rectangle / room is gone).
         let kind = g.flatMap { KLGuardian.savedKind(game: $0) }
-        _redefining = State(initialValue: !saved || kind != "stationary")
+        _redefining = State(initialValue: !saved || kind != "stationary" || VQCalibration.redo)
         let area = VQGameArea.load(key: g?.aaKey ?? "")
         // Drawing needs ARKit's world tracking (the floor plane and the hands live in that world): without it only the circle is possible.
         _choice = State(initialValue: area.seated || kind == "stationary" || KLGuardian.worldTrackingDenied ? .stationary : .draw)
@@ -186,7 +195,7 @@ struct VQGuardianSetupView: View {
             LabeledContent(VQL("Zona", "Area"), value: savedAreaText)
             HStack {
                 Button(VQL("Cancelar", "Cancel"), role: .cancel) { end(.cancelled) }.buttonStyle(.bordered)
-                Button(VQL("Redefinir", "Redefine")) { redefining = true }.buttonStyle(.bordered)
+                Button(VQL("Rehacer calibración", "Redo calibration")) { redefining = true }.buttonStyle(.bordered)
                 Button(VQL("Usar la guardada", "Use the saved one")) { end(.skipped) }.buttonStyle(.borderedProminent)
             }
         }
@@ -446,8 +455,8 @@ struct VQGuardianSetupView: View {
                 Button(VQL("Omitir", "Skip")) { skip() }.buttonStyle(.bordered)
                 Button(VQL("Confirmar", "Confirm")) { confirm() }.buttonStyle(.borderedProminent).disabled(!canConfirm)
             }
-            Text(VQL("Omitir deja la definición automática y no guarda nada. Confirmar la guarda para este juego.",
-                     "Skip keeps the automatic definition and saves nothing. Confirm saves it for this game."))
+            Text(VQL("Omitir deja la definición automática y no guarda nada. Confirmar la guarda como calibración para todos los juegos.",
+                     "Skip keeps the automatic definition and saves nothing. Confirm saves it as the calibration for every game."))
                 .font(.caption)
         }
     }
@@ -475,6 +484,13 @@ struct VQGuardianSetupView: View {
             saved = .stationary(radius: Float(KLG_DEFAULT_RADIUS))
         }
         KLGuardian.save(game: game, area: saved)
+        if result == 1, !noWorld, let fy = KLGuardian.floorY(), let h = head {
+            // The global calibration: the floor and the zone (as drawn) anchored to a WorldAnchor; the redo mark goes once it is stored.
+            let drawn = choice == .draw ? KLGuardian.zone().points : []
+            Task { await VQCalibration.save(zone: drawn, head: h, floorY: fy) }
+        } else if noWorld {
+            VQCalibration.redo = false                   // without world sensing nothing can be anchored: do not ask again every game
+        }
         VQLog.log("Guardián: confirmado (\(choice)) -> \(result), suelo \(floorY.map { String(format: "%.3f", $0) } ?? "-") (\(live.floorSource)), cabeza \(String(format: "%.3f", headY))")
         end(.confirmed)
     }

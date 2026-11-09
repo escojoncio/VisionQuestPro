@@ -76,6 +76,12 @@ int   kl_guardian_zone_get(float *xz, int cap, int *closed);
 // Same as set_boundary(roomscale) for the floor outline of an ARKit room, but only when no user boundary exists and the
 // outline fits a 1.15 m rectangle (else nothing changes). Returns 1 when stored.
 int   kl_guardian_default_from_room(const float *xz, int n);
+// Global calibration (anchored to an ARKit WorldAnchor): the zone's vertices stored in the anchor's frame (x,z pairs in metres,
+// y = floor) to the GUEST space of this session, for an anchor at (ax, az) turned by yaw (about +Y, the anchor's own rotation:
+// guest = a + (cos*lx + sin*lz, -sin*lx + cos*lz), i.e. yaw = atan2(col2.x, col2.z) of its transform). Rigid: winding (CCW stays CCW) and
+// area are kept. Returns n and fills out_xz (2n floats); -1 (out_xz untouched) when a pointer is NULL, n < 3 or > KLG_MAX_POINTS, or an
+// input or result is not finite / beyond 1e4 m. out_xz must not overlap local_xz.
+int   kl_guardian_zone_from_anchor(float ax, float az, float yaw, const float *local_xz, int n, float *out_xz);
 int   kl_guardian_configured(void);
 int   kl_guardian_boundary_source(void);
 int   kl_guardian_get_mode(void);
