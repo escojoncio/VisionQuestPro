@@ -595,6 +595,10 @@ final class KleptonCompositor {
     // Link -> SteamVR) snaps to the new forward coherently. Set by holding the
     // right Sense Options button >= 1 s (KleptonControllers).
     nonisolated(unsafe) static var pendingRecenter = false
+    /// True once a recenter was folded into recenterXform (mirror of the instance state, for VQCalibration).
+    nonisolated(unsafe) static var recenterApplied = false
+    /// A recenter is pending or applied: guest XZ/yaw no longer match the ARKit origin, so the calibration neither saves nor applies.
+    static var recenterActive: Bool { pendingRecenter || recenterApplied }
     private var recenterXform = matrix_identity_float4x4
     private var cmdCommitted = 0
     private var capGuestFrames = 0
@@ -1834,6 +1838,8 @@ final class KleptonCompositor {
         // lifecycle report, and belongs to the guest's end of the run rather than
         // to this one — has been written before this returns.
         if syncGuest { kl_app_lifecycle_report() } else { kl_app_guest_stop() }
+        Self.headAtTracker = nil          // the provider of this (finished) session must not outlive it
+        Self.recenterApplied = false      // recenterXform dies with this compositor
         // VisionQuestPro: the space is gone — bring the launcher back (or exit).
         Task { @MainActor in Lifecycle.immersiveEnded() }
     }
@@ -2266,6 +2272,7 @@ final class KleptonCompositor {
                 simd_float4( sy, 0,  cy, 0),
                 simd_float4( px, 0,  pz, 1))
             recenterXform = m.inverse * recenterXform
+            Self.recenterApplied = !simd_equal(recenterXform, matrix_identity_float4x4)
             NSLog("[cp] RECENTER: yaw %.1f deg, pos (%.2f, %.2f) folded into the origin",
                   yaw * 180 / .pi, px, pz)
         }

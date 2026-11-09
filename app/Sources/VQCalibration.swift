@@ -52,6 +52,7 @@ enum VQCalibration {
 
     /// Anchors a calibration on the confirmed floor and stores it, replacing the previous one. `zone` empty = stationary (centred on `head`).
     static func save(zone: [SIMD2<Float>], head: SIMD3<Float>, floorY: Float) async {
+        if KleptonCompositor.recenterActive { VQLog.log("[calib] skipped reason=recentered"); return }
         guard !KLGuardian.worldTrackingDenied, let tracker = KleptonCompositor.headAtTracker else {
             VQLog.log("[calib] not saved reason=no-world-tracking")
             return
@@ -111,6 +112,7 @@ enum VQCalibration {
     /// false (reason logged) when there is none, a redo was asked, or the anchor was not found tracked in time.
     static func applyAtLaunch() async -> Bool {
         if redo { VQLog.log("[calib] anchor not found reason=redo requested"); return false }
+        if KleptonCompositor.recenterActive { VQLog.log("[calib] skipped reason=recentered"); return false }
         guard let c = load() else { VQLog.log("[calib] anchor not found reason=no calibration saved"); return false }
         // ARKit starts in parallel with the render loop: wait (at most 6 s) for the tracker to run, then 3 s for the anchor to be tracked.
         var tracker: WorldTrackingProvider?
@@ -122,14 +124,15 @@ enum VQCalibration {
         guard let tracker else { VQLog.log("[calib] anchor not found reason=tracker not running in 6 s"); return false }
         let found = Found()
         let id = c.anchorID
-        Task.detached {
+        let finder = Task.detached {
             for await u in tracker.anchorUpdates {
-                if found.isStopped { break }
+                if found.isStopped || Task.isCancelled { break }
                 if u.anchor.id == id, u.event != .removed, u.anchor.isTracked { found.set(u.anchor.originFromAnchorTransform); break }
             }
         }
         for _ in 0..<60 where found.value == nil { try? await Task.sleep(nanoseconds: 50_000_000) }
         found.stop()
+        finder.cancel()                          // ends the loop (and releases the tracker) if the stream honours cancellation
         await removeAnchors([])                  // retry the orphans now that the tracker runs
         guard let m = found.value else { VQLog.log("[calib] anchor not found reason=not tracked in 3 s anchor=\(id)"); return false }
         let ax = m.columns.3.x, ay = m.columns.3.y, az = m.columns.3.z
