@@ -17,8 +17,8 @@
 //    kl_ovrp_push_event, visible only from the NEXT ovrp_PollEvent2.
 //  * Event layouts are the natural C layout of the OVRPlugin.cs structs
 //    (EventDataSpatialAnchorCreateComplete {u64 requestId; i32 result; u64 space;
-//    uuid}, ...). The ovrpEventType numbers are the OVRPlugin.cs values as
-//    recalled; the Discovery ones are a GUESS (marked below).
+//    uuid}, ...). The ovrpEventType numbers are the OVRPlugin.cs (EventType) values;
+//    discovery / SaveSpaces / EraseSpaces = 300..303 (Meta XR Core SDK v77 OVRPlugin.cs).
 #include "kl_ovrp_priv.h"
 #include "kl_spatial.h"
 #include "kl_envdepth.h"
@@ -220,9 +220,10 @@ enum {
     EV_ERASE_COMPLETE  = 54,
     EV_LIST_SAVE       = 57,
     EV_SCENE_CAPTURE   = 100,
-    // UNVERIFIED guesses (XR_META_spatial_entity_discovery has no ovrp header here).
-    EV_DISC_RESULTS    = 104,
-    EV_DISC_COMPLETE   = 105,
+    EV_DISC_RESULTS    = 300,     // SpaceDiscoveryResultsAvailable {u64 requestId}
+    EV_DISC_COMPLETE   = 301,     // SpaceDiscoveryComplete {u64 requestId; i32 result}
+    EV_SPACES_SAVE     = 302,     // SpacesSaveResult {u64 requestId; i32 result} (ovrp_SaveSpaces)
+    EV_SPACES_ERASE    = 303,     // SpacesEraseResult {u64 requestId; i32 result} (ovrp_EraseSpaces)
 };
 enum {
     C_LOCATABLE = 0, C_STORABLE = 1, C_SHARABLE = 2, C_BOUNDED2D = 3, C_BOUNDED3D = 4,
@@ -395,7 +396,7 @@ static float volume_depth(int label, const float *plane_m) {
 }
 
 // ---- pending async requests ----------------------------------------------------
-enum { P_CREATE = 1, P_ERASE = 2 };
+enum { P_CREATE = 1, P_ERASE = 2, P_ERASES = 3 };
 typedef struct { uint64_t req; int kind; int32_t location; } fpend;
 static fpend g_pend[64];
 static unsigned g_npend;
@@ -423,6 +424,10 @@ static void on_done(uint64_t req, int ok, kl_uuid id) {
         e.requestId = req; e.result = ok ? KLOVRP_SUCCESS : KLOVRP_OPERATION_FAILED;
         if (ok) { e.space = kl_spatial_handle_for(id); e.uuid = id; }
         push(EV_ANCHOR_CREATE, &e, sizeof e);
+    } else if (p.kind == P_ERASES) {
+        ev_simple e; memset(&e, 0, sizeof e);
+        e.requestId = req; e.result = ok ? KLOVRP_SUCCESS : KLOVRP_OPERATION_FAILED;
+        push(EV_SPACES_ERASE, &e, sizeof e);
     } else {
         ev_erase e; memset(&e, 0, sizeof e);
         e.requestId = req; e.result = ok ? KLOVRP_SUCCESS : KLOVRP_OPERATION_FAILED; e.uuid = id; e.location = p.location;
@@ -530,7 +535,8 @@ static ovrpResult klovrp_SaveSpace(uint64_t space, int32_t location, int32_t mod
     SPT("ovrp_SaveSpace", r, "space=0x%llx loc=%d mode=%d req=%llu", ULL(sp_h(space)), location, mode, ULL(req_out ? *req_out : 0));
     return r;
 }
-static ovrpResult save_list(const uint64_t *spaces, uint32_t n, int32_t location, uint64_t *req_out) {
+// One completion: SpaceListSaveResult (57) for ovrp_SaveSpaceList, SpacesSaveResult (302) for ovrp_SaveSpaces; both {requestId, result}.
+static ovrpResult save_list(const uint64_t *spaces, uint32_t n, int32_t location, uint64_t *req_out, int ev_type) {
     if (!spaces || !req_out || n > 1024) return KLOVRP_INVALID_PARAM;
     *req_out = 0;
     uint64_t req = kl_spatial_new_request();
@@ -541,14 +547,14 @@ static ovrpResult save_list(const uint64_t *spaces, uint32_t n, int32_t location
     }
     ev_simple e; memset(&e, 0, sizeof e);
     e.requestId = req; e.result = ok ? KLOVRP_SUCCESS : KLOVRP_UNSUPPORTED;
-    push(EV_LIST_SAVE, &e, sizeof e);
+    push(ev_type, &e, sizeof e);
     *req_out = req;
     return KLOVRP_SUCCESS;
 }
 // ovrp_SaveSpaceList(spaces*, n, location, out requestId)
 SP_IMPL sp_SaveSpaceList(const uint64_t *spaces, uint32_t n, int32_t location, uint64_t *req_out) {
     kl_ovrp_hit("ovrp_SaveSpaceList");
-    return save_list(spaces, n, location, req_out);
+    return save_list(spaces, n, location, req_out, EV_LIST_SAVE);
 }
 static ovrpResult klovrp_SaveSpaceList(const uint64_t *spaces, uint32_t n, int32_t location, uint64_t *req_out) {
     ovrpResult r = sp_SaveSpaceList(spaces, n, location, req_out);
@@ -563,7 +569,7 @@ SP_IMPL sp_SaveSpaces(uint32_t n, const uint64_t *spaces, uint64_t a2, uint64_t 
     // location (a stray a3 that looks like a pointer must not be written).
     uint64_t *out = isptr(a2) ? (uint64_t *)(uintptr_t)a2 : (isptr(a3) ? (uint64_t *)(uintptr_t)a3 : NULL);
     int32_t loc = isptr(a2) ? STORAGE_LOCAL : (int32_t)a2;
-    return save_list(spaces, n, loc, out);
+    return save_list(spaces, n, loc, out, EV_SPACES_SAVE);
 }
 static ovrpResult klovrp_SaveSpaces(uint32_t n, const uint64_t *spaces, uint64_t a2, uint64_t a3) {
     ovrpResult r = sp_SaveSpaces(n, spaces, a2, a3);
@@ -571,20 +577,29 @@ static ovrpResult klovrp_SaveSpaces(uint32_t n, const uint64_t *spaces, uint64_t
     return r;
 }
 
-static ovrpResult erase_one(kl_uuid id, int kind, int32_t location, uint64_t req) {
+// The completion of ovrp_EraseSpace is SpaceEraseComplete (54, ev_erase); of ovrp_EraseSpaces (spaces = 1),
+// SpacesEraseResult (303, {requestId, result}).
+static void erase_event(uint64_t req, int32_t result, kl_uuid id, int32_t location, int spaces) {
+    if (spaces) {
+        ev_simple e; memset(&e, 0, sizeof e);
+        e.requestId = req; e.result = result;
+        push(EV_SPACES_ERASE, &e, sizeof e);
+        return;
+    }
+    ev_erase e; memset(&e, 0, sizeof e);
+    e.requestId = req; e.result = result; e.uuid = id; e.location = location;
+    push(EV_ERASE_COMPLETE, &e, sizeof e);
+}
+static ovrpResult erase_one(kl_uuid id, int kind, int32_t location, uint64_t req, int spaces) {
     ensure_listener();
     if (kind != KLSP_ANCHOR || !IS_LOCAL_LOC(location)) {
-        ev_erase e; memset(&e, 0, sizeof e);
-        e.requestId = req; e.result = KLOVRP_UNSUPPORTED; e.uuid = id; e.location = location;
-        push(EV_ERASE_COMPLETE, &e, sizeof e);
+        erase_event(req, KLOVRP_UNSUPPORTED, id, location, spaces);
         return KLOVRP_SUCCESS;
     }
-    pend_add(req, P_ERASE, location);
+    pend_add(req, spaces ? P_ERASES : P_ERASE, location);
     if (kl_spatial_remove_anchor(req, id) != 0) {
         fpend p; pend_take(req, &p);
-        ev_erase e; memset(&e, 0, sizeof e);
-        e.requestId = req; e.result = KLOVRP_OPERATION_FAILED; e.uuid = id; e.location = location;
-        push(EV_ERASE_COMPLETE, &e, sizeof e);
+        erase_event(req, KLOVRP_OPERATION_FAILED, id, location, spaces);
     }
     return KLOVRP_SUCCESS;
 }
@@ -598,7 +613,7 @@ SP_IMPL sp_EraseSpace(uint64_t space, int32_t location, uint64_t *req_out) {
     uint64_t req = kl_spatial_new_request();
     *req_out = req;
     cs_clear(kl_spatial_handle_for(id));
-    return erase_one(id, kind, location, req);
+    return erase_one(id, kind, location, req, 0);
 }
 static ovrpResult klovrp_EraseSpace(uint64_t space, int32_t location, uint64_t *req_out) {
     ovrpResult r = sp_EraseSpace(space, location, req_out);
@@ -635,7 +650,7 @@ SP_IMPL sp_EraseSpaces(uint32_t ns, const uint64_t *spaces, uint64_t a2, uint64_
         if (memcmp(uu[i].b, first.b, 16) && kl_spatial_kind_of(uu[i]) == KLSP_ANCHOR)
             (void)kl_spatial_remove_anchor(kl_spatial_new_request(), uu[i]);
     *out = req;
-    return erase_one(first, kind, loc, req);
+    return erase_one(first, kind, loc, req, 1);
 }
 static ovrpResult klovrp_EraseSpaces(uint32_t ns, const uint64_t *spaces, uint64_t a2, uint64_t a3, uint64_t a4) {
     ovrpResult r = sp_EraseSpaces(ns, spaces, a2, a3, a4);
@@ -870,9 +885,38 @@ static int in_ids(kl_uuid id, const kl_uuid *ids, int n) {
     for (int i = 0; i < n; i++) if (!memcmp(ids[i].b, id.b, 16)) return 1;
     return 0;
 }
-static int has_all(kl_uuid id, int kind, const int32_t *want, int nw) {
-    for (int i = 0; i < nw; i++) if (!comp_supported(id, kind, want[i])) return 0;
-    return 1;
+// Component filters are OR (OVRAnchor.FetchOptions.ComponentTypes: "all anchors that support any of those types").
+static int has_any(kl_uuid id, int kind, const int32_t *want, int nw) {
+    for (int i = 0; i < nw; i++) if (comp_supported(id, kind, want[i])) return 1;
+    return 0;
+}
+// Quest's Space Setup always ends with a CLOSED room: without a real room or a complete real set, a synthetic one (size of
+// the play area, around the head) completes what ARKit measured. Built at every scene capture and at the start of every
+// scene load (a room-level query: RoomLayout asked, or a discovery without filters) -- a game that only loads the scene
+// (MRUK discovery, no RequestSceneCapture) gets the same room; the child queries by id that follow never rebuild it.
+// A capture builds it even with nothing scanned (the box); a load does not (the game captures or asks again).
+// Returns kl_spatial_synth_room's answer (1 = a synthetic room is there), or 0 when nothing was built.
+static int scene_room_build(void) {
+    float hp[3], hq[4], zw = 3.0f, zd = 3.0f;
+    kl_ovrp_get_head_pose(&hp[0], &hp[1], &hp[2], &hq[0], &hq[1], &hq[2], &hq[3]);
+    if (!isfinite(hp[0]) || !isfinite(hp[2])) hp[0] = hp[2] = 0.0f;       // a NaN/Inf head would poison the box fit
+    if (!kl_ovrp_boundary(&zw, &zd)) zw = zd = 3.0f;
+    return kl_spatial_synth_room(hp[0], hp[2], zw, zd);
+}
+// A load refreshes it at most every 2 s: the build walks every scene-mesh vertex, and a game may re-query rooms often.
+static int scene_room_refresh(void) {
+    static uint64_t last_ns;
+    if (!kl_spatial_count(KLSP_PLANE) && !kl_spatial_count(KLSP_ROOM)) return 0;
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    uint64_t now = (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec, prev = __atomic_load_n(&last_ns, __ATOMIC_RELAXED);
+    if (prev && now - prev < 2000000000ull) return 0;
+    __atomic_store_n(&last_ns, now, __ATOMIC_RELAXED);
+    return scene_room_build();
+}
+static int wants_room(const int32_t *want, int nw) {
+    for (int i = 0; i < nw; i++) if (want[i] == C_ROOMLAYOUT) return 1;
+    return 0;
 }
 // Runs a query on the snapshot; stores the result under `req`. ids/want may be NULL.
 static void run_query(uint64_t req, int maxn, const kl_uuid *ids, int nids, const int32_t *want, int nw, int32_t location) {
@@ -887,11 +931,11 @@ static void run_query(uint64_t req, int maxn, const kl_uuid *ids, int nids, cons
             for (uint32_t i = 0; i < cnt && n < (uint32_t)maxn; i++) {
                 kl_uuid id;
                 if (!kl_spatial_get(kind, i, &id, NULL)) continue;
-                if (nids) { if (!in_ids(id, ids, nids)) continue; }
+                if (nids) { if (!in_ids(id, ids, nids) || (nw && !has_any(id, kind, want, nw))) continue; }
                 else {
-                    if (kind == KLSP_MESH && !(nw && has_all(id, kind, want, nw))) continue;   // meshes only when asked for
+                    if (kind == KLSP_MESH && !(nw && has_any(id, kind, want, nw))) continue;   // meshes only when asked for
                     if (kind == KLSP_ANCHOR && !kl_spatial_anchor_saved(id)) continue;          // storage queries see saved anchors
-                    if (nw && !has_all(id, kind, want, nw)) continue;
+                    if (nw && !has_any(id, kind, want, nw)) continue;
                 }
                 r[n].space = kl_spatial_handle_for(id); r[n].uuid = id; n++;
             }
@@ -918,6 +962,7 @@ SP_IMPL sp_QuerySpaces(const qinfo *q, uint64_t *req_out) {
     const kl_uuid *ids = NULL; int nids = 0; const int32_t *want = NULL; int nw = 0;
     if (q->FilterType == FILTER_IDS && q->NumIds > 0 && q->NumIds <= QINFO_MAX_IDS) { ids = q->Ids; nids = q->NumIds; }
     else if (q->FilterType == FILTER_COMPONENTS && q->NumComponents > 0 && q->NumComponents <= QINFO_MAX_COMPS) { want = q->Components; nw = q->NumComponents; }
+    if (wants_room(want, nw)) scene_room_refresh();
     uint64_t req = kl_spatial_new_request();
     run_query(req, q->MaxQuerySpaces, ids, nids, want, nw, q->Location);
     *req_out = req;
@@ -963,6 +1008,7 @@ SP_IMPL sp_QuerySpaces2(const qinfo2 *q, uint64_t *req_out) {
         else if (f->type == FILTER_COMPONENTS && plausible_array(f->items, f->count)) { want = (const int32_t *)f->items; nw = f->count; }
         else ONCE("QuerySpaces2: unrecognised filter layout, answering with everything");
     }
+    if (wants_room(want, nw)) scene_room_refresh();
     uint64_t req = kl_spatial_new_request();
     run_query(req, q->MaxQuerySpaces, ids, nids, want, nw, q->Location);
     *req_out = req;
@@ -1002,30 +1048,55 @@ static ovrpResult klovrp_RetrieveSpaceQueryResults(uint64_t req, int32_t cap, in
     SPT("ovrp_RetrieveSpaceQueryResults", r, "req=%llu cap=%d count=%d", ULL(U(req)), cap, count ? *count : -1);
     return r;
 }
-// Discovery (XR_META_spatial_entity_discovery): same store, filters ignored.
+// Discovery (XR_META_spatial_entity_discovery, OVRAnchor.FetchAnchorsAsync): the same store and query.
 // ovrp_DiscoverSpaces(in SpaceDiscoveryInfo {uint NumFilters; Header** Filters}, out ulong requestId): two arguments (a
 // third one read as the out pointer is a stray register: the guest never got its id, and 8 bytes went to a wild address).
+// Filters (OVRPlugin.cs): Header {int Type}; Component {Type 3, int Component}; Ids {Type 2, int NumIds, Guid *Ids}.
+// Component filters are OR (any of them: OVRAnchor.FetchOptions.ComponentTypes); with an Ids filter the two combine as AND
+// (an id in the list AND any of the components; unverified against the SDK); Ids with NumIds 0 matches nothing.
 typedef struct { uint32_t n; uint32_t _p; const void *const *filters; } dinfo;
+typedef struct { int32_t type, n; const kl_uuid *ids; } dfilter_ids;
+#define DFILTER_IDS 2
+#define DFILTER_COMPONENT 3
+typedef struct { int nw, nids, empty; int32_t want[QINFO_MAX_COMPS]; const kl_uuid *ids; } dfilters;
+static void disc_filters(const dinfo *info, dfilters *f) {
+    memset(f, 0, sizeof *f);
+    if (!info || !info->n || !isptr((uint64_t)(uintptr_t)info->filters)) return;
+    for (uint32_t i = 0; i < info->n && i < 64; i++) {
+        const int32_t *h = (const int32_t *)info->filters[i];
+        if (!isptr((uint64_t)(uintptr_t)h)) continue;
+        if (h[0] == DFILTER_COMPONENT && f->nw < QINFO_MAX_COMPS) f->want[f->nw++] = h[1];
+        else if (h[0] == DFILTER_IDS) {
+            const dfilter_ids *d = (const dfilter_ids *)h;
+            if (plausible_array(d->ids, d->n)) { f->ids = d->ids; f->nids = d->n; }
+            else f->empty = 1;
+        }
+    }
+}
 SP_IMPL sp_DiscoverSpaces(const dinfo *info, uint64_t *req_out) {
     kl_ovrp_hit("ovrp_DiscoverSpaces");
-    (void)info;
     if (!req_out) return KLOVRP_INVALID_PARAM;
     *req_out = 0;
+    dfilters f;
+    disc_filters(info, &f);
+    if (!f.nids && !f.empty && (!f.nw || wants_room(f.want, f.nw))) scene_room_refresh();
     uint64_t req = kl_spatial_new_request();
-    run_query(req, QRES_MAX, NULL, 0, NULL, 0, STORAGE_LOCAL);
+    // empty: an Ids filter with no ids; location 2 (cloud) is the store's "nothing" answer
+    run_query(req, QRES_MAX, f.ids, f.nids, f.want, f.nw, f.empty ? 2 : STORAGE_LOCAL);
     *req_out = req;
     ev_qres a = {req};
     push(EV_DISC_RESULTS, &a, sizeof a);
     ev_qdone b; memset(&b, 0, sizeof b);
     b.requestId = req; b.result = KLOVRP_SUCCESS;
     push(EV_DISC_COMPLETE, &b, sizeof b);
-    ONCE("DiscoverSpaces: event type numbers are unverified guesses");
     return KLOVRP_SUCCESS;
 }
 static ovrpResult klovrp_DiscoverSpaces(const dinfo *info, uint64_t *req_out) {
     ovrpResult r = sp_DiscoverSpaces(info, req_out);
-    SPT("ovrp_DiscoverSpaces", r, "filters=%d req=%llu results=%d", info ? (int)info->n : -1, ULL(req_out ? *req_out : 0),
-        req_out ? sp_qcount(*req_out) : -1);
+    dfilters f;
+    disc_filters(info, &f);
+    SPT("ovrp_DiscoverSpaces", r, "filters=%d comps=%d comp0=%d ids=%d%s req=%llu results=%d", info ? (int)info->n : -1, f.nw,
+        f.nw ? (int)f.want[0] : -1, f.nids, f.empty ? " (empty ids)" : "", ULL(req_out ? *req_out : 0), req_out ? sp_qcount(*req_out) : -1);
     return r;
 }
 // ovrp_RetrieveSpaceDiscoveryResults(ulong requestId, ref SpaceDiscoveryResults): capacity 0 / no array asks the count.
@@ -1174,11 +1245,18 @@ static void room_dump(void) {
     enum { MW = 64, MM = 256 };
     kl_uuid w[MW], mem[MM];                        // ~5 KB of the capture thread's 128 KB stack
     uint32_t nr = kl_spatial_count(KLSP_ROOM), np = kl_spatial_count(KLSP_PLANE), inroom = 0;
+    {   // where the player and the play area are, in the same guest space as the room
+        float hp[3], hq[4], zw = 0, zd = 0, oy = kl_ovrp_guest_origin_y();
+        kl_ovrp_get_head_pose(&hp[0], &hp[1], &hp[2], &hq[0], &hq[1], &hq[2], &hq[3]);
+        int b = kl_ovrp_boundary(&zw, &zd);
+        fprintf(stderr, "  [room-dump] head=(%.2f,%.2f,%.2f) guest_origin_y=%.2f boundary=%s%.2fx%.2f (centred on the origin)\n",
+                hp[0], hp[1] - oy, hp[2], oy, b ? "" : "none ", zw, zd);
+    }
     for (uint32_t r = 0; r < nr && r < 4; r++) {
         kl_uuid id, fl, ce; float m[16]; uint32_t nw = 0, nm = 0;
         if (!kl_spatial_get(KLSP_ROOM, r, &id, m) || !kl_spatial_room_info(id, &fl, &ce, MW, w, &nw, MM, mem, &nm)) continue;
-        fprintf(stderr, "  [room-dump] room 0x%llx%s floor 0x%llx ceiling 0x%llx walls=%u members=%u\n", ULL(dump_h(id)),
-                kl_spatial_is_synthetic(id) ? " (synthetic)" : "", ULL(dump_h(fl)), ULL(dump_h(ce)), nw, nm);
+        fprintf(stderr, "  [room-dump] room 0x%llx%s floor 0x%llx ceiling 0x%llx walls=%u members=%u at %.2f,%.2f,%.2f\n", ULL(dump_h(id)),
+                kl_spatial_is_synthetic(id) ? " (synthetic)" : "", ULL(dump_h(fl)), ULL(dump_h(ce)), nw, nm, m[12], m[13], m[14]);
         for (uint32_t k = 0; k < nm && k < MM; k++) {
             float pw = 0, ph = 0; int lbl = KLSP_LBL_OTHER; uint32_t npl = 0, wall = 0;
             kl_spatial_plane_info(mem[k], &pw, &ph, &lbl, 0, NULL, &npl);
@@ -1217,15 +1295,8 @@ static void *capture_thread(void *arg) {
     if (kl_spatial_count(KLSP_PLANE) > 0) usleep(settle_ms * 1000);
     // Quest's Space Setup always ends with a CLOSED room: without a real room or a complete real set, hand out a synthetic
     // box (size of the play area) around the head, completing any partial walls.
-    int synth;
-    {
-        float hp[3], hq[4], zw = 3.0f, zd = 3.0f;
-        kl_ovrp_get_head_pose(&hp[0], &hp[1], &hp[2], &hq[0], &hq[1], &hq[2], &hq[3]);
-        if (!isfinite(hp[0]) || !isfinite(hp[2])) hp[0] = hp[2] = 0.0f;       // a NaN/Inf head would poison the box fit
-        if (!kl_ovrp_boundary(&zw, &zd)) zw = zd = 3.0f;
-        synth = kl_spatial_synth_room(hp[0], hp[2], zw, zd);
-        if (synth) fprintf(stderr, "  [sp] capture synthetic room\n");
-    }
+    int synth = scene_room_build();
+    if (synth) fprintf(stderr, "  [sp] capture synthetic room\n");
     ev_simple e; memset(&e, 0, sizeof e);
     e.requestId = req;
     e.result = (synth || kl_spatial_available(KLSP_CAP_PLANES) || kl_spatial_available(KLSP_CAP_ROOM) || kl_spatial_count(KLSP_PLANE))
@@ -1256,9 +1327,15 @@ SP_IMPL sp_RequestSceneCapture(const void *request, uint64_t *req_out) {
     *req_out = req;
     return KLOVRP_SUCCESS;
 }
+// The request (OVRPlugin SceneCaptureRequestInternal {int requestByteCount; LPStr request}) names what the game wants
+// the scan to contain (OVRSceneManager / MRUK: semantic labels); logged as given, it is not acted on.
+typedef struct { int32_t n; int32_t _p; const char *s; } capreq;
 static ovrpResult klovrp_RequestSceneCapture(const void *request, uint64_t *req_out) {
     ovrpResult r = sp_RequestSceneCapture(request, req_out);
-    SPT("ovrp_RequestSceneCapture", r, "req=%llu", ULL(req_out ? *req_out : 0));
+    const capreq *q = isptr((uint64_t)(uintptr_t)request) ? (const capreq *)request : NULL;
+    int n = q && q->n > 0 && isptr((uint64_t)(uintptr_t)q->s) ? (q->n < 160 ? q->n : 160) : 0;
+    SPT("ovrp_RequestSceneCapture", r, "req=%llu request_bytes=%d request=\"%.*s\"", ULL(req_out ? *req_out : 0),
+        q ? (int)q->n : -1, n, n ? q->s : "");
     return r;
 }
 

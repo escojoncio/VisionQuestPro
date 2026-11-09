@@ -44,5 +44,11 @@ int main(void) {
     CHECK(kled_done_action(0, 1, 1, 1) == KLED_DONE_FREE_LOST, "timed-out job, nothing in flight, slot S_LOST: slot freed");
     CHECK(kled_done_action(1, 1, 2, 0) == KLED_DONE_IGNORE, "old job, slot reused (not S_LOST): left alone");
     CHECK(kled_done_action(0, 1, 2, 0) == KLED_DONE_IGNORE, "old job, nothing in flight, slot not S_LOST: left alone");
+
+    // supported(): announced while ARKit's answer is pending, then only if the scene mesh really runs.
+    CHECK(kled_supported(0, 1, 0) == 1, "scene wanted, authorisation pending: announced");
+    CHECK(kled_supported(0, 1, 1) == 0, "scene wanted, world sensing denied / no mesh provider: not announced");
+    CHECK(kled_supported(1, 1, 1) == 1, "mesh provider running: announced");
+    CHECK(kled_supported(0, 0, 0) == 0, "scene not wanted, nothing running: not announced");
     return fails ? 1 : (printf("t_envdepth_job ok\n"), 0);
 }

@@ -56,6 +56,7 @@ uint64_t kl_spatial_handle_for(kl_uuid id);   // ovrpSpace == internal stable Xr
 //    synthesises the rectangle (4 points, CCW, in plane XY).
 enum { KLSP_CAP_PLANES = 1, KLSP_CAP_MESH = 2, KLSP_CAP_ROOM = 4, KLSP_CAP_ANCHORS = 8 };
 int      kl_spatial_available(int cap);                       // 1 when that provider runs and is authorised
+int      kl_spatial_available_known(void);                  // 1 once ARKit's answer is in (kl_spatial_set_available called)
 void     kl_spatial_policy(int *wants_scene, int *wants_anchors);   // for KleptonSpatial.providers()
 // recenterXform of the compositor (guest = recenter * ARKit). Identity until set.
 void     kl_spatial_set_recenter(const float m4[16]);

@@ -70,6 +70,12 @@ static int kled_done_action(int rendering, uint32_t job_seq, uint32_t cur_seq, i
     if (kled_job_is_current(rendering, job_seq, cur_seq)) return KLED_DONE_CURRENT;
     return slot_lost ? KLED_DONE_FREE_LOST : KLED_DONE_IGNORE;
 }
+// Is environment depth supported? While ARKit's answer is pending (known = 0) the game may already enumerate, so a game
+// that wants the scene is told yes; once it is in, only a running scene-mesh provider says yes (world sensing denied
+// or no SceneReconstructionProvider = no).
+static int kled_supported(int mesh_available, int wants_scene, int known) {
+    return mesh_available || (wants_scene && !known);
+}
 // KL-TEST-END envdepthjob
 enum { API_NONE, API_VULKAN, API_GL };
 
@@ -171,12 +177,11 @@ static double now_s(void) {
 }
 
 // ---- support / lifecycle -------------------------------------------------------
-// Announced by policy too: ARKit may not be authorised yet when the game enumerates; without a mesh
-// the provider simply has nothing to show.
+// Announced by policy too while ARKit's answer is pending (kled_supported).
 int kl_envdepth_supported(void) {
     int ws = 0;
     kl_spatial_policy(&ws, NULL);
-    return (kl_spatial_available(KLSP_CAP_MESH) || ws) ? 1 : 0;
+    return kled_supported(kl_spatial_available(KLSP_CAP_MESH), ws, kl_spatial_available_known());
 }
 
 int kl_envdepth_create(int hand_removal) {

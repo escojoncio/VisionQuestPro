@@ -51,6 +51,7 @@ static uint32_t g_n, g_cap;
 
 static int g_wants_scene, g_wants_anchors;
 static int g_cap_planes, g_cap_mesh, g_cap_room, g_cap_anchors;
+static int g_cap_known;             // the providers' state is settled (authorised and running, or denied / unsupported)
 static float g_rc[16] = {1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1};
 static kl_spatial_host g_host;
 static int g_have_host;
@@ -414,9 +415,16 @@ void kl_spatial_set_available(int planes_ok, int mesh_ok, int room_ok, int ancho
     pthread_mutex_lock(&g_mu);
     g_cap_planes = planes_ok != 0; g_cap_mesh = mesh_ok != 0;
     g_cap_room = room_ok != 0; g_cap_anchors = anchors_ok != 0;
+    g_cap_known = 1;
     pthread_mutex_unlock(&g_mu);
     fprintf(stderr, "  [spatial] available: planes=%d mesh=%d room=%d anchors=%d\n",
             planes_ok != 0, mesh_ok != 0, room_ok != 0, anchors_ok != 0);
+}
+int kl_spatial_available_known(void) {
+    pthread_mutex_lock(&g_mu);
+    int k = g_cap_known;
+    pthread_mutex_unlock(&g_mu);
+    return k;
 }
 int kl_spatial_available(int cap) {
     pthread_mutex_lock(&g_mu);
@@ -428,7 +436,9 @@ int kl_spatial_available(int cap) {
 
 void kl_spatial_plane(kl_uuid id, int removed, const float m4[16], float w, float h, int label,
                       const float *poly2d, int npoly) {
-    static int lg;
+    static int lg, nfloor;
+    static float floor_logged = NAN;
+    int log_floor = 0;
     pthread_mutex_lock(&g_mu);
     ent *e = find_locked(id);
     if (removed) { if (e && e->kind == KLSP_PLANE) del_locked(e); pthread_mutex_unlock(&g_mu); return; }
@@ -444,8 +454,15 @@ void kl_spatial_plane(kl_uuid id, int removed, const float m4[16], float w, floa
         // A complete real set (floor, ceiling, closed walls) replaces the synthetic room, its walls turned inward first;
         // last, as the purge moves entries.
         if (!is_synth(id) && real_set_complete_locked()) { real_walls_inward_locked(); purge_synth_locked(); }
+        // [spatial] floor plane: the first real floor and each new floor height (5 cm), 10 lines at most
+        if (label == KLSP_LBL_FLOOR && !is_synth(id) && nfloor < 10 && !(fabsf(m4[13] - floor_logged) < 0.05f)) {
+            floor_logged = m4[13]; nfloor++; log_floor = 1;
+        }
     }
     pthread_mutex_unlock(&g_mu);
+    if (log_floor)
+        fprintf(stderr, "  [spatial] floor plane y=%.3f %.2fx%.2f (ARKit world = head_display_y's frame: ~0 = the visionOS origin is this floor)\n",
+                (double)m4[13], (double)w, (double)h);
     once(&lg, "first plane received");
 }
 

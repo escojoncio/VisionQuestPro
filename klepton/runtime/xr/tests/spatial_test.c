@@ -136,6 +136,83 @@ int main(void) {
     kl_spatial_host h = {h_create, h_remove}; kl_spatial_set_host(&h);
     float m[16];
 
+    // --- scene load without a capture (MRUK discovery, Quest already set up): events 300/301 (OVRPlugin.cs EventType
+    // SpaceDiscoveryResultsAvailable / SpaceDiscoveryComplete), filters applied, and the closed room built from what ARKit has
+    {
+        typedef int32_t (*fdisc)(const void *, uint64_t *);
+        typedef int32_t (*fret)(uint64_t, void *);
+        struct { uint32_t n; const void *const *filters; } di;
+        int32_t froom[2] = {3, 6};                                    // Component filter: RoomLayout
+        const void *fl[2] = {froom, NULL};
+        struct { uint32_t cap, count; void *results; } dr;
+        struct { uint64_t space; kl_uuid u; } dres[16];
+        uint64_t dq = 0;
+        di.n = 1; di.filters = fl; g_nev = 0;
+        CK(((fdisc)F("ovrp_DiscoverSpaces"))(&di, &dq) == 0 && dq);   // nothing scanned: no room is invented
+        CK(g_nev == 2 && g_ev[0].type == 300 && g_ev[1].type == 301);
+        { uint64_t r0, r1; int32_t res1 = -1; memcpy(&r0, g_ev[0].d, 8); memcpy(&r1, g_ev[1].d, 8); memcpy(&res1, g_ev[1].d + 8, 4);
+          CK(r0 == dq && r1 == dq && res1 == 0 && g_ev[0].len == 8 && g_ev[1].len == 16); }
+        dr.cap = 16; dr.count = 0; dr.results = dres;
+        CK(((fret)F("ovrp_RetrieveSpaceDiscoveryResults"))(dq, &dr) == 0 && dr.count == 0);
+        horiz(m, 1.5f, 0, -0.5f, 0); kl_spatial_plane(U16(90), 0, m, 4, 5, KLSP_LBL_FLOOR, NULL, 0);   // ARKit: one floor so far
+        CK(((fdisc)F("ovrp_DiscoverSpaces"))(&di, &dq) == 0);
+        dr.cap = 16; dr.count = 0;
+        CK(((fret)F("ovrp_RetrieveSpaceDiscoveryResults"))(dq, &dr) == 0 && dr.count == 1);   // the room, and only the room
+        kl_uuid room0 = dres[0].u;
+        CK(kl_spatial_kind_of(room0) == KLSP_ROOM);
+        kl_uuid fl0, ce0, ws0[8]; uint32_t nw0 = 0;
+        CK(kl_spatial_room_info(room0, &fl0, &ce0, 8, ws0, &nw0, 0, NULL, NULL) && nw0 >= 4 && memcmp(fl0.b, "KLSYNTH", 7) == 0);
+        struct { int32_t type, n; const kl_uuid *ids; } fid = {2, 2, ws0};    // Ids filter: two of its walls
+        fl[0] = &fid;
+        CK(((fdisc)F("ovrp_DiscoverSpaces"))(&di, &dq) == 0);
+        dr.cap = 16; dr.count = 0;
+        CK(((fret)F("ovrp_RetrieveSpaceDiscoveryResults"))(dq, &dr) == 0 && dr.count == 2);
+        fid.n = 0;                                                    // Ids filter with no ids: nothing
+        CK(((fdisc)F("ovrp_DiscoverSpaces"))(&di, &dq) == 0);
+        dr.cap = 16; dr.count = 0;
+        CK(((fret)F("ovrp_RetrieveSpaceDiscoveryResults"))(dq, &dr) == 0 && dr.count == 0);
+        fl[0] = froom; fl[1] = &fid; fid.n = 1; fid.ids = &room0; di.n = 2;   // both filters: the room by id AND RoomLayout
+        CK(((fdisc)F("ovrp_DiscoverSpaces"))(&di, &dq) == 0);
+        dr.cap = 16; dr.count = 0;
+        CK(((fret)F("ovrp_RetrieveSpaceDiscoveryResults"))(dq, &dr) == 0 && dr.count == 1);
+        fid.ids = ws0;                                                // a wall by id AND RoomLayout: a wall is no room
+        CK(((fdisc)F("ovrp_DiscoverSpaces"))(&di, &dq) == 0);
+        dr.cap = 16; dr.count = 0;
+        CK(((fret)F("ovrp_RetrieveSpaceDiscoveryResults"))(dq, &dr) == 0 && dr.count == 0);
+        // several Component filters are OR (OVRAnchor.FetchOptions.ComponentTypes: "any of those types"): the union
+        {
+            int32_t fb2d[2] = {3, 3};                                 // Component filter: Bounded2D (planes; the room has none)
+            const void *f3[3] = {froom, fb2d, NULL};
+            uint32_t n6, n3;
+            di.filters = f3; di.n = 1; f3[0] = froom;
+            CK(((fdisc)F("ovrp_DiscoverSpaces"))(&di, &dq) == 0);
+            dr.cap = 16; dr.count = 0;
+            CK(((fret)F("ovrp_RetrieveSpaceDiscoveryResults"))(dq, &dr) == 0); n6 = dr.count;
+            f3[0] = fb2d;
+            CK(((fdisc)F("ovrp_DiscoverSpaces"))(&di, &dq) == 0);
+            dr.cap = 16; dr.count = 0;
+            CK(((fret)F("ovrp_RetrieveSpaceDiscoveryResults"))(dq, &dr) == 0); n3 = dr.count;
+            CK(n6 == 1 && n3 >= 2);
+            f3[0] = froom; di.n = 2;                                  // RoomLayout OR Bounded2D: the room and every plane
+            CK(((fdisc)F("ovrp_DiscoverSpaces"))(&di, &dq) == 0);
+            dr.cap = 16; dr.count = 0;
+            CK(((fret)F("ovrp_RetrieveSpaceDiscoveryResults"))(dq, &dr) == 0 && dr.count == n6 + n3);
+            // ids AND (components OR): the room and a wall by id, filtered by RoomLayout, then by RoomLayout OR Bounded2D
+            kl_uuid two[2] = {room0, ws0[0]};
+            struct { int32_t type, n; const kl_uuid *ids; } fid2 = {2, 2, two};
+            const void *f4[3] = {froom, &fid2, NULL};
+            di.filters = f4; di.n = 2;
+            CK(((fdisc)F("ovrp_DiscoverSpaces"))(&di, &dq) == 0);
+            dr.cap = 16; dr.count = 0;
+            CK(((fret)F("ovrp_RetrieveSpaceDiscoveryResults"))(dq, &dr) == 0 && dr.count == 1);   // only the room has RoomLayout
+            f4[0] = froom; f4[1] = fb2d; f4[2] = &fid2; di.n = 3;
+            CK(((fdisc)F("ovrp_DiscoverSpaces"))(&di, &dq) == 0);
+            dr.cap = 16; dr.count = 0;
+            CK(((fret)F("ovrp_RetrieveSpaceDiscoveryResults"))(dq, &dr) == 0 && dr.count == 2);   // both ids pass an OR; an AND gives 0
+        }
+        kl_spatial_plane(U16(90), 1, m, 4, 5, KLSP_LBL_FLOOR, NULL, 0);
+    }
+
     // --- capture with no plane/room data: synthetic room, event 100 SUCCESS, room query finds floor + walls
     setenv("KL_SPATIAL_CAPTURE_TIMEOUT_MS", "300", 1);
     g_nev = 0;
@@ -338,6 +415,21 @@ int main(void) {
     CK(((int32_t(*)(const ci *, uint64_t *))F("ovrp_CreateSpatialAnchor"))(&info, &req) == 0 && kl_spatial_count(KLSP_ANCHOR) == 1);
     uint64_t h2 = kl_spatial_handle_for(a2);
     CK(((int32_t(*)(uint64_t *))F("ovrp_DestroySpace"))(&h2) == 0 && kl_spatial_count(KLSP_ANCHOR) == 0);
+    // ovrp_SaveSpaces / ovrp_EraseSpaces (OVRAnchor.SaveAsync / EraseAsync): SpacesSaveResult 302 / SpacesEraseResult 303 {requestId, result}
+    {
+        kl_uuid a3 = U16(52); g_next_anchor = a3;
+        CK(((int32_t(*)(const ci *, uint64_t *))F("ovrp_CreateSpatialAnchor"))(&info, &req) == 0);
+        uint64_t h3 = kl_spatial_handle_for(a3), r3 = 0, rr;
+        int32_t res3 = -1;
+        g_nev = 0;
+        CK(((int32_t(*)(uint32_t, const uint64_t *, uint64_t *))F("ovrp_SaveSpaces"))(1, &h3, &r3) == 0 && r3);
+        CK(g_nev == 1 && g_ev[0].type == 302 && kl_spatial_anchor_saved(a3));
+        memcpy(&rr, g_ev[0].d, 8); memcpy(&res3, g_ev[0].d + 8, 4); CK(rr == r3 && res3 == 0);
+        g_nev = 0; r3 = 0;
+        CK(((int32_t(*)(uint32_t, const uint64_t *, uint32_t, const kl_uuid *, uint64_t *))F("ovrp_EraseSpaces"))(1, &h3, 0, NULL, &r3) == 0 && r3);
+        CK(g_nev == 1 && g_ev[0].type == 303 && !kl_spatial_anchor_saved(a3));
+        memcpy(&rr, g_ev[0].d, 8); res3 = -1; memcpy(&res3, g_ev[0].d + 8, 4); CK(rr == r3 && res3 == 0);
+    }
 
     // scene capture completes (planes exist: settle 1.5 s)
     g_nev = 0;

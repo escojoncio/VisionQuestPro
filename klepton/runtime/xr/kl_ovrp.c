@@ -1071,9 +1071,11 @@ static uint64_t klovrp_GetSystemMultiViewSupported(void) {
 // (klovrp_boundary_*, defined with the coverage block near the dispatch
 // tables); KL_OVRP_BOUNDARY=0 restores the old "no guardian" answer.
 static int klovrp_boundary_on(void);
+static void klovrp_boundary_note(const char *fn, int type, int count);
 static uint64_t klovrp_GetBoundaryConfigured2(int *out) {
     ovrp_hit("ovrp_GetBoundaryConfigured2");
     if (out) *out = klovrp_boundary_on();
+    klovrp_boundary_note("ovrp_GetBoundaryConfigured2", -1, out ? *out : -1);
     return OVRP_SUCCESS;
 }
 
@@ -2128,16 +2130,21 @@ int kl_ovrp_tracking_origin(void) { return g_tracking_origin; }
 // from a getter — whatever the guest happened to leave in x0 gets written, which
 // is a SIGBUS or silent corruption depending on the register, unattributable to
 // this function from anywhere.
+static void klovrp_origin_note(const char *why);
 static uint64_t klovrp_SetTrackingOriginType(int origin) {
     ovrp_hit("ovrp_SetTrackingOriginType");
     ovrp_log_arg("ovrp_SetTrackingOriginType", origin, __builtin_return_address(0));
+    int old = g_tracking_origin;
     g_tracking_origin = origin;
+    if (old != origin) klovrp_origin_note("ovrp_SetTrackingOriginType");
     return OVRP_TRUE;                       // ovrpBool
 }
 static uint64_t klovrp_SetTrackingOriginType2(int origin) {
     ovrp_hit("ovrp_SetTrackingOriginType2");
     ovrp_log_arg("ovrp_SetTrackingOriginType2", origin, __builtin_return_address(0));
+    int old = g_tracking_origin;
     g_tracking_origin = origin;
+    if (old != origin) klovrp_origin_note("ovrp_SetTrackingOriginType2");
     return OVRP_SUCCESS;                    // ovrpResult
 }
 // The plugin's own event queue, which OVRManager drains every frame.
@@ -2407,6 +2414,7 @@ float kl_ovrp_measured_eye_height_or0(void) {
     if (ov > 0.0f) return ov;
     return (float)__atomic_load_n(&g_eye_mm, __ATOMIC_ACQUIRE) / 1000.0f;
 }
+static void klovrp_origin_note(const char *why);
 static void klovrp_eye_latch(float y, const char *why) {
     int old = __atomic_exchange_n(&g_eye_mm, (int)lrintf(y * 1000.0f), __ATOMIC_ACQ_REL);
     if (old > 0) {
@@ -2417,6 +2425,7 @@ static void klovrp_eye_latch(float y, const char *why) {
         fprintf(stderr, "  [ovrp] eye height measured by the headset: %.3f m (%s)\n",
                 (double)y, y < 1.35f ? "seated" : "standing");
     }
+    klovrp_origin_note(old > 0 ? why : "first eye height");
 }
 static void klovrp_recenter_now(const char *why);
 // Host entry (right PS long-press = Quest Oculus-button hold): re-measure eye
@@ -2703,6 +2712,20 @@ float klovrp_guest_origin_y(void) {
 float kl_ovrp_guest_origin_y(void) {
     if (!__atomic_load_n(&g_ovrp_space_used, __ATOMIC_ACQUIRE)) return 0.0f;
     return klovrp_guest_origin_y();
+}
+// [origin]: one line whenever the guest's tracking origin or the measured eye height changes. head_display_y is the
+// head over the visionOS world origin, which sits on the floor ARKit detects (compare with the [spatial] floor plane
+// line: |y| ~ 0 there means this IS the height over the real floor); guest_head_y is what an OVRPlugin guest reads
+// (head_display_y - guest_origin_y: ~0 under EyeLevel, the real height under FloorLevel/Stage, plus seated_raise).
+static void klovrp_origin_note(const char *why) {
+    static const char *const pn[3] = {"auto", "seated", "standing"};
+    int hs = __atomic_load_n(&g_head_set, __ATOMIC_ACQUIRE);
+    float hy = hs ? klovrp_pose_read(&g_head_pose).py : 0.0f, oy = klovrp_guest_origin_y();
+    float eh = kl_ovrp_measured_eye_height_or0();
+    fprintf(stderr, "  [origin] why=%s origin=%d (0=eye,1=floor,2=stage) head_display_y=%.3f%s guest_head_y=%.3f "
+                    "guest_origin_y=%.3f eye_height=%.3f%s seated_raise=%.3f posture=%s\n",
+            why, g_tracking_origin, (double)hy, hs ? "" : " (no head yet)", (double)(hy - oy), (double)oy,
+            (double)eh, eh > 0.0f ? "" : " (unmeasured)", (double)klovrp_seat_offset(), pn[klovrp_posture()]);
 }
 
 // --- One pose per guest frame, and why the live one is wrong ---------------
@@ -2992,8 +3015,8 @@ void kl_ovrp_set_head_pose(float px, float py, float pz,
                     * (180.0f/3.14159265358979f);
         float pitch = asinf(2.0f*(qw*qx - qy*qz)) * (180.0f/3.14159265358979f);
         fprintf(stderr, "  [ovrp] head Y=%.3f yaw=%.1f pitch=%.1f  origin=%d "
-                        "(0=eye,1=floor,2=stage) eye_height=%.3f\n",
-                py, yaw, pitch, kl_ovrp_tracking_origin(), kl_ovrp_eye_height());
+                        "(0=eye,1=floor,2=stage) eye_height=%.3f guest_Y=%.3f\n",
+                py, yaw, pitch, kl_ovrp_tracking_origin(), kl_ovrp_eye_height(), py - klovrp_guest_origin_y());
         n++;
     } else n++; }
 }
@@ -9576,6 +9599,16 @@ int kl_ovrp_boundary(float *width, float *depth) {
 }
 // The floor in the guest's tracking space (y = -eye height under EyeLevel).
 static float klovrp_boundary_floor_y(void) { return -klovrp_guest_origin_y(); }
+// [boundary]: the first 16 guardian reads, in order with the [sp-call] / [room-dump] lines (a game that checks its room
+// against the guardian reads it around each scene load). count = points written / asked (Configured2: the flag).
+static void klovrp_boundary_note(const char *fn, int type, int count) {
+    static unsigned n;
+    if (__atomic_add_fetch(&n, 1, __ATOMIC_RELAXED) > 16) return;
+    float w = 0, d = 0;
+    int on = kl_ovrp_boundary(&w, &d);
+    fprintf(stderr, "  [boundary] %s type=%d count=%d area=%s%.2fx%.2f%s centre=0,0 floor_y=%.2f\n", fn, type, count,
+            on ? "" : "none ", (double)w, (double)d, klovrp_boundary_circle() ? " circle" : "", (double)klovrp_boundary_floor_y());
+}
 
 typedef struct {
     int32_t is_triggering; float closest_distance;
@@ -9677,15 +9710,17 @@ static int klovrp_boundary_points(float *pts, int *count) {
 // ovrpBool ovrp_GetBoundaryGeometry2(ovrpBoundaryType, void *points, int *count)
 static uint64_t klovrp_GetBoundaryGeometry2(int type, float *pts, int *count) {
     ovrp_hit("ovrp_GetBoundaryGeometry2");
-    (void)type;
-    return (uint64_t)klovrp_boundary_points(pts, count);
+    uint64_t r = (uint64_t)klovrp_boundary_points(pts, count);
+    klovrp_boundary_note(pts ? "ovrp_GetBoundaryGeometry2(points)" : "ovrp_GetBoundaryGeometry2(count)", type, count ? *count : -1);
+    return r;
 }
 // ovrpResult ovrp_GetBoundaryGeometry3(ovrpBoundaryType, void *points, int *count)
 static uint64_t klovrp_GetBoundaryGeometry3(int type, float *pts, int *count) {
     ovrp_hit("ovrp_GetBoundaryGeometry3");
-    (void)type;
     if (!count) return OVRP_FAIL_INVALID_PARAM;
-    return klovrp_boundary_points(pts, count) ? OVRP_SUCCESS : OVRP_FAIL_INVALID_PARAM;
+    uint64_t r = klovrp_boundary_points(pts, count) ? OVRP_SUCCESS : OVRP_FAIL_INVALID_PARAM;
+    klovrp_boundary_note(pts ? "ovrp_GetBoundaryGeometry3(points)" : "ovrp_GetBoundaryGeometry3(count)", type, *count);
+    return r;
 }
 static uint64_t klovrp_GetBoundaryDimensions2(int type, float *dims) {
     ovrp_hit("ovrp_GetBoundaryDimensions2");
