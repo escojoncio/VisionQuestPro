@@ -1289,6 +1289,14 @@ build/t_lowmem: tests/t_lowmem.c runtime/kl_memrule.h
 lowmem: build/t_lowmem
 	@./build/t_lowmem
 
+# Unreal log scan behind the "[ue-log]" boot-log line (runtime/kl_uelog.h, pure libc; used by visionos/Sources/kl_app.c). Plain C.
+build/t_uelog: tests/t_uelog.c runtime/kl_uelog.h
+	@mkdir -p build
+	$(CC) -g -fsanitize=address,undefined -Wall -Wextra -Iruntime -o $@ tests/t_uelog.c
+.PHONY: uelog
+uelog: build/t_uelog
+	@./build/t_uelog
+
 # Linux-semantics fixes of the libc/pthread shims (affinity mask, MADV_DONTNEED split, cond/mutex maps, mallocx flags).
 # Cut out of kl_libc.c / kl_pthread.c / kl_shim.c by their KL-TEST markers; plain C, Linux or macOS.
 build/t_libc_sem: tests/t_libc_sem.c runtime/libc/kl_libc.c runtime/libc/kl_pthread.c runtime/libc/kl_shim.c

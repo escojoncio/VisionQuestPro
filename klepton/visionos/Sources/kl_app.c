@@ -30,6 +30,7 @@
 #include "kl_vulkan.h"    // kl_vulkan_mem_stats — the heartbeat's GPU line
 #include "kl_bg.h"        // kl_bg_shutdown — release the guest's blocked submit paths before joining it
 #include "kl_mtl_attr.h"  // kl_mtl_attr_print — live Metal objects by creation site
+#include "kl_uelog.h"     // kl_uelog_scan — the "[ue-log]" line: Unreal logs under the guest's files folder
 
 // --- Which guest ------------------------------------------------------------
 //
@@ -805,6 +806,7 @@ static void *heartbeat(void *arg) {
     const uint64_t t0 = kl_mono_ms();
     uint64_t next_slow = t0, next_sec = t0, fast_until = 0, hbm_last_foot = 0;
     unsigned hbm_lines = 0, vk_lines = 0, mtl_lines = 0, vms_lines = 0, dumps = 0;
+    int ue_checks = 0;   // [ue-log] scans done (0, 1 = found none at 45 s, 2 = finished)
     for (;;) {
         const uint64_t now = kl_mono_ms();
         const int slow_tick = now >= next_slow;
@@ -834,6 +836,16 @@ static void *heartbeat(void *arg) {
             next_sec = now + 1000;
             kl_sample_threads_baseline();
             kl_mem_telemetry(now - t0);   // [mem] line: 5 s cadence, 120 lines then only >10 % footprint changes (kl_libc.c)
+            // [ue-log]: did Unreal write any *.log this run (kl_uelog.h)? Once at 45 s; if none, once more at 150 s. UE guests only.
+            if (ue_checks < 2 && g_target && g_target->kind == KL_GUEST_UE4 && g_files[0] && now - t0 >= (ue_checks ? 150000u : 45000u)) {
+                kl_uelog_res ur;
+                char ul[700];
+                const char *root = g_obb_base[0] ? g_obb_base : g_files;   // the real folder when g_files is the short alias
+                kl_uelog_scan(root, time(NULL) - (time_t)((now - t0) / 1000) - 5, &ur);
+                kl_uelog_line(ul, sizeof ul, root, &ur);
+                fprintf(stderr, "%s\n", ul);
+                ue_checks = ur.logs ? 2 : ue_checks + 1;
+            }
             char mt[1100];
             size_t mn = kl_vulkan_diag(1, mt, sizeof mt);
             if (mn && mtl_lines < 900) {

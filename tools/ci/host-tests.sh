@@ -59,6 +59,7 @@ klepton_tests() {
   awk '/^static int klj_decode_args\(/,/^}/{print} /^static int klj_decode_args_a\(/,/^}/{print}' runtime/kl_jni.c > "$T/memdiag/jni_decoders.inc"
   run t_jni_sig -I"$T/memdiag" tests/t_jni_sig.c
   run t_lowmem -Wextra -Iruntime tests/t_lowmem.c
+  run t_uelog -Wextra -Iruntime tests/t_uelog.c
   mkdir -p "$T/libcsem"
   awk '/KL-TEST-BEGIN (affinity|madvclip)/{p=1;next} /KL-TEST-END (affinity|madvclip)/{p=0} p' runtime/libc/kl_libc.c > "$T/libcsem/libc_blocks.inc"
   awk '/KL-TEST-BEGIN pthmap/{p=1;next} /KL-TEST-END pthmap/{p=0} p' runtime/libc/kl_pthread.c > "$T/libcsem/pthread_blocks.inc"

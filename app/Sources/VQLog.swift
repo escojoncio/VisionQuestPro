@@ -300,7 +300,7 @@ enum VQLog {
     nonisolated(unsafe) private static var gameFiles: URL?
     nonisolated(unsafe) private static var gameLogStamps: [String: String] = [:]
     private static let gameLogLock = NSLock()
-    private static let gameLogBytes: UInt64 = 8 * 1_048_576
+    private static let gameLogBytes: UInt64 = 2 * 1_048_576
     private static let gameLogMax = 5
     private static let gameLogDepth = 6
     private static let gameLogVisits = 20_000
