@@ -1222,9 +1222,12 @@ SP_IMPL sp_GetSpaceSemanticLabels(uint64_t space, cap_list *out) {
     kl_uuid id; int kind;
     if (!space_of(space, &id, &kind) || kind != KLSP_PLANE) { out->count = 0; return KLOVRP_INVALID_PARAM; }
     const char *s = label_name(plane_label(id));
-    int n = (int)strlen(s) + 1;                                           // with the NUL, as the OpenXR twin
-    if (out->cap > 0 && out->data) { int c = out->cap < n ? out->cap : n; memcpy(out->data, s, (size_t)c); ((char *)out->data)[c - 1] = 0; out->count = c; }
-    else out->count = n;
+    int n = (int)strlen(s);   // count is the byte count WITHOUT a NUL: Meta's C# copies `count` bytes and compares "FLOOR" exactly
+    if (out->cap <= 0 || !out->data) { out->count = n; return KLOVRP_SUCCESS; }   // size query
+    if (out->cap < n) return KLOVRP_INSUFFICIENT_SIZE;                              // too small: nothing written
+    memcpy(out->data, s, (size_t)n);
+    if (out->cap > n) ((char *)out->data)[n] = 0;                                   // NUL only if there is room; never over the last byte
+    out->count = n;
     return KLOVRP_SUCCESS;
 }
 static ovrpResult klovrp_GetSpaceSemanticLabels(uint64_t space, cap_list *out) {

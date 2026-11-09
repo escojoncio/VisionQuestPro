@@ -94,6 +94,7 @@ typedef struct { int32_t w, h; }     ovrpSizei;
 #define KLOVRP_NOT_INITIALIZED    (-1002)
 #define KLOVRP_UNSUPPORTED        (-1004)
 #define KLOVRP_OPERATION_FAILED   (-1006)
+#define KLOVRP_INSUFFICIENT_SIZE  (-1007)
 
 // ---- registration ----------------------------------------------------------
 typedef struct { const char *name; void *fn; } kl_ovrp_entry;

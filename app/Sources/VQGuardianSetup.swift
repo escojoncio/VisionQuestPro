@@ -57,6 +57,7 @@ enum VQGuardianGate {
         KLGuardian.zoneClear()      // a draft left by another game in this process never reaches this screen
         // Real passthrough and the room mesh / floor grid while the screen is up; released below whatever ends it.
         kl_passthrough_force(1)
+        KLGuardianScene.floorPending = KLGuardian.floorSource() != .manual   // a manual floor (redo) is the start; else the grid starts at head height
         KLGuardianScene.active = true
         KleptonChroma.shared.followPassthroughNow()
         VQLog.log("Guardián: pantalla de definición para \(game.aaKey) (guardada: \(KLGuardian.hasSaved(game: game) ? "sí" : "no"))")
@@ -93,6 +94,7 @@ enum VQGuardianGate {
         KLGuardian.grabFloor(pressed: false, handY: .nan, headY: .nan)   // whatever ends the screen, no grab is left held in C
         KLGuardianScene.setCursor(nil, closing: false)
         KLGuardianScene.zoneVisible = false
+        KLGuardianScene.floorPending = false
         if outcome != .confirmed { KLGuardian.zoneClear() }              // a zone drawn and abandoned does not reach the game
         guard let c = waiter else { return }
         waiter = nil
@@ -115,6 +117,7 @@ struct VQGuardianSetupView: View {
     @State private var grabHand: Int?         // the hand (0 left, 1 right) holding the floor grid
     @State private var finished = false
     @State private var floorTouched = false   // the user moved the floor on this screen (not confirmed until Confirm)
+    @State private var floorChosen = !KLGuardianScene.floorPending   // the floor is the player's (grabbed, detected one picked, or a manual one to start from)
     @State private var zone: [SIMD2<Float>] = []      // the zone being drawn (a copy of kl_guardian's draft, for the map)
     @State private var zoneClosed = false
     @State private var cursor: SIMD2<Float>?           // where the pointing hand meets the floor
@@ -216,7 +219,7 @@ struct VQGuardianSetupView: View {
     /// Quest's floor step: no numbers, no sliders; the grid in the room is the floor and the player moves it with the hand.
     private var floorSection: some View {
         Section(VQL("Suelo", "Floor")) {
-            LabeledContent(VQL("Altura del suelo", "Floor height"), value: floorY.map(meters) ?? VQL("Sin detectar", "Not detected"))
+            LabeledContent(VQL("Altura del suelo", "Floor height"), value: floorChosen ? (floorY.map(meters) ?? VQL("Sin detectar", "Not detected")) : VQL("Sin fijar", "Not set"))
             Text(grabHand != nil
                  ? VQL("Mueve la mano hasta el suelo real y suelta para fijarlo.", "Move your hand to the real floor and let go to set it.")
                  : VQL("Agarra la rejilla del suelo con el grip del mando (o pellizca con la mano si no usas mandos) y deslízala hasta el suelo real, hacia arriba o hacia abajo. Al soltar queda fijada.",
@@ -226,14 +229,25 @@ struct VQGuardianSetupView: View {
                 // Hands: the same pinch near the floor is the grid's grab and a vertex, so the floor is declared done before drawing.
                 Button(floorDone ? VQL("Ajustar el suelo otra vez", "Adjust the floor again") : VQL("Suelo listo", "Floor done")) { floorDone.toggle() }
                     .buttonStyle(.bordered)
+                    .disabled(!floorChosen)
+            }
+            if let detected = live.detectedFloorY, !noWorld {
+                Button(VQL("Usar suelo detectado", "Use detected floor")) {
+                    KLGuardian.setFloor(detected, source: .manual)
+                    floorTouched = true
+                    setFloorChosen()
+                }.buttonStyle(.bordered)
             }
             if noWorld {
                 Text(VQL("Sin permiso de seguimiento del entorno: el suelo no se puede fijar ni guardar.",
                          "No world-sensing permission: the floor cannot be set or saved."))
                     .font(.caption).foregroundStyle(.orange)
-            } else if let f = floorY, head != nil, !KLGuardian.plausible(floorY: f, headY: headY) {
-                Text(VQL("El suelo no parece plausible respecto a tu cabeza (debe estar entre 0,7 y 2,5 m por debajo). Ajústalo.",
-                         "The floor does not look plausible against your head (it should be 0.7 to 2.5 m below). Adjust it."))
+            } else if !floorChosen {
+                Text(VQL("Baja la rejilla hasta el suelo.", "Lower the grid to the floor."))
+                    .font(.caption).foregroundStyle(.orange)
+            } else if let f = floorY, head != nil, !floorConfirmable(f) {
+                Text(VQL("El suelo no parece plausible respecto a tu cabeza (debe estar entre 0,3 y 2,5 m por debajo). Ajústalo.",
+                         "The floor does not look plausible against your head (it should be 0.3 to 2.5 m below). Adjust it."))
                     .font(.caption).foregroundStyle(.orange)
             }
         }
@@ -243,6 +257,19 @@ struct VQGuardianSetupView: View {
     /// presses a button in this window must not drag the floor.
     private static let grabReach: Float = 0.25
 
+    /// Floor accepted to confirm: 0.3 to 2.5 m under the head (KLGuardian.plausible's SLAM minimum of 0.7 m would refuse a kneeling / lying player,
+    /// though the grab allows the floor up to head - 0.1524).
+    private func floorConfirmable(_ f: Float) -> Bool {
+        let d = f - headY
+        return d.isFinite && d >= -2.5 - 1e-5 && d <= -0.3 + 1e-5
+    }
+
+    /// The floor is now the player's: the grid stops being drawn at head height and Confirm may be allowed.
+    private func setFloorChosen() {
+        KLGuardianScene.floorPending = false
+        if !floorChosen { floorChosen = true }
+    }
+
     /// 60 Hz: reads the head and the floor, and moves the floor with the grabbing hand (kl_guardian_floor_grab keeps the rules).
     private func tick() {
         if let h = KLGuardian.headPosition(), head == nil || simd_distance(h, head!) > 0.005 { head = h }
@@ -250,7 +277,7 @@ struct VQGuardianSetupView: View {
         if f != floorY { floorY = f }
         guard let h = head, !noWorld else { return }
         let noControllers = GCController.controllers().isEmpty
-        let reference = floorY ?? (h.y - 1.15)
+        let reference = floorChosen ? floorY ?? (h.y - 1.15) : h.y - 0.1524   // where the grid is drawn: the grab starts there
         var holding: (hand: Int, y: Float)?
         for hand in (grabHand == 1 ? [1, 0] : [0, 1]) {
             var pos: [Float] = [0, 0, 0]
@@ -268,6 +295,7 @@ struct VQGuardianSetupView: View {
             grabHand = hold.hand
             KLGuardian.grabFloor(pressed: true, handY: hold.y, headY: h.y)
             floorTouched = true
+            setFloorChosen()
         } else if grabHand != nil {
             KLGuardian.grabFloor(pressed: false, handY: .nan, headY: h.y)
             grabHand = nil
@@ -306,7 +334,7 @@ struct VQGuardianSetupView: View {
         if state.points != zone { zone = state.points }
         if state.closed != zoneClosed { zoneClosed = state.closed }
         KLGuardianScene.zoneVisible = choice == .draw
-        guard choice == .draw, !state.closed, grabHand == nil, !noControllers || floorDone, let floor = floorY else {
+        guard choice == .draw, !state.closed, grabHand == nil, floorChosen, !noControllers || floorDone, let floor = floorY else {
             if cursor != nil { cursor = nil }
             KLGuardianScene.setCursor(nil, closing: false)
             return
@@ -413,6 +441,8 @@ struct VQGuardianSetupView: View {
 
     private var canConfirm: Bool {
         guard head != nil else { return false }
+        // The floor must be the player's and below the head (as the grid starts at head height, a confirm without lowering it is refused).
+        if !noWorld { guard floorChosen, let f = floorY, floorConfirmable(f) else { return false } }
         return choice == .stationary || zoneClosed          // a drawn zone must be closed and valid (kl_guardian_zone_close checked it)
     }
 

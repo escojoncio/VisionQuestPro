@@ -1,5 +1,4 @@
-// Order a game gets the planes in: FLOOR, CEILING, WALL (the room's order), the rest, and OTHER always last -- a game that stops at the first
-// plane it cannot classify (HLVR: "Unknown classification: OTHER") has then seen the room before it gives up. Handles stay stable.
+// Order a game gets the planes in: FLOOR, CEILING, WALL (the room's order), the rest, and OTHER always last. Handles stay stable.
 // clang -Wall -I.. -I../jni -I../libc -I../gfx -I. -I../media -I../guest -I../diag tests/t_plane_order.c kl_spatial.c kl_guardian.c -lm -lpthread
 #include <stdio.h>
 #include <stdlib.h>

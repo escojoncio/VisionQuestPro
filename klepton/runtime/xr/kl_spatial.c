@@ -652,8 +652,8 @@ int kl_spatial_uuid_for_handle(uint64_t h, kl_uuid *id, int *kind) {
 }
 
 // ---- rooms ------------------------------------------------------------------
-// Planes are handed out FLOOR, CEILING, WALL, the rest, OTHER last (arrival order within each): a game that gives up at the first
-// plane it cannot classify (HLVR: "Unknown classification: OTHER") has seen the room before it does. Handles are given in listing order
+// Planes are handed out FLOOR, CEILING, WALL, the rest, OTHER last (arrival order within each): the room's own order, no other
+// effect on the game (HLVR's "Unknown classification" was the label count including the NUL, not the OTHER plane). Handles are given in listing order
 // on first sight and never change (kl_spatial_handle_for), so a later reordering renumbers nothing. KL-TEST t_plane_order.
 static int plane_rank(int label) {
     return label == KLSP_LBL_FLOOR ? 0 : label == KLSP_LBL_CEILING ? 1 : label == KLSP_LBL_WALL ? 2 : label == KLSP_LBL_OTHER ? 4 : 3;

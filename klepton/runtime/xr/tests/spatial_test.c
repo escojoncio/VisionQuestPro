@@ -353,7 +353,15 @@ int main(void) {
     // semantic label + boxes on the table plane
     uint64_t tbl = kl_spatial_handle_for(U16(3));
     char lbl[32]; cl sl = {32, 0, lbl};
-    CK(((int32_t(*)(uint64_t *, cl *))F("ovrp_GetSpaceSemanticLabels"))(&tbl, &sl) == 0 && !strcmp(lbl, "TABLE") && sl.count == 6);
+    CK(((int32_t(*)(uint64_t *, cl *))F("ovrp_GetSpaceSemanticLabels"))(&tbl, &sl) == 0 && !strcmp(lbl, "TABLE") && sl.count == 5);   // count without the NUL
+    {   // count is the exact byte count: no NUL over the last byte, size query with cap 0, -1007 when too small (nothing written)
+        char e[5]; memset(e, 'x', sizeof e); cl se = {5, 0, e};
+        CK(((int32_t(*)(uint64_t *, cl *))F("ovrp_GetSpaceSemanticLabels"))(&tbl, &se) == 0 && se.count == 5 && !memcmp(e, "TABLE", 5));
+        char t[3]; memset(t, 'x', sizeof t); cl st = {3, 0, t};
+        CK(((int32_t(*)(uint64_t *, cl *))F("ovrp_GetSpaceSemanticLabels"))(&tbl, &st) == -1007 && !memcmp(t, "xxx", 3));
+        cl sq = {0, 0, NULL};
+        CK(((int32_t(*)(uint64_t *, cl *))F("ovrp_GetSpaceSemanticLabels"))(&tbl, &sq) == 0 && sq.count == 5);
+    }
     float r2[4], b3[6];
     CK(((int32_t(*)(uint64_t *, float *))F("ovrp_GetSpaceBoundingBox2D"))(&tbl, r2) == 0);
     CK(fabsf(r2[0] + 0.6f) < 1e-5f && fabsf(r2[2] - 1.2f) < 1e-5f);

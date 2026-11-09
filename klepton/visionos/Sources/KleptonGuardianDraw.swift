@@ -43,6 +43,9 @@ enum KLGuardianScene {
     /// True while the guardian screen is in «Dibujar zona» mode (set by VQGuardianSetup each tick): the draft is not painted otherwise,
     /// e.g. after the player switched to «Estacionario».
     nonisolated(unsafe) static var zoneVisible = false
+    /// True until the player has set the floor on the guardian screen (grabbed the grid, picked the detected floor, or started from a manual
+    /// one): the grid is then drawn at the top of the grab range, head - 0.1524 m, to be pulled down to the real floor as on a Quest.
+    nonisolated(unsafe) static var floorPending = false
 
     /// The point of the floor the hand points at (nil = none), and whether it is close enough to the first vertex to close the zone.
     static func setCursor(_ p: SIMD2<Float>?, closing: Bool) {
@@ -283,7 +286,7 @@ enum KLGuardianScene {
         upload(device)
         guard let pipe = makePipeline(device, format: colorFormat, amplification: amplification) else { return }
         let head = KLGuardian.headPosition()
-        let floorY = KLGuardian.floorY() ?? ((head?.y ?? 1.15) - 1.15)
+        let floorY = floorPending ? (head?.y ?? 1.15) - 0.1524 : KLGuardian.floorY() ?? ((head?.y ?? 1.15) - 1.15)
         enc.setRenderPipelineState(pipe)
         if let depthState { enc.setDepthStencilState(depthState) }
         enc.setCullMode(.none)
