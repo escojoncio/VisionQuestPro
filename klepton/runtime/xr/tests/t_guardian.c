@@ -284,6 +284,116 @@ int main(void) {
     memcpy(q3, q, sizeof q3);                                         // 3 walls that do not meet
     CK(!kl_guardian_roombox_valid(q3, 3, 0.0f, 2.5f));
 
+    // ---- drawn zone (Quest's setup: the player places vertices, closing near the first one) ----
+    kl_guardian_clear();
+    kl_guardian_zone_clear();
+    {
+        float xz[16];
+        int closed = -1;
+        CK(kl_guardian_zone_get(xz, 8, &closed) == 0 && closed == 0);
+        CK(kl_guardian_zone_close() == KLG_ZONE_TOO_FEW && kl_guardian_zone_validate() == KLG_ZONE_TOO_FEW);
+        CK(kl_guardian_zone_add(0, 0) == 1 && kl_guardian_zone_add(3, 0) == 2);
+        CK(kl_guardian_zone_add(3.005f, 0.005f) == 2);                       // within 2 cm of the last: nothing added
+        CK(kl_guardian_zone_add(0.1f, 0.1f) == 3);                           // only 2 placed before it: a point near the first does not close
+        CK(kl_guardian_zone_add(0, 3) == 4);
+        CK(kl_guardian_zone_add(NAN, 1) == -1 && kl_guardian_zone_add(1, 1e5f) == -1 && kl_guardian_zone_get(NULL, 0, &closed) == 4);
+        CK(!kl_guardian_configured());                                       // a draft sets nothing
+        // a 3 x 3 square drawn clockwise
+        kl_guardian_zone_clear();
+        CK(kl_guardian_zone_add(0, 0) == 1 && kl_guardian_zone_add(0, 3) == 2 && kl_guardian_zone_add(3, 3) == 3 && kl_guardian_zone_add(3, 0) == 4);
+        CK(kl_guardian_zone_validate() == KLG_ZONE_OK && !kl_guardian_configured());
+        CK(kl_guardian_zone_add(0.2f, 0.1f) == 0);                           // within 0.3 m of the first with 4 placed: closes
+        CK(kl_guardian_configured() && kl_guardian_boundary_source() == KLG_BSRC_USER && kl_guardian_get_mode() == KLG_MODE_ROOMSCALE);
+        CK(kl_guardian_get_boundary(NULL, 0) == 4 && kl_guardian_playspace_ok() && kl_guardian_playspace(&w, &d, NULL, NULL, NULL));
+        CK(NEAR(fmaxf(w, d), 3.0f, 0.1f) && NEAR(fminf(w, d), 3.0f, 0.1f));
+        float b[8];
+        kl_guardian_get_boundary(b, 4);
+        float a2 = 0;
+        for (int k = 0; k < 4; k++) a2 += b[2 * k] * b[2 * ((k + 1) % 4) + 1] - b[2 * ((k + 1) % 4)] * b[2 * k + 1];
+        CK(a2 > 0);                                                          // stored counter-clockwise although drawn clockwise
+        int e_circle = 1;
+        CK(kl_guardian_effective(&e_circle, &w, &d) && e_circle == 0);
+        CK(kl_guardian_zone_get(xz, 8, &closed) == 4 && closed == 1 && xz[2] == 0 && xz[3] == 3);   // the draft is kept as drawn
+        CK(kl_guardian_zone_add(1, 1) == -1 && kl_guardian_zone_close() == KLG_ZONE_OK);              // closed: no more vertices
+        // undo on a closed draft reopens it and takes the boundary away; undo then removes vertices
+        CK(kl_guardian_zone_undo() == 4 && !kl_guardian_configured());
+        CK(kl_guardian_zone_get(NULL, 0, &closed) == 4 && closed == 0);
+        CK(kl_guardian_zone_undo() == 3 && kl_guardian_zone_undo() == 2 && kl_guardian_zone_undo() == 1 && kl_guardian_zone_undo() == 0 && kl_guardian_zone_undo() == 0);
+        // clear removes the boundary it set, but not one somebody else set
+        kl_guardian_zone_add(0, 0); kl_guardian_zone_add(0, 2); kl_guardian_zone_add(2, 2); kl_guardian_zone_add(2, 0);
+        CK(kl_guardian_zone_close() == KLG_ZONE_OK && kl_guardian_configured());
+        kl_guardian_zone_clear();
+        CK(!kl_guardian_configured() && kl_guardian_zone_get(NULL, 0, &closed) == 0 && closed == 0);
+        float own[8]; rect(own, 4, 4);
+        kl_guardian_zone_add(0, 0); kl_guardian_zone_add(0, 2); kl_guardian_zone_add(2, 2); kl_guardian_zone_add(2, 0);
+        CK(kl_guardian_zone_close() == KLG_ZONE_OK);
+        CK(kl_guardian_set_boundary(own, 4, KLG_MODE_ROOMSCALE, 0) == 1);   // the user's later boundary replaces the zone ...
+        kl_guardian_zone_clear();
+        CK(kl_guardian_configured());                                        // ... and clearing the old draft leaves it alone
+        kl_guardian_clear();
+    }
+    // what a game sees of the boundary is one signature: it changes with every redraw / recentre / circle size, not with the floor
+    {
+        float a[8] = {0, 0, 3, 0, 3, 3, 0, 3}, b[8] = {0, 0, 3, 0, 3, 3.5f, 0, 3.5f}, moved[8] = {1, 0, 4, 0, 4, 3, 1, 3};
+        kl_guardian_clear();
+        CK(kl_guardian_boundary_signature() == 0);
+        kl_guardian_set_boundary(a, 4, KLG_MODE_ROOMSCALE, 0);
+        uint64_t sa = kl_guardian_boundary_signature();
+        CK(sa != 0);
+        kl_guardian_set_floor(-0.2f, KLG_FLOOR_MANUAL);
+        CK(kl_guardian_boundary_signature() == sa);                      // the floor is not the boundary
+        kl_guardian_set_boundary(a, 4, KLG_MODE_ROOMSCALE, 0);
+        CK(kl_guardian_boundary_signature() == sa);                      // the same polygon again
+        kl_guardian_set_boundary(b, 4, KLG_MODE_ROOMSCALE, 0);
+        uint64_t sb = kl_guardian_boundary_signature();
+        CK(sb != sa);                                                    // redrawn
+        kl_guardian_set_boundary(moved, 4, KLG_MODE_ROOMSCALE, 0);
+        CK(kl_guardian_boundary_signature() != sb && kl_guardian_boundary_signature() != sa);   // recentred 1 m
+        kl_guardian_set_boundary(NULL, 0, KLG_MODE_STATIONARY, 1.0f);
+        uint64_t sc = kl_guardian_boundary_signature();
+        kl_guardian_set_boundary(NULL, 0, KLG_MODE_STATIONARY, 1.5f);
+        CK(sc != 0 && kl_guardian_boundary_signature() != sc);
+        // a drawn zone that is closed then undone takes its boundary (and signature) away
+        kl_guardian_clear();
+        kl_guardian_zone_clear();
+        kl_guardian_zone_add(0, 0); kl_guardian_zone_add(0, 3); kl_guardian_zone_add(3, 3); kl_guardian_zone_add(3, 0);
+        CK(kl_guardian_zone_close() == KLG_ZONE_OK && kl_guardian_boundary_signature() != 0);
+        kl_guardian_zone_undo();
+        CK(kl_guardian_boundary_signature() == 0);
+        kl_guardian_zone_clear();
+        kl_guardian_set_floor(0.0f, 0);
+        kl_guardian_clear();
+    }
+    // invalid drafts: crossing edges (bow-tie), too small (1 x 1), degenerate (collinear); a failed close leaves the draft open and sets nothing
+    {
+        int closed = -1;
+        kl_guardian_zone_clear();
+        kl_guardian_zone_add(0, 0); kl_guardian_zone_add(3, 3); kl_guardian_zone_add(3, 0); kl_guardian_zone_add(0, 2.5f);
+        CK(kl_guardian_zone_validate() == KLG_ZONE_CROSSING && kl_guardian_zone_close() == KLG_ZONE_CROSSING);
+        CK(kl_guardian_zone_add(0.1f, 0.1f) == -2);                          // near the first, but crossing: not closed, not added
+        CK(kl_guardian_zone_get(NULL, 0, &closed) == 4 && closed == 0 && !kl_guardian_configured());
+        kl_guardian_zone_clear();
+        kl_guardian_zone_add(0, 0); kl_guardian_zone_add(1, 0); kl_guardian_zone_add(1, 1); kl_guardian_zone_add(0, 1);
+        CK(kl_guardian_zone_close() == KLG_ZONE_TOO_SMALL && !kl_guardian_configured());
+        CK(kl_guardian_zone_undo() == 3);
+        kl_guardian_zone_clear();
+        kl_guardian_zone_add(0, 0); kl_guardian_zone_add(1, 0); kl_guardian_zone_add(2, 0);
+        CK(kl_guardian_zone_close() == KLG_ZONE_INVALID);                    // no area
+        kl_guardian_zone_clear();
+        // 3 vertices are enough (V1): a 3 x 3 right triangle has a 1.5 m inscribed square
+        kl_guardian_zone_add(0, 0); kl_guardian_zone_add(4, 0); kl_guardian_zone_add(0, 4);
+        CK(kl_guardian_zone_close() == KLG_ZONE_OK && kl_guardian_get_boundary(NULL, 0) == 3);
+        kl_guardian_zone_clear();
+        // the vertex cap: 4096 vertices on a 1 km circle, the next one is refused
+        for (int k = 0; k < KLG_MAX_POINTS; k++) {
+            float a = 6.2831853f * (float)k / (float)KLG_MAX_POINTS;
+            CK(kl_guardian_zone_add(1000.0f * cosf(a), 1000.0f * sinf(a)) == k + 1);
+        }
+        CK(kl_guardian_zone_add(0.0f, 0.0f) == -1 && kl_guardian_zone_get(NULL, 0, &closed) == KLG_MAX_POINTS);
+        kl_guardian_zone_clear();
+        kl_guardian_clear();
+    }
+
     printf(fails ? "t_guardian: %d FAILED\n" : "t_guardian: all passed\n", fails);
     return fails != 0;
 }

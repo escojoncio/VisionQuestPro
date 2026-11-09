@@ -71,6 +71,31 @@ enum KLGuardian {
         }
     }
 
+    // MARK: drawn zone (kl_guardian_zone_*: the player draws the play area on the floor; the polygon is in the boundary's guest space)
+
+    /// Adds a vertex (x, z). >0 the vertex count, 0 closed (the boundary is set), -1 rejected, -2 near the first but not valid.
+    @discardableResult
+    static func zoneAdd(_ p: SIMD2<Float>) -> Int { Int(kl_guardian_zone_add(p.x, p.y)) }
+    /// Removes the last vertex; on a closed zone reopens it (and takes the boundary it set away).
+    @discardableResult
+    static func zoneUndo() -> Int { Int(kl_guardian_zone_undo()) }
+    /// Forgets the draft (and the boundary it set).
+    static func zoneClear() { kl_guardian_zone_clear() }
+    /// KLG_ZONE_* of the draft; 0 = valid.
+    static func zoneValidate() -> Int { Int(kl_guardian_zone_validate()) }
+    /// Validates and sets the boundary from the draft; the KLG_ZONE_* code, 0 = closed.
+    @discardableResult
+    static func zoneClose() -> Int { Int(kl_guardian_zone_close()) }
+    /// The draft as drawn (x = x, y = z) and whether it is closed.
+    static func zone() -> (points: [SIMD2<Float>], closed: Bool) {
+        var closed: Int32 = 0
+        let n = Int(kl_guardian_zone_get(nil, 0, &closed))
+        guard n > 0 else { return ([], closed != 0) }
+        var flat = [Float](repeating: 0, count: n * 2)
+        let got = flat.withUnsafeMutableBufferPointer { b in Int(kl_guardian_zone_get(b.baseAddress, Int32(n), &closed)) }
+        return ((0..<min(got, n)).map { SIMD2<Float>(flat[2 * $0], flat[2 * $0 + 1]) }, closed != 0)
+    }
+
     static func setStationaryRadius(_ radius: Float) { kl_guardian_set_stationary_radius(radius) }
     static func clear() { kl_guardian_clear() }
     static var generation: UInt32 { kl_guardian_generation() }
@@ -219,7 +244,7 @@ final class KLGuardianLive: ObservableObject {
 }
 
 /// Per-game persistence (UserDefaults), keyed by VQGame.aaKey like the other per-game settings:
-/// vq.guardian.<k>.{floor, floorSource, enabled, kind, mode, radius, w, d}. Boundary polygons are NOT stored: they are in
+/// vq.guardian.<k>.{floor, floorSource, enabled, kind, mode, radius, w, d}. Boundary polygons (also the zone the player drew) are NOT stored: they are in
 /// the absolute coordinates of one session, so only the choice and its sizes are kept and the shape is rebuilt around the
 /// current head. A key `poly` written by older builds is ignored.
 extension KLGuardian {
@@ -230,6 +255,8 @@ extension KLGuardian {
         case room
         case rectangle(w: Float, d: Float)
         case stationary(radius: Float)
+        /// A zone the player drew: nothing of it is stored (the polygon is in this session's coordinates), only the floor.
+        case drawn
     }
 
     /// A restored rectangle waiting to be centred on the head (see `recenterRestored`).
@@ -257,6 +284,8 @@ extension KLGuardian {
         pendingRect = nil
         d.set(true, forKey: key(game, "enabled"))
         switch area {
+        case .drawn:
+            d.removeObject(forKey: key(game, "enabled"))     // no area to restore: the next time the zone is drawn again
         case .room:
             d.set("room", forKey: key(game, "kind"))
         case .rectangle(let w, let dd):

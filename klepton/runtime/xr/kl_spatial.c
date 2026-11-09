@@ -158,7 +158,7 @@ static void del_locked(ent *e) {
 }
 // Synthetic box-room planes (kl_spatial_synth_room) carry this uuid prefix; real ARKit data replaces them.
 static int is_synth(kl_uuid id) { return memcmp(id.b, "KLSYNTH", 7) == 0; }
-static uint32_t g_synth_n;          // planes of the synthetic room as built (6 for the box; 2 + walls when built from real data)
+static uint32_t g_synth_n;          // planes of the synthetic room as built (6 for the box; 2 + walls for an outline / zone)
 static void purge_synth_locked(void) {
     g_synth_n = 0;
     for (uint32_t i = 0; i < g_n; ) {
@@ -916,8 +916,9 @@ int kl_spatial_raycast(const float o[3], const float d[3], float maxd, float *hi
 
 int kl_spatial_is_synthetic(kl_uuid id) { return is_synth(id); }
 
-// ---- room built from real data: convex hull of what ARKit measured ----
+// ---- footprint helpers: convex hull of what ARKit measured (guardian default) and the polygons of the synthetic room ----
 #define KLSP_MAX_WALLS 64        // = what klsp_ring_closed accepts
+#define KLSP_ZONE_PTS 256        // points of the user's zone kept (klsp_zone_points)
 typedef struct { float x, z; } klsp_pt;
 static int klsp_pt_cmp(const void *a, const void *b) {
     const klsp_pt *p = (const klsp_pt *)a, *q = (const klsp_pt *)b;
@@ -963,8 +964,10 @@ static int klsp_hull_fuse(klsp_pt *h, int n) {
     return n;
 }
 // What the built room was made from: a change in any of these rebuilds it (kl_spatial_synth_room). bb = bounding box of the
-// points in 5 cm units (x0, z0, x1, z1); built = a hull room came out (0 = the box).
-typedef struct { int nplanes, nmem, nmesh, bb[4], built; } klsp_sig;
+// points in 5 cm units (x0, z0, x1, z1); built = the source (KLSP_SRC_*); fy, h = floor and height in 5 cm units; nwall = walls built;
+// zhash = hash (mm) of the drawn zone's polygon, 0 for the other sources (a zone redrawn inside the same box is another room).
+typedef struct { int nplanes, nmem, nmesh, bb[4], built, fy, h, nwall, zhash; } klsp_sig;
+enum { KLSP_SRC_FALLBACK = 0, KLSP_SRC_OUTLINE = 1, KLSP_SRC_GUARDIAN = 2, KLSP_SRC_REAL = 3 };      // the order of the log names below
 static klsp_sig g_synth_sig;
 static int klsp_sig_significant(const klsp_sig *a, const klsp_sig *b);
 // The footprint of the room from measured data only (guest space): corners of the real FLOOR / CEILING / WALL planes -- the
@@ -1062,26 +1065,331 @@ static int klsp_hull_room_valid(const klsp_pt *h, int n, float fy, float H) {
     return kl_guardian_hull_ok(&h[0].x, n, H) && kl_guardian_room_v1_valid(n, 1, 1, fy, fy + H) && kl_guardian_roombox_valid(q, n, fy, fy + H);
 }
 
-// ---- synthetic box room (no usable ARKit room: Space Setup must still end with a closed room) ----
-// Floor, ceiling 2.5 m and four walls forming a closed rectangle (klsp_box_walls), zw x zd + 0.5 m margin per side, centred
-// on guest (hx, hz). Partial real walls turn and grow the box (klsp_fit_rect); a known real floor sets its height.
+// ---- the footprint of the room handed to a game: real walls, else the user's zone (never an invented size) ----
+// 1 when polygon p (n >= 3) has two non-adjacent edges that cross.
+static int klsp_self_cross(const klsp_pt *p, int n) {
+    for (int i = 0; i < n; i++)
+        for (int j = i + 2; j < n; j++) {
+            if (i == 0 && j == n - 1) continue;                                   // neighbours through the closing edge
+            const klsp_pt *a = &p[i], *b = &p[(i + 1) % n], *c = &p[j], *d = &p[(j + 1) % n];
+            if (klsp_cross(a, b, c) * klsp_cross(a, b, d) < 0 && klsp_cross(c, d, a) * klsp_cross(c, d, b) < 0) return 1;
+        }
+    return 0;
+}
+static float klsp_area2(const klsp_pt *p, int n) {          // twice the signed area: > 0 = counter-clockwise in (x, z)
+    float a = 0;
+    for (int k = 0; k < n; k++) a += p[k].x * p[(k + 1) % n].z - p[(k + 1) % n].x * p[k].z;
+    return a;
+}
+// 1 when (x, z) lies in polygon p (n vertices) or within 5 cm of its outline.
+static int klsp_inside(const klsp_pt *p, int n, float x, float z) {
+    int in = 0;
+    for (int k = 0; k < n; k++) {
+        const klsp_pt *a = &p[k], *b = &p[(k + 1) % n];
+        klsp_seg s = {a->x, a->z, b->x, b->z};
+        if (klsp_pt_seg(x, z, &s) <= 0.05f) return 1;
+        if ((a->z > z) != (b->z > z) && x < a->x + (z - a->z) * (b->x - a->x) / (b->z - a->z)) in ^= 1;
+    }
+    return in;
+}
+// Makes p (n vertices, any simple polygon -- convex or not) a room footprint: counter-clockwise, short / collinear / surplus
+// vertices fused (klsp_hull_fuse), at least 3 walls (V1 accepts 3), no crossing edges, area >= KLSP_MIN_AREA. Returns the new
+// vertex count, 0 when it is not one.
+static int klsp_poly_prepare(klsp_pt *p, int n) {
+    if (n < 3) return 0;
+    for (int k = 0; k < n; k++) if (!isfinite(p[k].x) || !isfinite(p[k].z)) return 0;
+    if (klsp_area2(p, n) < 0)
+        for (int a = 0, b = n - 1; a < b; a++, b--) { klsp_pt t = p[a]; p[a] = p[b]; p[b] = t; }
+    n = klsp_hull_fuse(p, n);
+    if (n < 3 || n > KLSP_MAX_WALLS || klsp_self_cross(p, n) || !(klsp_area2(p, n) * 0.5f >= KLSP_MIN_AREA)) return 0;
+    return n;
+}
+// The player's drawn zone as a room footprint. klsp_hull_fuse assumes a convex polygon, so a hand-drawn L would lose its reflex corners:
+// here only what cannot be a wall goes -- duplicate points (under 1 cm), points on the straight line of their neighbours (3 cm), and
+// edges under KLSP_MIN_WALL, whose two ends become their midpoint (the shape and its concavity stay) -- then, over KLSP_MAX_WALLS vertices,
+// the shortest edges the same way. Counter-clockwise on return. A zone that still crosses itself, has under 3 vertices or under
+// KLSP_MIN_AREA is refused and logged ("[room] drawn zone rejected: reason=..."). Returns the vertex count, 0 when refused.
+static int klsp_zone_prepare(klsp_pt *p, int n) {
+    const char *why = NULL;
+    for (int k = 0; k < n; k++) if (!isfinite(p[k].x) || !isfinite(p[k].z)) { why = "not-finite"; break; }
+    if (!why && n >= 3 && klsp_area2(p, n) < 0)
+        for (int a = 0, b = n - 1; a < b; a++, b--) { klsp_pt t = p[a]; p[a] = p[b]; p[b] = t; }
+    for (int guard = 0; !why && n > 3 && guard < 4 * KLSP_ZONE_PTS; guard++) {
+        int drop = -1, shortest = -1;
+        float sl = 1e30f;
+        for (int i = 0; i < n && drop < 0; i++) {
+            const klsp_pt *a = &p[(i + n - 1) % n], *b = &p[i], *c = &p[(i + 1) % n];
+            float ab = hypotf(b->x - a->x, b->z - a->z), ac = hypotf(c->x - a->x, c->z - a->z);
+            if (ab < 0.01f || ac < 0.01f || fabsf(klsp_cross(a, b, c)) < 0.03f * ac) drop = i;   // duplicate / spike / straight through
+        }
+        if (drop >= 0) { memmove(&p[drop], &p[drop + 1], (size_t)(n - drop - 1) * sizeof *p); n--; continue; }
+        for (int i = 0; i < n; i++) {
+            float l = hypotf(p[(i + 1) % n].x - p[i].x, p[(i + 1) % n].z - p[i].z);
+            if (l < sl) { sl = l; shortest = i; }
+        }
+        if (sl >= KLSP_MIN_WALL && n <= KLSP_MAX_WALLS) break;
+        int j = (shortest + 1) % n;                                                       // merge the shortest edge into its midpoint
+        p[shortest] = (klsp_pt){(p[shortest].x + p[j].x) * 0.5f, (p[shortest].z + p[j].z) * 0.5f};
+        memmove(&p[j], &p[j + 1], (size_t)(n - j - 1) * sizeof *p);
+        n--;
+    }
+    if (!why && n < 3) why = "too-few-vertices";
+    if (!why && klsp_self_cross(p, n)) why = "self-crossing";
+    if (!why && !(klsp_area2(p, n) * 0.5f >= KLSP_MIN_AREA)) why = "area";
+    if (why) { fprintf(stderr, "  [room] drawn zone rejected: reason=%s\n", why); return 0; }
+    return n;
+}
+// Intersection of the lines of walls a and b, when they are not nearly parallel (under 6 degrees).
+static int klsp_line_isect(const klsp_seg *a, const klsp_seg *b, float *x, float *z) {
+    float ax = a->x1 - a->x0, az = a->z1 - a->z0, bx = b->x1 - b->x0, bz = b->z1 - b->z0, den = ax * bz - az * bx;
+    if (!(fabsf(den) > 0.1f * hypotf(ax, az) * hypotf(bx, bz))) return 0;
+    float t = ((b->x0 - a->x0) * bz - (b->z0 - a->z0) * bx) / den;
+    *x = a->x0 + ax * t; *z = a->z0 + az * t;
+    return 1;
+}
+
+// ---- the outline from the real walls: what a wall list holds besides the room's own walls ----
+#define KLSP_OUT_MAX 128         // real walls looked at; more are dropped (logged)
+static float klsp_seg_len(const klsp_seg *s) { return hypotf(s->x1 - s->x0, s->z1 - s->z0); }
+// Distance between two wall segments (0 when they cross).
+static float klsp_seg_dist(const klsp_seg *a, const klsp_seg *b) {
+    klsp_pt p0 = {a->x0, a->z0}, p1 = {a->x1, a->z1}, q0 = {b->x0, b->z0}, q1 = {b->x1, b->z1};
+    if (klsp_cross(&p0, &p1, &q0) * klsp_cross(&p0, &p1, &q1) < 0 && klsp_cross(&q0, &q1, &p0) * klsp_cross(&q0, &q1, &p1) < 0) return 0.0f;
+    return fminf(fminf(klsp_pt_seg(a->x0, a->z0, b), klsp_pt_seg(a->x1, a->z1, b)),
+                 fminf(klsp_pt_seg(b->x0, b->z0, a), klsp_pt_seg(b->x1, b->z1, a)));
+}
+// 1 when wall b is the same wall as a (a duplicate, or a piece of it): lines within 15 cm and 8 degrees, overlapping or at most
+// 35 cm apart along it. Then a becomes the one segment that spans both (same direction).
+static int klsp_wall_merge(klsp_seg *a, const klsp_seg *b) {
+    float ax = a->x1 - a->x0, az = a->z1 - a->z0, la = hypotf(ax, az), bx = b->x1 - b->x0, bz = b->z1 - b->z0, lb = hypotf(bx, bz);
+    if (!(fabsf(ax * bz - az * bx) <= 0.14f * la * lb)) return 0;
+    float ux = ax / la, uz = az / la;
+    if (fabsf(-uz * (b->x0 - a->x0) + ux * (b->z0 - a->z0)) > 0.15f || fabsf(-uz * (b->x1 - a->x0) + ux * (b->z1 - a->z0)) > 0.15f) return 0;
+    float s0 = ux * (b->x0 - a->x0) + uz * (b->z0 - a->z0), s1 = ux * (b->x1 - a->x0) + uz * (b->z1 - a->z0);
+    float lo = fminf(fminf(s0, s1), 0.0f), hi = fmaxf(fmaxf(s0, s1), la);
+    if (fminf(s0, s1) > la + 0.35f || fmaxf(s0, s1) < -0.35f) return 0;
+    *a = (klsp_seg){a->x0 + ux * lo, a->z0 + uz * lo, a->x0 + ux * hi, a->z0 + uz * hi};
+    return 1;
+}
+// 1 when wall i of the n is on the outside of the set: a ray from beside its middle, along one of its two normals, meets no other wall.
+// A partition has other walls on both sides of it; the walls of a room, one side open to the outside (or to its missing side).
+static int klsp_wall_outer(const klsp_seg *s, int n, int i) {
+    float l = klsp_seg_len(&s[i]), mx = (s[i].x0 + s[i].x1) * 0.5f, mz = (s[i].z0 + s[i].z1) * 0.5f;
+    float nx = -(s[i].z1 - s[i].z0) / l, nz = (s[i].x1 - s[i].x0) / l;
+    for (int sg = -1; sg <= 1; sg += 2) {
+        float dx = (float)sg * nx, dz = (float)sg * nz, ox = mx + dx * 0.05f, oz = mz + dz * 0.05f;
+        int hit = 0;
+        for (int k = 0; k < n && !hit; k++) {
+            if (k == i) continue;
+            float ex = s[k].x1 - s[k].x0, ez = s[k].z1 - s[k].z0, den = dx * ez - dz * ex;
+            if (!(fabsf(den) > 1e-6f)) continue;
+            float px = s[k].x0 - ox, pz = s[k].z0 - oz, t = (px * ez - pz * ex) / den, u = (px * dz - pz * dx) / den;
+            hit = t > 0 && u >= 0 && u <= 1;
+        }
+        if (!hit) return 1;
+    }
+    return 0;
+}
+// Distance from (x, z) to the outline of polygon p (n vertices).
+static float klsp_edge_dist(const klsp_pt *p, int n, float x, float z) {
+    float d = 1e30f;
+    for (int k = 0; k < n; k++) {
+        klsp_seg e = {p[k].x, p[k].z, p[(k + 1) % n].x, p[(k + 1) % n].z};
+        d = fminf(d, klsp_pt_seg(x, z, &e));
+    }
+    return d;
+}
+// The ring of the n (>= 3) outer walls w: chained end to start from the longest, always to the nearest free end; where two
+// neighbours meet (ends within 0.35 m, lines crossing there) the corner is where their lines cross, otherwise the ends are joined
+// by a straight closure -- what a missing side becomes. Then it must be a real outline: every edge of the polygon covers at least
+// half a real wall (sum of the overlaps along it) or is a closure between two wall ends, closures are at most half of the perimeter
+// and no wall lies inside the polygon (midpoint inside, over 0.3 m from the border). Returns the vertex count, 0 when not.
+static int klsp_wall_ring(const klsp_seg *w, int n, klsp_pt *out) {
+    klsp_seg a[KLSP_OUT_MAX];
+    int used[KLSP_OUT_MAX] = {0}, first = 0, m = 0;
+    for (int k = 1; k < n; k++) if (klsp_seg_len(&w[k]) > klsp_seg_len(&w[first])) first = k;
+    a[0] = w[first]; used[first] = 1;
+    for (int c = 1; c < n; c++) {                               // the free wall with an end nearest to the tail of the chain
+        int bk = -1, bf = 0;
+        float bd = 1e30f;
+        for (int k = 0; k < n; k++) {
+            if (used[k]) continue;
+            for (int f = 0; f < 2; f++) {
+                float d = hypotf((f ? w[k].x1 : w[k].x0) - a[c - 1].x1, (f ? w[k].z1 : w[k].z0) - a[c - 1].z1);
+                if (d < bd) { bd = d; bk = k; bf = f; }
+            }
+        }
+        used[bk] = 1;
+        a[c] = bf ? (klsp_seg){w[bk].x1, w[bk].z1, w[bk].x0, w[bk].z0} : w[bk];
+    }
+    for (int c = 0; c < n; c++) {
+        const klsp_seg *p = &a[c], *q = &a[(c + 1) % n];
+        float ix, iz, gap = hypotf(q->x0 - p->x1, q->z0 - p->z1);
+        if (gap <= 0.35f && klsp_line_isect(p, q, &ix, &iz) && hypotf(ix - p->x1, iz - p->z1) <= 0.35f && hypotf(ix - q->x0, iz - q->z0) <= 0.35f)
+            out[m++] = (klsp_pt){ix, iz};
+        else if (gap <= KLSP_MIN_WALL) out[m++] = (klsp_pt){(p->x1 + q->x0) * 0.5f, (p->z1 + q->z0) * 0.5f};
+        else { out[m++] = (klsp_pt){p->x1, p->z1}; out[m++] = (klsp_pt){q->x0, q->z0}; }
+    }
+    m = klsp_poly_prepare(out, m);
+    if (!m) return 0;
+    float perim = 0, closure = 0;
+    for (int k = 0; k < m; k++) {
+        const klsp_pt *e0 = &out[k], *e1 = &out[(k + 1) % m];
+        float el = hypotf(e1->x - e0->x, e1->z - e0->z), ux = (e1->x - e0->x) / el, uz = (e1->z - e0->z) / el, cover = 0;
+        perim += el;
+        for (int j = 0; j < n; j++) {                           // how much of this edge the real walls lie along
+            float wl = klsp_seg_len(&w[j]), cr = ux * (w[j].z1 - w[j].z0) - uz * (w[j].x1 - w[j].x0);
+            if (!(fabsf(cr) <= 0.26f * wl)) continue;           // not within 15 degrees of the edge
+            if (fabsf(-uz * (w[j].x0 - e0->x) + ux * (w[j].z0 - e0->z)) > 0.35f || fabsf(-uz * (w[j].x1 - e0->x) + ux * (w[j].z1 - e0->z)) > 0.35f) continue;
+            float s0 = ux * (w[j].x0 - e0->x) + uz * (w[j].z0 - e0->z), s1 = ux * (w[j].x1 - e0->x) + uz * (w[j].z1 - e0->z);
+            float ov = fminf(fmaxf(s0, s1), el) - fmaxf(fminf(s0, s1), 0.0f);
+            if (ov > 0) cover += ov;
+        }
+        if (cover >= 0.5f * el) continue;
+        int near0 = 0, near1 = 0;                               // not a wall: it must be a closure between two wall ends
+        for (int j = 0; j < n; j++)
+            for (int f = 0; f < 2; f++) {
+                float x = f ? w[j].x1 : w[j].x0, z = f ? w[j].z1 : w[j].z0;
+                near0 |= hypotf(x - e0->x, z - e0->z) <= 0.35f; near1 |= hypotf(x - e1->x, z - e1->z) <= 0.35f;
+            }
+        if (!near0 || !near1) return 0;
+        closure += el;
+    }
+    if (closure > 0.5f * perim) return 0;
+    for (int j = 0; j < n; j++) {
+        float mx = (w[j].x0 + w[j].x1) * 0.5f, mz = (w[j].z0 + w[j].z1) * 0.5f;
+        if (klsp_inside(out, m, mx, mz) && klsp_edge_dist(out, m, mx, mz) > 0.3f) return 0;     // a partition inside the ring
+    }
+    return m;
+}
+// The outline of the room from its real WALL planes only (guest space): the walls of the first RoomAnchor that lists planes, else
+// every real wall, each at least KLSP_MIN_WALL wide, at their measured extent. Duplicated / overlapping pieces of one wall are merged;
+// walls are grouped by touching (within 0.35 m) and the groups tried from the biggest: those with a wall of another group (another
+// room) in them never mix. In a group only the outer walls count (klsp_wall_outer -- partitions and furniture edges left out) and
+// they make the ring of klsp_wall_ring. No hull, no margin: an L stays an L. With head_check the player (hx, hz) must stand inside the
+// walls (the first build only: a live rebuild keeps what the game has while he walks about). Returns the vertex count, 0 when
+// there is no outline (fewer than 3 walls, or the ring does not validate: the next source). out holds KLSP_ZONE_PTS. Caller holds g_mu.
+static int outline_from_walls_locked(klsp_pt *out, float hx, float hz, int head_check) {
+    klsp_seg s[KLSP_OUT_MAX];
+    const ent *room = NULL;
+    int n = 0, dropped = 0;
+    for (uint32_t i = 0; i < g_n; i++) if (g_e[i].kind == KLSP_ROOM && g_e[i].nmem) { room = &g_e[i]; break; }
+    for (uint32_t i = 0; i < g_n; i++) {
+        const ent *e = &g_e[i];
+        if (e->kind != KLSP_PLANE || is_synth(e->id) || e->label != KLSP_LBL_WALL || !(e->w >= KLSP_MIN_WALL)) continue;
+        if (room) {
+            int in = 0;
+            for (uint32_t k = 0; k < room->nmem && !in; k++) in = uuid_eq(room->mem[k], e->id);
+            if (!in) continue;
+        }
+        float g[16], hw = e->w * 0.5f;
+        to_guest_locked(e->m, g);
+        klsp_seg q = {g[12] - g[0] * hw, g[14] - g[2] * hw, g[12] + g[0] * hw, g[14] + g[2] * hw};
+        if (!(isfinite(q.x0) && isfinite(q.z0) && isfinite(q.x1) && isfinite(q.z1))) continue;
+        if (n < KLSP_OUT_MAX) s[n++] = q; else dropped++;
+    }
+    if (dropped) fprintf(stderr, "  [room] outline: %d real walls, only the first %d used\n", n + dropped, n);
+    for (int i = 0; i < n; i++)                                 // duplicated / overlapping pieces of one wall -> one
+        for (int j = i + 1; j < n; ) {
+            if (klsp_wall_merge(&s[i], &s[j])) { s[j] = s[--n]; j = i + 1; } else j++;
+        }
+    if (n < 3) return 0;
+    int grp[KLSP_OUT_MAX], done[KLSP_OUT_MAX] = {0};
+    for (int i = 0; i < n; i++) grp[i] = i;
+    for (int i = 0; i < n; i++)
+        for (int j = i + 1; j < n; j++)
+            if (klsp_seg_dist(&s[i], &s[j]) <= 0.35f) {
+                int a = grp[i], b = grp[j];
+                while (grp[a] != a) a = grp[a];
+                while (grp[b] != b) b = grp[b];
+                grp[b] = a;
+            }
+    for (int i = 0; i < n; i++) { int a = i; while (grp[a] != a) a = grp[a]; grp[i] = a; }
+    for (;;) {                                                  // the biggest group not tried yet
+        int best = -1, bc = 2;
+        for (int g = 0; g < n; g++) {
+            int c = 0;
+            if (grp[g] != g || done[g]) continue;
+            for (int i = 0; i < n; i++) c += grp[i] == g;
+            if (c > bc) { bc = c; best = g; }
+        }
+        if (best < 0) return 0;
+        done[best] = 1;
+        klsp_seg all[KLSP_OUT_MAX], w[KLSP_OUT_MAX];
+        int na = 0, nw = 0;
+        for (int i = 0; i < n; i++) if (grp[i] == best) all[na++] = s[i];
+        for (int i = 0; i < na; i++) if (klsp_wall_outer(all, na, i)) w[nw++] = all[i];
+        if (nw < 3) continue;
+        int m = klsp_wall_ring(w, nw, out);
+        if (m && (!head_check || klsp_inside(out, m, hx, hz))) return m;
+    }
+}
+// The user's confirmed zone (kl_guardian: the user's roomscale boundary, guest space) as at most KLSP_ZONE_PTS points, thinned
+// evenly when it has more. 0 when there is none (nothing set, the default taken from the room, or a stationary circle).
+static int klsp_zone_points(klsp_pt *z) {
+    if (kl_guardian_boundary_source() != KLG_BSRC_USER || kl_guardian_get_mode() != KLG_MODE_ROOMSCALE) return 0;
+    int n = kl_guardian_get_boundary(NULL, 0);
+    if (n < 3) return 0;
+    float *xz = (float *)malloc((size_t)n * 2 * sizeof *xz);
+    if (!xz) return 0;
+    n = kl_guardian_get_boundary(xz, n);
+    int step = (n + KLSP_ZONE_PTS - 1) / KLSP_ZONE_PTS, m = 0;
+    for (int k = 0; k < n && m < KLSP_ZONE_PTS; k += step) z[m++] = (klsp_pt){xz[2 * k], xz[2 * k + 1]};
+    free(xz);
+    return m;
+}
+// Height of the room above its floor fy: the real ceiling plane (cey, guest y) when it is 1.5-6 m up; else the highest scene-mesh
+// point inside the footprint p (n vertices); else 2.4 m, the one invented figure left. *src = 1 ceiling, 2 mesh, 0 default. Caller
+// holds g_mu.
+static float klsp_room_height_locked(float fy, float cey, const klsp_pt *p, int n, int *src) {
+    *src = 0;
+    if (cey > -1e29f && cey - fy >= 1.5f && cey - fy <= 6.0f) { *src = 1; return cey - fy; }
+    float top = -1e30f;
+    for (uint32_t i = 0; i < g_n; i++) {
+        const ent *e = &g_e[i];
+        float g[16];
+        if (e->kind != KLSP_MESH) continue;
+        to_guest_locked(e->m, g);
+        for (uint32_t k = 0; k < e->nv; k++) {
+            const float *v = e->v + 3 * (size_t)k;
+            float y = g[1] * v[0] + g[5] * v[1] + g[9] * v[2] + g[13];
+            if (!(y > fy + 1.0f && y <= fy + 6.0f && y > top)) continue;       // below 1 m is furniture, above 6 m is not this room
+            float x = g[0] * v[0] + g[4] * v[1] + g[8] * v[2] + g[12], z = g[2] * v[0] + g[6] * v[1] + g[10] * v[2] + g[14];
+            if (isfinite(x) && isfinite(z) && klsp_inside(p, n, x, z)) top = y;
+        }
+    }
+    if (top - fy >= 1.5f) { *src = 2; return top - fy; }
+    return 2.4f;
+}
+
+// ---- the room handed to a game when the real planes are not a complete room (Space Setup must still end with a closed one) ----
+// Source, first that applies (logged as "[room] source=..."): real (a complete real set: nothing is added, returns 0) ->
+// guardian (the zone the player DREW with the controller: kl_guardian, user source, roomscale, >= 3 vertices; one wall per edge, edges
+// under 0.3 m fused, no test of where his head is) -> outline (outline_from_walls_locked: the measured walls, a missing side closed
+// by a straight wall) -> fallback (no drawn zone, no usable wall: the old box, zw x zd + 0.5 m per side around the head (hx, hz),
+// turned and grown to hold partial walls by klsp_fit_rect; 2.5 m high). A stationary circle is never a room. The first two have no
+// margin and no box: the polygon is floor and ceiling (non-convex allowed), one wall per edge, ceiling at the real ceiling or the
+// mesh (klsp_room_height_locked). The floor is the guardian's (the user's confirmed one) when there is one, else the real floor plane.
 // Planes use the ARKit frame (normal +Y; walls: local Z points down so Meta +Y is up, see kl_spatial.h).
-// When the real set is not a complete room -- also with a RoomAnchor whose walls are fragments -- the room is built from the
-// measured data instead (built_footprint_locked): one wall per edge of their convex hull, the real ceiling height (2.4 m without
-// one), floor and ceiling as that polygon; with fewer than 4 useful edges it stays the box above.
 // Returns 1 when a synthetic room is present now, 0 when a complete real set exists (it wins, nothing is added).
 // keep != NULL (live update): a synthetic room already built from `keep` stays as it is while the new input does not differ
 // significantly from it -- no silent change of geometry for jitter or a few mesh points.
+static int g_src_logged = -1;                                          // the source of the last "[room] source=" line
 static int synth_room_impl(float hx, float hz, float zw, float zd, klsp_sig *out, const klsp_sig *keep) {
+    static const char *const k_src[] = {"fallback", "outline", "guardian", "real"}, *const k_hsrc[] = {"default", "ceiling", "mesh"};
     const float M = 0.5f, oy = kl_ovrp_guest_origin_y();
     memset(out, 0, sizeof *out);
     float H = 2.5f, gfy = 0.0f, rfy = 1e30f, cey = -1e30f;
     int gsrc = kl_guardian_get_floor(&gfy);            // the guardian's floor (visionOS world) when there is one
     float fy = gfy - oy;
+    klsp_pt zone[KLSP_ZONE_PTS], poly[KLSP_ZONE_PTS];
+    int nz = klsp_zone_points(zone);                   // before g_mu: the guardian has its own lock
     klsp_seg ws[64];
     int nws = 0;
     pthread_mutex_lock(&g_mu);
-    int synth = 0, have_room = 0;
+    const ent *room = NULL;
+    int synth = 0, have_room = 0, nplanes = 0;
+    for (uint32_t i = 0; i < g_n; i++) if (g_e[i].kind == KLSP_ROOM && g_e[i].nmem) { room = &g_e[i]; break; }
     for (uint32_t i = 0; i < g_n; i++) {
         if (g_e[i].kind == KLSP_ROOM) have_room = 1;
         if (g_e[i].kind != KLSP_PLANE) continue;
@@ -1091,31 +1399,76 @@ static int synth_room_impl(float hx, float hz, float zw, float zd, klsp_sig *out
         if (g_e[i].label == KLSP_LBL_FLOOR && g[13] < rfy) rfy = g[13];
         if (g_e[i].label == KLSP_LBL_CEILING && g[13] > cey) cey = g[13];
         if (g_e[i].label == KLSP_LBL_WALL && nws < 64) ws[nws++] = (klsp_seg){g[12] - g[0] * hw, g[14] - g[2] * hw, g[12] + g[0] * hw, g[14] + g[2] * hw};
+        if (g_e[i].label == KLSP_LBL_FLOOR || g_e[i].label == KLSP_LBL_CEILING || g_e[i].label == KLSP_LBL_WALL) {
+            int in = !room;
+            for (uint32_t k = 0; room && k < room->nmem && !in; k++) in = uuid_eq(room->mem[k], g_e[i].id);
+            nplanes += in;
+        }
     }
-    if (real_set_complete_locked()) { pthread_mutex_unlock(&g_mu); return 0; }
+    if (real_set_complete_locked()) {
+        float lo[2] = {1e30f, 1e30f}, hi[2] = {-1e30f, -1e30f};
+        for (int k = 0; k < nws; k++) {
+            lo[0] = fminf(lo[0], fminf(ws[k].x0, ws[k].x1)); hi[0] = fmaxf(hi[0], fmaxf(ws[k].x0, ws[k].x1));
+            lo[1] = fminf(lo[1], fminf(ws[k].z0, ws[k].z1)); hi[1] = fmaxf(hi[1], fmaxf(ws[k].z0, ws[k].z1));
+        }
+        int first = g_src_logged != KLSP_SRC_REAL;
+        g_src_logged = KLSP_SRC_REAL;
+        pthread_mutex_unlock(&g_mu);
+        if (first) fprintf(stderr, "  [room] source=real dims=%.2fx%.2f h=%.2f nwalls=%d\n", hi[0] - lo[0], hi[1] - lo[1], cey > -1e29f ? cey - (rfy < 1e29f ? rfy : fy) : 0.0f, nws);
+        return 0;
+    }
     if (rfy < 1e29f && !gsrc) fy = rfy;
     klsp_rect r;
     klsp_seg sg[KLSP_MAX_WALLS];
-    klsp_pt hull[KLSP_MAX_WALLS];
     klsp_sig sig;
-    int nwall = 4, npts = 0;
-    float hb = cey > -1e29f && cey - fy >= 1.5f && cey - fy <= 6.0f ? cey - fy : 2.4f;     // real ceiling over the floor, else 2.4 m
-    int nh = built_footprint_locked(fy - 0.3f, fy + hb + 0.3f, hx, hz, hull, &npts, &sig);
-    if (nh && !klsp_hull_room_valid(hull, nh, fy, hb)) { nh = 0; sig.built = 0; }   // not a V1 room: keep the box
-    if (synth && synth == (int)g_synth_n && (!memcmp(&sig, &g_synth_sig, sizeof sig) || (keep && !klsp_sig_significant(&sig, keep)))) { *out = sig; pthread_mutex_unlock(&g_mu); return 1; }   // same input: keep it
-    purge_synth_locked();                              // new or changed data: rebuild (same ids, one source at a time, under this lock)
-    if (nh) {                                          // walls = hull edges (counter-clockwise: inward on the left, like the box)
-        float lo[2] = {1e30f, 1e30f}, hi[2] = {-1e30f, -1e30f};
-        for (int k = 0; k < nh; k++) {
-            sg[k] = (klsp_seg){hull[k].x, hull[k].z, hull[(k + 1) % nh].x, hull[(k + 1) % nh].z};
-            lo[0] = fminf(lo[0], hull[k].x); hi[0] = fmaxf(hi[0], hull[k].x); lo[1] = fminf(lo[1], hull[k].z); hi[1] = fmaxf(hi[1], hull[k].z);
+    memset(&sig, 0, sizeof sig);
+    sig.nplanes = nplanes; sig.nmem = room ? (int)room->nmem : 0;
+    int np = 0, src = KLSP_SRC_FALLBACK, hsrc = 0, nwall = 4;
+    float hb = H;
+    // The player must stand inside the outline when it is first chosen; a live rebuild of an outline the game already has does not ask
+    // again (he walks about), whereas anything else being rebuilt live starts from the first-build rule.
+    int head_check = !(keep && keep->built == KLSP_SRC_OUTLINE);
+    static const int k_order[2] = {KLSP_SRC_GUARDIAN, KLSP_SRC_OUTLINE};
+    for (int i = 0; i < 2 && !np; i++) {
+        int s = k_order[i], n = 0;
+        if (s == KLSP_SRC_OUTLINE) {
+            n = outline_from_walls_locked(poly, hx, hz, head_check);
+        } else if (nz >= 3) {                                          // the player's drawn zone: no head test, it is his
+            memcpy(poly, zone, (size_t)nz * sizeof *poly);
+            n = klsp_zone_prepare(poly, nz);
         }
-        nwall = nh; H = hb;
+        if (n) {
+            hb = klsp_room_height_locked(fy, cey, poly, n, &hsrc);
+            if (!klsp_hull_room_valid(poly, n, fy, hb)) n = 0;         // not a V1 room: the next source
+        }
+        if (n) { np = n; src = s; }
+    }
+    if (np) {
+        float lo[2] = {1e30f, 1e30f}, hi[2] = {-1e30f, -1e30f};
+        for (int k = 0; k < np; k++) {
+            sg[k] = (klsp_seg){poly[k].x, poly[k].z, poly[(k + 1) % np].x, poly[(k + 1) % np].z};
+            lo[0] = fminf(lo[0], poly[k].x); hi[0] = fmaxf(hi[0], poly[k].x); lo[1] = fminf(lo[1], poly[k].z); hi[1] = fmaxf(hi[1], poly[k].z);
+        }
+        nwall = np; H = hb;
         r = (klsp_rect){(lo[0] + hi[0]) * 0.5f, (lo[1] + hi[1]) * 0.5f, hi[0] - lo[0], hi[1] - lo[1], 0.0f};
+        sig.bb[0] = (int)lroundf(lo[0] * 20.0f); sig.bb[1] = (int)lroundf(lo[1] * 20.0f);
+        sig.bb[2] = (int)lroundf(hi[0] * 20.0f); sig.bb[3] = (int)lroundf(hi[1] * 20.0f);
+        sig.h = (int)lroundf(H * 20.0f);
     } else {
         r = klsp_fit_rect(ws, nws, hx, hz, zw + 2 * M, zd + 2 * M);
         klsp_box_walls(&r, sg);
     }
+    sig.built = src; sig.fy = (int)lroundf(fy * 20.0f); sig.nwall = nwall;
+    if (src == KLSP_SRC_GUARDIAN) {                                    // exact: the player drew it, no ARKit jitter in it
+        uint32_t h = 2166136261u;
+        for (int k = 0; k < np; k++) {
+            h = (h ^ (uint32_t)lroundf(poly[k].x * 1000.0f)) * 16777619u;
+            h = (h ^ (uint32_t)lroundf(poly[k].z * 1000.0f)) * 16777619u;
+        }
+        sig.zhash = (int)h;
+    }
+    if (synth && synth == (int)g_synth_n && (!memcmp(&sig, &g_synth_sig, sizeof sig) || (keep && !klsp_sig_significant(&sig, keep)))) { *out = sig; pthread_mutex_unlock(&g_mu); return 1; }   // same input: keep it
+    purge_synth_locked();                              // new or changed data: rebuild (same ids, one source at a time, under this lock)
     float c = cosf(r.yaw), sn = sinf(r.yaw);
     for (int k = 0; k < 2 + nwall; k++) {
         float g[16] = {0};
@@ -1145,22 +1498,23 @@ static int synth_room_impl(float hx, float hz, float zw, float zd, klsp_sig *out
         if (!e) { purge_synth_locked(); pthread_mutex_unlock(&g_mu); return 0; }
         memcpy(e->m, a, sizeof e->m);
         e->w = w; e->h = h; e->label = label; e->tracked = 1;
-        float *pl = (nh && k < 2) ? (float *)malloc((size_t)nh * 2 * sizeof(float)) : NULL;
-        if (pl) {                                      // floor / ceiling = the hull polygon, counter-clockwise in plane XY (Meta y = -local Z)
-            for (int j = 0; j < nh; j++) {
-                const klsp_pt *q = &hull[k ? j : nh - 1 - j];
+        float *pl = (np && k < 2) ? (float *)malloc((size_t)np * 2 * sizeof(float)) : NULL;
+        if (pl) {                                      // floor / ceiling = the polygon, counter-clockwise in plane XY (Meta y = -local Z)
+            for (int j = 0; j < np; j++) {
+                const klsp_pt *q = &poly[k ? j : np - 1 - j];
                 pl[2 * j] = q->x - r.cx; pl[2 * j + 1] = (k ? 1.0f : -1.0f) * (q->z - r.cz);
             }
-            free(e->poly); e->poly = pl; e->npoly = nh;
+            free(e->poly); e->poly = pl; e->npoly = np;
         }
     }
     g_synth_n = (uint32_t)(2 + nwall); g_synth_sig = sig; *out = sig;
+    g_src_logged = src;
     pthread_mutex_unlock(&g_mu);
-    if (nh) kl_guardian_default_from_room(&hull[0].x, nh);     // the floor outline is the default play space (a user one wins)
+    if (src == KLSP_SRC_OUTLINE) kl_guardian_default_from_room(&poly[0].x, np);     // the outline is the default play space (a user one wins)
     fprintf(stderr, "  [spatial] synthetic room %.2fx%.2f turn=%.2f centre=%.2f,%.2f floor_y=%.2f partial_walls=%d\n",
             r.w, r.d, r.yaw, r.cx, r.cz, fy, nws);
-    if (nh) fprintf(stderr, "  [room] built from real: walls=%d hull_pts=%d h=%.2f floor_y=%.2f src=%s\n",
-                    nh, npts, H, fy, have_room ? "roomanchor" : "planes");
+    fprintf(stderr, "  [room] source=%s dims=%.2fx%.2f h=%.2f nwalls=%d hsrc=%s floor_y=%.2f src=%s\n", k_src[src], r.w, r.d, H, nwall,
+            np ? k_hsrc[hsrc] : "fixed", fy, src == KLSP_SRC_GUARDIAN ? "zone" : np ? (have_room ? "roomanchor" : "planes") : "none");
     return 1;
 }
 
@@ -1182,11 +1536,13 @@ int kl_spatial_synth_room(float hx, float hz, float zw, float zd) {
 static int klsp_sig_significant(const klsp_sig *a, const klsp_sig *b) {
     if (a->built != b->built || a->nplanes != b->nplanes || a->nmem != b->nmem) return 1;
     for (int i = 0; i < 4; i++) if (abs(a->bb[i] - b->bb[i]) >= 2) return 1;          // bb is in 5 cm units
+    if (abs(a->fy - b->fy) >= 2 || abs(a->h - b->h) >= 2) return 1;
+    if (a->nwall != b->nwall || a->zhash != b->zhash) return 1;                   // the floor or the height moved by >= 10 cm
     int dm = abs(a->nmesh - b->nmesh), top = a->nmesh > b->nmesh ? a->nmesh : b->nmesh;
     return dm > 64 && dm * 4 > top;
 }
 static void (*g_room_cb)(void);
-static uint32_t g_room_gen, g_live_gen;
+static uint32_t g_room_gen, g_live_gen, g_live_ggen;
 static int g_live_gen_valid;
 static uint64_t g_live_ns;
 void kl_spatial_set_room_listener(void (*fn)(void)) {
@@ -1198,9 +1554,9 @@ uint32_t kl_spatial_room_generation(void) { return __atomic_load_n(&g_room_gen, 
 uint32_t kl_spatial_generation(void) { return __atomic_load_n(&g_gen, __ATOMIC_RELAXED); }
 int kl_spatial_live_update_at(float hx, float hz, float zw, float zd, uint64_t now_ns) {
     if (!isfinite(hx) || !isfinite(hz)) return 0;
-    uint32_t gen = kl_spatial_generation();
+    uint32_t gen = kl_spatial_generation(), ggen = kl_guardian_generation();    // the store or the guardian (a zone redrawn) changed
     pthread_mutex_lock(&g_mu);
-    int run = g_given.valid && !(g_live_gen_valid && gen == g_live_gen) && (!g_live_ns || now_ns >= g_live_ns + 2000000000ull);
+    int run = g_given.valid && !(g_live_gen_valid && gen == g_live_gen && ggen == g_live_ggen) && (!g_live_ns || now_ns >= g_live_ns + 2000000000ull);
     if (run) g_live_ns = now_ns;
     pthread_mutex_unlock(&g_mu);
     if (!run) return 0;
@@ -1212,7 +1568,7 @@ int kl_spatial_live_update_at(float hx, float hz, float zw, float zd, uint64_t n
     uint32_t after = kl_spatial_generation();
     void (*cb)(void) = NULL;
     pthread_mutex_lock(&g_mu);
-    g_live_gen = after; g_live_gen_valid = 1;
+    g_live_gen = after; g_live_ggen = ggen; g_live_gen_valid = 1;
     int changed = r != g_given.synth || (r && klsp_sig_significant(&sig, &g_given.sig));
     if (changed) {
         g_given.synth = r; g_given.sig = sig;
@@ -1220,7 +1576,7 @@ int kl_spatial_live_update_at(float hx, float hz, float zw, float zd, uint64_t n
         cb = g_room_cb;
     }
     pthread_mutex_unlock(&g_mu);
-    if (changed) fprintf(stderr, "  [spatial] room changed (%s, planes=%d mesh_pts=%d): rebuilt, game notified\n", r ? "synthetic" : "real set", sig.nplanes, sig.nmesh);
+    if (changed) fprintf(stderr, "  [spatial] room changed (%s, planes=%d h=%.2f): rebuilt, game notified\n", r ? "synthetic" : "real set", sig.nplanes, (double)sig.h * 0.05);
     if (cb) cb();                                       // outside g_mu: the listener may query the store
     return changed;
 }

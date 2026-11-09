@@ -82,10 +82,13 @@ int      kl_spatial_anchor_tracked(kl_uuid id);
 int      kl_spatial_room_info(kl_uuid id, kl_uuid *floor, kl_uuid *ceiling,
                               uint32_t wcap, kl_uuid *walls, uint32_t *nwalls,
                               uint32_t mcap, kl_uuid *members, uint32_t *nmembers);
-// Synthetic CLOSED box room (floor, 2.5 m ceiling, 4 walls running clockwise seen from above, ends touching), zw x zd + 0.5 m per side,
-// centred on guest (hx, hz), for a scene capture without a usable ARKit room. Partial real walls turn/grow the box.
-// A set that is not complete (also a RoomAnchor whose walls are fragments) is replaced by a room built from the measured planes /
-// scene mesh (hull of their footprint, one wall per edge, real ceiling height), or by the box when that gives < 4 walls.
+// Synthetic CLOSED room (floor, ceiling, one wall per edge, ends touching) for a scene capture without a complete real set. Source, in
+// order, logged as "[room] source=": guardian (the zone the player DREW, kl_guardian user source / roomscale, >= 3 vertices; edges under
+// 0.3 m fused; his head need not be inside; a stationary circle is never a room), outline (the footprint of the real WALL planes at their
+// measured extent -- partitions, duplicates and other rooms left out -- a missing side closed by a straight wall; no hull, no margin; an
+// L stays an L; the player must stand inside it when it is first chosen), fallback (nothing drawn, no usable wall: a 2.5 m box, zw x zd +
+// 0.5 m per side, centred on guest (hx, hz), partial real walls turn/grow it). Height: real ceiling, else the scene mesh inside the
+// footprint, else 2.4 m. Floor: the guardian's floor, else the real one.
 // 1 = synthetic room present; 0 = a complete real set (floor, ceiling, closed walls) exists (untouched).
 int      kl_spatial_synth_room(float hx, float hz, float zw, float zd);
 // Live room. kl_spatial_synth_room records what the game was last handed; from then on the scene capture keeps running and

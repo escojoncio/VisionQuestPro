@@ -7,6 +7,9 @@
 // As on a Quest: passthrough is on while the screen is up (kl_passthrough_force, nothing of the game is drawn yet), the room's mesh and a
 // grid at the floor are drawn in the space (KleptonGuardianDraw.swift), and the player sets the floor by grabbing that grid with the
 // controller's grip (or a hand's pinch without controllers) and sliding it to the real floor, up or down; letting go keeps it.
+// Then the player DRAWS his play area on that floor: the controller's ray against the floor plane, trigger (or pinch without
+// controllers) places a vertex, getting within 0.3 m of the first one or «Cerrar» closes it (kl_guardian_zone_*, which validates and sets the
+// boundary); or he picks «Estacionario», the small circle. The drawn polygon is never saved (the world origin changes every session).
 
 import GameController
 import SwiftUI
@@ -42,6 +45,7 @@ enum VQGuardianGate {
             return .skipped
         }
         shown = false
+        KLGuardian.zoneClear()      // a draft left by another game in this process never reaches this screen
         // Real passthrough and the room mesh / floor grid while the screen is up; released below whatever ends it.
         kl_passthrough_force(1)
         KLGuardianScene.active = true
@@ -78,6 +82,9 @@ enum VQGuardianGate {
     /// Ends the wait (once; later calls do nothing).
     @MainActor static func finish(_ outcome: Outcome) {
         KLGuardian.grabFloor(pressed: false, handY: .nan, headY: .nan)   // whatever ends the screen, no grab is left held in C
+        KLGuardianScene.setCursor(nil, closing: false)
+        KLGuardianScene.zoneVisible = false
+        if outcome != .confirmed { KLGuardian.zoneClear() }              // a zone drawn and abandoned does not reach the game
         guard let c = waiter else { return }
         waiter = nil
         c.resume(returning: outcome)
@@ -86,7 +93,7 @@ enum VQGuardianGate {
 
 struct VQGuardianSetupView: View {
     /// What the play area is made from on Confirm.
-    enum Choice: Hashable { case room, rectangle, stationary }
+    enum Choice: Hashable { case draw, stationary }
 
     @ObservedObject private var live = KLGuardianLive.shared
     @Environment(\.dismissWindow) private var dismissWindow
@@ -94,29 +101,29 @@ struct VQGuardianSetupView: View {
     private let hasSaved: Bool
     @State private var redefining: Bool
     @State private var choice: Choice
-    @State private var rectW: Double
-    @State private var rectD: Double
-    @State private var radius: Double
     @State private var head: SIMD3<Float>?
     @State private var floorY: Float?
     @State private var grabHand: Int?         // the hand (0 left, 1 right) holding the floor grid
     @State private var finished = false
     @State private var floorTouched = false   // the user moved the floor on this screen (not confirmed until Confirm)
+    @State private var zone: [SIMD2<Float>] = []      // the zone being drawn (a copy of kl_guardian's draft, for the map)
+    @State private var zoneClosed = false
+    @State private var cursor: SIMD2<Float>?           // where the pointing hand meets the floor
+    @State private var triggerDown = [false, false]   // per hand, last frame (a vertex goes in on the press, not while held)
+    @State private var zoneNote: String?
+    @State private var floorDone = false               // hands only: the floor is set, so a pinch near it draws instead of grabbing the grid
 
     init() {
         let g = VQLaunch.choice?.game
         game = g
         let saved = g.map { KLGuardian.hasSaved(game: $0) } ?? false
         hasSaved = saved
-        _redefining = State(initialValue: !saved)
-        // The sizes the game already uses (vq.area / vq.areaW / vq.areaD), the radius the guardian has.
+        // Only a saved stationary circle can be reused as it is: a drawn polygon is never saved (and an older rectangle / room is gone).
+        let kind = g.flatMap { KLGuardian.savedKind(game: $0) }
+        _redefining = State(initialValue: !saved || kind != "stationary")
         let area = VQGameArea.load(key: g?.aaKey ?? "")
-        _rectW = State(initialValue: min(max(area.w, 1.2), 6))
-        _rectD = State(initialValue: min(max(area.d, 1.2), 6))
-        _radius = State(initialValue: min(max(Double(KLGuardian.radius), 0.5), 2.5))
-        var c: Choice = area.seated ? .stationary : .rectangle
-        if let g, let kind = KLGuardian.savedKind(game: g) { c = kind == "stationary" ? .stationary : kind == "rect" ? .rectangle : .room }
-        _choice = State(initialValue: c)
+        // Drawing needs ARKit's world tracking (the floor plane and the hands live in that world): without it only the circle is possible.
+        _choice = State(initialValue: area.seated || kind == "stationary" || KLGuardian.worldTrackingDenied ? .stationary : .draw)
     }
 
     var body: some View {
@@ -148,6 +155,7 @@ struct VQGuardianSetupView: View {
                     return
                 }
                 VQGuardianGate.shown = true
+                KLGuardian.zoneClear()      // a fresh screen starts with no draft (not in init: SwiftUI may rebuild the struct mid-drawing)
                 VQGuardianGate.closeWindow = { dismissWindow(id: VQGuardianGate.windowID) }
             }
         }
@@ -205,6 +213,11 @@ struct VQGuardianSetupView: View {
                  : VQL("Agarra la rejilla del suelo con el grip del mando (o pellizca con la mano si no usas mandos) y deslízala hasta el suelo real, hacia arriba o hacia abajo. Al soltar queda fijada.",
                        "Grab the floor grid with the controller's grip (or pinch with your hand if you have no controllers) and slide it to the real floor, up or down. Letting go sets it."))
                 .font(.caption)
+            if GCController.controllers().isEmpty && !noWorld {
+                // Hands: the same pinch near the floor is the grid's grab and a vertex, so the floor is declared done before drawing.
+                Button(floorDone ? VQL("Ajustar el suelo otra vez", "Adjust the floor again") : VQL("Suelo listo", "Floor done")) { floorDone.toggle() }
+                    .buttonStyle(.bordered)
+            }
             if noWorld {
                 Text(VQL("Sin permiso de seguimiento del entorno: el suelo no se puede fijar ni guardar.",
                          "No world-sensing permission: the floor cannot be set or saved."))
@@ -237,7 +250,7 @@ struct VQGuardianSetupView: View {
             guard kl_ovrp_hand_motion(Int32(hand), &pos, nil, nil, nil) != 0, pos[1].isFinite,
                   kl_ovrp_controller_input(Int32(hand), &buttons, nil, &index, &grip, nil, nil) != 0 else { continue }
             let gripDown = grip > 0.5 || buttons & (hand == 0 ? OVRPRawButton.lHandTrigger : OVRPRawButton.rHandTrigger) != 0
-            let pinch = noControllers && index > 0.5
+            let pinch = noControllers && index > 0.5 && !floorDone
             // A hand with no controller pose is skipped above; without controllers connected the pinch takes the grip's place.
             let started = grabHand == hand || abs(pos[1] - reference) <= Self.grabReach
             if (gripDown || pinch) && started { holding = (hand, pos[1]); break }
@@ -251,37 +264,103 @@ struct VQGuardianSetupView: View {
             grabHand = nil
         }
         floorY = KLGuardian.floorY()
+        drawStep(noControllers: noControllers)
+    }
+
+    // MARK: drawing
+
+    /// Where the hand points on the floor plane (y = the confirmed floor): the controller's ray (its pose, forward = -Z of the grip pose
+    /// the guest gets) against that plane, at most 12 m away and pointing at least 3 degrees down; with hands and no controller, the hand
+    /// itself projected straight down, and ONLY within 25 cm over the floor (a pinch anywhere else is the system's UI, not a vertex).
+    /// nil when it does not meet the floor.
+    private func floorPoint(pos: [Float], quat: [Float], noControllers: Bool, floorY: Float) -> SIMD2<Float>? {
+        guard pos.count >= 3, pos.allSatisfy({ $0.isFinite }) else { return nil }
+        if noControllers {                       // hands: only touching the floor counts (at most 25 cm over it, 15 cm under for tracking noise)
+            let dy = pos[1] - floorY
+            return dy <= Self.grabReach && dy >= -0.15 ? SIMD2<Float>(pos[0], pos[2]) : nil
+        }
+        guard quat.count >= 4, quat.allSatisfy({ $0.isFinite }) else { return nil }
+        let q = simd_quatf(ix: quat[0], iy: quat[1], iz: quat[2], r: quat[3])
+        guard q.length > 0.5 else { return nil }
+        let dir = simd_normalize(q).act(SIMD3<Float>(0, 0, -1))
+        guard dir.y < -0.05 else { return nil }
+        let t = (floorY - pos[1]) / dir.y
+        guard t > 0, t < 12 else { return nil }
+        return SIMD2<Float>(pos[0] + dir.x * t, pos[2] + dir.z * t)
+    }
+
+    /// 60 Hz while «Dibujar zona» is on: follows the pointing hand, and a trigger press (a pinch with the hand down at the floor, without
+    /// controllers) places a vertex. Nothing is placed while the floor is being grabbed or, with hands, before «Suelo listo». @State is
+    /// only assigned when it changes (the body is not redrawn at 60 Hz for nothing).
+    private func drawStep(noControllers: Bool) {
+        let state = KLGuardian.zone()
+        if state.points != zone { zone = state.points }
+        if state.closed != zoneClosed { zoneClosed = state.closed }
+        KLGuardianScene.zoneVisible = choice == .draw
+        guard choice == .draw, !state.closed, grabHand == nil, !noControllers || floorDone, let floor = floorY else {
+            if cursor != nil { cursor = nil }
+            KLGuardianScene.setCursor(nil, closing: false)
+            return
+        }
+        var point: SIMD2<Float>?
+        for hand in [1, 0] {
+            var pos: [Float] = [0, 0, 0], quat: [Float] = [0, 0, 0, 1]
+            var index: Float = 0
+            guard kl_ovrp_hand_motion(Int32(hand), &pos, &quat, nil, nil) != 0,
+                  kl_ovrp_controller_input(Int32(hand), nil, nil, &index, nil, nil, nil) != 0 else {
+                if triggerDown[hand] { triggerDown[hand] = false }
+                continue
+            }
+            let p = floorPoint(pos: pos, quat: quat, noControllers: noControllers, floorY: floor)
+            let down = index > 0.5
+            let rising = down && !triggerDown[hand]
+            if triggerDown[hand] != down { triggerDown[hand] = down }
+            if point == nil || down { point = p }
+            if rising, let p {
+                let r = KLGuardian.zoneAdd(p)
+                let note: String? = r == -2 ? zoneReason(KLGuardian.zoneValidate()) : (r >= 0 ? nil : zoneNote)
+                if note != zoneNote { zoneNote = note }
+            }
+        }
+        if let pt = point {
+            if cursor == nil || simd_distance(cursor!, pt) > 0.01 { cursor = pt }
+        } else if cursor != nil {
+            cursor = nil
+        }
+        let near = point.map { p in zone.count >= 3 && simd_distance(p, zone[0]) <= Float(KLG_ZONE_CLOSE_DIST) } ?? false
+        KLGuardianScene.setCursor(point, closing: near)
+        let state2 = KLGuardian.zone()
+        if state2.points != zone { zone = state2.points }
+        if state2.closed != zoneClosed { zoneClosed = state2.closed }
+    }
+
+    private func zoneReason(_ code: Int) -> String? {
+        switch Int32(code) {
+        case Int32(KLG_ZONE_OK): return nil
+        case Int32(KLG_ZONE_TOO_FEW): return VQL("Pon al menos 3 puntos.", "Place at least 3 points.")
+        case Int32(KLG_ZONE_CROSSING): return VQL("Los lados se cruzan: deshaz el último punto.", "The sides cross: undo the last point.")
+        case Int32(KLG_ZONE_TOO_SMALL): return VQL("La zona es demasiado pequeña (1,15 m de lado como mínimo).", "The area is too small (1.15 m on a side at least).")
+        default: return VQL("La zona no es válida.", "The area is not valid.")
+        }
     }
 
     // MARK: map
 
     private var mapSection: some View {
         // Snapshots: the canvas closure only reads these locals.
-        let outline = choice == .room ? roomOutline : live.boundary
-        let play: (w: Float, d: Float, cx: Float, cz: Float, yaw: Float)? = choice == .room && !roomOutline.isEmpty ? KLGuardian.playspace() : nil
+        let draft = zone
+        let closed = zoneClosed
         let headXZ = head.map { SIMD2<Float>($0.x, $0.z) }
-        let rect: (Float, Float)? = choice == .rectangle ? (Float(rectW), Float(rectD)) : nil
-        let circle: Float? = choice == .stationary ? Float(radius) : nil
+        let pointer = cursor
+        let circle: Float? = choice == .stationary ? Float(KLG_DEFAULT_RADIUS) : nil
         return Section(VQL("Mapa (vista desde arriba)", "Map (top view)")) {
             Canvas { ctx, size in
-                let corners: [(Float, Float)] = [(-1, -1), (1, -1), (1, 1), (-1, 1)]
-                var playPoly: [SIMD2<Float>] = []
-                if let p = play {
-                    let c = cosf(p.yaw), s = sinf(p.yaw)
-                    playPoly = corners.map { k -> SIMD2<Float> in
-                        let u = k.0 * p.w / 2, v = k.1 * p.d / 2
-                        return SIMD2<Float>(p.cx + c * u - s * v, p.cz + s * u + c * v)   // kl_guardian.c: turn yaw, w along u
-                    }
-                }
-                var preview: [SIMD2<Float>] = []
-                if let r = rect, let h = headXZ {
-                    preview = corners.map { SIMD2<Float>(h.x + $0.0 * r.0 / 2, h.y + $0.1 * r.1 / 2) }
-                }
-                var extent: [SIMD2<Float>] = outline + playPoly + preview
+                var extent: [SIMD2<Float>] = draft
                 if let h = headXZ {
                     extent.append(h)
                     if let r = circle { extent.append(h + SIMD2<Float>(r, r)); extent.append(h - SIMD2<Float>(r, r)) }
                 }
+                if let c = pointer { extent.append(c) }
                 guard let first = extent.first else { return }
                 var lo = first, hi = first
                 for p in extent { lo = simd_min(lo, p); hi = simd_max(hi, p) }
@@ -291,17 +370,20 @@ struct VQGuardianSetupView: View {
                 func pt(_ p: SIMD2<Float>) -> CGPoint {
                     CGPoint(x: size.width / 2 + CGFloat(p.x - mid.x) * scale, y: size.height / 2 + CGFloat(p.y - mid.y) * scale)
                 }
-                func stroke(_ poly: [SIMD2<Float>], _ color: Color, _ width: CGFloat) {
-                    guard let f = poly.first else { return }
+                if let f = draft.first {
                     var path = Path()
                     path.move(to: pt(f))
-                    for p in poly.dropFirst() { path.addLine(to: pt(p)) }
-                    path.closeSubpath()
-                    ctx.stroke(path, with: .color(color), lineWidth: width)
+                    for p in draft.dropFirst() { path.addLine(to: pt(p)) }
+                    if closed { path.closeSubpath() } else if let c = pointer { path.addLine(to: pt(c)) }
+                    ctx.stroke(path, with: .color(.green), lineWidth: 2)
+                    for p in draft {
+                        let c = pt(p)
+                        ctx.fill(Path(ellipseIn: CGRect(x: c.x - 4, y: c.y - 4, width: 8, height: 8)), with: .color(.green))
+                    }
                 }
-                if outline.count >= 3 { stroke(outline, .gray, 2) }
-                if !playPoly.isEmpty { stroke(playPoly, .blue, 2) }
-                if !preview.isEmpty { stroke(preview, .green, 2) }
+                if let c = pointer.map(pt), !closed {
+                    ctx.stroke(Path(ellipseIn: CGRect(x: c.x - 6, y: c.y - 6, width: 12, height: 12)), with: .color(.white), lineWidth: 2)
+                }
                 if let h = headXZ {
                     if let r = circle {
                         let c = pt(h), pr = CGFloat(r) * scale
@@ -312,65 +394,47 @@ struct VQGuardianSetupView: View {
                 }
             }
             .frame(height: 280)
-            Text(VQL("Gris: contorno de la sala. Azul: rectángulo jugable dentro de ella. Verde: la zona que elijas. Amarillo: tu cabeza.",
-                     "Grey: room outline. Blue: the playable rectangle inside it. Green: the area you choose. Yellow: your head."))
+            Text(VQL("Verde: la zona que dibujas (o el círculo estacionario). Blanco: dónde apunta tu mano en el suelo. Amarillo: tu cabeza.",
+                     "Green: the area you draw (or the stationary circle). White: where your hand points on the floor. Yellow: your head."))
                 .font(.caption)
         }
     }
 
     // MARK: area
 
-    /// Longest side of the room outline's bounding box (m), 0 without one.
-    private var roomExtent: Float {
-        guard let f = roomOutline.first else { return 0 }
-        var lo = f, hi = f
-        for p in roomOutline { lo = simd_min(lo, p); hi = simd_max(hi, p) }
-        return max(hi.x - lo.x, hi.y - lo.y)
-    }
-
-    /// The room's own outline: nothing when the boundary in use was set by the user (a restored rectangle is not the room).
-    private var roomOutline: [SIMD2<Float>] { KLGuardian.boundarySource == 2 ? [] : live.boundary }
-
-    private var roomTooSmall: Bool { choice == .room && !roomOutline.isEmpty && !live.playspaceOK }
-    private var roomTooBig: Bool { choice == .room && roomExtent > 15 }
     private var canConfirm: Bool {
         guard head != nil else { return false }
-        if choice == .room { return !roomOutline.isEmpty && !roomTooBig }
-        return true
+        return choice == .stationary || zoneClosed          // a drawn zone must be closed and valid (kl_guardian_zone_close checked it)
     }
 
     private var areaSection: some View {
         Section(VQL("Zona de juego", "Play area")) {
             Picker(VQL("Modo", "Mode"), selection: $choice) {
-                Text(VQL("Sala (contorno de Vision Pro)", "Room (Vision Pro outline)")).tag(Choice.room)
-                Text(VQL("Rectángulo (ancho × fondo)", "Rectangle (width × depth)")).tag(Choice.rectangle)
-                Text(VQL("Estacionario (radio)", "Stationary (radius)")).tag(Choice.stationary)
+                Text(VQL("Dibujar zona", "Draw area")).tag(Choice.draw)
+                Text(VQL("Estacionario", "Stationary")).tag(Choice.stationary)
             }
             switch choice {
-            case .room:
-                if roomOutline.isEmpty {
-                    Text(VQL("Vision Pro aún no ha detectado la sala. Mira alrededor o elige otro modo.", "Vision Pro has not detected the room yet. Look around or pick another mode."))
+            case .draw:
+                Text(zoneClosed
+                     ? VQL("Zona cerrada: \(zone.count) puntos. Confirma, o usa Deshacer para reabrirla.", "Area closed: \(zone.count) points. Confirm, or use Undo to reopen it.")
+                     : VQL("Apunta con el mando al suelo y pulsa el gatillo para poner un punto. Con manos: pulsa «Suelo listo», baja la mano al suelo y pellizca (un pellizco más arriba no pone nada). Acércate a menos de 30 cm del primero, o pulsa Cerrar, para cerrar la zona. Puntos: \(zone.count).",
+                           "Point the controller at the floor and press the trigger to place a point. With hands: press «Floor done», lower your hand to the floor and pinch (a pinch higher up places nothing). Get within 30 cm of the first one, or press Close, to close the area. Points: \(zone.count)."))
+                    .font(.caption)
+                if noWorld {
+                    Text(VQL("Dibujar zona requiere seguimiento del entorno; usa Estacionario.", "Drawing the area needs world tracking; use Stationary."))
                         .font(.caption).foregroundStyle(.orange)
                 }
-            case .rectangle:
-                Stepper(VQL("Ancho: \(String(format: "%.1f", rectW)) m", "Width: \(String(format: "%.1f", rectW)) m"), value: $rectW, in: 1.2...6, step: 0.1)
-                Stepper(VQL("Fondo: \(String(format: "%.1f", rectD)) m", "Depth: \(String(format: "%.1f", rectD)) m"), value: $rectD, in: 1.2...6, step: 0.1)
-                Text(VQL("Se centra en tu cabeza al confirmar.", "Centred on your head when you confirm.")).font(.caption)
+                HStack {
+                    Button(VQL("Deshacer", "Undo")) { KLGuardian.zoneUndo(); zoneNote = nil }.buttonStyle(.bordered).disabled(zone.isEmpty)
+                    Button(VQL("Borrar", "Clear")) { KLGuardian.zoneClear(); zoneNote = nil }.buttonStyle(.bordered).disabled(zone.isEmpty)
+                    Button(VQL("Cerrar", "Close")) {
+                        zoneNote = zoneReason(KLGuardian.zoneClose())
+                    }.buttonStyle(.bordered).disabled(zoneClosed || zone.count < 3)
+                }
+                if let n = zoneNote { Text(n).font(.caption).foregroundStyle(.orange) }
             case .stationary:
-                Stepper(VQL("Radio: \(String(format: "%.1f", radius)) m", "Radius: \(String(format: "%.1f", radius)) m"), value: $radius, in: 0.5...2.5, step: 0.1)
-            }
-            if roomTooSmall || (choice == .rectangle && min(rectW, rectD) < 1.15) {
-                Text(VQL("La zona mide menos de 1,15 m de lado: se usará el modo estacionario.", "The area is under 1.15 m on a side: stationary mode will be used."))
-                    .font(.caption).foregroundStyle(.orange)
-            }
-            if roomTooBig {
-                Text(VQL("El contorno de la sala mide \(String(format: "%.0f", roomExtent)) m (más de 15 m): no es válido. Usa el modo Rectángulo.",
-                         "The room outline is \(String(format: "%.0f", roomExtent)) m (over 15 m): not valid. Use the Rectangle mode."))
-                    .font(.caption).foregroundStyle(.red)
-            } else if choice == .room && roomExtent > 8 {
-                Text(VQL("El contorno de la sala mide \(String(format: "%.0f", roomExtent)) m (más de 8 m): comprueba que es correcto.",
-                         "The room outline is \(String(format: "%.0f", roomExtent)) m (over 8 m): check that it is right."))
-                    .font(.caption).foregroundStyle(.orange)
+                Text(VQL("Un círculo pequeño alrededor de ti, como en Quest cuando no dibujas una zona.", "A small circle around you, as on a Quest when you do not draw an area."))
+                    .font(.caption)
             }
         }
     }
@@ -401,17 +465,14 @@ struct VQGuardianSetupView: View {
         let result: Int
         let saved: KLGuardian.SavedArea
         switch choice {
-        case .room:
-            result = KLGuardian.setBoundary(points: roomOutline, mode: .roomscale, radius: 0)
-            saved = .room
-        case .rectangle:
-            // counter-clockwise, centred on the head
-            result = KLGuardian.setBoundary(points: KLGuardian.rectangle(w: Float(rectW), d: Float(rectD), around: head),
-                                            mode: .roomscale, radius: 0)
-            saved = .rectangle(w: Float(rectW), d: Float(rectD))
+        case .draw:
+            // kl_guardian_zone_close already set the boundary (roomscale, user source); the polygon is not saved.
+            result = zoneClosed ? 1 : -1
+            saved = .drawn
         case .stationary:
-            result = KLGuardian.setBoundary(points: [], mode: .stationary, radius: Float(radius))
-            saved = .stationary(radius: Float(radius))
+            KLGuardian.zoneClear()                       // a drawn zone, if any, gives way to the circle
+            result = KLGuardian.setBoundary(points: [], mode: .stationary, radius: Float(KLG_DEFAULT_RADIUS))
+            saved = .stationary(radius: Float(KLG_DEFAULT_RADIUS))
         }
         KLGuardian.save(game: game, area: saved)
         VQLog.log("Guardián: confirmado (\(choice)) -> \(result), suelo \(floorY.map { String(format: "%.3f", $0) } ?? "-") (\(live.floorSource)), cabeza \(String(format: "%.3f", headY))")

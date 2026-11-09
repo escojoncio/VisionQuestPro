@@ -8,3 +8,5 @@ Reglas copiadas como COMPORTAMIENTO del Quest 3 (firmware solo como referencia o
 - Claves: `vq.envCapture`, `vq.guardianAsk`, `vq.guardian.<aaKey>.{floor,floorSource,kind,mode,w,d,radius,enabled}`, `vq.d24emul.<aaKey>`.
 - v2 (2026-11-09): passthrough forzado (`kl_passthrough_force`), malla+rejilla (`KleptonGuardianDraw.swift`, solo con `KLGuardianScene.active`), suelo = agarrar rejilla con grip/pellizco (`kl_guardian_floor_grab`), log `[floor]`; sin slider/5 s/stick. Malla viva: `kl_spatial_live_update` (opt-in `KL_SPATIAL_LIVE_NOTIFY=1` para eventos 300/301). Orden de planos FLOOR,CEILING,WALL,resto,OTHER.
 - Sin verificar: cableado kl_ovrp.c/kl_openxr.c y todo el Swift (solo CI); espacios guest vs mundo tras recenter; sentido de giro de las esquinas PlayArea.
+
+- v3 (2026-11-09): zona DIBUJADA (kl_guardian_zone_*), Estacionario por defecto si no se dibuja; prioridad de sala real > dibujada > outline > fallback (kl_spatial.c); getters ovrp vivos; sin persistir polígono entre sesiones.

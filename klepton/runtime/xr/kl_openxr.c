@@ -3655,11 +3655,24 @@ static void klxr_floor_log(const char *why) {
 }
 static int g_xr_floor_mm = INT_MIN;           // latched guardian floor in mm (0 = none); INT_MIN = no baseline yet
 static uint32_t g_xr_floor_gen = UINT32_MAX;  // guardian generation last looked at
+// The bounds xrGetReferenceSpaceBoundsRect answers (STAGE) come live from the guardian (kl_ovrp_boundary): when the player redraws or recentres
+// the zone, or switches to the circle, the same change-pending event is posted for STAGE (origin unchanged, so the pose in the previous space is
+// the identity). The first look is the baseline.
+static uint64_t g_xr_bound_sig;
+static int g_xr_bound_have;
 static void klxr_guardian_floor_watch(void) {
     uint32_t gen = kl_guardian_generation();
     if (gen == __atomic_exchange_n(&g_xr_floor_gen, gen, __ATOMIC_ACQ_REL)) return;
     float gy = 0.0f;
     kl_guardian_get_floor(&gy);               // 0 without a floor, as klxr_space_pose_ex uses it
+    uint64_t bs = kl_guardian_boundary_signature();
+    if (!__atomic_exchange_n(&g_xr_bound_have, 1, __ATOMIC_ACQ_REL)) __atomic_store_n(&g_xr_bound_sig, bs, __ATOMIC_RELEASE);
+    else if (__atomic_exchange_n(&g_xr_bound_sig, bs, __ATOMIC_ACQ_REL) != bs) {
+        float w = 0.0f, d = 0.0f;
+        kl_ovrp_boundary(&w, &d);
+        fprintf(stderr, "  [xr] STAGE bounds changed: %.2f x %.2f m (boundary %016llx); change pending posted\n", (double)w, (double)d, (unsigned long long)bs);
+        klxr_space_changed(KLXR_REF_SPACE_STAGE, gy, gy);
+    }
     int mm = (int)lrintf(gy * 1000.0f);
     int cur = __atomic_load_n(&g_xr_floor_mm, __ATOMIC_ACQUIRE);
     if (cur == INT_MIN) {

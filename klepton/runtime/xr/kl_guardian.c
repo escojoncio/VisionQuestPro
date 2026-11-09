@@ -2,6 +2,7 @@
 #include "kl_guardian.h"
 #include <math.h>
 #include <pthread.h>
+#include <stdlib.h>
 #include <string.h>
 
 typedef struct { float w, d, cx, cz, yaw, cell; } rect_t;   // cell = grid step the sides were counted in
@@ -14,6 +15,8 @@ static float g_radius = KLG_DEFAULT_RADIUS;
 static float g_pts[KLG_MAX_POINTS * 2];
 static rect_t g_rect;
 static uint32_t g_gen;
+static float g_zpts[KLG_MAX_POINTS * 2];                          // the zone being drawn (kl_guardian_zone_*)
+static int g_zn, g_zclosed, g_zcommitted;                        // vertices, closed, its polygon is the boundary in use
 
 // ---- floor ----
 static int floor_set_locked(float y, int src) {
@@ -204,6 +207,7 @@ static int commit_locked(int n, int mode, float radius, int bsrc, const rect_t *
     if (!(radius > 0)) radius = g_radius;
     if (g_configured && g_n == n && g_mode == mode && g_radius == radius && g_bsrc == bsrc
         && (n == 0 || !memcmp(g_pts, g_tmp, (size_t)n * 2 * sizeof(float)))) return 0;
+    g_zcommitted = 0;                                          // whoever sets it, the boundary is no longer a drawn zone
     g_n = n; g_mode = mode; g_radius = radius; g_bsrc = bsrc; g_configured = 1;
     if (n) memcpy(g_pts, g_tmp, (size_t)n * 2 * sizeof(float));
     g_rect = r ? *r : (rect_t){0, 0, 0, 0, 0};
@@ -238,10 +242,133 @@ void kl_guardian_set_stationary_radius(float radius) {
     if (r != g_radius) { g_radius = r; g_gen++; }
     pthread_mutex_unlock(&g_mu);
 }
+static void clear_locked(void) {
+    if (g_configured) { g_configured = 0; g_n = 0; g_bsrc = KLG_BSRC_NONE; g_mode = 0; g_rect = (rect_t){0, 0, 0, 0, 0}; g_gen++; }
+    g_zcommitted = 0;
+}
 void kl_guardian_clear(void) {
     pthread_mutex_lock(&g_mu);
-    if (g_configured) { g_configured = 0; g_n = 0; g_bsrc = KLG_BSRC_NONE; g_mode = 0; g_rect = (rect_t){0, 0, 0, 0, 0}; g_gen++; }
+    clear_locked();
     pthread_mutex_unlock(&g_mu);
+}
+
+uint64_t kl_guardian_boundary_signature(void) {
+    pthread_mutex_lock(&g_mu);
+    uint64_t h = 0;
+    if (g_configured) {
+        h = 1469598103934665603ull;
+        long v[3] = {g_mode, g_mode == KLG_MODE_STATIONARY ? lroundf(g_radius * 1000.0f) : 0, g_n};
+        for (int k = 0; k < 3; k++) h = (h ^ (uint64_t)v[k]) * 1099511628211ull;
+        for (int k = 0; k < g_n * 2; k++) h = (h ^ (uint64_t)lroundf(g_pts[k] * 1000.0f)) * 1099511628211ull;
+        if (!h) h = 1;
+    }
+    pthread_mutex_unlock(&g_mu);
+    return h;
+}
+
+// ---- drawn zone ----
+// The boundary set by a closed draft goes away with it (undo / clear): a zone the player abandoned must not reach the game.
+static void zone_uncommit_locked(void) {
+    if (g_zcommitted && g_configured && g_bsrc == KLG_BSRC_USER) clear_locked();
+    g_zcommitted = 0;
+}
+void kl_guardian_zone_clear(void) {
+    pthread_mutex_lock(&g_mu);
+    zone_uncommit_locked();
+    g_zn = 0; g_zclosed = 0;
+    pthread_mutex_unlock(&g_mu);
+}
+// 1 when two non-adjacent edges of the n-gon p properly cross.
+static int zone_crossing(const float *p, int n) {
+    for (int i = 0; i < n; i++)
+        for (int j = i + 2; j < n; j++) {
+            if (i == 0 && j == n - 1) continue;
+            const float *a = p + 2 * i, *b = p + 2 * ((i + 1) % n), *c = p + 2 * j, *d = p + 2 * ((j + 1) % n);
+            double d1 = (double)(b[0] - a[0]) * (c[1] - a[1]) - (double)(b[1] - a[1]) * (c[0] - a[0]);
+            double d2 = (double)(b[0] - a[0]) * (d[1] - a[1]) - (double)(b[1] - a[1]) * (d[0] - a[0]);
+            double d3 = (double)(d[0] - c[0]) * (a[1] - c[1]) - (double)(d[1] - c[1]) * (a[0] - c[0]);
+            double d4 = (double)(d[0] - c[0]) * (b[1] - c[1]) - (double)(d[1] - c[1]) * (b[0] - c[0]);
+            if (d1 * d2 < 0 && d3 * d4 < 0) return 1;
+        }
+    return 0;
+}
+// Validates the draft p (n points); when `commit`, sets the boundary from it. Takes g_calc_mu then g_mu itself.
+static int zone_check(const float *p, int n, int commit) {
+    if (n < 3) return KLG_ZONE_TOO_FEW;
+    pthread_mutex_lock(&g_calc_mu);
+    int code = KLG_ZONE_OK, m = load_tmp(p, n);
+    if (!m) code = KLG_ZONE_INVALID;
+    else if (zone_crossing(g_tmp, m)) code = KLG_ZONE_CROSSING;
+    else {
+        rect_t rc = inscribed(g_tmp, m);
+        if (!rect_ok(&rc)) code = KLG_ZONE_TOO_SMALL;
+        else if (commit) {
+            pthread_mutex_lock(&g_mu);
+            commit_locked(m, KLG_MODE_ROOMSCALE, 0.0f, KLG_BSRC_USER, &rc);
+            g_zcommitted = 1;
+            pthread_mutex_unlock(&g_mu);
+        }
+    }
+    pthread_mutex_unlock(&g_calc_mu);
+    return code;
+}
+static int zone_run(int commit) {
+    pthread_mutex_lock(&g_mu);
+    int n = g_zn;
+    float *copy = n >= 3 ? (float *)malloc((size_t)n * 2 * sizeof *copy) : NULL;
+    if (copy) memcpy(copy, g_zpts, (size_t)n * 2 * sizeof *copy);
+    pthread_mutex_unlock(&g_mu);
+    if (n >= 3 && !copy) return KLG_ZONE_INVALID;
+    int code = zone_check(copy, n, commit);
+    free(copy);
+    if (commit && code == KLG_ZONE_OK) {
+        pthread_mutex_lock(&g_mu);
+        g_zclosed = 1;
+        pthread_mutex_unlock(&g_mu);
+    }
+    return code;
+}
+int kl_guardian_zone_validate(void) { return zone_run(0); }
+int kl_guardian_zone_close(void) {
+    pthread_mutex_lock(&g_mu);
+    int closed = g_zclosed;
+    pthread_mutex_unlock(&g_mu);
+    return closed ? KLG_ZONE_OK : zone_run(1);
+}
+int kl_guardian_zone_add(float x, float z) {
+    if (!(fabsf(x) <= 1e4f) || !(fabsf(z) <= 1e4f)) return -1;
+    pthread_mutex_lock(&g_mu);
+    if (g_zclosed) { pthread_mutex_unlock(&g_mu); return -1; }
+    if (g_zn >= 3 && hypotf(x - g_zpts[0], z - g_zpts[1]) <= KLG_ZONE_CLOSE_DIST) {
+        pthread_mutex_unlock(&g_mu);
+        return kl_guardian_zone_close() == KLG_ZONE_OK ? 0 : -2;
+    }
+    int n = g_zn;
+    if (n > 0 && hypotf(x - g_zpts[2 * n - 2], z - g_zpts[2 * n - 1]) < 0.02f) { pthread_mutex_unlock(&g_mu); return n; }
+    if (n >= KLG_MAX_POINTS) { pthread_mutex_unlock(&g_mu); return -1; }
+    g_zpts[2 * n] = x; g_zpts[2 * n + 1] = z;
+    g_zn = n + 1;
+    pthread_mutex_unlock(&g_mu);
+    return n + 1;
+}
+int kl_guardian_zone_undo(void) {
+    pthread_mutex_lock(&g_mu);
+    if (g_zclosed) { g_zclosed = 0; zone_uncommit_locked(); }
+    else if (g_zn > 0) g_zn--;
+    int n = g_zn;
+    pthread_mutex_unlock(&g_mu);
+    return n;
+}
+int kl_guardian_zone_get(float *xz, int cap, int *closed) {
+    pthread_mutex_lock(&g_mu);
+    int n = g_zn;
+    if (closed) *closed = g_zclosed;
+    if (xz && n > 0) {
+        if (cap < n) n = cap > 0 ? cap : 0;
+        memcpy(xz, g_zpts, (size_t)n * 2 * sizeof(float));
+    }
+    pthread_mutex_unlock(&g_mu);
+    return n;
 }
 int kl_guardian_default_from_room(const float *xz, int n) {
     if (!xz) return 0;

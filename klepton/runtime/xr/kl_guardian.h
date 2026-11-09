@@ -46,6 +46,33 @@ int   kl_guardian_floor_grabbing(void);      // [Swift] last `pressed` given to 
 int   kl_guardian_set_boundary(const float *points, int n, int mode, float radius);
 void  kl_guardian_set_stationary_radius(float radius);     // [Swift]
 void  kl_guardian_clear(void);                              // [Swift] back to "not configured"
+// What a game can see of the boundary, as one number (FNV-1a over mode, stationary radius and the polygon, all in mm); 0 when not
+// configured. Equal while the answers of ovrp_GetBoundaryGeometry* / Dimensions* and xrGetReferenceSpaceBoundsRect do not change, so
+// kl_openxr.c compares it to tell the game (XrEventDataReferenceSpaceChangePending) that the bounds moved.
+uint64_t kl_guardian_boundary_signature(void);
+
+// ---- drawn zone: Quest's guardian setup, the player draws the play area on the floor with the controller ----
+// A draft of vertices (x,z pairs in the same GUEST space as the boundary), kept apart from the boundary in use until it is closed.
+// Closing a valid draft sets the boundary: roomscale, source KLG_BSRC_USER, the polygon counter-clockwise. The draft is NOT stored
+// across sessions (the visionOS world origin changes; the Swift side never saves the polygon).
+enum { KLG_ZONE_OK = 0, KLG_ZONE_TOO_FEW = 1, KLG_ZONE_CROSSING = 2, KLG_ZONE_TOO_SMALL = 3, KLG_ZONE_INVALID = 4 };
+#define KLG_ZONE_CLOSE_DIST 0.3f     // m: a vertex this near the first one (with >= 3 placed) closes the zone
+// Forgets the draft; when its closed polygon is the boundary in use, that boundary is cleared too (back to not configured).
+void  kl_guardian_zone_clear(void);
+// Adds a vertex. Returns the vertex count after it (> 0); 0 when it was within KLG_ZONE_CLOSE_DIST of the first vertex and the zone
+// closed (the boundary is set); -1 rejected (not finite / beyond 1e4 m, the draft is closed, or KLG_MAX_POINTS reached); -2 near the
+// first vertex but the polygon is not valid (kl_guardian_zone_validate says why; nothing was added). A point within 2 cm of the
+// last vertex adds nothing and returns the current count.
+int   kl_guardian_zone_add(float x, float z);
+// Removes the last vertex; on a closed draft it reopens it instead (and clears the boundary it had set). Returns the count left.
+int   kl_guardian_zone_undo(void);
+// KLG_ZONE_*: 0 when the draft is a valid zone: >= 3 vertices, finite with a real area, no two non-adjacent edges crossing, and an
+// inscribed rectangle with both sides >= 1.15 m (the V1 minimum). Does not change anything.
+int   kl_guardian_zone_validate(void);
+// Validates and, when OK, sets the boundary from the draft (closed). Returns the KLG_ZONE_* code; the draft stays as it was on error.
+int   kl_guardian_zone_close(void);
+// Copies the draft (as drawn) into xz (cap points); returns the count; *closed = 1 when it is closed.
+int   kl_guardian_zone_get(float *xz, int cap, int *closed);
 // Same as set_boundary(roomscale) for the floor outline of an ARKit room, but only when no user boundary exists and the
 // outline fits a 1.15 m rectangle (else nothing changes). Returns 1 when stored.
 int   kl_guardian_default_from_room(const float *xz, int n);

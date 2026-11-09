@@ -50,7 +50,8 @@ int main(void) {
     horiz(m, 0.5f, 0.75f, -1, 0); kl_spatial_plane(U16(3), 0, m, 1.2f, 0.8f, KLSP_LBL_TABLE, NULL, 0);
     CK(kl_spatial_live_update_at(0, 0, 3, 3, 23 * SEC) == 0 && g_cb == 0);
 
-    // a scene mesh with many points inside the room is a significant change ...
+    // a scene mesh with many points inside a room that has a real ceiling changes nothing (the footprint is the walls', the height the
+    // ceiling's) ...
     {
         enum { NV = 400 };
         float v[NV * 3]; uint32_t t[(NV - 2) * 3]; float mm[16];
@@ -59,29 +60,37 @@ int main(void) {
         horiz(mm, 0, 0, 0, 0);
         kl_spatial_mesh(U16(50), 0, mm, v, NV, t, NV - 2);
     }
-    // ... but not before 2 s have passed since the last check (23 s): nothing is rebuilt or notified at 24 s
+    // ... and not before 2 s have passed since the last check (23 s) anyway
     uint32_t gen_before = kl_spatial_generation();
     CK(kl_spatial_live_update_at(0, 0, 3, 3, 24 * SEC) == 0 && g_cb == 0 && kl_spatial_generation() == gen_before);
-    CK(kl_spatial_live_update_at(0, 0, 3, 3, 25 * SEC + 1) == 1 && g_cb == 1 && kl_spatial_room_generation() == rg + 1);
+    CK(kl_spatial_live_update_at(0, 0, 3, 3, 25 * SEC + 1) == 0 && g_cb == 0 && kl_spatial_room_generation() == rg);
+    // the ceiling 40 cm higher is a significant change (the room is that much taller)
+    horiz(m, 0, 3.0f, 0, 1); kl_spatial_plane(U16(2), 0, m, 4, 5, KLSP_LBL_CEILING, NULL, 0);
+    CK(kl_spatial_live_update_at(0, 0, 3, 3, 27 * SEC + 2) == 1 && g_cb == 1 && kl_spatial_room_generation() == rg + 1);
     CK(kl_spatial_live_update_at(0, 0, 3, 3, 28 * SEC) == 0 && g_cb == 1);          // same room: quiet
 
     // a wall moved 1 m changes the footprint: notified; a further move 1 s later waits for the 2 s limit
-    wall(2, 1.0f);
-    CK(kl_spatial_live_update_at(0, 0, 3, 3, 29 * SEC) == 1 && g_cb == 2);
-    wall(2, -1.0f);
-    CK(kl_spatial_live_update_at(0, 0, 3, 3, 30 * SEC) == 0 && g_cb == 2);          // rate-limited: not rebuilt yet
-    CK(kl_spatial_live_update_at(0, 0, 3, 3, 31 * SEC + 1) == 1 && g_cb == 3);      // and not lost
-    CK(kl_spatial_live_update_at(0, 0, 3, 3, 34 * SEC) == 0 && g_cb == 3);
+    wall(1, 1.0f);
+    CK(kl_spatial_live_update_at(0, 0, 3, 3, 30 * SEC) == 1 && g_cb == 2);
+    wall(1, -1.0f);
+    CK(kl_spatial_live_update_at(0, 0, 3, 3, 31 * SEC) == 0 && g_cb == 2);          // rate-limited: not rebuilt yet
+    CK(kl_spatial_live_update_at(0, 0, 3, 3, 32 * SEC + 2) == 1 && g_cb == 3);      // and not lost
+    CK(kl_spatial_live_update_at(0, 0, 3, 3, 35 * SEC) == 0 && g_cb == 3);
     // a wall that moves 2 cm is jitter, not a new room
-    wall(2, -0.98f);
+    wall(1, -0.98f);
     uint32_t gjit = kl_spatial_generation();
-    CK(kl_spatial_live_update_at(0, 0, 3, 3, 37 * SEC) == 0 && g_cb == 3);
+    CK(kl_spatial_live_update_at(0, 0, 3, 3, 38 * SEC) == 0 && g_cb == 3);
     CK(kl_spatial_generation() == gjit);                                  // and the synthetic room's geometry was not touched either
 
+    // the player walks out of the walls (head 10 m away): the outline the game has is kept, not swapped for a box around him
+    uint32_t grg = kl_spatial_room_generation();
+    wall(1, -0.98f);                                                      // a write to the store, so the check really runs
+    CK(kl_spatial_live_update_at(10, 10, 3, 3, 40 * SEC) == 0 && g_cb == 3 && kl_spatial_room_generation() == grg);
+
     // the fourth wall closes the ring: the real set replaces the synthetic one
-    wall(2, 0); wall(3, 0);
-    CK(kl_spatial_live_update_at(0, 0, 3, 3, 40 * SEC) == 1 && g_cb == 4);
-    CK(kl_spatial_live_update_at(0, 0, 3, 3, 43 * SEC) == 0 && g_cb == 4);
+    wall(1, 0); wall(3, 0);
+    CK(kl_spatial_live_update_at(0, 0, 3, 3, 43 * SEC) == 1 && g_cb == 4);
+    CK(kl_spatial_live_update_at(0, 0, 3, 3, 46 * SEC) == 0 && g_cb == 4);
 
     CK(kl_guardian_get_floor(&y) == KLG_FLOOR_MANUAL && fabsf(y + 0.3f) < 1e-6f);   // the user's floor was never touched
     CK(kl_spatial_live_update_at(NAN, 0, 3, 3, 50 * SEC) == 0);                     // a NaN head poisons nothing

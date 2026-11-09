@@ -1,5 +1,5 @@
 // KleptonGuardianDraw - what the guardian screen draws into the immersive space (Quest's guardian setup shows the room's mesh and the
-// floor grid over passthrough): the scene mesh as a translucent wireframe and a grid at the guardian floor. Drawn by the compositor in
+// floor grid over passthrough): the scene mesh as a translucent wireframe and a grid at the guardian floor and the zone the player is drawing on it (polyline, vertex discs, the pointed spot, the preview and closing edges). Drawn by the compositor in
 // the same Metal pass as the overlays (KleptonCompositor.drawGuardianScene), only while `active` (set by VQGuardianGate, which also
 // forces passthrough): outside the guardian screen nothing here runs.
 //
@@ -33,6 +33,23 @@ enum KLGuardianScene {
     nonisolated(unsafe) private static var pipeline: MTLRenderPipelineState?
     nonisolated(unsafe) private static var pipelineFormat: MTLPixelFormat = .invalid
     nonisolated(unsafe) private static var pipelineFailed = false
+    // The zone being drawn (VQGuardianSetup): where the pointing hand meets the floor, set under `lock`; render thread reads it.
+    nonisolated(unsafe) private static var cursorPt: SIMD2<Float>?
+    nonisolated(unsafe) private static var cursorClosing = false
+    // Render thread only: three slots in turn like the mesh (the GPU may still read the previous frames' buffers).
+    nonisolated(unsafe) private static var zbufs = [MTLBuffer?](repeating: nil, count: 3)
+    nonisolated(unsafe) private static var zslot = 0
+    nonisolated(unsafe) private static var zoneHolding = false
+    /// True while the guardian screen is in «Dibujar zona» mode (set by VQGuardianSetup each tick): the draft is not painted otherwise,
+    /// e.g. after the player switched to «Estacionario».
+    nonisolated(unsafe) static var zoneVisible = false
+
+    /// The point of the floor the hand points at (nil = none), and whether it is close enough to the first vertex to close the zone.
+    static func setCursor(_ p: SIMD2<Float>?, closing: Bool) {
+        lock.lock()
+        cursorPt = p; cursorClosing = closing && p != nil
+        lock.unlock()
+    }
 
     private static let msl = """
     #include <metal_stdlib>
@@ -103,7 +120,7 @@ enum KLGuardianScene {
     }
 
     /// Copies `data` into the next slot's buffer, reusing it when it is big enough (and not wastefully so).
-    private static func fill(_ device: MTLDevice, _ bufs: inout [MTLBuffer?], _ data: UnsafeRawBufferPointer) -> Bool {
+    private static func fill(_ device: MTLDevice, _ bufs: inout [MTLBuffer?], _ data: UnsafeRawBufferPointer, slot: Int) -> Bool {
         guard data.count > 0 else { return false }
         if let b = bufs[slot], b.length >= data.count, b.length <= data.count * 2 {
             b.contents().copyMemory(from: data.baseAddress!, byteCount: data.count)
@@ -120,8 +137,8 @@ enum KLGuardianScene {
         lock.unlock()
         guard let pos, let idx else { return }
         slot = (slot + 1) % 3
-        let okV = pos.withUnsafeBytes { fill(device, &vbufs, $0) }
-        let okI = idx.withUnsafeBytes { fill(device, &ibufs, $0) }
+        let okV = pos.withUnsafeBytes { fill(device, &vbufs, $0, slot: slot) }
+        let okI = idx.withUnsafeBytes { fill(device, &ibufs, $0, slot: slot) }
         indexCount = okV && okI ? idx.count : 0
         holding = true
         NSLog("[guardian] room mesh for the setup screen: \(pos.count / 3) vertices, \(idx.count / 3) triangles")
@@ -130,6 +147,10 @@ enum KLGuardianScene {
     /// The screen is closed: give back the GPU buffers and the cached lists (a rebuild starts again on the next activation).
     /// Called by the compositor every frame while inactive; one flag test once everything is released.
     static func releaseIfIdle() {
+        if zoneHolding {
+            for k in 0..<3 { zbufs[k] = nil }
+            zoneHolding = false
+        }
         guard holding || pendingPos != nil else { return }
         lock.lock()
         pendingPos = nil; pendingIdx = nil
@@ -188,6 +209,71 @@ enum KLGuardianScene {
         return v
     }
 
+    /// Appends a circle of `r` m around `c` at height `y` as a line list (24 segments) or a triangle list (12 triangles) to `v`.
+    private static func circle(_ c: SIMD2<Float>, y: Float, r: Float, filled: Bool, into v: inout [Float]) {
+        let n = filled ? 12 : 24
+        for k in 0..<n {
+            let a0 = Float(k) / Float(n) * 2 * .pi, a1 = Float(k + 1) / Float(n) * 2 * .pi
+            let p0 = [c.x + r * cosf(a0), y, c.y + r * sinf(a0)], p1 = [c.x + r * cosf(a1), y, c.y + r * sinf(a1)]
+            if filled { v += [c.x, y, c.y] + p0 + p1 } else { v += p0 + p1 }
+        }
+    }
+
+    /// The zone being drawn, over the grid: the placed edges, the edge from the last vertex to the cursor and the closing edge back to
+    /// the first vertex, a disc on every vertex (the first one bigger, yellow) and a ring where the hand points. Floor grid height + 1 cm.
+    private static func drawZone(_ enc: MTLRenderCommandEncoder, device: MTLDevice, floorY: Float) {
+        guard zoneVisible else { return }
+        let z = KLGuardian.zone()
+        let pts = z.points
+        lock.lock()
+        let cur = cursorPt, closing = cursorClosing
+        lock.unlock()
+        guard !pts.isEmpty || cur != nil else { return }
+        let y = floorY + 0.01
+        var v = [Float]()
+        func add(_ p: SIMD2<Float>) { v += [p.x, y, p.y] }
+        // An edge is a ribbon 2 cm wide lying on the floor (two triangles), so it reads at a distance where a 1 px line would not.
+        func ribbon(_ a: SIMD2<Float>, _ b: SIMD2<Float>) {
+            let d = b - a, l = simd_length(d)
+            guard l > 1e-5 else { return }
+            let n = SIMD2<Float>(-d.y, d.x) / l * 0.01
+            for p in [a + n, a - n, b + n, b + n, a - n, b - n] { add(p) }
+        }
+        for i in stride(from: 1, to: pts.count, by: 1) { ribbon(pts[i - 1], pts[i]) }
+        if z.closed, pts.count >= 3 { ribbon(pts[pts.count - 1], pts[0]) }
+        let nPlaced = v.count / 3
+        if !z.closed, let c = cur, let last = pts.last { ribbon(last, c) }
+        let nPreview = v.count / 3 - nPlaced
+        if !z.closed, let c = cur, pts.count >= 3 { ribbon(c, pts[0]) }
+        let nClose = v.count / 3 - nPlaced - nPreview
+        if !z.closed, let c = cur { circle(c, y: y, r: 0.12, filled: false, into: &v) }
+        let nRing = v.count / 3 - nPlaced - nPreview - nClose
+        for p in pts.dropFirst().prefix(512) { circle(p, y: y, r: 0.05, filled: true, into: &v) }
+        let nDiscs = v.count / 3 - nPlaced - nPreview - nClose - nRing
+        if let f = pts.first { circle(f, y: y, r: 0.09, filled: true, into: &v) }
+        let nFirst = v.count / 3 - nPlaced - nPreview - nClose - nRing - nDiscs
+        guard !v.isEmpty else { return }
+        zslot = (zslot + 1) % 3
+        guard v.withUnsafeBytes({ fill(device, &zbufs, $0, slot: zslot) }), let buf = zbufs[zslot] else { return }
+        zoneHolding = true
+        enc.setVertexBuffer(buf, offset: 0, index: 1)
+        var start = 0
+        func run(_ type: MTLPrimitiveType, _ count: Int, _ color: SIMD4<Float>) {
+            defer { start += count }
+            guard count > 0 else { return }
+            var c = color
+            enc.setFragmentBytes(&c, length: MemoryLayout<SIMD4<Float>>.size, index: 0)
+            enc.drawPrimitives(type: type, vertexStart: start, vertexCount: count)
+        }
+        let green = SIMD4<Float>(0.3, 1.0, 0.4, 0.95), yellow = SIMD4<Float>(1.0, 0.85, 0.2, 0.95)
+        run(.triangle, nPlaced, green)
+        run(.triangle, nPreview, SIMD4<Float>(0.3, 1.0, 0.4, 0.6))
+        run(.triangle, nClose, closing ? yellow : SIMD4<Float>(0.3, 1.0, 0.4, 0.35))
+        run(.line, nRing, closing ? yellow : SIMD4<Float>(1.0, 1.0, 1.0, 0.9))
+        run(.triangle, nDiscs, green)
+        run(.triangle, nFirst, yellow)
+    }
+
     /// Encodes the room mesh and the floor grid. `viewProj` is one projection * inverse(view) per view in the pass's order (the
     /// vertex shader indexes it by [[amplification_id]]). Render thread, inside the pass that holds the overlays.
     static func draw(_ enc: MTLRenderCommandEncoder, device: MTLDevice, colorFormat: MTLPixelFormat, amplification: Int,
@@ -218,5 +304,6 @@ enum KLGuardianScene {
         var c = KLGuardian.floorGrabbing ? SIMD4<Float>(1.0, 0.85, 0.2, 0.9) : SIMD4<Float>(0.4, 1.0, 0.5, 0.6)
         enc.setFragmentBytes(&c, length: MemoryLayout<SIMD4<Float>>.size, index: 0)
         enc.drawPrimitives(type: .line, vertexStart: 0, vertexCount: grid.count / 3)
+        drawZone(enc, device: device, floorY: floorY)
     }
 }
