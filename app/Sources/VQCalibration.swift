@@ -32,6 +32,19 @@ enum VQCalibration {
 
     static var exists: Bool { load() != nil }
 
+    /// The frozen room mesh (kl_spatial snapshot, "[sp-scan]") lives next to the calibration: poses relative to the calibration's WorldAnchor.
+    private static func setSnapshotPath() {
+        let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("VisionQuestPro", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        kl_spatial_snapshot_set_path(dir.appendingPathComponent("calib-mesh.bin").path)
+    }
+
+    private static func withM4<R>(_ m: simd_float4x4, _ body: (UnsafePointer<Float>) -> R) -> R {
+        var mm = m
+        return withUnsafePointer(to: &mm) { p in p.withMemoryRebound(to: Float.self, capacity: 16) { body($0) } }
+    }
+
     private static func load() -> Saved? {
         guard let data = UserDefaults.standard.data(forKey: storeKey),
               let s = try? JSONDecoder().decode(Saved.self, from: data), s.version == 1 else { return nil }
@@ -82,6 +95,8 @@ enum VQCalibration {
         }
         UserDefaults.standard.set(data, forKey: storeKey)
         redo = false
+        setSnapshotPath()
+        _ = withM4(m) { kl_spatial_snapshot_save(kl_uuid(b: anchor.id.uuid), $0) }   // the room mesh seen during the calibration is the frozen one
         await removeAnchors(old.map { [$0.anchorID] } ?? [])
         VQLog.log("[calib] saved anchor=\(anchor.id) kind=\(s.kind) verts=\(local.count / 2) floor=\(String(format: "%.3f", floorY))")
     }
@@ -178,6 +193,10 @@ enum VQCalibration {
         KLGuardian.setFloor(ay, source: .manual)
         KLGuardian.dropPendingRect()         // a rectangle restored for this game must not replace the calibration at start
         VQLog.log("[calib] applied anchor=\(id) verts=\(n) floor=\(String(format: "%.3f", ay)) source=saved")
+        setSnapshotPath()
+        let loaded = withM4(m) { kl_spatial_snapshot_load(kl_uuid(b: id.uuid), $0) }   // the room mesh saved with it replaces the live one
+        // The anchor is tracked and the snapshot loaded: merge what ARKit sees now (a moved table...) for 5 s after the resync, memory only.
+        if loaded == 1 { _ = kl_spatial_scan_auto(5000) }
         return true
     }
 }

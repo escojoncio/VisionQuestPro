@@ -19,6 +19,7 @@
 #include "kl_evgate.h"      // when a queued event may reach the guest
 #include "kl_ovrp_eyesize.h"   // the app's resolution slider: target size, desc compensation
 #include "kl_guardian.h"        // floor / play space the user confirmed
+#include "kl_spatial.h"         // kl_spatial_scan_input: L3+R3 held 5 s refreshes the frozen room mesh
 #include "../guest/kl_driver.h"
 #include "../guest/kl_slink.h"
 #include "../guest/kl_il2cpp.h"   // kl_il2cpp_method_at, for ovrp_log_chain
@@ -4600,8 +4601,20 @@ void kl_ovrp_set_controller_input(int hand, uint32_t buttons, uint32_t touches,
     g_input[hand].hand_trigger = hand_trigger;
     g_input[hand].stick_x = stick_x;
     g_input[hand].stick_y = stick_y;
-    kl_diagcap_input(hand, buttons);
-
+    // Room scan: both thumbstick clicks (L3 + R3) held 5 s; kl_spatial.c counts the time and logs "[sp-scan]". A hand that has
+    // not reported for 1 s (controller gone with the click held) does not count as pressed. While the combo is down the VPCAP
+    // capture trigger (kl_diagcap, a stick click) is not fed the clicks, so KL_DIAGCAP_BTN=2 (both clicks) cannot fire on it.
+    static uint64_t last_upd[2];
+    uint64_t tnow;
+    { struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts); tnow = (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec; }
+    __atomic_store_n(&last_upd[hand], tnow, __ATOMIC_RELAXED);
+    // Both hands report from the one controller-update thread (KleptonControllers); relaxed atomics keep a stray thread harmless, and a
+    // newer stamp than tnow (another thread) counts as fresh instead of underflowing the unsigned difference.
+    uint64_t u0 = __atomic_load_n(&last_upd[0], __ATOMIC_RELAXED), u1 = __atomic_load_n(&last_upd[1], __ATOMIC_RELAXED);
+    const int sticks = u0 && u1 && (u0 > tnow || tnow - u0 < 1000000000ull) && (u1 > tnow || tnow - u1 < 1000000000ull)
+                       && (g_input[0].buttons & KL_OVRP_RAW_LTHUMBSTICK) && (g_input[1].buttons & KL_OVRP_RAW_RTHUMBSTICK);
+    kl_diagcap_input(hand, sticks ? buttons & ~(uint32_t)(KL_OVRP_RAW_LTHUMBSTICK | KL_OVRP_RAW_RTHUMBSTICK) : buttons);
+    kl_spatial_scan_input(sticks);
     // RIGHT Options button (PSVR2 Sense) -> a console command, on the press edge.
     // Reaches us as the BACK bit on the right hand (system/click). Default (hl1)
     // skips past the broken intro to the first real level, c1a0 (Anomalous

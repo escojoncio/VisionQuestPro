@@ -58,6 +58,10 @@ typedef struct klj_object {
     // its thread's Looper are one klj_looper), and a class-keyed destructor would
     // double-free exactly those. An object with no destructor leaks its payload.
     void      (*destroy)(void *data);
+    // Stored in an object array by SetObjectArrayElement (count) and DeleteLocalRef'd by the guest meanwhile: the array still
+    // refers to it, so the delete waits (del_pending) until the array lets go (overwrite / array freed).
+    uint32_t    held;
+    int         del_pending;
 } klj_object;
 
 typedef struct { char name[224]; klj_object *as_object; } klj_class;
@@ -104,6 +108,7 @@ typedef struct {
     char   kind;    // 'L' object, else 'Z' 'B' 'C' 'S' 'I' 'J' 'F' 'D'
     size_t elem;    // element size in bytes (primitive arrays)
     void  *data;    // void** when kind=='L', else a raw buffer
+    uint8_t *held;  // kind=='L': held[i] = element i was stored by SetObjectArrayElement and counts in its object's `held`
 } klj_array;
 
 typedef struct { void *addr; int64_t capacity; } klj_direct_buffer;
@@ -288,7 +293,9 @@ extern const klj_binding *const klj_binding_tables[];
 
 typedef struct { char *url; char *path; int found, logged; } klj_webdoc;
 typedef struct { void **items; int count; } klj_list;
-typedef struct { int64_t native_ptr; void *classes; int disabled; } klj_proxy;
+typedef struct { int64_t native_ptr; void *classes; int disabled;
+                 int unity_helper;   // made by ReflectionHelper.newProxyInstance: Unity dispatches it through ReflectionHelper.nativeProxyInvoke
+               } klj_proxy;
 typedef struct { void *looper, *callback; } klj_handler;
 typedef struct { int32_t what, arg1, arg2; void *obj, *target; } klj_message;
 typedef struct {

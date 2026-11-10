@@ -135,7 +135,16 @@ final class VQModel: ObservableObject {
     }
 
     func play(_ game: VQGame) {
-        guard busy == nil else { return }
+        VQLog.log("Jugar: pulsado \(game.id) busy=\(busy ?? "-") running=\(running) ended=\(ended) compatible=\(game.compatible)")
+        guard busy == nil else {
+            VQLog.log("Jugar: ignorado, ya se prepara \(busy ?? "-")")
+            message = VQL("Preparando \(busy ?? "otro juego")… espera a que termine.", "Preparing \(busy ?? "another game")… wait for it to finish.")
+            return
+        }
+        guard game.compatible else {
+            VQLog.log("Jugar: ignorado, \(game.id) no es compatible")
+            return
+        }
         busy = game.id
         progress = 0
         progressText = VQL("Preparando…", "Preparing…")
@@ -322,14 +331,14 @@ struct VQGameCard: View {
                               systemImage: "play.fill")
                     }
                     .buttonStyle(.borderedProminent)
-                    .disabled(!game.compatible || model.busy != nil)
+                    .disabled(!game.compatible)
                     Button {
+                        VQLog.log("Ajustes del juego: abrir \(game.id) busy=\(model.busy ?? "-") running=\(model.running)")
                         showGameSettings = true
                     } label: {
                         Label(VQL("Ajustes del juego", "Game settings"), systemImage: "slider.horizontal.3")
                     }
                     .buttonStyle(.bordered)
-                    .disabled(model.busy != nil)
                 }
             }
         }
@@ -727,6 +736,7 @@ struct VQGameSettingsView: View {
     @State private var area: VQGameArea
     @State private var capture: VQGameCapture
     @State private var d24: Bool
+    @State private var frameAsync: Bool
 
     init(game: VQGame) {
         self.game = game
@@ -739,6 +749,7 @@ struct VQGameSettingsView: View {
         _area = State(initialValue: VQGameArea.load(key: game.aaKey))
         _capture = State(initialValue: VQGameCapture.load(key: game.aaKey))
         _d24 = State(initialValue: VQGameD24.load(key: game.aaKey))
+        _frameAsync = State(initialValue: VQGameFrameAsync.load(key: game.aaKey))
     }
 
     var body: some View {
@@ -803,6 +814,11 @@ struct VQGameSettingsView: View {
                     Text(VQL("Para Into The Radius 2 y juegos con z-fighting; puede costar rendimiento", "For Into The Radius 2 and games with z-fighting; it may cost performance"))
                         .font(.caption)
                 }
+                Section(VQL("Fin de frame asíncrono (experimental)", "Asynchronous frame end (experimental)")) {
+                    Toggle(VQL("Fin de frame asíncrono (experimental)", "Asynchronous frame end (experimental)"), isOn: $frameAsync)
+                    Text(VQL("Apagado por defecto; puede cambiar el ritmo de los frames", "Off by default; it may change frame pacing"))
+                        .font(.caption)
+                }
                 Section(VQL("Perfil del visor", "Headset profile")) {
                     Picker(VQL("Perfil del visor", "Headset profile"), selection: $profile) {
                         Text(VQL("Automático", "Automatic")).tag(0)
@@ -865,6 +881,10 @@ struct VQGameSettingsView: View {
             .onChange(of: d24) { _, new in
                 VQGameD24.save(new, key: game.aaKey)
                 VQLog.log("Ajustes del juego \(game.aaKey): profundidad de 24 bits emulada \(new ? "sí" : "no")")
+            }
+            .onChange(of: frameAsync) { _, new in
+                VQGameFrameAsync.save(new, key: game.aaKey)
+                VQLog.log("Ajustes del juego \(game.aaKey): fin de frame asíncrono \(new ? "sí" : "no")")
             }
             .onChange(of: aniso) { _, new in
                 VQGameAniso.save(new < 0 ? nil : new, key: game.aaKey)

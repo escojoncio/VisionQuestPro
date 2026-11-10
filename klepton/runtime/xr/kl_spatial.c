@@ -45,6 +45,7 @@ typedef struct {
     uint32_t *t; uint32_t nt;   // mesh triangles (3 indices each)
     kl_uuid *mem; uint32_t nmem;   // room: plane ids
     int mine;                   // anchor: visible to this game
+    int fresh;                  // plane / mesh / room: written by ARKit since the last scan began (0 = from the snapshot only)
 } ent;
 
 static pthread_mutex_t g_mu = PTHREAD_MUTEX_INITIALIZER;
@@ -406,6 +407,389 @@ int kl_spatial_anchor_tracked(kl_uuid id) {
     return r;
 }
 
+
+// ---- frozen room snapshot ([sp-scan]) -------------------------------------------------------------------------------------------
+// The store the game, the environment depth and the guardian screen read is a SNAPSHOT: once one exists (loaded at launch, saved by the
+// calibration or by a scan) ARKit's writes of planes / meshes / rooms are ignored, except while a scan is on: the calibration screen
+// (kl_spatial_scan_force) or both thumbstick clicks (L3 + R3, see kl_ovrp_set_controller_input) held 5 s and still held.
+// L3+R3 held 5 s asks the host to resend everything it has (kl_spatial_set_resync) and MERGES what arrives into the existing snapshot
+// (nothing purged, nothing written: it lasts for the session). The calibration screen (scan_force) replaces: on Confirm what was not resent
+// is dropped (per kind, only if something of that kind did arrive, so the game is never left without a room) and the file is written.
+// Without a snapshot the store stays live; the first snapshot is born from the calibration screen or from a scan (never by itself).
+// A scan with no mesh vertices at all takes no snapshot (nothing is frozen or written). Files are read / written outside the store lock.
+// File (little endian): "KLSN", u32 version 1, anchor uuid, u32 planes, u32 meshes, u32 rooms; poses are relative to the calibration
+// WorldAnchor (ARKit's world changes every session; the anchor persists). plane: uuid, 16 f32, w, h, i32 label, i32 npoly, npoly*2 f32.
+// mesh: uuid, 16 f32, u32 nv, u32 nt, nv*3 f32, nt*3 u32. room: uuid, u32 n, n uuids.
+#define KLSP_SNAP_MAGIC   0x4e534c4bu      // "KLSN"
+#define KLSP_SNAP_VERSION 1u
+#define KLSP_SNAP_MAX     (96u * 1024u * 1024u)
+#define KLSP_HOLD_NS      5000000000ull
+static int g_snap_have;                     // a snapshot is the truth: ARKit writes are ignored outside a scan
+static int g_scan_force, g_scan_hold_ok, g_scan_began;
+static int g_resync_pending;                // a scan asked the host to resend everything and it has not said it finished
+static uint64_t g_scan_held_ns, g_scan_last_ns;
+static pthread_mutex_t g_io_mu = PTHREAD_MUTEX_INITIALIZER;   // serialises the file writes (never held with g_mu)
+static int g_frame_ok;
+static kl_uuid g_frame_id;
+static float g_frame_m[16];
+static char g_snap_path[1024];
+static void (*g_resync)(void);
+static uint64_t (*g_clock)(void);
+
+static uint64_t clk_ns(void) {
+    if (g_clock) return g_clock();
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
+}
+// Launch rescan (kl_spatial_scan_auto): a merge window like L3+R3's, started by the app, not by buttons. It waits for the host's resync to
+// finish, then stays open g_auto_dur_ns more, then freezes again (a wait with no end in sight is cut after 30 s).
+static int g_auto_wait, g_auto_on;
+static uint64_t g_auto_dur_ns, g_auto_end, g_auto_cap;
+static int auto_active_locked(void) {
+    if (!g_auto_on) return 0;
+    const uint64_t now = clk_ns();
+    if ((g_auto_wait && now >= g_auto_cap) || (!g_auto_wait && now >= g_auto_end)) {
+        g_auto_on = g_auto_wait = 0;
+        fprintf(stderr, "  [sp-scan] stop (launch rescan)\n  [sp-scan] update merged, not saved (this session only; the file is the calibration's)\n");
+        return 0;
+    }
+    return 1;
+}
+static int scan_active_locked(void) { return g_scan_force || g_scan_hold_ok || auto_active_locked(); }
+static int is_scene_kind(int k) { return k == KLSP_PLANE || k == KLSP_MESH || k == KLSP_ROOM; }
+
+static uint32_t snap_verts_locked(void) {
+    uint32_t n = 0;
+    for (uint32_t i = 0; i < g_n; i++) if (g_e[i].kind == KLSP_MESH) n += g_e[i].nv;
+    return n;
+}
+// After a scan: what the host did not resend is gone (per kind, and only when something of that kind did arrive).
+static void snap_purge_stale_locked(void) {
+    for (int kind = KLSP_PLANE; kind <= KLSP_ROOM; kind++) {
+        if (kind == KLSP_ANCHOR) continue;
+        uint32_t nfresh = 0;
+        for (uint32_t i = 0; i < g_n; i++) if (g_e[i].kind == kind && g_e[i].fresh && !is_synth(g_e[i].id)) nfresh++;
+        if (!nfresh) continue;
+        for (uint32_t i = 0; i < g_n; ) {
+            if (g_e[i].kind == kind && !g_e[i].fresh && !is_synth(g_e[i].id)) del_locked(&g_e[i]);
+            else i++;
+        }
+    }
+    // Rooms none of whose planes exist any more (the planes went, the room was not resent) are dropped with them.
+    for (uint32_t i = 0; i < g_n; ) {
+        int orphan = 0;
+        if (g_e[i].kind == KLSP_ROOM && g_e[i].nmem) {
+            orphan = 1;
+            for (uint32_t k = 0; k < g_e[i].nmem && orphan; k++) {
+                ent *pl = find_locked(g_e[i].mem[k]);
+                if (pl && pl->kind == KLSP_PLANE) orphan = 0;
+            }
+        }
+        if (orphan) del_locked(&g_e[i]); else i++;
+    }
+}
+static uint64_t g_snap_gen, g_snap_written;   // build order / newest generation on disk (g_snap_gen under g_mu, g_snap_written under g_io_mu)
+typedef struct { char *buf; size_t n; char path[1024]; uint64_t gen; } snap_io;
+// Serialises the store into io->buf (memory only: the file is written by snap_finish, outside the lock). 1 = something to write.
+static int snap_build_locked(snap_io *io) {
+    if (!g_snap_path[0] || !g_frame_ok) return 0;
+    snprintf(io->path, sizeof io->path, "%s", g_snap_path);
+    io->gen = ++g_snap_gen;
+    FILE *f = open_memstream(&io->buf, &io->n);
+    if (!f) return 0;
+    float inv[16];
+    m_rigid_inv(g_frame_m, inv);
+    uint32_t np = 0, nm = 0, nr = 0;
+    for (uint32_t i = 0; i < g_n; i++) {
+        np += g_e[i].kind == KLSP_PLANE && !is_synth(g_e[i].id);
+        nm += g_e[i].kind == KLSP_MESH;
+        nr += g_e[i].kind == KLSP_ROOM;
+    }
+    const uint32_t hdr[2] = { KLSP_SNAP_MAGIC, KLSP_SNAP_VERSION };
+    fwrite(hdr, sizeof hdr, 1, f); fwrite(g_frame_id.b, 16, 1, f);
+    const uint32_t cnt[3] = { np, nm, nr };
+    fwrite(cnt, sizeof cnt, 1, f);
+    for (uint32_t i = 0; i < g_n; i++) {
+        const ent *e = &g_e[i];
+        float rel[16];
+        if (e->kind == KLSP_PLANE && !is_synth(e->id)) {
+            m_mul(inv, e->m, rel);
+            const int32_t lp[2] = { e->label, e->npoly };
+            fwrite(e->id.b, 16, 1, f); fwrite(rel, 64, 1, f); fwrite(&e->w, 4, 1, f); fwrite(&e->h, 4, 1, f);
+            fwrite(lp, sizeof lp, 1, f);
+            if (e->npoly) fwrite(e->poly, 4, (size_t)e->npoly * 2, f);
+        } else if (e->kind == KLSP_MESH) {
+            m_mul(inv, e->m, rel);
+            const uint32_t sz[2] = { e->nv, e->nt };
+            fwrite(e->id.b, 16, 1, f); fwrite(rel, 64, 1, f); fwrite(sz, sizeof sz, 1, f);
+            fwrite(e->v, 12, e->nv, f); fwrite(e->t, 12, e->nt, f);
+        } else if (e->kind == KLSP_ROOM) {
+            const uint32_t n = e->nmem;
+            fwrite(e->id.b, 16, 1, f); fwrite(&n, 4, 1, f);
+            if (n) fwrite(e->mem, 16, n, f);
+        }
+    }
+    int ok = ferror(f) == 0;
+    ok = fclose(f) == 0 && ok;
+    if (!ok) { free(io->buf); io->buf = NULL; io->n = 0; }
+    return ok;
+}
+// The store is the snapshot from now on, unless it has no mesh vertices (then nothing changes: 0). Call snap_finish after unlocking.
+static int snap_commit_locked(snap_io *io, uint32_t *nv) {
+    *nv = snap_verts_locked();
+    if (*nv == 0) { g_scan_began = 0; fprintf(stderr, "  [sp-scan] snapshot not taken: the scene has 0 mesh vertices, nothing frozen or saved\n"); return 0; }
+    if (g_scan_began) {
+        if (g_resync_pending) fprintf(stderr, "  [sp-scan] host resync not finished: stale data kept this time (no purge)\n");
+        else snap_purge_stale_locked();
+    }
+    g_scan_began = 0;
+    g_snap_have = 1;
+    *nv = snap_verts_locked();
+    snap_build_locked(io);
+    return 1;
+}
+static void snap_finish(snap_io *io, uint32_t nv, const char *why) {
+    int saved = 0;
+    if (io->buf) {
+        char tmp[1100];
+        snprintf(tmp, sizeof tmp, "%s.tmp", io->path);
+        pthread_mutex_lock(&g_io_mu);
+        FILE *f = io->gen > g_snap_written ? fopen(tmp, "wb") : NULL;   // a newer snapshot already went out: this one is dropped
+        if (io->gen <= g_snap_written) { saved = 1; fprintf(stderr, "  [sp-scan] older snapshot write dropped (a newer one is on disk)\n"); }
+        if (f) {
+            saved = fwrite(io->buf, 1, io->n, f) == io->n;
+            saved = fclose(f) == 0 && saved;
+            if (saved) saved = rename(tmp, io->path) == 0;
+            if (!saved) remove(tmp); else g_snap_written = io->gen;
+        }
+        pthread_mutex_unlock(&g_io_mu);
+    }
+    fprintf(stderr, "  [sp-scan] snapshot saved %u verts (%s%s)\n", nv, why,
+            saved ? ", file written" : io->buf ? ", FILE WRITE FAILED" : ", memory only: no calibration anchor or path");
+    free(io->buf);
+}
+// ARKit's write of a plane / mesh / room: 1 = ignore it.
+static int write_blocked_locked(void) {
+    if (scan_active_locked()) return 0;
+    if (g_snap_have) {
+        static int lg;
+        if (!lg) { lg = 1; fprintf(stderr, "  [sp-scan] frozen: live ARKit updates ignored until L3+R3 are held 5 s\n"); }
+        return 1;
+    }
+    return 0;
+}
+// A scan begins: everything is stale until the host resends it.
+static void scan_begin_locked(void) {
+    for (uint32_t i = 0; i < g_n; i++) if (is_scene_kind(g_e[i].kind)) g_e[i].fresh = 0;
+    g_scan_began = 1;
+    g_resync_pending = g_resync != NULL;
+}
+void kl_spatial_resync_done(void) {
+    pthread_mutex_lock(&g_mu);
+    g_resync_pending = 0;
+    if (g_auto_on && g_auto_wait) { g_auto_wait = 0; g_auto_end = clk_ns() + g_auto_dur_ns; }
+    pthread_mutex_unlock(&g_mu);
+}
+// Launch, calibration anchor tracked and snapshot loaded: merge ARKit's current scene into the snapshot for window_ms after the resync,
+// in memory only. 0 (nothing done, store as it was) without a snapshot, without a host to resync from, or while a rescan is running.
+int kl_spatial_scan_auto(uint32_t window_ms) {
+    pthread_mutex_lock(&g_mu);
+    void (*rs)(void) = g_resync;
+    const int ok = g_snap_have && rs && !auto_active_locked();
+    if (ok) { g_auto_on = g_auto_wait = 1; g_auto_dur_ns = (uint64_t)window_ms * 1000000ull; g_auto_cap = clk_ns() + 30000000000ull; }
+    pthread_mutex_unlock(&g_mu);
+    if (!ok) { fprintf(stderr, "  [sp-scan] launch rescan skipped (no snapshot loaded or no host)\n"); return 0; }
+    fprintf(stderr, "  [sp-scan] start (launch rescan, %u ms after the resync)\n", window_ms);
+    rs();
+    return 1;
+}
+
+void kl_spatial_set_resync(void (*fn)(void)) { pthread_mutex_lock(&g_mu); g_resync = fn; pthread_mutex_unlock(&g_mu); }
+void kl_spatial_set_clock(uint64_t (*fn)(void)) { pthread_mutex_lock(&g_mu); g_clock = fn; pthread_mutex_unlock(&g_mu); }
+void kl_spatial_snapshot_set_path(const char *path) {
+    pthread_mutex_lock(&g_mu);
+    snprintf(g_snap_path, sizeof g_snap_path, "%s", path ? path : "");
+    pthread_mutex_unlock(&g_mu);
+}
+int kl_spatial_scan_active(void) { pthread_mutex_lock(&g_mu); int r = scan_active_locked(); pthread_mutex_unlock(&g_mu); return r; }
+int kl_spatial_snapshot_frozen(void) { pthread_mutex_lock(&g_mu); int r = g_snap_have && !scan_active_locked(); pthread_mutex_unlock(&g_mu); return r; }
+
+void kl_spatial_scan_force(int on) {
+    void (*rs)(void) = NULL;
+    snap_io io = {0};
+    uint32_t nv = 0;
+    int committed = 0, changed = 0;
+    pthread_mutex_lock(&g_mu);
+    on = on != 0;
+    if (on && !g_scan_force) { g_scan_force = 1; changed = 1; if (!g_scan_hold_ok) scan_begin_locked(); rs = g_resync; }
+    else if (!on && g_scan_force) {
+        g_scan_force = 0; changed = 1;
+        // Leaving the screen without a Confirm: a store that already was a snapshot is made coherent (purged and saved against its
+        // own frame) rather than left half old, half new; with no snapshot there is nothing stale to purge.
+        if (g_snap_have && g_scan_began && !g_scan_hold_ok) committed = snap_commit_locked(&io, &nv);
+        else if (!g_snap_have) g_scan_began = 0;
+    }
+    pthread_mutex_unlock(&g_mu);
+    if (changed) fprintf(stderr, "  [sp-scan] %s (calibration screen)\n", on ? "start" : "stop");
+    if (committed) snap_finish(&io, nv, "calibration screen closed");
+    if (rs) rs();
+}
+void kl_spatial_scan_input_at(int held, uint64_t now_ns) {
+    void (*rs)(void) = NULL;
+    int stop = 0, started = 0, reached = 0, early = 0, merged = 0;
+    if (!now_ns) now_ns = 1;
+    pthread_mutex_lock(&g_mu);
+    g_scan_last_ns = now_ns;
+    if (held) {
+        if (!g_scan_held_ns) { g_scan_held_ns = now_ns; started = 1; }
+        else if (!g_scan_hold_ok && now_ns - g_scan_held_ns >= KLSP_HOLD_NS) {
+            // L3+R3 only UPDATES the snapshot that exists (merged on top, nothing purged, nothing written; session only). With none
+            // yet the store is live anyway and nothing special happens.
+            g_scan_hold_ok = 1; reached = 1;
+            if (g_snap_have) rs = g_resync;
+        }
+    } else if (g_scan_held_ns) {
+        stop = g_scan_hold_ok; early = !g_scan_hold_ok;
+        g_scan_held_ns = 0; g_scan_hold_ok = 0;
+        merged = stop && !g_scan_force && g_snap_have;
+    }
+    pthread_mutex_unlock(&g_mu);
+    if (started) fprintf(stderr, "  [sp-scan] start (L3+R3 pressed)\n");
+    if (reached) fprintf(stderr, "  [sp-scan] hold 5s reached: refreshing from ARKit while held\n");
+    if (stop) fprintf(stderr, "  [sp-scan] stop\n");
+    if (early) fprintf(stderr, "  [sp-scan] released before 5s: nothing changes\n");
+    if (merged) fprintf(stderr, "  [sp-scan] update merged, not saved (this session only; the file is the calibration's)\n");
+    if (rs) rs();
+}
+void kl_spatial_scan_input(int held) { kl_spatial_scan_input_at(held, clk_ns()); }
+// ~1 Hz: a combo held while the controllers stopped reporting (disconnect) ends as a release after 2 s.
+void kl_spatial_scan_tick_at(uint64_t now_ns) {
+    pthread_mutex_lock(&g_mu);
+    const int stale = g_scan_held_ns && now_ns > g_scan_last_ns && now_ns - g_scan_last_ns > 2000000000ull;
+    pthread_mutex_unlock(&g_mu);
+    if (stale) { fprintf(stderr, "  [sp-scan] no controller input for 2 s: treated as released\n"); kl_spatial_scan_input_at(0, now_ns); }
+}
+void kl_spatial_scan_tick(void) { pthread_mutex_lock(&g_mu); (void)auto_active_locked(); pthread_mutex_unlock(&g_mu); kl_spatial_scan_tick_at(clk_ns()); }
+
+typedef struct { const uint8_t *p; size_t n; } snrd;
+static int snrd_get(snrd *r, void *o, size_t n) { if (r->n < n) return 0; if (o) memcpy(o, r->p, n); r->p += n; r->n -= n; return 1; }
+static int snrd_skip(snrd *r, size_t cnt, size_t sz) { if (sz && cnt > r->n / sz) return 0; return snrd_get(r, NULL, cnt * sz); }
+static int mat_finite(const float *m) { for (int i = 0; i < 16; i++) if (!isfinite(m[i])) return 0; return 1; }
+static int floats_finite(const void *p, size_t n) { float f; for (size_t i = 0; i < n; i++) { memcpy(&f, (const char *)p + 4 * i, 4); if (!isfinite(f)) return 0; } return 1; }
+// Pass 1 (apply = 0) validates every size and index; pass 2 inserts. anchor_m4 is the frame the poses were saved against.
+static int snap_parse_locked(snrd r, const float *A, int apply, uint32_t *nvert, uint32_t cnt_out[3]) {
+    uint32_t hdr[2], cnt[3]; uint8_t aid[16];
+    if (!snrd_get(&r, hdr, sizeof hdr) || hdr[0] != KLSP_SNAP_MAGIC || hdr[1] != KLSP_SNAP_VERSION) return 0;
+    if (!snrd_get(&r, aid, 16) || memcmp(aid, g_frame_id.b, 16) != 0) return -1;
+    if (!snrd_get(&r, cnt, sizeof cnt) || cnt[0] > KLSP_MAX_ENT || cnt[1] > KLSP_MAX_ENT || cnt[2] > KLSP_MAX_ENT) return 0;
+    uint32_t tv = 0;
+    for (uint32_t i = 0; i < cnt[0]; i++) {
+        kl_uuid id; float m[16], w, h; int32_t lp[2];
+        if (!snrd_get(&r, id.b, 16) || !snrd_get(&r, m, 64) || !mat_finite(m) || !snrd_get(&r, &w, 4) || !snrd_get(&r, &h, 4) || !snrd_get(&r, lp, 8)) return 0;
+        if (lp[1] != 0 && (lp[1] < 3 || lp[1] > KLSP_POLY_MAX)) return 0;
+        const float *poly = (const float *)r.p;
+        if (!snrd_skip(&r, (size_t)lp[1] * 2, 4)) return 0;
+        if (!isfinite(w) || !isfinite(h) || !floats_finite(poly, (size_t)lp[1] * 2)) return 0;
+        if (apply) {
+            ent *e = upsert_locked(KLSP_PLANE, id);
+            if (!e) continue;
+            m_mul(A, m, e->m);
+            e->w = w; e->h = h; e->label = lp[0]; e->tracked = 1; e->fresh = 0;
+            free(e->poly); e->poly = NULL; e->npoly = 0;
+            if (lp[1]) { e->poly = (float *)malloc((size_t)lp[1] * 2 * 4); if (e->poly) { memcpy(e->poly, poly, (size_t)lp[1] * 2 * 4); e->npoly = lp[1]; } }
+        }
+    }
+    for (uint32_t i = 0; i < cnt[1]; i++) {
+        kl_uuid id; float m[16]; uint32_t sz[2];
+        if (!snrd_get(&r, id.b, 16) || !snrd_get(&r, m, 64) || !mat_finite(m) || !snrd_get(&r, sz, 8)) return 0;
+        if (sz[0] == 0 || sz[1] == 0 || sz[0] > KLSP_MESH_V_MAX || tv + sz[0] > KLSP_MESH_V_TOTAL) return 0;
+        tv += sz[0];
+        const float *v = (const float *)r.p;
+        if (!snrd_skip(&r, sz[0], 12)) return 0;
+        const uint32_t *t = (const uint32_t *)r.p;
+        if (!snrd_skip(&r, sz[1], 12)) return 0;
+        if (!apply && !floats_finite(v, (size_t)sz[0] * 3)) return 0;
+        if (!apply) { uint32_t k; for (k = 0; k < sz[1] * 3 && t[k] < sz[0]; k++) {} if (k < sz[1] * 3) return 0; continue; }
+        float *vv = (float *)malloc((size_t)sz[0] * 12);
+        uint32_t *tt = (uint32_t *)malloc((size_t)sz[1] * 12);
+        ent *e = (vv && tt) ? upsert_locked(KLSP_MESH, id) : NULL;
+        if (!e) { free(vv); free(tt); continue; }
+        memcpy(vv, v, (size_t)sz[0] * 12); memcpy(tt, t, (size_t)sz[1] * 12);
+        g_mesh_verts -= e->nv; free(e->v); free(e->t);
+        e->v = vv; e->t = tt; e->nv = sz[0]; e->nt = sz[1]; e->tracked = 1; e->fresh = 0;
+        g_mesh_verts += sz[0];
+        m_mul(A, m, e->m);
+    }
+    for (uint32_t i = 0; i < cnt[2]; i++) {
+        kl_uuid id; uint32_t n;
+        if (!snrd_get(&r, id.b, 16) || !snrd_get(&r, &n, 4) || n > 1024) return 0;
+        const kl_uuid *mem = (const kl_uuid *)r.p;
+        if (!snrd_skip(&r, n, 16)) return 0;
+        if (apply) {
+            ent *e = upsert_locked(KLSP_ROOM, id);
+            if (!e) continue;
+            free(e->mem); e->mem = NULL; e->nmem = 0;
+            if (n) { e->mem = (kl_uuid *)malloc(n * 16); if (e->mem) { memcpy(e->mem, mem, n * 16); e->nmem = n; } }
+            e->tracked = 1; e->fresh = 0;
+        }
+    }
+    if (nvert) *nvert = tv;
+    if (cnt_out) memcpy(cnt_out, cnt, sizeof cnt);
+    return 1;
+}
+// Launch: replaces the store's planes / meshes / rooms by the saved snapshot of this calibration anchor. 1 = loaded.
+int kl_spatial_snapshot_load(kl_uuid anchor, const float anchor_m4[16]) {
+    uint8_t *buf = NULL;
+    size_t n = 0;
+    char path[1024];
+    pthread_mutex_lock(&g_mu);
+    g_frame_id = anchor; memcpy(g_frame_m, anchor_m4, sizeof g_frame_m); g_frame_ok = mat_finite(anchor_m4);
+    snprintf(path, sizeof path, "%s", g_frame_ok ? g_snap_path : "");
+    pthread_mutex_unlock(&g_mu);
+    int rc = 0;
+    const char *why = "no file";
+    FILE *f = path[0] ? fopen(path, "rb") : NULL;        // read outside the lock
+    if (f) {
+        fseek(f, 0, SEEK_END); long sz = ftell(f); fseek(f, 0, SEEK_SET);
+        if (sz > 0 && (unsigned long)sz <= KLSP_SNAP_MAX && (buf = (uint8_t *)malloc((size_t)sz)) && fread(buf, 1, (size_t)sz, f) == (size_t)sz) n = (size_t)sz;
+        else why = "unreadable or too big";
+        fclose(f);
+    }
+    uint32_t nv = 0, cnt[3] = {0, 0, 0}, kept = 0;
+    pthread_mutex_lock(&g_mu);
+    if (n) {
+        snrd r = { buf, n };
+        int ok = snap_parse_locked(r, anchor_m4, 0, &nv, cnt);
+        if (ok == 1 && nv == 0) { ok = 0; why = "empty snapshot"; }
+        else if (ok == 1) {
+            purge_synth_locked();
+            for (uint32_t i = 0; i < g_n; ) { if (is_scene_kind(g_e[i].kind)) del_locked(&g_e[i]); else i++; }
+            snap_parse_locked(r, anchor_m4, 1, NULL, NULL);
+            g_snap_have = 1; rc = 1;
+            for (uint32_t i = 0; i < g_n; i++) kept += is_scene_kind(g_e[i].kind);
+        } else why = ok < 0 ? "saved for another calibration anchor" : "corrupt, non-finite or other version";
+    }
+    pthread_mutex_unlock(&g_mu);
+    free(buf);
+    if (rc) {
+        fprintf(stderr, "  [sp-scan] snapshot loaded %u verts, %u planes, %u meshes, %u rooms\n", nv, cnt[0], cnt[1], cnt[2]);
+        if (kept < cnt[0] + cnt[1] + cnt[2]) fprintf(stderr, "  [sp-scan] snapshot TRUNCATED: only %u of %u entities fit in the store\n", kept, cnt[0] + cnt[1] + cnt[2]);
+    } else fprintf(stderr, "  [sp-scan] no snapshot loaded (%s): live ARKit until one is taken\n", why);
+    return rc;
+}
+// Calibration confirmed: the anchor is the frame, the store (live during the calibration screen) is the snapshot. Returns its vertices.
+int kl_spatial_snapshot_save(kl_uuid anchor, const float anchor_m4[16]) {
+    snap_io io = {0};
+    uint32_t nv = 0;
+    pthread_mutex_lock(&g_mu);
+    g_frame_id = anchor; memcpy(g_frame_m, anchor_m4, sizeof g_frame_m); g_frame_ok = mat_finite(anchor_m4);
+    const int committed = snap_commit_locked(&io, &nv);
+    pthread_mutex_unlock(&g_mu);
+    if (committed) snap_finish(&io, nv, "calibration");
+    return (int)nv;
+}
+
 // ---- Swift -> C ------------------------------------------------------------
 void kl_spatial_set_policy(int wants_scene, int wants_anchors) {
     static int logged;
@@ -449,10 +833,12 @@ void kl_spatial_plane(kl_uuid id, int removed, const float m4[16], float w, floa
     static float floor_logged = NAN;
     int log_floor = 0;
     pthread_mutex_lock(&g_mu);
+    if (write_blocked_locked()) { pthread_mutex_unlock(&g_mu); return; }
     ent *e = find_locked(id);
     if (removed) { if (e && e->kind == KLSP_PLANE) del_locked(e); pthread_mutex_unlock(&g_mu); return; }
     e = upsert_locked(KLSP_PLANE, id);
     if (e) {
+        e->fresh = 1;
         memcpy(e->m, m4, sizeof e->m);
         e->w = w; e->h = h; e->label = label; e->tracked = 1;
         free(e->poly); e->poly = NULL; e->npoly = 0;
@@ -479,11 +865,21 @@ void kl_spatial_mesh(kl_uuid id, int removed, const float m4[16], const float *v
                      const uint32_t *tri3, uint32_t nt) {
     static int lg, lcap;
     pthread_mutex_lock(&g_mu);
+    if (write_blocked_locked()) { pthread_mutex_unlock(&g_mu); return; }
     ent *e = find_locked(id);
     if (removed) { if (e && e->kind == KLSP_MESH) del_locked(e); pthread_mutex_unlock(&g_mu); return; }
     if (nv == 0 || nt == 0 || !verts3 || !tri3) { if (e && e->kind == KLSP_MESH) del_locked(e); pthread_mutex_unlock(&g_mu); return; }
     if (nv > KLSP_MESH_V_MAX) { pthread_mutex_unlock(&g_mu); once(&lcap, "mesh anchor over the per-mesh vertex cap: ignored"); return; }
     uint32_t old = (e && e->kind == KLSP_MESH) ? e->nv : 0;
+    if (g_mesh_verts - old + nv > KLSP_MESH_V_TOTAL && scan_active_locked()) {
+        // A scan updating the snapshot: the meshes of the snapshot not sent again (other ids) give way to the fresh one, oldest slots first.
+        for (uint32_t i = 0; i < g_n && g_mesh_verts - old + nv > KLSP_MESH_V_TOTAL; ) {
+            if (g_e[i].kind == KLSP_MESH && !g_e[i].fresh && !uuid_eq(g_e[i].id, id)) del_locked(&g_e[i]);
+            else i++;
+        }
+        e = find_locked(id);
+        old = (e && e->kind == KLSP_MESH) ? e->nv : 0;
+    }
     if (g_mesh_verts - old + nv > KLSP_MESH_V_TOTAL) { pthread_mutex_unlock(&g_mu); once(&lcap, "scene mesh over the total vertex cap: update ignored"); return; }
     float *v = (float *)malloc((size_t)nv * 3 * sizeof(float));
     uint32_t *t = (uint32_t *)malloc((size_t)nt * 3 * sizeof(uint32_t));
@@ -494,7 +890,7 @@ void kl_spatial_mesh(kl_uuid id, int removed, const float m4[16], const float *v
     if (!e) { free(v); free(t); pthread_mutex_unlock(&g_mu); return; }
     g_mesh_verts -= e->nv;
     free(e->v); free(e->t);
-    e->v = v; e->t = t; e->nv = nv; e->nt = nt; e->tracked = 1;
+    e->v = v; e->t = t; e->nv = nv; e->nt = nt; e->tracked = 1; e->fresh = 1;
     g_mesh_verts += nv;
     memcpy(e->m, m4, sizeof e->m);
     pthread_mutex_unlock(&g_mu);
@@ -504,6 +900,7 @@ void kl_spatial_mesh(kl_uuid id, int removed, const float m4[16], const float *v
 void kl_spatial_room(kl_uuid id, int removed, const kl_uuid *plane_ids, uint32_t n) {
     static int lg;
     pthread_mutex_lock(&g_mu);
+    if (write_blocked_locked()) { pthread_mutex_unlock(&g_mu); return; }
     ent *e = find_locked(id);
     if (removed) { if (e && e->kind == KLSP_ROOM) del_locked(e); pthread_mutex_unlock(&g_mu); return; }
     if (real_set_complete_locked()) purge_synth_locked();   // a complete real room replaces the synthetic one; fragments do not
@@ -515,7 +912,7 @@ void kl_spatial_room(kl_uuid id, int removed, const kl_uuid *plane_ids, uint32_t
             e->mem = (kl_uuid *)malloc(n * sizeof(kl_uuid));
             if (e->mem) { memcpy(e->mem, plane_ids, n * sizeof(kl_uuid)); e->nmem = n; }
         }
-        e->tracked = 1;
+        e->tracked = 1; e->fresh = 1;
     }
     pthread_mutex_unlock(&g_mu);
     once(&lg, "first room received");

@@ -518,6 +518,10 @@ final class VQSettings: ObservableObject {
         let d24 = VQGameD24.load(key: gameKey)
         if d24 { setenv("VPVK_D24_EMUL", "1", 1) } else { unsetenv("VPVK_D24_EMUL") }
         VQLog.log("Gráficos: profundidad de 24 bits emulada \(d24)")
+        // «Fin de frame asíncrono (experimental)», per game (VQGameFrameAsync): off unless the game asks for it.
+        let frameAsync = VQGameFrameAsync.load(key: gameKey)
+        if frameAsync { setenv("KL_VK_FRAME_ASYNC", "1", 1) } else { unsetenv("KL_VK_FRAME_ASYNC") }
+        VQLog.log("Gráficos: fin de frame asíncrono \(frameAsync)")
         // Per-pass GPU timing in VPKEngine (gpu.passtime lines, one rendering frame every 90).
         if perfDiag { setenv("VP_PASS_TIMING", "90", 1) } else { unsetenv("VP_PASS_TIMING") }
         if fsDiag { setenv("KL_TRACE_FS", "1", 1) } else { unsetenv("KL_TRACE_FS") }
@@ -705,6 +709,19 @@ enum VQGameD24 {
         guard !key.isEmpty else { return }
         if on { UserDefaults.standard.set(true, forKey: "vq.d24emul." + key) }
         else { UserDefaults.standard.removeObject(forKey: "vq.d24emul." + key) }
+    }
+}
+
+/// «Fin de frame asíncrono (experimental)» per game, off by default (KL_VK_FRAME_ASYNC). Saved as vq.frameasync.<key>.
+enum VQGameFrameAsync {
+    static func load(key: String) -> Bool {
+        !key.isEmpty && UserDefaults.standard.object(forKey: "vq.frameasync." + key) as? Bool == true
+    }
+
+    static func save(_ on: Bool, key: String) {
+        guard !key.isEmpty else { return }
+        if on { UserDefaults.standard.set(true, forKey: "vq.frameasync." + key) }
+        else { UserDefaults.standard.removeObject(forKey: "vq.frameasync." + key) }
     }
 }
 

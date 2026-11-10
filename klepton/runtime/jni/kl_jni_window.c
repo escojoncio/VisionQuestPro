@@ -838,7 +838,10 @@ int klj_perm_request(void *target, void *cb, int32_t code, void *string_array) {
     const char *perms[KLJ_PERM_MAX_N];
     int n = 0;
     for (int i = 0; arr && arr->kind == 'L' && i < arr->len && n < KLJ_PERM_MAX_N; i++) {
-        const char *p = klj_str(((void **)arr->data)[i]);
+        void *el = ((void **)arr->data)[i];
+        const char *p = klj_str(el);
+        klj_object *eo = klj_as_object(el);
+        KLJ_LOG("perm[%d] cls=%s name=\"%s\"", i, eo ? eo->cls : el ? "(untagged pointer)" : "(null)", p ? p : "");
         perms[n++] = p ? p : "";
     }
     int ok = klj_perm_push(target, cb, code, perms, n);

@@ -178,6 +178,7 @@ static klj_val klj_ReflectionHelper_newProxyInstance(void *env, void *clazz,
                                                      const klj_val *a, int n) {
     (void)env; (void)clazz;
     klj_proxy *p = calloc(1, sizeof *p);
+    p->unity_helper = 1;
     p->native_ptr = n > 1 ? (int64_t)a[1].j : 0;
     // Wrapped in a one-element array so the two doors' proxies are identical
     // down to the field, rather than alike: klj_proxy_invoke and the report
@@ -204,7 +205,11 @@ static klj_val klj_ReflectionHelper_newProxyInstance_J(void *env, void *clazz,
     klj_val b[3] = {{.l = NULL}, {.l = NULL}, {.l = NULL}};
     if (n > 0) b[1] = a[0];
     if (n > 1) b[2] = a[1];
-    return klj_ReflectionHelper_newProxyInstance(env, clazz, b, n > 1 ? 3 : n + 1);
+    klj_val r = klj_ReflectionHelper_newProxyInstance(env, clazz, b, n > 1 ? 3 : n + 1);
+    // Unity 6 (Gundam) keeps its earlier dispatch through JNIBridge.invoke: only the UnityPlayer-first door is routed to nativeProxyInvoke.
+    klj_object *ro = klj_as_object(r.l);
+    if (ro && ro->data) ((klj_proxy *)ro->data)->unity_helper = 0;
+    return r;
 }
 
 static klj_val klj_ReflectionHelper_getFieldSignature(void *env, void *self,
@@ -258,12 +263,16 @@ static klj_val klj_Method_getDeclaringClass(void *env, void *self, const klj_val
                 o ? o->cls : "(not an object)");
         return NULL;
     }
-    void *fn = kl_jni_native("bitter/jnibridge/JNIBridge", "invoke", NULL);
+    klj_proxy *p = o->data;
+    // A proxy made by ReflectionHelper.newProxyInstance is dispatched by Unity through ReflectionHelper.nativeProxyInvoke
+    // (long nativeProxy, String methodName, Object[] args), not JNIBridge.invoke: the other entry takes a different pointer type.
+    void *hfn = p->unity_helper ? kl_jni_native("com/unity3d/player/ReflectionHelper", "nativeProxyInvoke", NULL) : NULL;
+    void *fn = hfn ? hfn : kl_jni_native("bitter/jnibridge/JNIBridge", "invoke", NULL);
     if (!fn) {
-        KLJ_LOG("drain: the guest has not registered JNIBridge.invoke — skipped");
+        KLJ_LOG("drain: the guest has registered neither %s — skipped",
+                p->unity_helper ? "ReflectionHelper.nativeProxyInvoke nor JNIBridge.invoke" : "JNIBridge.invoke");
         return NULL;
     }
-    klj_proxy *p = o->data;
     if (p->disabled) {
         KLJ_LOG("proxy 0x%llx is disabled — not invoking %s.%s",
                 (unsigned long long)p->native_ptr, iface, name);
@@ -272,12 +281,26 @@ static klj_val klj_Method_getDeclaringClass(void *env, void *self, const klj_val
     // A static native is (JNIEnv*, jclass, args...). The frame pair is the
     // JVM's pop on native return — the method object, the args array, and
     // whatever the guest allocates inside the callback all die at the pop.
-    void *(*invoke)(void *, void *, int64_t, void *, void *, void *) = fn;
+    // Per-frame callers (Choreographer, Runnable.run, onFrameAvailable) must not write a line per call: log the Unity-helper proxies
+    // and permission callbacks always (rare), everything else only for its first 8 calls.
+    static unsigned s_quiet;
+    const int loud = p->unity_helper || strstr(iface, "Permission") || __atomic_fetch_add(&s_quiet, 1, __ATOMIC_RELAXED) < 8;
+    if (loud) KLJ_LOG("proxy invoke %s.%s ptr=0x%llx unity_helper=%d via %s", iface, name, (unsigned long long)p->native_ptr,
+                      p->unity_helper, hfn ? "ReflectionHelper.nativeProxyInvoke" : "JNIBridge.invoke");
     klj_PushLocalFrame(NULL, 0);
-    void *r = invoke(kl_jni_env(), klj_class_object("bitter/jnibridge/JNIBridge"),
-                     p->native_ptr, klj_class_object(iface),
-                     klj_new_method(iface, name, sig), args);
+    void *r;
+    if (hfn) {
+        void *(*hinvoke)(void *, void *, int64_t, void *, void *) = hfn;
+        r = hinvoke(kl_jni_env(), klj_class_object("com/unity3d/player/ReflectionHelper"), p->native_ptr,
+                    kl_jni_new_string(name), args);
+    } else {
+        void *(*invoke)(void *, void *, int64_t, void *, void *, void *) = fn;
+        r = invoke(kl_jni_env(), klj_class_object("bitter/jnibridge/JNIBridge"),
+                   p->native_ptr, klj_class_object(iface),
+                   klj_new_method(iface, name, sig), args);
+    }
     klj_PopLocalFrame(NULL, NULL);
+    if (loud) KLJ_LOG("proxy invoke %s.%s ptr=0x%llx returned %p", iface, name, (unsigned long long)p->native_ptr, r);
     return r;
 }
 

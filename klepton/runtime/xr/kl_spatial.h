@@ -113,4 +113,24 @@ int      kl_spatial_update_guardian_default(float hx, float hz);
 // 1 when the plane is one of the synthetic room's (not measured geometry: kept out of the environment depth).
 int      kl_spatial_is_synthetic(kl_uuid id);
 
+
+// ---- frozen snapshot ([sp-scan], kl_spatial.c) ----
+// Once a snapshot exists (loaded, saved by the calibration, or taken by a scan) ARKit's planes / meshes / rooms are ignored except during a
+// scan: the calibration screen, or L3+R3 held 5 s (kl_ovrp_set_controller_input feeds kl_spatial_scan_input). Every reader (ovrp,
+// OpenXR, environment depth, guardian screen) reads the store, so all see the snapshot.
+void kl_spatial_scan_input(int held);                       // L3+R3 state, every controller update
+void kl_spatial_scan_input_at(int held, uint64_t now_ns);   // host tests
+void kl_spatial_scan_force(int on);                         // the calibration screen is a scan
+int  kl_spatial_scan_active(void);
+int  kl_spatial_snapshot_frozen(void);
+void kl_spatial_snapshot_set_path(const char *path);        // binary file; "" = memory only
+int  kl_spatial_snapshot_load(kl_uuid anchor, const float anchor_m4[16]);   // anchor = the calibration WorldAnchor (ARKit world pose); 1 = loaded
+int  kl_spatial_snapshot_save(kl_uuid anchor, const float anchor_m4[16]);   // returns the snapshot's vertices
+void kl_spatial_resync_done(void);                          // the host finished resending: the scan may purge what it did not resend
+void kl_spatial_scan_tick(void);                            // ~1 Hz: ends a combo whose controllers went silent
+void kl_spatial_scan_tick_at(uint64_t now_ns);
+int  kl_spatial_scan_auto(uint32_t window_ms);              // launch rescan: merge for window_ms after the resync, memory only; 0 = nothing done
+void kl_spatial_set_resync(void (*fn)(void));               // the host resends every plane / mesh / room it holds when a scan begins
+void kl_spatial_set_clock(uint64_t (*fn)(void));            // host tests (monotonic ns)
+
 #endif

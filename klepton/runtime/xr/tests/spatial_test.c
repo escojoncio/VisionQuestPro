@@ -69,6 +69,13 @@ int kl_envdepth_is_vulkan(void) { return 0; }
 int kl_envdepth_acquire(kl_envdepth_frame *f) { (void)f; return -1; }
 void kl_envdepth_rebase(kl_envdepth_frame *f, const float e[7]) { (void)f; (void)e; }
 
+// [sp-scan] test seams: the monotonic clock (real + an offset) and the host's resync request
+static uint64_t g_clock_off;
+static int g_resyncs;
+static uint64_t clock_stub(void) { struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts); return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec + g_clock_off; }
+static int g_resync_finish = 1;
+static void resync_stub(void) { g_resyncs++; if (g_resync_finish) kl_spatial_resync_done(); }
+
 // host: completes anchors synchronously from a worker-less stub
 static kl_uuid g_next_anchor;
 static void h_create(uint64_t req, const float m[16]) {
@@ -730,6 +737,159 @@ int main(void) {
         kl_spatial_plane(U16(12), 1, wm, 4, 2.6f, KLSP_LBL_WALL, NULL, 0);
         CK(kl_spatial_live_update_at(g_head[0], g_head[2], 3, 3, 900030000000000ull) == 1 && g_nev == 0);
         unsetenv("KL_SPATIAL_LIVE_NOTIFY");
+    }
+
+    // --- [sp-scan] frozen snapshot: first run captures by itself, a snapshot blocks ARKit's writes outside a scan, L3+R3 held 3 s
+    // refreshes while held, the snapshot round-trips through the file against another anchor pose
+    {
+        static const float tv[9] = {0,0,0, 1,0,0, 0,1,0};
+        static const uint32_t tt[3] = {0, 1, 2};
+        float m[16], mA[16], mB[16];
+        char path[300];
+        const uint64_t sec = 1000000000ull;
+        snprintf(path, sizeof path, "%s/calib-mesh.bin", g_dir);
+        kl_spatial_snapshot_set_path(path);
+        kl_spatial_set_resync(resync_stub);
+        kl_spatial_set_clock(clock_stub);
+        ident(m, 2, 0, 3);
+        CK(!kl_spatial_snapshot_frozen());
+        g_resyncs = 0;
+        CK(kl_spatial_scan_auto(5000) == 0 && g_resyncs == 0 && !kl_spatial_scan_active());   // no snapshot: nothing happens
+        kl_spatial_mesh(U16(190), 0, m, tv, 3, tt, 1);                                  // live: first run, nothing frozen
+        CK(kl_spatial_kind_of(U16(190)) == KLSP_MESH);
+        g_clock_off = 21 * sec;                                                         // no capture by itself, however long it runs live
+        kl_spatial_mesh(U16(191), 0, m, tv, 3, tt, 1);
+        CK(!kl_spatial_snapshot_frozen() && kl_spatial_kind_of(U16(191)) == KLSP_MESH);
+        kl_spatial_mesh(U16(191), 1, m, NULL, 0, NULL, 0);
+        // the calibration (anchor A) takes the first snapshot; the file is written
+        ident(mA, 1, 0, 2);
+        kl_uuid aid = U16(77);
+        uint32_t np0 = kl_spatial_count(KLSP_PLANE), npreal = 0;
+        for (uint32_t i = 0; i < np0; i++) { kl_uuid pu; if (kl_spatial_get(KLSP_PLANE, i, &pu, NULL) && !kl_spatial_is_synthetic(pu)) npreal++; }
+        CK(kl_spatial_snapshot_save(aid, mA) >= 3 && access(path, R_OK) == 0 && kl_spatial_snapshot_frozen());
+        // blocked outside a scan: new mesh, new plane, a removal
+        horiz(m, 0, 0.5f, 0, 0);
+        kl_spatial_plane(U16(192), 0, m, 1, 1, KLSP_LBL_TABLE, NULL, 0);
+        CK(kl_spatial_kind_of(U16(192)) == 0);
+        kl_spatial_mesh(U16(191), 0, m, tv, 3, tt, 1);
+        CK(kl_spatial_kind_of(U16(191)) == 0);
+        kl_spatial_mesh(U16(190), 1, m, NULL, 0, NULL, 0);
+        CK(kl_spatial_kind_of(U16(190)) == KLSP_MESH);
+        // L3+R3: 4.9 s is not enough, 5.0 s starts the scan, the resync is asked once
+        g_resyncs = 0;
+        static char fbefore[1 << 16], fafter[1 << 16];
+        size_t nbefore = 0, nafter = 0;
+        { FILE *f = fopen(path, "rb"); if (f) { nbefore = fread(fbefore, 1, sizeof fbefore, f); fclose(f); } }
+        CK(nbefore > 0);
+        kl_spatial_scan_input_at(1, 500 * sec);
+        kl_spatial_scan_input_at(1, 500 * sec + 4900000000ull);
+        CK(!kl_spatial_scan_active() && g_resyncs == 0);
+        ident(m, 4, 0, 4);
+        kl_spatial_mesh(U16(193), 0, m, tv, 3, tt, 1);
+        CK(kl_spatial_kind_of(U16(193)) == 0);
+        kl_spatial_scan_input_at(1, 500 * sec + 5000000000ull);
+        CK(kl_spatial_scan_active() && !kl_spatial_snapshot_frozen() && g_resyncs == 1);
+        kl_spatial_mesh(U16(193), 0, m, tv, 3, tt, 1);                                  // the host resends what it has
+        CK(kl_spatial_kind_of(U16(193)) == KLSP_MESH);
+        kl_spatial_scan_input_at(1, 500 * sec + 5500000000ull);
+        CK(g_resyncs == 1);
+        kl_spatial_scan_input_at(0, 500 * sec + 6000000000ull);                         // released: frozen again, the stale mesh is gone, planes stay
+        CK(!kl_spatial_scan_active() && kl_spatial_snapshot_frozen());
+        CK(kl_spatial_kind_of(U16(190)) == KLSP_MESH && kl_spatial_kind_of(U16(193)) == KLSP_MESH && kl_spatial_count(KLSP_PLANE) == np0);   // merged: nothing purged
+        { FILE *f = fopen(path, "rb"); if (f) { nafter = fread(fafter, 1, sizeof fafter, f); fclose(f); } }
+        CK(nafter == nbefore && memcmp(fbefore, fafter, nbefore) == 0);                  // and the file is the calibration's, untouched
+        kl_spatial_mesh(U16(194), 0, m, tv, 3, tt, 1);
+        CK(kl_spatial_kind_of(U16(194)) == 0);
+        // released before 5 s: nothing changes
+        kl_spatial_scan_input_at(1, 600 * sec); kl_spatial_scan_input_at(0, 601 * sec);
+        CK(!kl_spatial_scan_active() && kl_spatial_snapshot_frozen());
+        // the calibration screen is a scan
+        kl_spatial_scan_force(1);
+        kl_spatial_mesh(U16(193), 0, m, tv, 3, tt, 1);                                  // the host resends 193 (else the save drops it as stale)
+        kl_spatial_mesh(U16(194), 0, m, tv, 3, tt, 1);
+        CK(kl_spatial_scan_active() && kl_spatial_kind_of(U16(194)) == KLSP_MESH);
+        kl_spatial_scan_force(0);
+        CK(kl_spatial_snapshot_frozen());
+        CK(kl_spatial_kind_of(U16(190)) == 0);                                          // the calibration screen replaces: 190 was not resent
+        // L3+R3 adds 195 and purges nothing, whatever the resync did: 3 chunks, 9 vertices from here on
+        g_resync_finish = 0;
+        ident(m, 4, 0, 4);
+        kl_spatial_scan_input_at(1, 700 * sec); kl_spatial_scan_input_at(1, 705 * sec);
+        kl_spatial_mesh(U16(195), 0, m, tv, 3, tt, 1);
+        kl_spatial_scan_input_at(0, 706 * sec);
+        CK(kl_spatial_snapshot_frozen() && kl_spatial_kind_of(U16(193)) == KLSP_MESH && kl_spatial_kind_of(U16(195)) == KLSP_MESH);
+        g_resync_finish = 1;
+        // a combo whose controllers went silent (disconnect) is released by the tick after 2 s, not before
+        kl_spatial_scan_input_at(1, 800 * sec); kl_spatial_scan_input_at(1, 805 * sec);
+        CK(kl_spatial_scan_active());
+        kl_spatial_scan_tick_at(806 * sec);
+        CK(kl_spatial_scan_active());
+        kl_spatial_scan_tick_at(808 * sec);
+        CK(!kl_spatial_scan_active() && kl_spatial_snapshot_frozen());
+        // save as the calibration does (three chunks, 9 vertices), then round-trip against anchor B
+        CK(kl_spatial_snapshot_save(aid, mA) >= 9);
+        float v0[9 * 3], vb[3]; uint32_t nv = 0, nt = 0, tri[16];
+        kl_uuid gid;
+        CK(kl_spatial_global_mesh(&gid, m));
+        ident(mB, 10, 0, 2);
+        uint32_t cnt_meshes = kl_spatial_count(KLSP_MESH);
+        CK(kl_spatial_mesh_info(gid, 27, v0, &nv, 16, tri, &nt) && nv == 9 && nt == 3);
+        kl_uuid other = U16(78);
+        CK(kl_spatial_snapshot_load(other, mB) == 0 && kl_spatial_count(KLSP_MESH) == cnt_meshes);   // another calibration's file is not used
+        CK(kl_spatial_snapshot_load(aid, mB) == 1);
+        CK(kl_spatial_count(KLSP_MESH) == cnt_meshes && kl_spatial_count(KLSP_PLANE) == npreal && kl_spatial_snapshot_frozen());   // synthetic room planes are rebuilt, not saved
+        CK(kl_spatial_mesh_info(gid, 27, v0, &nv, 16, tri, &nt) && nv == 9 && nt == 3);
+        // meshes 193 and 194 sat at (4,0,4) against A at (1,0,2): relative (3,0,2); against B at (10,0,2) it is at (13,0,4). Chunks may come in any order.
+        int hit = 0;
+        for (uint32_t i = 0; i < nv; i++) if (fabsf(v0[3 * i] - 13) < 1e-4f && fabsf(v0[3 * i + 1]) < 1e-4f && fabsf(v0[3 * i + 2] - 4) < 1e-4f) hit++;
+        CK(hit == 3);                                                                   // 193, 194 and 195 all sit there
+        (void)vb;
+        // a truncated file is refused and leaves the store alone
+        { FILE *f = fopen(path, "rb"); char buf[40]; size_t n = f ? fread(buf, 1, sizeof buf, f) : 0; if (f) fclose(f);
+          f = fopen(path, "wb"); if (f) { fwrite(buf, 1, n, f); fclose(f); }
+          CK(kl_spatial_snapshot_load(aid, mB) == 0 && kl_spatial_count(KLSP_MESH) == cnt_meshes); }
+        // launch rescan: window opens after the resync, merges (no purge), closes by itself, the file is untouched
+        { char fb[1 << 16], fa[1 << 16]; size_t nb = 0, na = 0; FILE *f;
+          f = fopen(path, "rb"); if (f) { nb = fread(fb, 1, sizeof fb, f); fclose(f); }
+          ident(m, 6, 0, 6);
+          g_resyncs = 0; g_resync_finish = 1;
+          uint32_t c0 = kl_spatial_count(KLSP_MESH);
+          CK(kl_spatial_scan_auto(5000) == 1 && g_resyncs == 1 && kl_spatial_scan_active());
+          kl_spatial_mesh(U16(196), 0, m, tv, 3, tt, 1);
+          CK(kl_spatial_kind_of(U16(196)) == KLSP_MESH);
+          g_clock_off += 4 * sec; CK(kl_spatial_scan_active());                              // still inside the 5 s
+          // L3+R3 held across the end of the window: the window closes, the hold keeps the scan open
+          kl_spatial_scan_input_at(1, 900 * sec); kl_spatial_scan_input_at(1, 905 * sec);
+          g_clock_off += 2 * sec;
+          CK(kl_spatial_scan_active());
+          kl_spatial_scan_input_at(0, 906 * sec);
+          CK(!kl_spatial_scan_active() && kl_spatial_snapshot_frozen());
+          kl_spatial_mesh(U16(197), 0, m, tv, 3, tt, 1);
+          CK(kl_spatial_kind_of(U16(197)) == 0 && kl_spatial_count(KLSP_MESH) == c0 + 1);    // frozen again, 196 merged, nothing purged
+          f = fopen(path, "rb"); if (f) { na = fread(fa, 1, sizeof fa, f); fclose(f); }
+          CK(nb > 0 && na == nb && memcmp(fb, fa, nb) == 0);
+          // a window with no end in sight (resync never finished) is cut after 30 s
+          g_resync_finish = 0;
+          CK(kl_spatial_scan_auto(5000) == 1 && kl_spatial_scan_active());
+          g_clock_off += 31 * sec;
+          CK(!kl_spatial_scan_active());
+          g_resync_finish = 1; }
+        // the window above added mesh 196: keep it in the counts of the round trip below
+        // a NaN vertex in the file is refused
+        { snprintf(path, sizeof path, "%s/calib-mesh.bin", g_dir); cnt_meshes = kl_spatial_count(KLSP_MESH); CK(kl_spatial_snapshot_save(aid, mA) >= 9);
+          FILE *f = fopen(path, "r+b"); long sz = 0;
+          if (f) { fseek(f, 0, SEEK_END); sz = ftell(f); fseek(f, sz - 40, SEEK_SET); float nanv = NAN; fwrite(&nanv, 4, 1, f); fclose(f); }   // inside the last chunk's triangles / vertices
+          CK(sz > 40);
+          CK(kl_spatial_snapshot_load(aid, mB) == 0 && kl_spatial_count(KLSP_MESH) == cnt_meshes); }
+        // the vertex cap (300000) during a scan: snapshot meshes that were not sent again give way to the fresh ones
+        { static float big[60000 * 3];
+          kl_spatial_scan_force(1);                                                          // clears every fresh flag, like any scan that replaces
+          ident(m, 8, 0, 8);
+          for (int i = 0; i < 5; i++) kl_spatial_mesh(U16(210 + i), 0, m, big, 60000, tt, 1);
+          CK(kl_spatial_kind_of(U16(214)) == KLSP_MESH && kl_spatial_kind_of(U16(210)) == KLSP_MESH);   // 5 x 60000 fit once the small stale ones left
+          CK(kl_spatial_kind_of(U16(193)) == 0);
+          kl_spatial_scan_force(0); }
+        kl_spatial_set_clock(NULL); kl_spatial_set_resync(NULL);
     }
     puts(fails ? "FALLA" : "OK");
     snprintf(cmd, sizeof cmd, "rm -rf %s", g_dir); if (system(cmd)) {}

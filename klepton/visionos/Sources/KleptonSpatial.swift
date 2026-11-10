@@ -38,6 +38,10 @@ enum KleptonSpatial {
     nonisolated(unsafe) private static var pendingMesh: [UUID: MeshAnchor] = [:]
     nonisolated(unsafe) private static var meshStamp: [UUID: CFTimeInterval] = [:]
     private static let meshLock = NSLock()
+    // The newest anchor of every kind ARKit announced, kept even while kl_spatial is frozen (a scan, kl_spatial_scan_*, asks for all of it again).
+    nonisolated(unsafe) private static var latestMesh: [UUID: MeshAnchor] = [:]
+    nonisolated(unsafe) private static var latestPlane: [UUID: PlaneAnchor] = [:]
+    nonisolated(unsafe) private static var latestRoom: [UUID: RoomAnchor] = [:]
     private static let meshMinInterval: CFTimeInterval = 0.5
 
     private static func envOn(_ name: String, _ dflt: Bool) -> Bool {
@@ -131,6 +135,15 @@ enum KleptonSpatial {
         if exposeAnchors, let tracker {
             Task.detached { for await u in tracker.anchorUpdates { handleWorldAnchor(u) } }
         }
+        // A Start+Select scan whose controllers went silent ends as a release (kl_spatial_scan_tick).
+        if plane != nil || room != nil || scene != nil {
+            Task.detached {
+                while !Task.isCancelled {
+                    try? await Task.sleep(nanoseconds: 1_000_000_000)
+                    kl_spatial_scan_tick()
+                }
+            }
+        }
         // Live room: the capture keeps running while the game plays, so the room the game was handed is re-checked about once a
         // second (kl_spatial.c rate-limits to 2 s, skips when the store did not change, and tells the game when it changed for real).
         // Only a game that sees the scene is concerned; the guardian's floor is never written by it.
@@ -207,7 +220,13 @@ enum KleptonSpatial {
 
     private static func handlePlane(_ u: AnchorUpdate<PlaneAnchor>) {
         KLFloorEstimator.plane(u)                       // the Guardian's automatic floor
-        let a = u.anchor
+        meshLock.lock()
+        latestPlane[u.anchor.id] = u.event == .removed ? nil : u.anchor
+        meshLock.unlock()
+        pushPlane(u.anchor, removed: u.event == .removed)
+    }
+
+    private static func pushPlane(_ a: PlaneAnchor, removed isRemoved: Bool) {
         let id = uuid(a.id)
         var m = a.originFromAnchorTransform * a.geometry.extent.anchorFromExtentTransform
         var w = a.geometry.extent.width
@@ -216,7 +235,7 @@ enum KleptonSpatial {
         let vertical = a.alignment == .vertical
         fixPlane(&m, &w, &h, lbl: lbl, vertical: vertical)
         m = m * rx90                                    // back to the anchor frame (normal +Y)
-        let removed: Int32 = u.event == .removed ? 1 : 0
+        let removed: Int32 = isRemoved ? 1 : 0
         withM4(m) { kl_spatial_plane(id, removed, $0, w, h, lbl, nil, 0) }
     }
 
@@ -224,19 +243,44 @@ enum KleptonSpatial {
 
     private static func handleRoom(_ u: AnchorUpdate<RoomAnchor>) {
         let r = u.anchor
-        let ids = r.planeAnchorIDs.map { uuid($0) }
+        meshLock.lock()
+        latestRoom[r.id] = u.event == .removed ? nil : r
+        meshLock.unlock()
         let removed: Int32 = u.event == .removed ? 1 : 0
+        pushRoom(r, removed: removed)
+        // The room outline is the guardian's default play space whether or not the game asks for the scene (rate-limited in C).
+        if removed == 0, let head = KLGuardian.headPosition() { _ = kl_spatial_update_guardian_default(head.x, head.z) }
+    }
+
+    private static func pushRoom(_ r: RoomAnchor, removed: Int32) {
+        let ids = r.planeAnchorIDs.map { uuid($0) }
         ids.withUnsafeBufferPointer { b in
             kl_spatial_room(uuid(r.id), removed, b.baseAddress, UInt32(b.count))
         }
-        // The room outline is the guardian's default play space whether or not the game asks for the scene (rate-limited in C).
-        if removed == 0, let head = KLGuardian.headPosition() { _ = kl_spatial_update_guardian_default(head.x, head.z) }
+    }
+
+    /// A scan began (kl_spatial_set_resync): send everything ARKit has announced again, so that what is not sent is what is gone.
+    /// Meshes skip the 0.5 s throttle.
+    private static func resync() {
+        meshLock.lock()
+        let planes = Array(latestPlane.values), rooms = Array(latestRoom.values), meshes = Array(latestMesh.values)
+        let now = CACurrentMediaTime()
+        for a in meshes { pendingMesh[a.id] = nil; meshStamp[a.id] = now }
+        meshLock.unlock()
+        for p in planes { pushPlane(p, removed: false) }
+        for r in rooms { pushRoom(r, removed: 0) }
+        for m in meshes { pushMesh(m) }
+        kl_spatial_resync_done()
+        NSLog("[spatial] resync for the scan: \(planes.count) planes, \(rooms.count) rooms, \(meshes.count) meshes")
     }
 
     // MARK: scene mesh
 
     private static func handleMesh(_ u: AnchorUpdate<MeshAnchor>) {
         let a = u.anchor
+        meshLock.lock()
+        latestMesh[a.id] = u.event == .removed ? nil : a
+        meshLock.unlock()
         if u.event == .removed {
             meshLock.lock(); pendingMesh[a.id] = nil; meshStamp[a.id] = nil; meshLock.unlock()
             withM4(matrix_identity_float4x4) { kl_spatial_mesh(uuid(a.id), 1, $0, nil, 0, nil, 0) }
@@ -324,6 +368,7 @@ enum KleptonSpatial {
                 Task.detached { await KleptonSpatial.removeAnchor(req, id) }
             })
         kl_spatial_set_host(&h)
+        kl_spatial_set_resync { Task.detached { KleptonSpatial.resync() } }
     }
 
     private static func createAnchor(_ req: UInt64, _ m: simd_float4x4) async {

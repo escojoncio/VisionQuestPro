@@ -59,6 +59,7 @@ enum VQGuardianGate {
         kl_passthrough_force(1)
         KLGuardianScene.floorPending = KLGuardian.floorSource() != .manual   // a manual floor (redo) is the start; else the grid starts at head height
         KLGuardianScene.active = true
+        kl_spatial_scan_force(1)    // the calibration screen is a room scan: the mesh is live here and saved on Confirm (VQCalibration.save)
         KleptonChroma.shared.followPassthroughNow()
         VQLog.log("Guardián: pantalla de definición para \(game.aaKey) (guardada: \(KLGuardian.hasSaved(game: game) ? "sí" : "no"))")
         let outcome: Outcome = await withCheckedContinuation { (c: CheckedContinuation<Outcome, Never>) in
@@ -73,6 +74,7 @@ enum VQGuardianGate {
             }
         }
         KLGuardianScene.active = false
+        kl_spatial_scan_force(0)
         kl_passthrough_force(0)
         KleptonChroma.shared.followPassthroughNow()
         VQLog.log("Guardián: \(outcome)")

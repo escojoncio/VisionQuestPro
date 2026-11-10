@@ -169,6 +169,9 @@ static void klj_forget_writes(void *obj);
  void klj_retire_object_locked(klj_object *o) {
     if (!o || o->magic != KLJ_OBJ_MAGIC || o->pinned) return;
     if (strcmp(o->cls, KLJ_CLASS_CLASS) == 0) return;
+    // An object array still refers to it (SetObjectArrayElement): whoever retires it (DeleteLocalRef, a frame pop) waits for the
+    // array to let go, so a recycled slot is never unheld by an array that listed its previous tenant.
+    if (o->held) { o->del_pending = 1; return; }
     klj_frame_forget(o);
     o->magic = 0;
     g_retired[g_retired_tail] = (unsigned)(o - g_objects);
@@ -687,6 +690,7 @@ static void  klj_DeleteLocalRef(void *env, void *obj) {
     pthread_mutex_lock(&g_lock);
     klj_object *o = klj_as_object(obj);
     if (o) g_stat_delete++;
+    if (o && o->held) { o->del_pending = 1; pthread_mutex_unlock(&g_lock); return; }   // an array still holds it
     if (!t_frame || !o || klj_frame_holds(o)) klj_retire_object_locked(obj);
     pthread_mutex_unlock(&g_lock);
 }
@@ -1696,9 +1700,18 @@ static size_t klj_prim_size(char kind) {
     }
 }
 
+// Caller holds g_lock. The array lets go of an element it held: a delete the guest asked for meanwhile now happens.
+static void klj_unhold_locked(void *e) {
+    klj_object *o = klj_as_object(e);
+    if (o && o->held && --o->held == 0 && o->del_pending) { o->del_pending = 0; klj_retire_object_locked(o); }
+}
+// Runs from klj_alloc_object_locked (g_lock held).
 static void klj_array_free(void *p) {
     klj_array *arr = p;
     if (!arr) return;
+    if (arr->held && arr->kind == 'L')
+        for (int i = 0; i < arr->len; i++) if (arr->held[i]) klj_unhold_locked(((void **)arr->data)[i]);
+    free(arr->held);
     free(arr->data);
     free(arr);
 }
@@ -1834,7 +1847,19 @@ static void klj_SetObjectArrayElement(void *env, void *a, kl_jint i, void *v) {
     (void)env;
     klj_array *arr = klj_arr(a);
     if (!arr || arr->kind != 'L' || i < 0 || i >= arr->len) return;
-    ((void **)arr->data)[i] = v;
+    // The array refers to v from now on, whatever the guest does with its own local ref: IL2CPP builds String[] for
+    // requestPermissions as NewStringUTF, SetObjectArrayElement, DeleteLocalRef, and the delete used to retire the string the
+    // array still held (names read back as "untagged pointer", i.e. empty). klj_DeleteLocalRef defers the retire while held.
+    pthread_mutex_lock(&g_lock);
+    void **d = (void **)arr->data;
+    if (!arr->held && v) arr->held = calloc((size_t)arr->len, 1);
+    void *oldv = arr->held && arr->held[i] ? d[i] : NULL;
+    klj_object *vo = v ? klj_as_object(v) : NULL;
+    if (vo && arr->held) vo->held++;                 // hold the new one BEFORE letting go of the old (same object twice stays alive)
+    if (oldv) klj_unhold_locked(oldv);
+    d[i] = v;
+    if (arr->held) arr->held[i] = vo ? 1 : 0;
+    pthread_mutex_unlock(&g_lock);
 }
 
 // Primitive arrays. New<T>Array / Get<T>ArrayElements / Release / Get-SetRegion
