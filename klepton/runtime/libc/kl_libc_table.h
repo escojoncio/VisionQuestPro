@@ -83,7 +83,7 @@ KL_FWD(acosh)
 KL_FWD(acoshf)
 KL_FWD(adler32)
 KL_FWD(alarm)
-KL_FWD(aligned_alloc)
+// aligned_alloc: NOT a straight forward — klb_aligned_alloc (kl_libc.c, registered in kl_shim.c): big requests go to the guest swap.
 KL_FWD(arc4random)
 KL_FWD(arc4random_buf)
 KL_FWD(asin)
@@ -103,7 +103,7 @@ KL_FWD(atoll)
 KL_FWD(basename)
 KL_FWD(bsearch)
 KL_FWD(btowc)
-KL_FWD(calloc)
+// calloc: NOT a straight forward — klb_calloc (kl_libc.c, registered in kl_shim.c): big requests go to the guest swap.
 KL_FWD(cbrt)
 KL_FWD(cbrtf)
 KL_FWD(ceil)
@@ -308,7 +308,7 @@ KL_FWD(logf)
 KL_FWD(lrand48)
 KL_FWD(lrint)
 KL_FWD(lrintf)
-KL_FWD(malloc)
+// malloc: NOT a straight forward — klb_malloc (kl_libc.c, registered in kl_shim.c): big requests go to the guest swap.
 KL_FWD(mbrlen)
 KL_FWD(mbrtowc)
 KL_FWD(mbsnrtowcs)
@@ -351,7 +351,7 @@ KL_FWD(perror)
 KL_FWD(pipe)
 KL_FWD(poll)
 KL_FWD(popen)
-KL_FWD(posix_memalign)
+// posix_memalign: NOT a straight forward — klb_posix_memalign (kl_libc.c, registered in kl_shim.c): big requests go to the guest swap.
 KL_FWD(pow)
 KL_FWD(powf)
 KL_FWD(preadv)
@@ -368,7 +368,7 @@ KL_FWD(random)
 // readlinkat: NOT a straight forward — klb_readlinkat (kl_libc.c, registered in kl_shim.c)
 //   maps the guest path (kl_guest_path) and the Linux *at/UTIME_*/_PC_ numbering.
 KL_FWD(readv)
-KL_FWD(realloc)
+// realloc: NOT a straight forward — klb_realloc (kl_libc.c, registered in kl_shim.c): big requests go to the guest swap.
 KL_FWD(reallocf)
 // realpath: NOT a straight forward — klb_realpath (kl_libc.c, registered in
 // kl_shim.c) maps the guest path in and reverse-maps the resolved path back to
@@ -521,7 +521,7 @@ KL_FWD(uselocale)
 //   maps the guest path (kl_guest_path) and the Linux *at/UTIME_*/_PC_ numbering.
 // utimes: NOT a straight forward — klb_utimes (kl_libc.c, registered in kl_shim.c)
 //   maps the guest path (kl_guest_path) and the Linux *at/UTIME_*/_PC_ numbering.
-KL_FWD(valloc)
+// valloc: NOT a straight forward — klb_valloc (kl_libc.c, registered in kl_shim.c): big requests go to the guest swap.
 KL_FWD(vfork)
 KL_FWD(vswprintf)
 KL_FWD(wait)

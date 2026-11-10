@@ -1553,7 +1553,7 @@ void kl_mem_telemetry(uint64_t now_ms) {
     fprintf(stderr, "  [mem] t=%llus foot=%lluM peak=%lluM avail=%lluM gfx=%lluM comp=%lluM | "
                     "gpu%s alloc=%lluM tex astc/color/depth/msaa=%llu/%llu/%llu/%lluM buf own/guest=%llu/%lluM args=%lluM "
                     "held=%lluM staging=%lluM | pso=%llu fn=%llu lib=%llu | guest mmap n=%llu anon=%lluM file=%lluM (cumulative) | "
-                    "gswap live=%lluM files=%u total=%lluM fresh=%lluM refused=%llu\n",
+                    "gswap live=%lluM files=%u total=%lluM fresh=%lluM refused=%llu blocks=%u blocks_total=%lluM\n",
             (unsigned long long)(now_ms / 1000), (unsigned long long)(led[0] / M),
             (unsigned long long)(atomic_load(&g_mem_peak) / M), (unsigned long long)(kl_proc_available() / M),
             (unsigned long long)(led[1] / M), (unsigned long long)(led[2] / M),
@@ -1568,7 +1568,8 @@ void kl_mem_telemetry(uint64_t now_ms) {
             (unsigned long long)(atomic_load(&g_gmmap_file_bytes) / M),
             (unsigned long long)(atomic_load(&klgs_live) / M), atomic_load(&klgs_files),
             (unsigned long long)(atomic_load(&klgs_total) / M), (unsigned long long)(atomic_load(&klgs_fresh_bytes) / M),
-            (unsigned long long)atomic_load(&klgs_refused));
+            (unsigned long long)atomic_load(&klgs_refused), atomic_load(&klgs_blk_n),
+            (unsigned long long)(atomic_load(&klgs_blk_total) / M));
 }
 
 void kl_mem_pressure_init(void) {
@@ -5064,11 +5065,12 @@ void *klb_memrchr(const void *s, int c, size_t n) {
     while (n--) if (p[n] == (unsigned char)c) return (void *)(p + n);
     return NULL;
 }
+int klb_posix_memalign(void **out, size_t align, size_t n);   // below, with the guest swap
 void *klb_memalign(size_t align, size_t size) {
     void *p = NULL;
     if (align < sizeof(void *)) align = sizeof(void *);
     if (align & (align - 1)) return NULL;             // must be a power of two
-    return posix_memalign(&p, align, size) == 0 ? p : NULL;
+    return klb_posix_memalign(&p, align, size) == 0 ? p : NULL;
 }
 
 // ---------- flag-value translation ----------
@@ -5152,6 +5154,51 @@ static int kl_gswap_on(void) {
                         "are file-backed from here\n", (unsigned long long)(used >> 20), at,
                 (unsigned long long)(limit >> 20), KL_GSWAP_MIN_BYTES >> 20);
     return 1;
+}
+
+// The guest's malloc family under the guest swap (kl_gswap.h): a request of KL_GSWAP_MIN_BYTES or more becomes a
+// file-backed block once the policy is on. Only the entry points that ALLOCATE are wrapped: the blocks belong to a
+// registered malloc zone, so free / realloc / malloc_size (the guest's forwarded ones and the runtime's own) take
+// them like any other pointer. Smaller requests and everything while the policy is off go to libc unchanged.
+static int kl_gswap_wants(size_t n) { return n >= KL_GSWAP_MIN_BYTES && kl_gswap_on(); }
+void *klb_malloc(size_t n) {
+    if (kl_gswap_wants(n)) { void *p = kl_gswap_big(n); if (p) return p; }
+    return malloc(n);
+}
+void *klb_calloc(size_t c, size_t n) {
+    size_t t;
+    if (!__builtin_mul_overflow(c, n, &t) && kl_gswap_wants(t)) { void *p = kl_gswap_big(t); if (p) return p; }
+    return calloc(c, n);
+}
+void *klb_realloc(void *p, size_t n) {
+    if (!p) return klb_malloc(n);
+    // An ordinary block growing into swap territory moves there; a block of ours is libmalloc's business (the zone).
+    if (kl_gswap_wants(n) && !kl_gswap_alloc_size(p)) {
+        size_t old = malloc_size(p);
+        if (old && old < n) {
+            void *q = kl_gswap_big(n);
+            if (q) { memcpy(q, p, old); free(p); return q; }
+        }
+    }
+    return realloc(p, n);
+}
+int klb_posix_memalign(void **out, size_t align, size_t n) {
+    if (out && kl_gswap_wants(n) && align >= sizeof(void *) && !(align & (align - 1)) && align <= (size_t)getpagesize()) {
+        void *p = kl_gswap_big(n);
+        if (p) { *out = p; return 0; }
+    }
+    return posix_memalign(out, align, n);
+}
+void *klb_aligned_alloc(size_t align, size_t n) {
+    if (kl_gswap_wants(n) && align && !(align & (align - 1)) && align <= (size_t)getpagesize()) {
+        void *p = kl_gswap_big(n);
+        if (p) return p;
+    }
+    return aligned_alloc(align, n);
+}
+void *klb_valloc(size_t n) {
+    if (kl_gswap_wants(n)) { void *p = kl_gswap_big(n); if (p) return p; }
+    return valloc(n);
 }
 
 // munmap for the guest: the guest swap forgets the range first (kl_gswap.h), then the kernel unmaps it.

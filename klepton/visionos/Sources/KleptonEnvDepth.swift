@@ -5,7 +5,7 @@
 // Each compositor frame `frame(recenter:)` asks the C side whether a picture is
 // due (the guest created AND started a depth provider, and the newest picture is
 // old or taken). If so, the scene mesh (or, when there is none yet, the planes)
-// is rasterised from each eye's pose into a 320x320, 2-layer D16 image, REVERSED-Z (clear 0)
+// is rasterised from each eye's pose into a 320x320, 2-layer D16 image, FORWARD-Z (clear 1)
 // in [0,1] with near/far from the job (see kl_envdepth.h for the exact
 // convention). No game asking for depth = no work, not even a lock beyond one
 // mutex in kl_envdepth_job_begin.
@@ -143,13 +143,13 @@ enum KleptonEnvDepth {
                 return nil
             }
             let dd = MTLDepthStencilDescriptor()
-            dd.depthCompareFunction = .greater      // reversed-Z: the larger d is the nearer surface
+            dd.depthCompareFunction = .less         // forward-Z: the smaller d is the nearer surface
             dd.isDepthWriteEnabled = true
             guard let ds = d.makeDepthStencilState(descriptor: dd) else { return nil }
             device = d
             queue = q
             depthState = ds
-            NSLog("[envdepth] depth convention: reversed-Z (1 = near, 0 = far / no geometry), clear 0, near \(KLED_NEAR) far \(KLED_FAR), D16, \(KLED_W)x\(KLED_H) x2 eyes")
+            NSLog("[envdepth] depth convention: forward-Z (0 = near, 1 = far / no geometry), clear 1, near \(KLED_NEAR) far \(KLED_FAR), D16, \(KLED_W)x\(KLED_H) x2 eyes")
         }
 
         // MARK: pipelines
@@ -238,11 +238,11 @@ enum KleptonEnvDepth {
         }
 
         /// Asymmetric perspective from the four positive tangents, eye looks down -Z,
-        /// Metal clip depth [0,1], REVERSED-Z: d = n (f - z) / (z (f - n)) (z = n -> 1, z = f -> 0), the
+        /// Metal clip depth [0,1], FORWARD-Z: d = f (z - n) / ((f - n) z) (z = n -> 0, z = f -> 1), the
         /// convention of kl_envdepth.h (kled_proj_ab in kl_envdepth.c is the tested form of a and b).
         static func projection(_ t: [Float], near n: Float, far f: Float) -> simd_float4x4 {
             let l = t[0], r = t[1], u = t[2], d = t[3]
-            let a = n / (f - n), b = n * f / (f - n)
+            let a = -f / (f - n), b = -f * n / (f - n)
             return simd_float4x4(columns: (
                 SIMD4<Float>(2 / (l + r), 0, 0, 0),
                 SIMD4<Float>(0, 2 / (u + d), 0, 0),
@@ -342,13 +342,13 @@ enum KleptonEnvDepth {
                 pd.depthAttachment.texture = depthTarget
                 pd.depthAttachment.slice = useColor ? 0 : eye
                 pd.depthAttachment.loadAction = .clear
-                pd.depthAttachment.clearDepth = 0.0          // reversed-Z: no geometry = 0 (infinitely far)
+                pd.depthAttachment.clearDepth = 1.0          // forward-Z: no geometry = 1 (the far plane)
                 pd.depthAttachment.storeAction = useColor ? .dontCare : .store
                 if useColor, let ct = colorTex {
                     pd.colorAttachments[0].texture = ct
                     pd.colorAttachments[0].slice = eye
                     pd.colorAttachments[0].loadAction = .clear
-                    pd.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 0)
+                    pd.colorAttachments[0].clearColor = MTLClearColor(red: 1, green: 0, blue: 0, alpha: 0)   // no geometry = 1
                     pd.colorAttachments[0].storeAction = .store
                 }
                 guard let enc = cmd.makeRenderCommandEncoder(descriptor: pd) else { continue }

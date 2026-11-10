@@ -291,4 +291,199 @@ static int kl_gswap_fresh(void *addr, size_t len, int prot) {
     return ok;
 }
 
+// ---- big blocks of the guest's malloc family ---------------------------------------------------------------------
+// Measured (Mobile Suit Gundam, logs 27): the level's texture data is malloc'ed, not mmap'ed (MALLOC_LARGE 1357 MiB
+// resident + 417 MiB compressed at the kill, against 650 MiB of guest mmap), so the mappings above alone moved 512 MiB.
+// A block is one mapping of its own; the table below knows each block's base and size, which is what free(),
+// realloc() and malloc_size() need. On Apple the blocks belong to a registered malloc zone, so those three find them
+// from ANY caller (the guest's forwarded free, or the runtime freeing a pointer the guest allocated) with no wrapper.
+typedef struct { uintptr_t base; size_t size, maplen; } klgs_blk;
+static struct { klgs_blk *b; unsigned n, cap; } klgs_blks;        // under klgs.mu, sorted by base
+static _Atomic unsigned klgs_blk_n;                                // blocks alive (fast "none of ours" answer)
+static _Atomic uint64_t klgs_blk_total;                            // bytes ever handed out as blocks
+
+// Under klgs.mu. Index of the first block whose base is >= `base`.
+static unsigned klgs_blk_find(uintptr_t base) {
+    unsigned lo = 0, hi = klgs_blks.n;
+    while (lo < hi) {
+        unsigned mid = (lo + hi) / 2;
+        if (klgs_blks.b[mid].base < base) lo = mid + 1; else hi = mid;
+    }
+    return lo;
+}
+
+// A zero-filled block of `size` bytes (page aligned), or NULL when it cannot be served from a file.
+static void *kl_gswap_alloc(size_t size) {
+    if (!size) size = 1;
+    void *p = kl_gswap_map(NULL, size, PROT_READ | PROT_WRITE);
+    if (p == MAP_FAILED) return NULL;
+    pthread_mutex_lock(&klgs.mu);
+    size_t maplen = (size + klgs.pg - 1) & ~(klgs.pg - 1);
+    int ok = 1;
+    if (klgs_blks.n == klgs_blks.cap) {
+        unsigned nc = klgs_blks.cap ? klgs_blks.cap * 2 : 64;
+        klgs_blk *nb = (klgs_blk *)realloc(klgs_blks.b, (size_t)nc * sizeof *nb);
+        if (nb) { klgs_blks.b = nb; klgs_blks.cap = nc; } else ok = 0;
+    }
+    if (ok) {
+        unsigned i = klgs_blk_find((uintptr_t)p);
+        memmove(&klgs_blks.b[i + 1], &klgs_blks.b[i], (size_t)(klgs_blks.n - i) * sizeof *klgs_blks.b);
+        klgs_blks.b[i] = (klgs_blk){ (uintptr_t)p, size, maplen };
+        klgs_blks.n++;
+        atomic_fetch_add(&klgs_blk_n, 1);
+        atomic_fetch_add(&klgs_blk_total, size);
+    }
+    pthread_mutex_unlock(&klgs.mu);
+    if (!ok) { kl_gswap_unmap(p, maplen); munmap(p, maplen); return NULL; }
+    return p;
+}
+
+// Size of the block that starts at `p`; 0 when `p` is not the start of one.
+static size_t kl_gswap_alloc_size(const void *p) {
+    if (!atomic_load(&klgs_blk_n)) return 0;
+    size_t size = 0;
+    pthread_mutex_lock(&klgs.mu);
+    unsigned i = klgs_blk_find((uintptr_t)p);
+    if (i < klgs_blks.n && klgs_blks.b[i].base == (uintptr_t)p) size = klgs_blks.b[i].size;
+    pthread_mutex_unlock(&klgs.mu);
+    return size;
+}
+
+// Frees the block that starts at `p`. 1 when it was one of ours.
+static int kl_gswap_alloc_free(void *p) {
+    if (!atomic_load(&klgs_blk_n)) return 0;
+    pthread_mutex_lock(&klgs.mu);
+    unsigned i = klgs_blk_find((uintptr_t)p);
+    if (i >= klgs_blks.n || klgs_blks.b[i].base != (uintptr_t)p) { pthread_mutex_unlock(&klgs.mu); return 0; }
+    size_t maplen = klgs_blks.b[i].maplen;
+    memmove(&klgs_blks.b[i], &klgs_blks.b[i + 1], (size_t)(klgs_blks.n - i - 1) * sizeof *klgs_blks.b);
+    klgs_blks.n--;
+    atomic_fetch_sub(&klgs_blk_n, 1);
+    pthread_mutex_unlock(&klgs.mu);
+    kl_gswap_unmap(p, maplen);
+    munmap(p, maplen);
+    return 1;
+}
+
+// Resizes the block at `p` (one of ours): in place while it fits its mapping, else a new block with the contents
+// moved. NULL when a new block cannot be served; `p` is then untouched.
+static void *kl_gswap_alloc_realloc(void *p, size_t size) {
+    if (!size) size = 1;
+    size_t old = 0;
+    pthread_mutex_lock(&klgs.mu);
+    unsigned i = klgs_blk_find((uintptr_t)p);
+    int ours = i < klgs_blks.n && klgs_blks.b[i].base == (uintptr_t)p;
+    if (ours) {
+        old = klgs_blks.b[i].size;
+        if (size <= klgs_blks.b[i].maplen) {
+            klgs_blks.b[i].size = size;
+            pthread_mutex_unlock(&klgs.mu);
+            return p;
+        }
+    }
+    pthread_mutex_unlock(&klgs.mu);
+    if (!ours) return NULL;
+    void *q = kl_gswap_alloc(size);
+    if (!q) return NULL;
+    memcpy(q, p, old < size ? old : size);
+    kl_gswap_alloc_free(p);
+    return q;
+}
+
+#if defined(__APPLE__)
+#include <malloc/malloc.h>
+// The malloc zone that owns the blocks. libmalloc asks every registered zone "is this yours?" (size) for a pointer its
+// default zone does not know, so free / realloc / malloc_size reach these from any thread of the process.
+static size_t klgs_z_size(malloc_zone_t *z, const void *p) { (void)z; return kl_gswap_alloc_size(p); }
+static void *klgs_z_malloc(malloc_zone_t *z, size_t n) { (void)z; return kl_gswap_alloc(n); }
+static void *klgs_z_calloc(malloc_zone_t *z, size_t c, size_t n) {
+    (void)z;
+    size_t t;
+    return __builtin_mul_overflow(c, n, &t) ? NULL : kl_gswap_alloc(t);          // a fresh mapping is already zero
+}
+static void klgs_z_free(malloc_zone_t *z, void *p) { (void)z; kl_gswap_alloc_free(p); }
+static void klgs_z_free_sized(malloc_zone_t *z, void *p, size_t n) { (void)z; (void)n; kl_gswap_alloc_free(p); }
+static void *klgs_z_realloc(malloc_zone_t *z, void *p, size_t n) {
+    (void)z;
+    if (!p) return kl_gswap_alloc(n);
+    void *q = kl_gswap_alloc_realloc(p, n);
+    if (q) return q;
+    size_t old = kl_gswap_alloc_size(p);                                         // no file for it: ordinary memory
+    if (!old || !(q = malloc(n ? n : 1))) return NULL;
+    memcpy(q, p, old < n ? old : n);
+    kl_gswap_alloc_free(p);
+    return q;
+}
+static void *klgs_z_memalign(malloc_zone_t *z, size_t align, size_t n) {
+    (void)z;
+    return align <= (size_t)getpagesize() ? kl_gswap_alloc(n) : NULL;            // blocks are page aligned
+}
+static void klgs_z_destroy(malloc_zone_t *z) { (void)z; }
+static unsigned klgs_z_batch_malloc(malloc_zone_t *z, size_t n, void **out, unsigned c) { (void)z; (void)n; (void)out; (void)c; return 0; }
+static void klgs_z_batch_free(malloc_zone_t *z, void **p, unsigned c) { (void)z; for (unsigned i = 0; i < c; i++) kl_gswap_alloc_free(p[i]); }
+static kern_return_t klgs_zi_enumerator(task_t t, void *c, unsigned m, vm_address_t a, memory_reader_t r, vm_range_recorder_t rec) {
+    (void)t; (void)c; (void)m; (void)a; (void)r; (void)rec;
+    return KERN_SUCCESS;
+}
+static size_t klgs_zi_good_size(malloc_zone_t *z, size_t n) { (void)z; size_t pg = (size_t)getpagesize(); return (n + pg - 1) & ~(pg - 1); }
+static boolean_t klgs_zi_check(malloc_zone_t *z) { (void)z; return 1; }
+static void klgs_zi_print(malloc_zone_t *z, boolean_t v) { (void)z; (void)v; }
+static void klgs_zi_log(malloc_zone_t *z, void *a) { (void)z; (void)a; }
+static void klgs_zi_lock(malloc_zone_t *z) { (void)z; }
+static void klgs_zi_stats(malloc_zone_t *z, malloc_statistics_t *st) {
+    (void)z;
+    st->blocks_in_use = atomic_load(&klgs_blk_n);
+    st->size_in_use = st->max_size_in_use = st->size_allocated = (size_t)atomic_load(&klgs_live);
+}
+static boolean_t klgs_zi_locked(malloc_zone_t *z) { (void)z; return 0; }
+static boolean_t klgs_zi_discharge_on(malloc_zone_t *z) { (void)z; return 0; }
+static void klgs_zi_discharge(malloc_zone_t *z, void *m) { (void)z; (void)m; }
+
+static malloc_introspection_t klgs_zone_intro;
+static malloc_zone_t klgs_zone;
+static void klgs_zone_register(void) {
+    klgs_zone_intro.enumerator = klgs_zi_enumerator;
+    klgs_zone_intro.good_size = klgs_zi_good_size;
+    klgs_zone_intro.check = klgs_zi_check;
+    klgs_zone_intro.print = klgs_zi_print;
+    klgs_zone_intro.log = klgs_zi_log;
+    klgs_zone_intro.force_lock = klgs_zi_lock;
+    klgs_zone_intro.force_unlock = klgs_zi_lock;
+    klgs_zone_intro.statistics = klgs_zi_stats;
+    klgs_zone_intro.zone_locked = klgs_zi_locked;
+    klgs_zone_intro.enable_discharge_checking = klgs_zi_discharge_on;
+    klgs_zone_intro.disable_discharge_checking = klgs_zi_lock;
+    klgs_zone_intro.discharge = klgs_zi_discharge;
+    klgs_zone_intro.reinit_lock = klgs_zi_lock;
+    klgs_zone.size = klgs_z_size;
+    klgs_zone.malloc = klgs_z_malloc;
+    klgs_zone.calloc = klgs_z_calloc;
+    klgs_zone.valloc = klgs_z_malloc;
+    klgs_zone.free = klgs_z_free;
+    klgs_zone.realloc = klgs_z_realloc;
+    klgs_zone.destroy = klgs_z_destroy;
+    klgs_zone.zone_name = "klepton guest swap";
+    klgs_zone.batch_malloc = klgs_z_batch_malloc;
+    klgs_zone.batch_free = klgs_z_batch_free;
+    klgs_zone.introspect = &klgs_zone_intro;
+    klgs_zone.version = 9;                       // memalign (5), free_definite_size (6), reinit_lock (9); nothing newer
+    klgs_zone.memalign = klgs_z_memalign;
+    klgs_zone.free_definite_size = klgs_z_free_sized;
+    malloc_zone_register(&klgs_zone);
+}
+// Before the first block is handed out.
+static void kl_gswap_zone_ready(void) {
+    static pthread_once_t once = PTHREAD_ONCE_INIT;
+    pthread_once(&once, klgs_zone_register);
+}
+#else
+static void kl_gswap_zone_ready(void) {}
+#endif
+
+// A block for the guest's malloc family: free() / realloc() / malloc_size() take it back like any other pointer.
+static void *kl_gswap_big(size_t size) {
+    kl_gswap_zone_ready();
+    return kl_gswap_alloc(size);
+}
+
 #endif

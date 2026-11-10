@@ -50,17 +50,22 @@
 
 enum { S_FREE, S_RENDER, S_READY, S_HELD, S_LOST };   // S_LOST: its job timed out, the GPU may still write it
 
-// The depth convention of the images (kl_envdepth.h): REVERSED-Z, as Meta's Environment Depth hands it out (1 = at the near plane, 0 = at
-// the far plane or no geometry). d(z) for a view-axis distance z, and the projection terms that give it (clip.z = a * eyeZ + b,
+// The depth convention of the images (kl_envdepth.h): FORWARD-Z in OpenGL's window range, which is what the guest's own code
+// decodes. Read out of Harem Life VR's libil2cpp (Meta.XR.EnvironmentDepth v71): EnvironmentDepthUtils.CalculateDepthCameraMatrices
+// builds a GL projection from the frame's tangents and nearZ/farZ (m22 = -(f+n)/(f-n), m23 = -2fn/(f-n)) and
+// ComputeNdcToLinearDepthParameters gives the shader x = -2fn/(f-n), y = -(f+n)/(f-n), linear = x / ((2d - 1) + y). So
+// d = (ndc.z + 1) / 2 = f (z - n) / ((f - n) z): 0 at the near plane, 1 at the far plane or where there is no geometry. The
+// reversed-Z form this replaces decoded every surface as ~near (0.1 m): the world "touched the camera" and hid every model.
+// d(z) for a view-axis distance z, and the projection terms that give it in Metal's [0,1] clip range (clip.z = a * eyeZ + b,
 // clip.w = -eyeZ, eyeZ = -z); KleptonEnvDepth.swift builds its matrix from the same two numbers. KL-TEST envdepthz.
 // KL-TEST-BEGIN envdepthz
-static float kled_depth_rev(float z, float n, float f) {
-    if (!(z > 0.0f) || !(f > n) || !(n > 0.0f)) return 0.0f;
-    if (z <= n) return 1.0f;
-    if (z >= f) return 0.0f;
-    return n * (f - z) / (z * (f - n));
+static float kled_depth_fwd(float z, float n, float f) {
+    if (!(z > 0.0f) || !(f > n) || !(n > 0.0f)) return 1.0f;      // no geometry: as far as it gets, occludes nothing
+    if (z <= n) return 0.0f;
+    if (z >= f) return 1.0f;
+    return f * (z - n) / ((f - n) * z);
 }
-static void kled_proj_ab(float n, float f, float *a, float *b) { *a = n / (f - n); *b = n * f / (f - n); }
+static void kled_proj_ab(float n, float f, float *a, float *b) { *a = -f / (f - n); *b = -f * n / (f - n); }
 // KL-TEST-END envdepthz
 
 // KL-TEST-BEGIN envdepthjob (extracted by tools/ci/host-tests.sh into klepton/tests/t_envdepth_job.c)

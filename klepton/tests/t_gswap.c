@@ -87,6 +87,45 @@ int main(void) {
     kl_gswap_unmap(m, 64 * M); munmap(m, 64 * M);
     CHECK(atomic_load(&klgs_live) == 0 && atomic_load(&klgs_files) == 0 && klgs.n == 0, "fragmented mapping released");
 
+    // Blocks of the malloc family: size, in-place shrink, growth by move, free; not-ours pointers are left alone.
+    {
+        unsigned char *b1 = kl_gswap_big(5 * M + 123);
+        CHECK(b1 && all(b1, 5 * M + 123, 0), "block: zero filled");
+        if (!b1) { printf("t_gswap: cannot allocate a block\n"); return 1; }
+        CHECK(kl_gswap_alloc_size(b1) == 5 * M + 123 && kl_gswap_alloc_size(b1 + 16) == 0, "block: size only at its base");
+        memset(b1, 0x5A, 5 * M + 123);
+        unsigned char *same = kl_gswap_alloc_realloc(b1, 3 * M);
+        CHECK(same == b1 && kl_gswap_alloc_size(b1) == 3 * M && all(b1, 3 * M, 0x5A), "block: shrink in place");
+        unsigned char *b2 = kl_gswap_alloc_realloc(b1, 9 * M);
+        CHECK(b2 && b2 != b1 && kl_gswap_alloc_size(b2) == 9 * M && kl_gswap_alloc_size(b1) == 0, "block: growth moves it");
+        CHECK(b2 && all(b2, 3 * M, 0x5A) && all(b2 + 3 * M, 6 * M, 0), "block: contents moved, rest zero");
+        int local = 0;
+        CHECK(kl_gswap_alloc_free(&local) == 0 && kl_gswap_alloc_size(&local) == 0, "block: a pointer that is not ours");
+        CHECK(kl_gswap_alloc_realloc(&local, M) == NULL, "block: realloc of a pointer that is not ours");
+        CHECK(kl_gswap_alloc_free(b2) == 1 && kl_gswap_alloc_free(b2) == 0, "block: free once");
+        CHECK(atomic_load(&klgs_live) == 0 && atomic_load(&klgs_files) == 0 && atomic_load(&klgs_blk_n) == 0, "block: all released");
+#if defined(__APPLE__)
+        // libmalloc finds the blocks through the registered zone (what free / realloc / malloc_size of any caller use).
+        // The zone's own entries are called here rather than free()/realloc(): this test runs under ASan, whose
+        // interposed free() rejects every pointer that is not ASan's.
+        unsigned char *z = kl_gswap_big(6 * M);
+        CHECK(z && malloc_zone_from_ptr(z) == &klgs_zone, "zone: libmalloc resolves the block to our zone");
+        CHECK(z && klgs_zone.size(&klgs_zone, z) == 6 * M && klgs_zone.size(&klgs_zone, z + 8) == 0, "zone: size");
+        memset(z, 0x77, 6 * M);
+        unsigned char *z2 = klgs_zone.realloc(&klgs_zone, z, 12 * M);
+        CHECK(z2 && klgs_zone.size(&klgs_zone, z2) == 12 * M && all(z2, 6 * M, 0x77), "zone: realloc");
+        klgs_zone.free_definite_size(&klgs_zone, z2, 12 * M);
+        CHECK(atomic_load(&klgs_blk_n) == 0 && atomic_load(&klgs_live) == 0, "zone: free");
+        void *plain = malloc(100);                                   // ordinary pointers are not claimed
+        CHECK(plain && klgs_zone.size(&klgs_zone, plain) == 0 && malloc_zone_from_ptr(plain) != &klgs_zone, "zone: ordinary malloc is not ours");
+        free(plain);
+        malloc_statistics_t st;
+        malloc_zone_statistics(NULL, &st);                           // walks every registered zone, ours included
+        malloc_zone_statistics(&klgs_zone, &st);
+        CHECK(st.blocks_in_use == 0, "zone: statistics");
+#endif
+    }
+
     rmdir(dir);
     if (fails) { printf("t_gswap: %d FAILED\n", fails); return 1; }
     printf("t_gswap: ok\n");

@@ -879,13 +879,15 @@ int klb_mallopt(int param, int value) {
     errno = ENOTSUP;
     return 0;
 }
+void *klb_valloc(size_t n);                      // kl_libc.c
+void *klb_realloc(void *p, size_t n);            // kl_libc.c
 void *klb_pvalloc(size_t n) {
     size_t pg = (size_t)getpagesize();
     if (n > SIZE_MAX - pg) { errno = ENOMEM; return NULL; }
-    return valloc((n + pg - 1) & ~(pg - 1));
+    return klb_valloc((n + pg - 1) & ~(pg - 1));     // kl_libc.c: under the guest swap
 }
 void *klb_reallocarray(void *p, size_t n, size_t sz) {
     size_t total;
     if (__builtin_mul_overflow(n, sz, &total)) { errno = ENOMEM; return NULL; }
-    return realloc(p, total);
+    return klb_realloc(p, total);                   // kl_libc.c: under the guest swap
 }

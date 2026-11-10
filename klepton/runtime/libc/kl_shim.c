@@ -2026,6 +2026,7 @@ X(klb_vprintf) X(klb_vsscanf) X(klb_memrchr) X(klb_memalign)
 X(klb_getrandom) X(klb_isnan)
 X(klb_isnanf) X(klb_isinf) X(klb_isinff) X(klb_isfinite) X(klb_isfinitef)
 X(klb_mmap) X(klb_munmap) X(klb_mprotect) X(klb_madvise) X(klb_sysinfo) X(klb_sbrk)
+X(klb_malloc) X(klb_calloc) X(klb_realloc) X(klb_posix_memalign) X(klb_aligned_alloc) X(klb_valloc)
 X(klb_pthread_mutex_init) X(klb_pthread_mutex_lock) X(klb_pthread_mutex_unlock)
 X(klb_pthread_mutex_trylock) X(klb_pthread_mutex_destroy)
 X(klb_pthread_mutexattr_init) X(klb_pthread_mutexattr_destroy) X(klb_pthread_mutexattr_settype)
@@ -2238,6 +2239,8 @@ static const kl_entry g_shim[] = {
     E("__isnan", klb_isnan), E("__isnanf", klb_isnanf), E("__isinf", klb_isinf),
     E("__isinff", klb_isinff), E("__isfinite", klb_isfinite), E("__isfinitef", klb_isfinitef),
     E("mmap", klb_mmap), E("munmap", klb_munmap), E("mprotect", klb_mprotect), E("madvise", klb_madvise),
+    E("malloc", klb_malloc), E("calloc", klb_calloc), E("realloc", klb_realloc),
+    E("posix_memalign", klb_posix_memalign), E("aligned_alloc", klb_aligned_alloc), E("valloc", klb_valloc),
     E("sbrk", klb_sbrk),
     // Linux-only, and the third door onto the memory budget — UE4 asks here
     // where every Unity title reads /proc/meminfo. See klb_sysinfo.
