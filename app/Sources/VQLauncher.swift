@@ -460,6 +460,10 @@ struct VQSettingsView: View {
                     .pickerStyle(.segmented)
                     Toggle(VQL("ASW desactivado (todos los frames reales)", "ASW off (every frame real)"), isOn: $settings.aswDisabled)
                     Toggle(VQL("Captura de entorno (suelo, sala y profundidad)", "Environment capture (floor, room and depth)"), isOn: $settings.envCapture)
+                    Toggle(VQL("Memoria extendida (intercambio a disco)", "Extended memory (swap to disk)"), isOn: $settings.guestSwap)
+                    Text(VQL("Activado: cuando un juego se acerca al límite de memoria del visor, sus reservas grandes pasan a ficheros temporales y dejan de contar para ese límite; evita cierres por memoria. Se aplica al lanzar el juego.",
+                             "On: when a game nears the headset's memory limit, its large allocations move to temporary files and stop counting towards that limit; it prevents out-of-memory closes. Applied when the game launches."))
+                        .font(.caption)
                     Toggle(VQL("Precompilar shaders antes de jugar", "Precompile shaders before playing"), isOn: $settings.precompileShaders)
                     Toggle(VQL("Shaders AOT (todo compilado antes de jugar, experimental)", "AOT shaders (all compiled before playing, experimental)"), isOn: $settings.aotShaders)
                     Toggle(VQL("Perfil Quest 3 cuando el juego lo tenga", "Quest 3 profile when the game has one"), isOn: $settings.quest3Profile)

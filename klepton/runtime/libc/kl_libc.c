@@ -53,6 +53,7 @@ int getentropy(void *buf, size_t buflen);
 #include "kl_jni.h"     // kl_jni_build_string — the Build.* half of the system
 #include "kl_fault.h"   // kl_fault_print_frames — who called exit()
 #include "kl_memrule.h"  // guest low-memory rule + [mem] telemetry throttle (pure, tested on Linux)
+#include "kl_gswap.h"    // guest swap: file-backed guest mappings (POSIX, tested on Linux)
                         // properties below, so the two cannot drift apart
 
 static void warn_once(const char *what) {
@@ -1551,7 +1552,8 @@ void kl_mem_telemetry(uint64_t now_ms) {
     const uint64_t M = 1048576;
     fprintf(stderr, "  [mem] t=%llus foot=%lluM peak=%lluM avail=%lluM gfx=%lluM comp=%lluM | "
                     "gpu%s alloc=%lluM tex astc/color/depth/msaa=%llu/%llu/%llu/%lluM buf own/guest=%llu/%lluM args=%lluM "
-                    "held=%lluM staging=%lluM | pso=%llu fn=%llu lib=%llu | guest mmap n=%llu anon=%lluM file=%lluM (cumulative)\n",
+                    "held=%lluM staging=%lluM | pso=%llu fn=%llu lib=%llu | guest mmap n=%llu anon=%lluM file=%lluM (cumulative) | "
+                    "gswap live=%lluM files=%u total=%lluM fresh=%lluM refused=%llu\n",
             (unsigned long long)(now_ms / 1000), (unsigned long long)(led[0] / M),
             (unsigned long long)(atomic_load(&g_mem_peak) / M), (unsigned long long)(kl_proc_available() / M),
             (unsigned long long)(led[1] / M), (unsigned long long)(led[2] / M),
@@ -1563,7 +1565,10 @@ void kl_mem_telemetry(uint64_t now_ms) {
             (unsigned long long)kl_kv_u64(g, "pso"), (unsigned long long)kl_kv_u64(g, "fn"),
             (unsigned long long)kl_kv_u64(g, "lib"),
             (unsigned long long)atomic_load(&g_gmmap_calls), (unsigned long long)(atomic_load(&g_gmmap_anon_bytes) / M),
-            (unsigned long long)(atomic_load(&g_gmmap_file_bytes) / M));
+            (unsigned long long)(atomic_load(&g_gmmap_file_bytes) / M),
+            (unsigned long long)(atomic_load(&klgs_live) / M), atomic_load(&klgs_files),
+            (unsigned long long)(atomic_load(&klgs_total) / M), (unsigned long long)(atomic_load(&klgs_fresh_bytes) / M),
+            (unsigned long long)atomic_load(&klgs_refused));
 }
 
 void kl_mem_pressure_init(void) {
@@ -5127,6 +5132,45 @@ static int klb_refuse_exec(const char *what, int anon, int prot) {
     return 1;
 }
 
+// Guest swap policy. KL_GSWAP=0 never, 1 always; default (auto): from the first time the footprint reaches
+// KL_GSWAP_AT % (45) of the real limit, and for the rest of the run. Below that a title that fits is left exactly as
+// it was (anonymous memory, no file I/O); above it every new large guest mapping stops counting towards the limit.
+static int kl_gswap_on(void) {
+    static int mode = -1;                        // 0 off, 1 always, 2 auto
+    static _Atomic int latched;
+    if (mode < 0) {
+        const char *e = kl_env_str("KL_GSWAP", NULL);
+        mode = !e ? 2 : (strcmp(e, "0") == 0 ? 0 : (strcmp(e, "1") == 0 ? 1 : 2));
+    }
+    if (mode != 2) return mode;
+    if (atomic_load(&latched)) return 1;
+    uint64_t used = kl_mem_footprint(), limit = kl_mem_real_limit(used, kl_proc_available());
+    int at = kl_lowmem_pct(kl_env_int("KL_GSWAP_AT", 45));
+    if (!limit || used * 100 < limit * (uint64_t)at) return 0;
+    if (!atomic_exchange(&latched, 1))
+        fprintf(stderr, "  [gswap] on: footprint %llu MiB is %d%% of the %llu MiB limit; guest mappings of %zu MiB or more "
+                        "are file-backed from here\n", (unsigned long long)(used >> 20), at,
+                (unsigned long long)(limit >> 20), KL_GSWAP_MIN_BYTES >> 20);
+    return 1;
+}
+
+// munmap for the guest: the guest swap forgets the range first (kl_gswap.h), then the kernel unmaps it.
+int klb_munmap(void *addr, size_t len) {
+    size_t hp = (size_t)getpagesize();
+    if (len && !((uintptr_t)addr & (hp - 1))) kl_gswap_unmap(addr, (len + hp - 1) & ~(hp - 1));
+    return munmap(addr, len);
+}
+
+// A zero-filled read/write mapping for the guest from inside the runtime (mremap's move), under the same policy as
+// the guest's own mmap.
+void *kl_guest_anon_map(size_t len) {
+    if (len >= KL_GSWAP_MIN_BYTES && kl_gswap_on()) {
+        void *g = kl_gswap_map(NULL, len, PROT_READ | PROT_WRITE);
+        if (g != MAP_FAILED) return g;
+    }
+    return mmap(NULL, len, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, (int)((unsigned)KL_VM_TAG_GUEST_MMAP << 24), 0);
+}
+
 void *klb_mmap(void *addr, size_t len, int prot, int flags, int fd, off_t off) {
     int df = kl_mmap_flags(flags);
     // A memory-map of an OBB read-through fd cannot be served: the pak's bytes
@@ -5140,6 +5184,30 @@ void *klb_mmap(void *addr, size_t len, int prot, int flags, int fd, off_t off) {
     }
     if (df & MAP_ANON) fd = -1;                  // Darwin insists on -1 for anonymous
     if (klb_refuse_exec("mmap", (df & MAP_ANON) != 0, prot)) return MAP_FAILED;
+    // Guest swap (kl_gswap.h). A private anonymous mapping may be served from a file; a MAP_FIXED over one of those
+    // either stays file-backed (fresh zero pages of the same file) or, when it is not ours to serve, is forgotten
+    // before the kernel replaces it.
+    {
+        size_t hp = (size_t)getpagesize(), rlen = (len + hp - 1) & ~(hp - 1);
+        int swappable = (df & MAP_ANON) && (df & MAP_PRIVATE) && !(df & MAP_SHARED) && !(prot & PROT_EXEC);
+        if (df & MAP_FIXED) {
+            if (len && !((uintptr_t)addr & (hp - 1))) {
+                if (swappable && kl_gswap_fresh(addr, rlen, prot)) {
+                    atomic_fetch_add(&g_gmmap_calls, 1);
+                    atomic_fetch_add(&g_gmmap_anon_bytes, (uint64_t)len);
+                    return addr;
+                }
+                kl_gswap_unmap(addr, rlen);
+            }
+        } else if (swappable && len >= KL_GSWAP_MIN_BYTES && kl_gswap_on()) {
+            void *g = kl_gswap_map(addr, len, prot);
+            if (g != MAP_FAILED) {
+                atomic_fetch_add(&g_gmmap_calls, 1);
+                atomic_fetch_add(&g_gmmap_anon_bytes, (uint64_t)len);
+                return g;
+            }
+        }
+    }
     // Darwin reads the VM tag of an anonymous mapping from the fd argument (VM_MAKE_TAG); the region map
     // (kl_mem_vm_print) then tells the guest's mappings from ours. Separate from `fd`, which stays -1 below.
     int mfd = (df & MAP_ANON) ? (int)((unsigned)KL_VM_TAG_GUEST_MMAP << 24) : fd;
@@ -5530,7 +5598,12 @@ static void kl_madv_range(uintptr_t a, size_t n, int mode, int edge) {
         int anon = !info.is_submap && !info.external_pager &&
                    info.share_mode != SM_SHARED && info.share_mode != SM_TRUESHARED;
         int writable = (info.protection & VM_PROT_WRITE) && !(info.protection & VM_PROT_EXECUTE);
-        if (!anon) kl_madv_fail_once(2, (void *)want, hi - want);
+        if (!anon) {
+            // A mapping of the guest swap: fresh zero pages of its file (whole pages), zeroed in place (edges).
+            if (!edge && kl_gswap_fresh((void *)want, hi - want, (int)info.protection)) { }
+            else if (edge && writable && kl_gswap_owns((void *)want)) memset((void *)want, 0, hi - want);
+            else kl_madv_fail_once(2, (void *)want, hi - want);
+        }
         else if (!edge) kl_madv_drop_one((void *)want, hi - want, mode, &info, writable);
         else if (writable) kl_madv_zero_resident(want, hi - want, &info);
         else kl_madv_fail_once(4, (void *)want, hi - want);

@@ -43,6 +43,7 @@
 #include <unistd.h>
 #include "kl_openxr.h"
 #include "kl_openxr_priv.h"   // batch seam: rows, extensions, events
+#include "kl_evgate.h"        // when a pushed event may reach the guest
 #include <pthread.h>
 #include <stdatomic.h>
 #include <ctype.h>
@@ -915,10 +916,14 @@ void klxr_register_extension(const char *name, uint32_t version, int (*gate)(voi
 // Events pushed from outside the session's own state machine.
 #define KLXR_PUSHQ     64
 #define KLXR_PUSH_MAX  480
-static struct { uint32_t type, len; uint64_t vis; uint8_t data[KLXR_PUSH_MAX]; }
+static struct { uint32_t type, len; kl_evgate vis; uint8_t data[KLXR_PUSH_MAX]; }
     g_xr_pushq[KLXR_PUSHQ];
 static unsigned g_xr_push_head, g_xr_push_count;
-static uint64_t g_xr_polls;
+static uint64_t g_xr_drains;   // polls that found no pushed event (kl_evgate.h)
+static uint64_t klxr_push_now_ms(void) {
+    struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000u + (uint64_t)ts.tv_nsec / 1000000u;
+}
 static pthread_mutex_t g_xr_push_mu = PTHREAD_MUTEX_INITIALIZER;
 
 int klxr_push_event(uint32_t type, const void *payload, size_t len) {
@@ -929,7 +934,7 @@ int klxr_push_event(uint32_t type, const void *payload, size_t len) {
         unsigned i = (g_xr_push_head + g_xr_push_count) % KLXR_PUSHQ;
         g_xr_pushq[i].type = type;
         g_xr_pushq[i].len = (uint32_t)len;
-        g_xr_pushq[i].vis = g_xr_polls + 1;   // not for the poll in progress
+        g_xr_pushq[i].vis = kl_evgate_stamp(g_xr_drains, klxr_push_now_ms());   // a later drain, after the device's latency
         if (len) memcpy(g_xr_pushq[i].data, payload, len);
         g_xr_push_count++;
         rc = 0;
@@ -942,8 +947,7 @@ int klxr_push_event(uint32_t type, const void *payload, size_t len) {
 static int klxr_pop_pushed(void *data) {
     int rc = 0;
     pthread_mutex_lock(&g_xr_push_mu);
-    g_xr_polls++;
-    if (g_xr_push_count && g_xr_pushq[g_xr_push_head].vis <= g_xr_polls) {
+    if (g_xr_push_count && kl_evgate_due(g_xr_pushq[g_xr_push_head].vis, g_xr_drains, klxr_push_now_ms())) {
         uint8_t *b = (uint8_t *)data;
         uint32_t type = g_xr_pushq[g_xr_push_head].type;
         memcpy(b, &type, 4);
@@ -952,6 +956,8 @@ static int klxr_pop_pushed(void *data) {
         g_xr_push_head = (g_xr_push_head + 1) % KLXR_PUSHQ;
         g_xr_push_count--;
         rc = 1;
+    } else {
+        g_xr_drains++;
     }
     pthread_mutex_unlock(&g_xr_push_mu);
     return rc;

@@ -114,7 +114,7 @@ enum VQCalibration {
         if redo { VQLog.log("[calib] anchor not found reason=redo requested"); return false }
         if KleptonCompositor.recenterActive { VQLog.log("[calib] skipped reason=recentered"); return false }
         guard let c = load() else { VQLog.log("[calib] anchor not found reason=no calibration saved"); return false }
-        // ARKit starts in parallel with the render loop: wait (at most 6 s) for the tracker to run, then 3 s for the anchor to be tracked.
+        // ARKit starts in parallel with the render loop: wait (at most 6 s) for the tracker to run, then up to 8 s for the anchor to be tracked.
         var tracker: WorldTrackingProvider?
         for _ in 0..<120 {
             if KLGuardian.worldTrackingDenied { VQLog.log("[calib] anchor not found reason=world sensing denied"); return false }
@@ -130,11 +130,29 @@ enum VQCalibration {
                 if u.anchor.id == id, u.event != .removed, u.anchor.isTracked { found.set(u.anchor.originFromAnchorTransform); break }
             }
         }
-        for _ in 0..<60 where found.value == nil { try? await Task.sleep(nanoseconds: 50_000_000) }
+        // Up to 8 s: a persisted anchor is tracked only once ARKit has relocalised, which took more than the old 3 s in two of
+        // four launches (logs 26). The update stream alone can miss it (the anchor was announced before this task subscribed and
+        // nothing updates it afterwards), so the tracker's own list is also read every 200 ms. An anchor that is not in that
+        // list for 3 s is not in this space: stop early and let the guardian screen take over.
+        var missing = 0
+        for step in 0..<160 where found.value == nil {
+            try? await Task.sleep(nanoseconds: 50_000_000)
+            guard step % 4 == 3, found.value == nil, let all = await tracker.allAnchors else { continue }
+            if let a = all.first(where: { $0.id == id }) {
+                missing = 0
+                if a.isTracked { found.set(a.originFromAnchorTransform) }
+            } else {
+                missing += 1
+                if missing >= 15 { break }
+            }
+        }
         found.stop()
         finder.cancel()                          // ends the loop (and releases the tracker) if the stream honours cancellation
         await removeAnchors([])                  // retry the orphans now that the tracker runs
-        guard let m = found.value else { VQLog.log("[calib] anchor not found reason=not tracked in 3 s anchor=\(id)"); return false }
+        guard let m = found.value else {
+            VQLog.log("[calib] anchor not found reason=\(missing >= 15 ? "not in this space (3 s)" : "not tracked in 8 s") anchor=\(id)")
+            return false
+        }
         let ax = m.columns.3.x, ay = m.columns.3.y, az = m.columns.3.z
         let yaw = atan2f(m.columns.2.x, m.columns.2.z)
         guard ay.isFinite, abs(ay) <= 10 else { VQLog.log("[calib] anchor not found reason=floor out of range y=\(ay)"); return false }

@@ -16,6 +16,7 @@
 #include "klepton.h"
 #include "kl_ovrp.h"
 #include "kl_ovrp_priv.h"   // batch seam: registration, events, pose helpers
+#include "kl_evgate.h"      // when a queued event may reach the guest
 #include "kl_ovrp_eyesize.h"   // the app's resolution slider: target size, desc compensation
 #include "kl_guardian.h"        // floor / play space the user confirmed
 #include "../guest/kl_driver.h"
@@ -2166,16 +2167,20 @@ static uint64_t klovrp_SetTrackingOriginType2(int origin) {
 // VisionQuestPro: a real queue behind both spellings. Producers are the batch
 // files (kl_ovrp_spatial.c: SpatialAnchorCreate, SpaceQueryComplete, ...) and
 // any host thread, through kl_ovrp_push_event. Slots are fixed-size so a push
-// never allocates; an event is deliverable only from the poll AFTER the one in
-// progress at push time (g_ev_polls counts polls as they begin), so the
-// requestId a creating call returns is in the guest's hands before the event
-// that names it, even when another guest thread is polling at that moment.
+// never allocates; an event is deliverable only in a LATER drain of the queue and
+// after the device's latency (kl_evgate.h: on a Quest a completion never arrives
+// in the frame that asked for it, and MRUK depends on that), so the requestId a
+// creating call returns is in the guest's hands before the event that names it.
 #define KLOVRP_EVQ      64
 #define KLOVRP_EV_MAX   256
-static struct { int32_t type; uint32_t len; uint64_t vis; uint8_t data[KLOVRP_EV_MAX]; }
+static struct { int32_t type; uint32_t len; kl_evgate vis; uint8_t data[KLOVRP_EV_MAX]; }
     g_evq[KLOVRP_EVQ];
 static unsigned g_ev_head, g_ev_count;
-static uint64_t g_ev_polls;
+static uint64_t g_ev_drains;   // polls answered "nothing": each closes one drain of the guest's loop
+static uint64_t klovrp_ev_now_ms(void) {
+    struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000u + (uint64_t)ts.tv_nsec / 1000000u;
+}
 static pthread_mutex_t g_ev_mu = PTHREAD_MUTEX_INITIALIZER;
 // The buffer ovrp_PollEvent2 hands out through *eventData: valid until the next
 // successful poll, which is how long the real plugin's internal buffer lives.
@@ -2189,7 +2194,7 @@ int kl_ovrp_push_event(int32_t type, const void *payload, size_t len) {
         unsigned i = (g_ev_head + g_ev_count) % KLOVRP_EVQ;
         g_evq[i].type = type;
         g_evq[i].len = (uint32_t)len;
-        g_evq[i].vis = g_ev_polls + 1;
+        g_evq[i].vis = kl_evgate_stamp(g_ev_drains, klovrp_ev_now_ms());
         if (len) memcpy(g_evq[i].data, payload, len);
         g_ev_count++;
         rc = 0;
@@ -2203,13 +2208,14 @@ int kl_ovrp_push_event(int32_t type, const void *payload, size_t len) {
 static int klovrp_ev_pop(int32_t *type, uint8_t *out) {
     int rc = -1;
     pthread_mutex_lock(&g_ev_mu);
-    g_ev_polls++;
-    if (g_ev_count && g_evq[g_ev_head].vis <= g_ev_polls) {
+    if (g_ev_count && kl_evgate_due(g_evq[g_ev_head].vis, g_ev_drains, klovrp_ev_now_ms())) {
         *type = g_evq[g_ev_head].type;
         rc = (int)g_evq[g_ev_head].len;
         memcpy(out, g_evq[g_ev_head].data, (size_t)rc);
         g_ev_head = (g_ev_head + 1) % KLOVRP_EVQ;
         g_ev_count--;
+    } else {
+        g_ev_drains++;
     }
     pthread_mutex_unlock(&g_ev_mu);
     return rc;

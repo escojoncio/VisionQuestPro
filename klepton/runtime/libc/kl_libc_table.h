@@ -333,7 +333,7 @@ KL_FWD(mlock)
 KL_FWD(modf)
 KL_FWD(modff)
 KL_FWD(msync)
-KL_FWD(munmap)
+// munmap: NOT a straight forward — klb_munmap (kl_libc.c, registered in kl_shim.c) tells the guest swap first.
 KL_FWD(nan)
 KL_FWD(nanf)
 KL_FWD(nanosleep)

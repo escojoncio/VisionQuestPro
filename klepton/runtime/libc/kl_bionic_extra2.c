@@ -145,6 +145,8 @@ int klb_prlimit(int pid, int res, const lx_rlimit *nw, lx_rlimit *old) {
 // kernel's move amounts to); without MREMAP_MAYMOVE (1) a grow that cannot happen in
 // place fails with ENOMEM, as it does when the neighbour address range is taken.
 // MREMAP_FIXED (2) / DONTUNMAP (4) are not offered.
+int klb_munmap(void *addr, size_t len);          // kl_libc.c
+void *kl_guest_anon_map(size_t len);             // kl_libc.c
 void *klb_mremap(void *old, size_t old_size, size_t new_size, int flags, ...) {
     if (flags & ~1) { errno = EINVAL; return MAP_FAILED; }
     if (new_size == 0 || ((uintptr_t)old & (getpagesize() - 1))) { errno = EINVAL; return MAP_FAILED; }
@@ -153,14 +155,14 @@ void *klb_mremap(void *old, size_t old_size, size_t new_size, int flags, ...) {
     new_size = (new_size + pg - 1) & ~(pg - 1);
     if (new_size == old_size) return old;
     if (new_size < old_size) {
-        if (munmap((char *)old + new_size, old_size - new_size) != 0) return MAP_FAILED;
+        if (klb_munmap((char *)old + new_size, old_size - new_size) != 0) return MAP_FAILED;
         return old;
     }
     if (!(flags & 1)) { errno = ENOMEM; return MAP_FAILED; }
-    void *n = mmap(NULL, new_size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
+    void *n = kl_guest_anon_map(new_size);       // the guest's own mmap policy (guest swap, kl_gswap.h)
     if (n == MAP_FAILED) return MAP_FAILED;
     memcpy(n, old, old_size);
-    munmap(old, old_size);
+    klb_munmap(old, old_size);
     return n;
 }
 // mlock2(addr, len, MLOCK_ONFAULT): the lock-on-fault flag has no Darwin form; plain mlock.

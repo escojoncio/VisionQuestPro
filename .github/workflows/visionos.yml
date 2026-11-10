@@ -32,7 +32,7 @@ jobs:
         with:
           repository: ${{ github.repository_owner }}/VPKEngine
           path: vpkengine
-          ref: 3c2cf8482e1dca34f1c5744b11b0da05dc48d0f0
+          ref: a4eccacb99c10126b7db3dd593c48ff235daaf7e
           fetch-depth: 1
           sparse-checkout: |
             runtime

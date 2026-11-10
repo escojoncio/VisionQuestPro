@@ -1297,6 +1297,22 @@ build/t_uelog: tests/t_uelog.c runtime/kl_uelog.h
 uelog: build/t_uelog
 	@./build/t_uelog
 
+# Event-delivery gate of ovrp_PollEvent*/xrPollEvent (runtime/xr/kl_evgate.h, pure; used by kl_ovrp.c and kl_openxr.c). Plain C.
+build/t_evgate: tests/t_evgate.c runtime/xr/kl_evgate.h
+	@mkdir -p build
+	$(CC) -g -fsanitize=address,undefined -Wall -Wextra -Iruntime -o $@ tests/t_evgate.c
+.PHONY: evgate
+evgate: build/t_evgate
+	@./build/t_evgate
+
+# Guest swap: file-backed guest mappings (runtime/libc/kl_gswap.h, POSIX; used by kl_libc.c). Plain C.
+build/t_gswap: tests/t_gswap.c runtime/libc/kl_gswap.h
+	@mkdir -p build
+	$(CC) -g -fsanitize=address,undefined -Wall -Wextra -Iruntime -o $@ tests/t_gswap.c -lpthread
+.PHONY: gswap
+gswap: build/t_gswap
+	@./build/t_gswap
+
 # Linux-semantics fixes of the libc/pthread shims (affinity mask, MADV_DONTNEED split, cond/mutex maps, mallocx flags).
 # Cut out of kl_libc.c / kl_pthread.c / kl_shim.c by their KL-TEST markers; plain C, Linux or macOS.
 build/t_libc_sem: tests/t_libc_sem.c runtime/libc/kl_libc.c runtime/libc/kl_pthread.c runtime/libc/kl_shim.c

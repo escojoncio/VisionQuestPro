@@ -56,3 +56,18 @@
 
 ## Maestro (UE4/GLES)
 - CODESIGNING 0x2, PC=0 en hilo de libUE4 tras `ovrp_GetSystemHeadsetType2`. Candidatos: `ovrMessageType_ToString` sin resolver, `eglGetProcAddress` no resuelto. Sin cerrar.
+
+## HLVR = Harem Life VR (Unity 2022.3, ovrp 1.103, MRUK v71; carpeta `homebrew`)
+- Quest 3: el juego activa MR (MRUK C# `CreateSceneDataFromDevice`: rooms → container → hijos → labels/BB2D/Boundary2D/LocateSpace2 por hijo). `_cameraRig` se asigna en `MRUK.Start`; ver `kl_evgate.h`. Quest 2: sin MR, suelo propio.
+- Pide origen suelo y luego ojos (`ovrp_SetTrackingOriginType`=0); el plano FLOOR llega a y=-eye. Profundidad de entorno 320x320 D16 reversed-Z (convención unverified).
+- `libMetaXRAudioUnity.so` rechazada por AMFI (global) → plugin nulo. `libmrutilitykitshared.so` carga traducida.
+- Crash antiguo: firma de `ovrp_DiscoverSpaces` (corregido). Etiquetas: count sin NUL (`Unknown classification`).
+
+## Gundam Silver Phantom (añadido 2026-11-10)
+- AR funciona con sala de zona dibujada (`[room] source=guardian`, 17 miembros) + etiquetas sin NUL; el juego ya no destruye los espacios (antes CheckRules fallaba).
+- Nivel tras el AR: 14x 8192² ASTC6x6 + 8x 8192² ASTC4x4 + 2x 8192² RGBA8 (358 y 268 MiB) pedidos por el juego; ojo al 130 % = 825 MiB entre RT y MSAA materializada.
+
+## Into the Radius 2 (UE 5.5, Vulkan ES3.1 móvil; añadido 2026-11-10)
+- Un submit por frame con 5 pases (ver bitácora del motor). MSAA 4x propio, adjuntos TRANSIENT con LOAD/STORE.
+- Texturas: ~2950 ASTC de 64x64 (7 mips) y ~190 mayores; el streamer deja de pedir mips con memoria libre (causa sin demostrar). Sesiones probadas de ~50 s (10 s de nivel).
+- Descartado: shaders/pipelines (failed=0), Nanite/Lumen, memoria, formatos.

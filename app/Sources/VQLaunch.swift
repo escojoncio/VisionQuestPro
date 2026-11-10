@@ -161,6 +161,9 @@ final class VQSettings: ObservableObject {
     /// «Captura de entorno (suelo, sala y profundidad)»: ARKit scans floor, room and depth in every game, for the Guardian
     /// (KL_ENV_CAPTURE). Off: only what the game's manifest asks for. The game still sees only what its manifest declares.
     @Published var envCapture: Bool { didSet { save() } }
+    /// «Memoria extendida (intercambio a disco)»: guest swap (kl_gswap.h). On: automatic, the game's large allocations go to
+    /// temporary files once the app passes 45 % of its memory limit, so they stop counting towards it. Off: KL_GSWAP=0.
+    @Published var guestSwap: Bool { didSet { save() } }
     /// «Definir el guardián antes de cada juego»: the guardian screen (VQGuardianSetupView) stops the start of every game, with the
     /// immersive space already open. Off: the game's saved definition (KLGuardian.restore) or the automatic one is used.
     @Published var guardianAsk: Bool { didSet { save() } }
@@ -230,6 +233,7 @@ final class VQSettings: ObservableObject {
         showFps = d.object(forKey: "vq.showFps") as? Bool ?? false
         aswDisabled = d.object(forKey: "vq.aswOff") as? Bool ?? true
         envCapture = d.object(forKey: "vq.envCapture") as? Bool ?? true
+        guestSwap = d.object(forKey: "vq.guestSwap") as? Bool ?? true
         guardianAsk = d.object(forKey: "vq.guardianAsk") as? Bool ?? true
         d.removeObject(forKey: "vq.hapticsGain")  // old setting: vibration is calibrated automatically per controller
         quest3Profile = d.object(forKey: "vq.quest3v2") as? Bool ?? true  // global switch of «Perfil Quest 3 cuando el juego lo tenga»
@@ -287,6 +291,7 @@ final class VQSettings: ObservableObject {
         d.set(showFps, forKey: "vq.showFps")
         d.set(aswDisabled, forKey: "vq.aswOff")
         d.set(envCapture, forKey: "vq.envCapture")
+        d.set(guestSwap, forKey: "vq.guestSwap")
         d.set(guardianAsk, forKey: "vq.guardianAsk")
         d.set(quest3Profile, forKey: "vq.quest3v2")
         d.set(forceVulkan, forKey: "vq.forceVulkan")
@@ -340,6 +345,7 @@ final class VQSettings: ObservableObject {
         selectDriver()
         setenv("KL_NET_OFFLINE", offline ? "1" : "0", 1)
         setenv("KL_ENV_CAPTURE", envCapture ? "1" : "0", 1)
+        if guestSwap { unsetenv("KL_GSWAP") } else { setenv("KL_GSWAP", "0", 1) }
         setenv("KL_LOG_FILE", guestLog ? "1" : "0", 1)
         setenv("KL_ALARM", String(Int(watchdogSeconds)), 1)
         // The launcher already decided; BootView must boot straight away.

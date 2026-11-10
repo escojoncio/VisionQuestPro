@@ -814,10 +814,39 @@ static int kl_core_shim_claims(const char *path) {
 
 static int kl_core_shim_is_handle(void *h) { return h == (void *)&g_core_shim_handle; }
 
+// MetaXRAudioUnity cannot be loaded (kl_target_default_refused: its init trips AMFI), and its managed side does not
+// tolerate the absence: Meta's MetaXRAudio scripts P/Invoke it from Update, so a guest that ships them threw
+// DllNotFoundException every frame (Harem Life VR: 5747 in one session). Served instead as a library whose API
+// (ovrAudio_*, MetaXRAudio_*, MetaXRAudioUnity_*) answers ovrSuccess and writes nothing: spatialisation stays off, as
+// it already was, and the scripts run. Unity's own plugin entry points (UnityGetAudioEffectDefinitions,
+// UnityPluginLoad, JNI_OnLoad...) stay undefined so libunity registers no audio effect from it.
+static const int g_nullplugin_handle = 1;            // address is the sentinel (a value of its own: never merged with another)
+static int kl_nullplugin_claims(const char *path) { return path && strstr(path, "MetaXRAudioUnity") != NULL; }
+static int kl_nullplugin_is_handle(void *h) { return h == (void *)&g_nullplugin_handle; }
+#if defined(__aarch64__)
+__attribute__((naked)) static void kl_nullplugin_ret0(void) { __asm__("mov x0, #0\n" "fmov d0, xzr\n" "ret\n"); }
+#else
+static long kl_nullplugin_ret0(void) { return 0; }
+#endif
+static void *kl_nullplugin_sym(const char *name) {
+    if (name && (!strncmp(name, "ovrAudio_", 9) || !strncmp(name, "MetaXRAudio_", 12) ||
+                 !strncmp(name, "MetaXRAudioUnity_", 17)))
+        return (void *)kl_nullplugin_ret0;
+    snprintf(g_dlerr, sizeof g_dlerr, "klepton: undefined symbol: %s", name ? name : "(null)");
+    return NULL;
+}
+
 void *klb_dlopen(const char *path, int flags) {
     (void)flags;
     { static int once; if (!once) { once = 1; kl_dl_trace_shims(); } }
     if (!path) return (void *)-1;                    // RTLD_DEFAULT-ish: whole process
+    if (kl_nullplugin_claims(path)) {
+        static int said;
+        if (!said++)
+            fprintf(stderr, "  [klepton] guest dlopen(\"%s\") -> null plugin (the real one trips AMFI; its API "
+                            "answers ovrSuccess and does nothing)\n", path);
+        return (void *)&g_nullplugin_handle;
+    }
     if (kl_dlopen_refused(path)) return NULL;
     // Asked before, and it was not here. The dlerror the guest reads next is set
     // to the same text the first attempt produced, so a caller that reports it
@@ -981,6 +1010,7 @@ void *klb_dlsym(void *handle, const char *name) {
     if (kl_vulkan_is_handle(handle)) return kl_vulkan_sym(name);
     if (kl_aaudio_is_handle(handle)) return kl_aaudio_sym(name);
     if (kl_openxr_is_handle(handle)) return kl_openxr_sym(name);
+    if (kl_nullplugin_is_handle(handle)) return kl_nullplugin_sym(name);
     // A core system-library handle (libc.so &c.) resolves like RTLD_DEFAULT: the
     // shim serves libc, and the global image search covers anything a guest .so
     // exported. A name neither has is a clean undefined-symbol dlerror, not a
