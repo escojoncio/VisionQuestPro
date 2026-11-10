@@ -128,8 +128,6 @@ enum VQLaunch {
 final class VQSettings: ObservableObject {
     static let shared = VQSettings()
 
-    @Published var offline: Bool { didSet { save() } }
-    @Published var guestLog: Bool { didSet { save() } }
     @Published var watchdogSeconds: Double { didSet { save() } }
     // Graphics (VPKEngine). The game's own Quest foveation is always off, and so is the app's own: the setting is
     // hidden and applyToEnvironment forces it off (the properties below are kept only for the stored values).
@@ -158,24 +156,15 @@ final class VQSettings: ObservableObject {
     /// Head-locked FPS counter in the compositor (KL_FPS_HUD).
     @Published var showFps: Bool { didSet { save() } }
     @Published var aswDisabled: Bool { didSet { save() } }
-    /// «Captura de entorno (suelo, sala y profundidad)»: ARKit scans floor, room and depth in every game, for the Guardian
-    /// (KL_ENV_CAPTURE). Off: only what the game's manifest asks for. The game still sees only what its manifest declares.
-    @Published var envCapture: Bool { didSet { save() } }
-    /// «Memoria extendida (intercambio a disco)»: guest swap (kl_gswap.h). On: automatic, the game's large allocations go to
-    /// temporary files once the app passes 45 % of its memory limit, so they stop counting towards it. Off: KL_GSWAP=0.
-    @Published var guestSwap: Bool { didSet { save() } }
     /// «Definir el guardián antes de cada juego»: the guardian screen (VQGuardianSetupView) stops the start of every game, with the
     /// immersive space already open. Off: the game's saved definition (KLGuardian.restore) or the automatic one is used.
     @Published var guardianAsk: Bool { didSet { save() } }
     /// Global «Perfil Quest 3 cuando el juego lo tenga»: allows the Quest 3 profile (per game it can be overridden, VQGameProfile).
     @Published var quest3Profile: Bool { didSet { save() } }
-    @Published var forceVulkan: Bool { didSet { save() } }
     @Published var diagCaptures: Bool { didSet { save() } }
     /// «Incluir capturas»: the .vpcap files of «Captura de frames» (QUEST/capturas) go in the share sheet too. They can
     /// be large, so off by default.
     @Published var includeCaptures: Bool { didSet { save() } }
-    /// Vulkan driver: VPKEngine's own (VPVulkan) or MoltenVK (to compare, or if VPKEngine fails).
-    @Published var useVPKEngine: Bool { didSet { save() } }
     /// Experimental: GLES games through VPKEngine's own OpenGL ES (vpgles in VPVulkan). Off by default:
     /// while off, GLES-only games stay marked incompatible ("solo Vulkan").
     @Published var glesVPK: Bool { didSet { save() } }
@@ -194,8 +183,6 @@ final class VQSettings: ObservableObject {
     /// Fixed game language (LANG), overriding the system one: "auto" | "es_ES" | "es_MX" | "en_US".
     /// Spain and Mexico differ only by region, which games read through java.util.Locale.
     @Published var gameLanguage: String { didSet { save() } }
-    /// Compile the game's known shaders/pipelines before it starts (VPVulkan recipe store).
-    @Published var precompileShaders: Bool { didSet { save() } }
     /// AOT shaders (VPKEngine VPVK_AOT): the whole game's shaders/pipelines are built into the Metal
     /// binary archive before playing; unseen variants compile in the background without holding frames.
     @Published var aotShaders: Bool { didSet { save() } }
@@ -205,8 +192,6 @@ final class VQSettings: ObservableObject {
 
     private init() {
         let d = UserDefaults.standard
-        offline = d.object(forKey: "vq.offline") as? Bool ?? true
-        guestLog = d.object(forKey: "vq.guestLog") as? Bool ?? true
         watchdogSeconds = d.object(forKey: "vq.watchdog") as? Double ?? 120
         var fov = Foveation(rawValue: d.object(forKey: "vq.fov") as? Int ?? 0) ?? .off
         if fov == .m5 && !VQSettings.isM5 { fov = .m2 }  // M5 preset only on an M5
@@ -232,16 +217,11 @@ final class VQSettings: ObservableObject {
         }
         showFps = d.object(forKey: "vq.showFps") as? Bool ?? false
         aswDisabled = d.object(forKey: "vq.aswOff") as? Bool ?? true
-        envCapture = d.object(forKey: "vq.envCapture") as? Bool ?? true
-        guestSwap = d.object(forKey: "vq.guestSwap") as? Bool ?? true
         guardianAsk = d.object(forKey: "vq.guardianAsk") as? Bool ?? true
         d.removeObject(forKey: "vq.hapticsGain")  // old setting: vibration is calibrated automatically per controller
         quest3Profile = d.object(forKey: "vq.quest3v2") as? Bool ?? true  // global switch of «Perfil Quest 3 cuando el juego lo tenga»
-        forceVulkan = d.object(forKey: "vq.forceVulkan") as? Bool ?? true
         diagCaptures = d.object(forKey: "vq.diagCaptures2") as? Bool ?? false
         includeCaptures = d.object(forKey: "vq.includeCaptures") as? Bool ?? false
-        // Saved as "vq.vpengine" before the engine was renamed VPKEngine.
-        useVPKEngine = (d.object(forKey: "vq.vpkengine") ?? d.object(forKey: "vq.vpengine")) as? Bool ?? true
         glesVPK = d.object(forKey: "vq.glesVPK") as? Bool ?? false
         posture = d.string(forKey: "vq.posture") ?? "auto"
         seated = d.object(forKey: "vq.seated") as? Bool ?? false
@@ -252,7 +232,6 @@ final class VQSettings: ObservableObject {
         systemLanguage = d.object(forKey: "vq.sysLang") as? Bool ?? true
         storeCovers = d.object(forKey: "vq.storeCovers") as? Bool ?? true
         gameLanguage = d.string(forKey: "vq.gameLang") ?? "auto"
-        precompileShaders = d.object(forKey: "vq.precompile") as? Bool ?? true
         aotShaders = d.object(forKey: "vq.aot") as? Bool ?? false
         conformanceMinutes = d.object(forKey: "vq.ctsMinutes") as? Double ?? 15
         conformanceMemoryMB = d.object(forKey: "vq.ctsMemMB") as? Int ?? 3000
@@ -275,8 +254,6 @@ final class VQSettings: ObservableObject {
 
     private func save() {
         let d = UserDefaults.standard
-        d.set(offline, forKey: "vq.offline")
-        d.set(guestLog, forKey: "vq.guestLog")
         d.set(watchdogSeconds, forKey: "vq.watchdog")
         d.set(foveation.rawValue, forKey: "vq.fov")
         d.set(sharpZone, forKey: "vq.fovSharp")
@@ -290,14 +267,10 @@ final class VQSettings: ObservableObject {
         d.set(resolutionPct, forKey: "vq.resPct")
         d.set(showFps, forKey: "vq.showFps")
         d.set(aswDisabled, forKey: "vq.aswOff")
-        d.set(envCapture, forKey: "vq.envCapture")
-        d.set(guestSwap, forKey: "vq.guestSwap")
         d.set(guardianAsk, forKey: "vq.guardianAsk")
         d.set(quest3Profile, forKey: "vq.quest3v2")
-        d.set(forceVulkan, forKey: "vq.forceVulkan")
         d.set(diagCaptures, forKey: "vq.diagCaptures2")
         d.set(includeCaptures, forKey: "vq.includeCaptures")
-        d.set(useVPKEngine, forKey: "vq.vpkengine")
         d.set(glesVPK, forKey: "vq.glesVPK")
         d.set(posture, forKey: "vq.posture")
         d.set(seated, forKey: "vq.seated")
@@ -306,7 +279,6 @@ final class VQSettings: ObservableObject {
         d.set(systemLanguage, forKey: "vq.sysLang")
         d.set(storeCovers, forKey: "vq.storeCovers")
         d.set(gameLanguage, forKey: "vq.gameLang")
-        d.set(precompileShaders, forKey: "vq.precompile")
         d.set(aotShaders, forKey: "vq.aot")
         d.set(conformanceMinutes, forKey: "vq.ctsMinutes")
         d.set(conformanceMemoryMB, forKey: "vq.ctsMemMB")
@@ -323,7 +295,7 @@ final class VQSettings: ObservableObject {
     /// RTLD_GLOBAL, so the settings reach it (vpvk_config_set_*) before the game creates its device;
     /// Klepton's own dlopen of the same path then returns this handle.
     func selectDriver() {
-        if useVPKEngine, let path = VQSettings.vpvulkanPath {
+        if let path = VQSettings.vpvulkanPath {
             if dlopen(path, RTLD_NOW | RTLD_GLOBAL) != nil {
                 setenv("KL_MVK_DYLIB", path, 1)
                 VQLog.log("Gráficos: VPKEngine (VPVulkan) \(path)")
@@ -331,10 +303,8 @@ final class VQSettings: ObservableObject {
             }
             let reason = dlerror().map { String(cString: $0) } ?? "?"
             VQLog.log("Gráficos: VPVulkan no carga (\(reason)); se usa MoltenVK")
-        } else if useVPKEngine {
-            VQLog.log("Gráficos: esta build no trae VPVulkan; se usa MoltenVK")
         } else {
-            VQLog.log("Gráficos: MoltenVK (elegido en ajustes)")
+            VQLog.log("Gráficos: esta build no trae VPVulkan; se usa MoltenVK")
         }
         unsetenv("KL_MVK_DYLIB")
     }
@@ -343,10 +313,10 @@ final class VQSettings: ObservableObject {
     func applyToEnvironment(game: VQGame?) {
         setenv("VPVK_QUEST_IDENTITY", "1", 0)  // Quest/Adreno 740 identity, always on (before VPVulkan loads; also covers GLES)
         selectDriver()
-        setenv("KL_NET_OFFLINE", offline ? "1" : "0", 1)
-        setenv("KL_ENV_CAPTURE", envCapture ? "1" : "0", 1)
-        if guestSwap { unsetenv("KL_GSWAP") } else { setenv("KL_GSWAP", "0", 1) }
-        setenv("KL_LOG_FILE", guestLog ? "1" : "0", 1)
+        setenv("KL_NET_OFFLINE", "1", 1)
+        setenv("KL_ENV_CAPTURE", "1", 1)
+        unsetenv("KL_GSWAP")  // guest swap (extended memory) always on
+        setenv("KL_LOG_FILE", "1", 1)
         setenv("KL_ALARM", String(Int(watchdogSeconds)), 1)
         // The launcher already decided; BootView must boot straight away.
         setenv("KL_AUTOBOOT", "1", 1)
@@ -357,16 +327,15 @@ final class VQSettings: ObservableObject {
         // device detection would fall back to GLES, which has no driver here.
         // -force-vulkan is only valid when the build ships Vulkan: otherwise Unity fails with
         // "Forced GfxDevice 'Vulkan' was not built from editor" and cannot create its device.
-        let unityVulkan = forceVulkan && (game?.guestKind != "unity" || game?.hasVulkan == true)
+        let unityVulkan = (game?.guestKind != "unity" || game?.hasVulkan == true)
         if unityVulkan { setenv("KL_UNITY_ARGS", "-force-vulkan", 1) } else { unsetenv("KL_UNITY_ARGS") }
         if let g = game {
             let used = g.hasVulkan ? "Vulkan" : "OpenGL ES"
             VQLog.log("Gráficos: APIs del juego \(g.apiList) → se usa \(used)"
                       + (g.guestKind == "unity" ? (unityVulkan ? " (-force-vulkan)" : " (sin -force-vulkan)") : ""))
         }
-        VQLog.log("Gráficos: forzar Vulkan en Unity \(forceVulkan)")
         // VPKEngine's own GLES (Klepton kl_gles.c): needs VPVulkan, so only with the VPKEngine driver.
-        let gles = glesVPK && useVPKEngine && VQSettings.vpvulkanPath != nil
+        let gles = glesVPK && VQSettings.vpvulkanPath != nil
         setenv("KL_GLES_VPK", gles ? "1" : "0", 1)
         VQLog.log("Gráficos: OpenGL ES con VPKEngine \(gles)")
         // Frame captures (PNG in Documents/Registros) at compositor frames 120/600/1200.
@@ -399,8 +368,7 @@ final class VQSettings: ObservableObject {
             setenv("KL_DIAGCAP", "1", 1)
             setenv("KL_DIAGCAP_BTN", String(cap.button.rawValue), 1)
             setenv("KL_DIAGCAP_HOLD_MS", String(cap.holdSeconds * 1000), 1)
-            VQLog.log("Captura de frames: activada (\(cap.button.title), \(cap.holdSeconds == 0 ? "al instante" : "\(cap.holdSeconds) s")) → \(dir.path)"
-                      + (useVPKEngine ? "" : "; solo funciona con VPKEngine"))
+            VQLog.log("Captura de frames: activada (\(cap.button.title), \(cap.holdSeconds == 0 ? "al instante" : "\(cap.holdSeconds) s")) → \(dir.path)")
         } else {
             for k in ["VPVK_CAPTURE", "VPVK_CAPTURE_DIR", "KL_DIAGCAP", "KL_DIAGCAP_BTN", "KL_DIAGCAP_HOLD_MS"] { unsetenv(k) }
             if cap.enabled { VQLog.log("Captura de frames: pedida, pero sin carpeta QUEST no se activa") }
@@ -535,10 +503,10 @@ final class VQSettings: ObservableObject {
         c.asw_disabled = aswDisabled ? 1 : 0
         c.quest3_profile = isQuest3 ? 1 : 0
         _ = vq_gfx_config_apply(&c)
-        vq_prewarm_set_enabled(precompileShaders ? 1 : 0)
+        vq_prewarm_set_enabled(1)
         // Also through the environment: the call above reaches VPVulkan only once it is loaded,
         // and its first vkCreateDevice may come before the app can repeat it.
-        setenv("VPVK_PREWARM", precompileShaders ? "1" : "0", 1)
+        setenv("VPVK_PREWARM", "1", 1)
         if aotShaders { setenv("VPVK_AOT", "1", 1) } else { unsetenv("VPVK_AOT") }
         // Games keep going after a single hung or faulting GPU frame (conformance runs set it to 1).
         unsetenv("VPVK_DEVICE_LOST_STRICT")
@@ -558,7 +526,7 @@ final class VQSettings: ObservableObject {
         // The engine's jitter env also switches off the RCAS UI mask (set_jitter still): games never inherit a 0 from an earlier run.
         unsetenv("VPVK_TAA_JITTER")
         VQLog.log("Gráficos: foveado Quest y propio siempre apagados, MSAA forzado \(effMSAA == 0 ? "el del juego" : "x\(effMSAA)") (juego \(gameKey.isEmpty ? "?" : gameKey), \(VQGameMSAA.load(key: gameKey) == nil ? "global" : "del juego")), Nitidez (RCAS) \(Int(effRcas * 100)) % (\(VQGameRCAS.load(key: gameKey) == nil ? "global" : "del juego")), anisotrópico x\(effAniso), diagnóstico de rendimiento \(perfDiag), diagnóstico de ficheros \(fsDiag), resolución \(Int(effPct.rounded())) %, ASW apagado \(aswDisabled), perfil Quest 3 \(isQuest3), FPS en pantalla \(showFps)")
-        VQLog.log("Ajustes: sin red \(offline), log del juego \(guestLog), vigilante \(Int(watchdogSeconds)) s")
+        VQLog.log("Ajustes: vigilante \(Int(watchdogSeconds)) s")
     }
 }
 
@@ -1036,10 +1004,6 @@ final class VQPrewarm: ObservableObject {
     static let firstRunVersion = 2  // 2: VPKEngine per-variable private slots (new MSL)
 
     static func run(gameFolder: URL, cache: URL) {
-        guard VQSettings.shared.precompileShaders else {
-            VQLog.log("Shaders: precompilación desactivada en ajustes")
-            return
-        }
         if VQSettings.shared.aotShaders {
             aot(gameFolder: gameFolder, cache: cache)
             return

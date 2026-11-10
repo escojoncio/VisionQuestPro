@@ -406,8 +406,6 @@ struct VQSettingsView: View {
                     if let result { Text(result).font(.caption) }
                 }
                 Section(VQL("Juego", "Game")) {
-                    Toggle(VQL("Sin conexión (el juego no intenta conectarse)", "Offline (the game does not try to connect)"), isOn: $settings.offline)
-                    Toggle(VQL("Guardar el registro del juego en archivo", "Save the game log to a file"), isOn: $settings.guestLog)
                     Toggle(VQL("Definir el guardián antes de cada juego", "Set the guardian before each game"), isOn: $settings.guardianAsk)
                     Text(VQL("Con el juego aún sin arrancar y la sala ya escaneándose, una ventana deja ajustar el suelo y la zona de juego. Apagado: se usa lo guardado de ese juego o lo automático. Con una calibración ya guardada (suelo y zona, la misma para todos los juegos) se aplica sola y la ventana no sale.",
                              "With the game not started yet and the room already being scanned, a window lets you adjust the floor and the play area. Off: the game's saved definition or the automatic one is used. With a calibration already saved (floor and play area, the same for every game) it is applied by itself and the window does not appear."))
@@ -426,8 +424,6 @@ struct VQSettingsView: View {
                             value: $settings.watchdogSeconds, in: 30...600, step: 30)
                 }
                 Section(VQL("Gráficos", "Graphics")) {
-                    Toggle(VQL("Motor gráfico VPKEngine (apagado: MoltenVK)", "VPKEngine graphics (off: MoltenVK)"),
-                           isOn: $settings.useVPKEngine)
                     VQMSAAPicker(selection: $settings.msaaForce)
                     VQRCASSlider(value: $settings.rcasIntensity)
                     Toggle(VQL("Descargar carátulas de la tienda de Meta", "Download covers from the Meta store"), isOn: $settings.storeCovers)
@@ -468,18 +464,11 @@ struct VQSettingsView: View {
                     }
                     .pickerStyle(.segmented)
                     Toggle(VQL("ASW desactivado (todos los frames reales)", "ASW off (every frame real)"), isOn: $settings.aswDisabled)
-                    Toggle(VQL("Captura de entorno (suelo, sala y profundidad)", "Environment capture (floor, room and depth)"), isOn: $settings.envCapture)
-                    Toggle(VQL("Memoria extendida (intercambio a disco)", "Extended memory (swap to disk)"), isOn: $settings.guestSwap)
-                    Text(VQL("Activado: cuando un juego se acerca al límite de memoria del visor, sus reservas grandes pasan a ficheros temporales y dejan de contar para ese límite; evita cierres por memoria. Se aplica al lanzar el juego.",
-                             "On: when a game nears the headset's memory limit, its large allocations move to temporary files and stop counting towards that limit; it prevents out-of-memory closes. Applied when the game launches."))
-                        .font(.caption)
-                    Toggle(VQL("Precompilar shaders antes de jugar", "Precompile shaders before playing"), isOn: $settings.precompileShaders)
                     Toggle(VQL("Shaders AOT (todo compilado antes de jugar, experimental)", "AOT shaders (all compiled before playing, experimental)"), isOn: $settings.aotShaders)
                     Toggle(VQL("Perfil Quest 3 cuando el juego lo tenga", "Quest 3 profile when the game has one"), isOn: $settings.quest3Profile)
                     Text(VQL("Activado: los juegos en «Automático» se presentan como Quest 3 solo si su manifiesto lista Quest 3 (si no declara dispositivos, también como Quest 3); si no, como Quest 2. Desactivado: como Quest 2. Cada juego puede forzar Quest 2 o Quest 3 en sus ajustes. Se aplica al lanzar el juego.",
                              "On: games set to «Automatic» appear as a Quest 3 only if their manifest lists Quest 3 (if it declares no devices, also as a Quest 3); otherwise as a Quest 2. Off: as a Quest 2. Each game can force Quest 2 or Quest 3 in its own settings. Applied when the game launches."))
                         .font(.caption)
-                    Toggle(VQL("Forzar Vulkan en juegos Unity", "Force Vulkan in Unity games"), isOn: $settings.forceVulkan)
                     Toggle(VQL("OpenGL ES con VPKEngine (experimental)", "OpenGL ES with VPKEngine (experimental)"),
                            isOn: $settings.glesVPK)
                     Toggle(VQL("Capturas de diagnóstico", "Diagnostic captures"), isOn: $settings.diagCaptures)
