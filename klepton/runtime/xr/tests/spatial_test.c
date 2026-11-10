@@ -853,6 +853,12 @@ int main(void) {
           f = fopen(path, "rb"); if (f) { nb = fread(fb, 1, sizeof fb, f); fclose(f); }
           ident(m, 6, 0, 6);
           g_resyncs = 0; g_resync_finish = 1;
+          kl_spatial_set_resync(NULL);                                                       // asked before the host exists: deferred, not lost
+          CK(kl_spatial_scan_auto(5000) == 0 && !kl_spatial_scan_active() && g_resyncs == 0);
+          kl_spatial_set_resync(resync_stub);
+          CK(g_resyncs == 1 && kl_spatial_scan_active());
+          g_clock_off += 6 * sec; CK(!kl_spatial_scan_active());                             // the bounded window ran and closed
+          g_resyncs = 0;
           uint32_t c0 = kl_spatial_count(KLSP_MESH);
           CK(kl_spatial_scan_auto(5000) == 1 && g_resyncs == 1 && kl_spatial_scan_active());
           kl_spatial_mesh(U16(196), 0, m, tv, 3, tt, 1);

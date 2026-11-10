@@ -281,10 +281,11 @@ static klj_val klj_Method_getDeclaringClass(void *env, void *self, const klj_val
     // A static native is (JNIEnv*, jclass, args...). The frame pair is the
     // JVM's pop on native return — the method object, the args array, and
     // whatever the guest allocates inside the callback all die at the pop.
-    // Per-frame callers (Choreographer, Runnable.run, onFrameAvailable) must not write a line per call: log the Unity-helper proxies
-    // and permission callbacks always (rare), everything else only for its first 8 calls.
-    static unsigned s_quiet;
-    const int loud = p->unity_helper || strstr(iface, "Permission") || __atomic_fetch_add(&s_quiet, 1, __ATOMIC_RELAXED) < 8;
+    // Per-frame callers (Choreographer, Runnable.run, onFrameAvailable) must not write a line per call: the first 8 calls of those,
+    // the first 10 of Unity-helper / permission proxies (rare).
+    static unsigned s_quiet, s_helper;
+    const int rare = p->unity_helper || strstr(iface, "Permission");
+    const int loud = __atomic_fetch_add(rare ? &s_helper : &s_quiet, 1, __ATOMIC_RELAXED) < (rare ? 10u : 8u);   // 2 lines per call: ~20 lines at most
     if (loud) KLJ_LOG("proxy invoke %s.%s ptr=0x%llx unity_helper=%d via %s", iface, name, (unsigned long long)p->native_ptr,
                       p->unity_helper, hfn ? "ReflectionHelper.nativeProxyInvoke" : "JNIBridge.invoke");
     klj_PushLocalFrame(NULL, 0);

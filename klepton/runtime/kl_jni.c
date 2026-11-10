@@ -690,7 +690,7 @@ static void  klj_DeleteLocalRef(void *env, void *obj) {
     pthread_mutex_lock(&g_lock);
     klj_object *o = klj_as_object(obj);
     if (o) g_stat_delete++;
-    if (o && o->held) { o->del_pending = 1; pthread_mutex_unlock(&g_lock); return; }   // an array still holds it
+    // (klj_retire_object_locked defers the retire of an object an array still holds)
     if (!t_frame || !o || klj_frame_holds(o)) klj_retire_object_locked(obj);
     pthread_mutex_unlock(&g_lock);
 }

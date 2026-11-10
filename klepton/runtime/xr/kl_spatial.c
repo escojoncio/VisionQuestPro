@@ -445,6 +445,7 @@ static uint64_t clk_ns(void) {
 // Launch rescan (kl_spatial_scan_auto): a merge window like L3+R3's, started by the app, not by buttons. It waits for the host's resync to
 // finish, then stays open g_auto_dur_ns more, then freezes again (a wait with no end in sight is cut after 30 s).
 static int g_auto_wait, g_auto_on;
+static uint32_t g_auto_req_ms;             // a launch rescan asked before the host registered its resync
 static uint64_t g_auto_dur_ns, g_auto_end, g_auto_cap;
 static int auto_active_locked(void) {
     if (!g_auto_on) return 0;
@@ -596,6 +597,12 @@ void kl_spatial_resync_done(void) {
 int kl_spatial_scan_auto(uint32_t window_ms) {
     pthread_mutex_lock(&g_mu);
     void (*rs)(void) = g_resync;
+    if (g_snap_have && !rs) {            // the host (ARKit session) is not up yet: asked again as soon as it registers
+        g_auto_req_ms = window_ms;
+        pthread_mutex_unlock(&g_mu);
+        fprintf(stderr, "  [sp-scan] launch rescan deferred until the host registers\n");
+        return 0;
+    }
     const int ok = g_snap_have && rs && !auto_active_locked();
     if (ok) { g_auto_on = g_auto_wait = 1; g_auto_dur_ns = (uint64_t)window_ms * 1000000ull; g_auto_cap = clk_ns() + 30000000000ull; }
     pthread_mutex_unlock(&g_mu);
@@ -605,7 +612,14 @@ int kl_spatial_scan_auto(uint32_t window_ms) {
     return 1;
 }
 
-void kl_spatial_set_resync(void (*fn)(void)) { pthread_mutex_lock(&g_mu); g_resync = fn; pthread_mutex_unlock(&g_mu); }
+void kl_spatial_set_resync(void (*fn)(void)) {
+    pthread_mutex_lock(&g_mu);
+    g_resync = fn;
+    const uint32_t req = fn ? g_auto_req_ms : 0;
+    if (req) g_auto_req_ms = 0;
+    pthread_mutex_unlock(&g_mu);
+    if (req) kl_spatial_scan_auto(req);
+}
 void kl_spatial_set_clock(uint64_t (*fn)(void)) { pthread_mutex_lock(&g_mu); g_clock = fn; pthread_mutex_unlock(&g_mu); }
 void kl_spatial_snapshot_set_path(const char *path) {
     pthread_mutex_lock(&g_mu);
