@@ -59,15 +59,22 @@
 
 ## HLVR = Harem Life VR (Unity 2022.3, ovrp 1.103, MRUK v71; carpeta `homebrew`)
 - Quest 3: el juego activa MR (MRUK C# `CreateSceneDataFromDevice`: rooms → container → hijos → labels/BB2D/Boundary2D/LocateSpace2 por hijo). `_cameraRig` se asigna en `MRUK.Start`; ver `kl_evgate.h`. Quest 2: sin MR, suelo propio.
-- Pide origen suelo y luego ojos (`ovrp_SetTrackingOriginType`=0); el plano FLOOR llega a y=-eye. Profundidad de entorno 320x320 D16 reversed-Z (convención unverified).
+- Pide origen suelo y luego ojos (`ovrp_SetTrackingOriginType`=0); el plano FLOOR llega a y=-eye.
+- Profundidad de entorno (DEMOSTRADO con libil2cpp, `EnvironmentDepthUtils`): forward-Z, d = f(z-n)/((f-n)z), 0 cerca, 1 lejos/sin geometría; el shader decodifica x/((2d-1)+y) con x=-2fn/(f-n), y=-(f+n)/(f-n); los fov del frame son tangentes. El reversed-Z de la build 0b7b5be decodificaba todo a ~0,1 m (modelo oculto).
+- Colisiones/colocación en Quest 3 = `EnvironmentRaycastManager` → `EnvironmentDepthRaycaster` (compute que copia la depth a un ComputeBuffer + `AsyncGPUReadback`); la oclusión usa el shader de preprocesado de Meta (vertex `SV_RenderTargetArrayIndex`, `DrawProceduralNow(...,3,2)` sobre RGBA16F 320x320x2), que fallaba `SetPass` sin `VK_EXT_shader_viewport_index_layer` (logs 27, frame 408). Un pipeline con el shader de error de Unity en un pase 1x desde ese frame (causa sin identificar).
 - `libMetaXRAudioUnity.so` rechazada por AMFI (global) → plugin nulo. `libmrutilitykitshared.so` carga traducida.
 - Crash antiguo: firma de `ovrp_DiscoverSpaces` (corregido). Etiquetas: count sin NUL (`Unknown classification`).
 
 ## Gundam Silver Phantom (añadido 2026-11-10)
 - AR funciona con sala de zona dibujada (`[room] source=guardian`, 17 miembros) + etiquetas sin NUL; el juego ya no destruye los espacios (antes CheckRules fallaba).
 - Nivel tras el AR: 14x 8192² ASTC6x6 + 8x 8192² ASTC4x4 + 2x 8192² RGBA8 (358 y 268 MiB) pedidos por el juego; ojo al 130 % = 825 MiB entre RT y MSAA materializada.
+- Cierre de logs 27 (t=77 s, jetsam): foot 8132M = gfx 4683M (astc 1827, color 1995, rt.mat 563M/28, msaa.mat 478M/6) + int 2176M + comp 1056M; el swap de mmap solo movía 512M porque lo grande del guest es malloc (MALLOC_LARGE 1357M res + 417 comp) → bloques malloc >= 4 MiB al swap (`kl_gswap_big`, zona malloc).
+- Unity 2021.3.15f1. 6 pipelines con el shader de error de Unity en el pase de ojo durante `LVL_Warmup` (frame ~1092), sin aviso `Unsupported` de Unity: causa sin identificar (¿variantes de la colección de warmup?).
 
 ## Into the Radius 2 (UE 5.5, Vulkan ES3.1 móvil; añadido 2026-11-10)
 - Un submit por frame con 5 pases (ver bitácora del motor). MSAA 4x propio, adjuntos TRANSIENT con LOAD/STORE.
-- Texturas: ~2950 ASTC de 64x64 (7 mips) y ~190 mayores; el streamer deja de pedir mips con memoria libre (causa sin demostrar). Sesiones probadas de ~50 s (10 s de nivel).
-- Descartado: shaders/pipelines (failed=0), Nanite/Lumen, memoria, formatos.
+- `vk.tex_hist` en nivel (logs 27): 3165 texturas con >= 6 mips = 197 MiB (media 62 KiB, ~256 px), 298 con 1-2 mips = 108 MiB, RT 41 = 489 MiB; constante durante la sesión. Sin log de UE (shipping). Síntoma visual (texturas de poco detalle, trozos de mapa que faltan) sin causa demostrada.
+- Draws indirectos con argumentos escritos por CPU (`vk.indirect_stats cpu_readable=todos`, hasta 5415 instancias); `draws_skipped=0`, `vk.err`=0, `pso failed=0`, sin shader de error.
+- Descartado: shaders/pipelines (failed=0), Nanite/Lumen, memoria (/proc/meminfo 8 GiB, heap Vulkan 6 GiB), formatos, tamaño reportado de imágenes ASTC (`imageBytes` por bloques), trim del motor (no suelta contenido ni PSO).
+- UE resuelve (sin que conste que use) funciones de ray tracing, descriptor buffer, mesh shader, device fault, calibrated timestamps: reciben stub.
+- Para avanzar hace falta el binario/config del juego (carpeta `Into The Radius 2` del PC no conectada) o una captura VPCAP.

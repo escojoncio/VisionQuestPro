@@ -230,6 +230,7 @@ int kl_envdepth_start(void) {
     int ok = g.created;
     if (ok) g.started = 1;
     pthread_mutex_unlock(&g_mu);
+    if (ok) ONCE("provider started");
     return ok ? 0 : -1;
 }
 
@@ -399,7 +400,14 @@ int kl_envdepth_acquire(kl_envdepth_frame *f) {
     if (f) *f = g.fr[s];
     int api = g.api;
     uint64_t name = g.img[s];
+    // What the game is handed, now and then (there is no debugger on the headset): how many pictures it took and how old.
+    static unsigned n_all, n_fresh;
+    unsigned na = ++n_all, nf = fresh ? ++n_fresh : n_fresh;
+    double age_ms = (now_s() - g.fr[s].time_s) * 1e3;
     pthread_mutex_unlock(&g_mu);
+    if (na == 1 || na % 3000 == 0)
+        fprintf(stderr, "  [envdepth] acquire #%u (%u new pictures): image %d, %.0f ms old, near %.2f far %.1f\n",
+                na, nf, s, age_ms, (double)KLED_NEAR, (double)KLED_FAR);
     if (fresh && api == API_GL) gl_upload(s, name);
     return 1;
 }

@@ -11,8 +11,8 @@
 // mutex in kl_envdepth_job_begin.
 //
 // Two ways the image reaches the guest:
-//   * Vulkan guest: the target is the MTLTexture MoltenVK backs the guest's own
-//     VkImage with, drawn into directly (no copy);
+//   * Vulkan guest: the target is the MTLTexture that backs the guest's own
+//     VkImage, drawn into directly (no copy);
 //   * GL guest: a depth image Metal shares with a GL name that already has its
 //     own storage is not possible, so the same picture is drawn into a private
 //     depth target while the fragment stage also writes the depth to an R16
@@ -122,6 +122,8 @@ enum KleptonEnvDepth {
         let lock = NSLock()
         var meshes: [Key: Mesh] = [:]
         var refreshing = false
+        var pictures = 0                     // pictures rendered (diagnostics)
+        var lastDrawn = -1                   // meshes + planes drawn in the last picture logged
         var lastRefresh: CFTimeInterval = 0
         var lastFull: CFTimeInterval = 0
         static let refreshInterval: CFTimeInterval = 0.1     // geometry check (counts) at most this often
@@ -335,6 +337,16 @@ enum KleptonEnvDepth {
                     $0.loadUnaligned(fromByteOffset: 0, as: SIMD4<Float>.self), $0.loadUnaligned(fromByteOffset: 16, as: SIMD4<Float>.self),
                     $0.loadUnaligned(fromByteOffset: 32, as: SIMD4<Float>.self), $0.loadUnaligned(fromByteOffset: 48, as: SIMD4<Float>.self))) }
                 drawPlanes.append((model, pw, ph))
+            }
+
+            // What goes into the picture: the first one, whenever it changes between nothing and something, and now and then.
+            pictures += 1
+            let drawn = drawMeshes.count + drawPlanes.count
+            if pictures == 1 || (drawn == 0) != (lastDrawn == 0) || pictures % 900 == 0 {
+                lastDrawn = drawn
+                var tris = 0
+                for (mesh, _) in drawMeshes { tris += Int(mesh.nt) }
+                NSLog("[envdepth] picture \(pictures): \(drawMeshes.count) of \(nMesh) scene meshes (\(tris) triangles), \(drawPlanes.count) planes, eye0 at (\(poses[0][0]), \(poses[0][1]), \(poses[0][2])), tangents \(tans[0]), into \(useColor ? "a private image (GL readback)" : "the guest's image") \(depthTarget.width)x\(depthTarget.height) format \(depthTarget.pixelFormat.rawValue)")
             }
 
             for eye in 0..<2 {
