@@ -12,7 +12,7 @@
 - Funciona en visor: Gundam AR, Maestro (render y MSAA x4 forzado), HLVR perfil Quest 2, HLVR Quest 3 carga de sala (MRUK), calibración global (cuando el ancla se rastrea).
 - Sin probar (este lote): HLVR Quest 3 con depth (oclusión y raycast), cierre por memoria de Gundam, ITR2 (fps).
 - Leer en la próxima prueba: HLVR sin `DrawProceduralNow requires a successful material.SetPass`, `vk.device_req … VK_EXT_shader_viewport_index_layer`, `[envdepth] picture`/`acquire`, `dispatches=` y errores de readback; Gundam `[mem] … gswap live= blocks=` y foot máximo; ITR2 `gpu.enc` (i4 `c0:CS,d:CS`, i5 `c0:LR,d:LR`), ausencia de `msaa_stale`, `gpu_ms`, `vk.rp_dump` del nivel.
-- Pendiente: ITR2 síntoma visual (sin datos: pedir carpeta del juego o captura); ITR2 fusionar i4+i5 (depth de input en tile); Gundam GPU (RT/MSAA materializadas al 130 %) y `comp`≈1 GB; shader de error de Unity en HLVR/Gundam; `E/Unity: Incompatible SDK version… MetaXRAudioFMOD` (el plugin nulo devuelve versión 0); calibración por habitación (ofrecida, sin respuesta); menores del guardián; AoT x4; tarjeta del launcher de ITR2 dice GLES siendo Vulkan.
+- Pendiente: ITR2 síntoma visual (binario revisado sin causa, ver `notas/juegos.md`; falta captura VPCAP del nivel para `replay.yml`); ITR2 fusionar i4+i5 (depth de input en tile); Gundam GPU (RT/MSAA materializadas al 130 %) y `comp`≈1 GB; shader de error de Unity en HLVR/Gundam; `E/Unity: Incompatible SDK version… MetaXRAudioFMOD` (el plugin nulo devuelve versión 0); calibración por habitación (ofrecida, sin respuesta); menores del guardián; AoT x4; tarjeta del launcher de ITR2 dice GLES siendo Vulkan.
 - Hipótesis vivas sin demostrar: en `notas/juegos.md`.
 
 ## Decisions
