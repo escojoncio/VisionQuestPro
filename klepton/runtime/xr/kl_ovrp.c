@@ -937,6 +937,8 @@ static uint64_t klovrp_GetSystemHeadsetType2(int *out) {
     // guard is reachable.
     if (!out) return -1001;
     *out = klovrp_headset_type();
+    static int said;   // a log line: a second copy from a racing first call does no harm
+    if (!said++) fprintf(stderr, "  [ovrp] ovrp_GetSystemHeadsetType2 -> %d (9 = Quest 2, 11 = Quest 3)\n", *out);
     return OVRP_SUCCESS;
 }
 

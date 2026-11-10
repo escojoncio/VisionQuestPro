@@ -184,6 +184,25 @@ static void test_kv(void) {
     CHECK(kl_kv_u64("xalloc=5 alloc=6", "alloc") == 6, "kv: a key must start a word");
 }
 
+static void test_texbudget(void) {
+    CHECK(kl_texbudget_cap(MIB(4000), MIB(8192)) == 0, "under half of the limit textures are created as asked");
+    CHECK(kl_texbudget_cap(MIB(4096), MIB(8192)) == 4096, "from 50 % the cap is 4096");
+    CHECK(kl_texbudget_cap(MIB(5734), MIB(8192)) == 4096 && kl_texbudget_cap(MIB(5735), MIB(8192)) == 2048, "from 70 % it is 2048");
+    CHECK(kl_texbudget_cap(MIB(6964), MIB(8192)) == 1024, "from 85 % it is 1024");
+    CHECK(kl_texbudget_cap(MIB(9000), 0) == 0, "no limit known, no cap");
+    unsigned cap = 0;
+    cap = kl_texbudget_next(cap, 0);
+    CHECK(cap == 0, "nothing asked, nothing set");
+    cap = kl_texbudget_next(cap, 4096);
+    CHECK(cap == 4096, "the first cap is taken");
+    cap = kl_texbudget_next(cap, 2048);
+    CHECK(cap == 2048, "a tighter cap is taken");
+    cap = kl_texbudget_next(cap, 4096);
+    CHECK(cap == 2048, "it never loosens");
+    cap = kl_texbudget_next(cap, 0);
+    CHECK(cap == 2048, "nor goes away when the footprint falls");
+}
+
 int main(void) {
     test_defaults();
     test_levels();
@@ -194,6 +213,7 @@ int main(void) {
     test_rate();
     test_tele();
     test_kv();
+    test_texbudget();
     if (fails) { printf("t_lowmem: %d FAILED\n", fails); return 1; }
     printf("t_lowmem: ok\n");
     return 0;

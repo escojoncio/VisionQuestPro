@@ -1315,6 +1315,7 @@ static _Atomic int g_lowmem_untold;   // last attempt found no nativeLowMemory r
 void kl_vulkan_trim(const char *why);   // kl_vulkan.c: destroyed OpenXR images, no grace
 void kl_vulkan_idle_drain(unsigned min_idle_ms, const char *why);   // kl_vulkan.c: graveyard of VPKEngine, if idle
 void kl_vulkan_retire_poll(void);   // kl_vulkan.c: free retired images that are due (no frame end needed)
+void kl_vulkan_texture_budget(unsigned max_dim);   // kl_vulkan.c: VPKEngine's cap on new sampled textures
 int kl_na_low_memory(void);   // guest/kl_nativeactivity.c: ANativeActivity.callbacks->onLowMemory
 
 // DECIDE vs DELIVER. nativeLowMemory is managed code (Unity -> IL2CPP), and IL2CPP only
@@ -1433,6 +1434,23 @@ static void kl_mem_rate_poll(void) {
     if (idle_ms > 0 && now - drain_ns >= 500000000ull) {
         drain_ns = now;
         kl_vulkan_idle_drain((unsigned)idle_ms, "idle");
+    }
+
+    // Texture budget (kl_memrule.h): from the footprint's share of the real limit; it only tightens. KL_TEX_BUDGET=0 turns it off.
+    {
+        static unsigned cap;
+        static int on = -1;
+        if (on < 0) on = kl_env_on("KL_TEX_BUDGET", 1);
+        const uint64_t limit = (used && avail) ? used + avail : 0;
+        const unsigned next = on ? kl_texbudget_next(cap, kl_texbudget_cap(used, limit)) : 0;
+        if (next != cap) {
+            cap = next;
+            fprintf(stderr, "  [mem] texture budget: footprint %llu MiB is %llu%% of the %llu MiB limit; plain sampled textures "
+                            "created from here keep levels of at most %u px\n",
+                    (unsigned long long)(used >> 20), (unsigned long long)(used * 100 / limit),
+                    (unsigned long long)(limit >> 20), cap);
+            kl_vulkan_texture_budget(cap);
+        }
     }
 
     const int warn_rate_s = kl_env_int("KL_LOWMEM_RATE_S", KL_LOWMEM_RATE_S_DEFAULT);   // tells the guest
@@ -1850,9 +1868,9 @@ static void kl_vmg_format(kl_vmg *g, unsigned nreg, int top, int partial, char *
 // The "<prefix> vm" line: the whole region map (vm_region_recurse_64, descending into submaps) grouped by
 // user_tag and kind, so the footprint is accounted for by region type. The walk costs time proportional to the
 // region count (the AC Nexus wall: 39k small IOAccelerator allocations in 4 s), so it runs at most every 2 s and
-// stops after KL_MEM_VM_MS (50) ms or KL_MEM_REGIONS_MAX (20000) regions, whichever comes first. A cut walk prints
+// stops after KL_MEM_VM_MS (150) ms or KL_MEM_REGIONS_MAX (20000) regions, whichever comes first. A cut walk prints
 // "vm partial (stopped at N regions / X ms)" with the top as orientation only, never as totals, and the next walk
-// waits 30 s. Static groups and line under a lock (no stack, no malloc in the walk; a busy lock skips the print):
+// waits 10 s (50 ms / 30 s left the Gundam kill of logs 28 without a region map: 3583 regions took longer under pressure). Static groups and line under a lock (no stack, no malloc in the walk; a busy lock skips the print):
 // it is called from the [mem] pressure notifications too.
 void kl_mem_vm_print(const char *prefix) {
     static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
@@ -1865,7 +1883,7 @@ void kl_mem_vm_print(const char *prefix) {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     uint64_t now = (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
-    if (last_ns && now - last_ns < (last_cut ? 30000000000ull : 2000000000ull)) { pthread_mutex_unlock(&mu); return; }
+    if (last_ns && now - last_ns < (last_cut ? 10000000000ull : 2000000000ull)) { pthread_mutex_unlock(&mu); return; }
     last_ns = now;
     if (!page && (host_page_size(mach_host_self(), &page) != KERN_SUCCESS || !page)) page = 16384;
     memset(g, 0, sizeof g);
@@ -1873,7 +1891,7 @@ void kl_mem_vm_print(const char *prefix) {
     natural_t depth = 0;
     unsigned nreg = 0;
     const unsigned max_regions = (unsigned)kl_env_int("KL_MEM_REGIONS_MAX", 20000);
-    const uint64_t budget_ns = (uint64_t)kl_env_int("KL_MEM_VM_MS", 50) * 1000000ull;
+    const uint64_t budget_ns = (uint64_t)kl_env_int("KL_MEM_VM_MS", 150) * 1000000ull;
     uint64_t spent_ns = 0;
     int cut = 0;
     for (;;) {
@@ -5135,8 +5153,10 @@ static int klb_refuse_exec(const char *what, int anon, int prot) {
 }
 
 // Guest swap policy. KL_GSWAP=0 never, 1 always; default (auto): from the first time the footprint reaches
-// KL_GSWAP_AT % (45) of the real limit, and for the rest of the run. Below that a title that fits is left exactly as
+// KL_GSWAP_AT % (20) of the real limit, and for the rest of the run. Below that a small title is left exactly as
 // it was (anonymous memory, no file I/O); above it every new large guest mapping stops counting towards the limit.
+// It was 45 %: by then Mobile Suit Gundam had 625 MiB of heap in mappings made earlier, which stayed anonymous for
+// the whole run (logs 28). A Quest 3 swaps from the first byte (ro.vendor.swap.zram_size = 4 GiB in its firmware).
 static int kl_gswap_on(void) {
     static int mode = -1;                        // 0 off, 1 always, 2 auto
     static _Atomic int latched;
@@ -5147,7 +5167,7 @@ static int kl_gswap_on(void) {
     if (mode != 2) return mode;
     if (atomic_load(&latched)) return 1;
     uint64_t used = kl_mem_footprint(), limit = kl_mem_real_limit(used, kl_proc_available());
-    int at = kl_lowmem_pct(kl_env_int("KL_GSWAP_AT", 45));
+    int at = kl_lowmem_pct(kl_env_int("KL_GSWAP_AT", 20));
     if (!limit || used * 100 < limit * (uint64_t)at) return 0;
     if (!atomic_exchange(&latched, 1))
         fprintf(stderr, "  [gswap] on: footprint %llu MiB is %d%% of the %llu MiB limit; guest mappings of %zu MiB or more "

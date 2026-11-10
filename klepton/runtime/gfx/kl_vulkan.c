@@ -168,6 +168,7 @@ void kl_vulkan_xr_image_mark_eye(unsigned long long img, int stage, int eye) { (
 void kl_vulkan_trim(const char *why) { (void)why; }
 size_t kl_vulkan_diag(int which, char *out, size_t cap) { (void)which; (void)out; (void)cap; return 0; }
 void kl_vulkan_idle_drain(unsigned min_idle_ms, const char *why) { (void)min_idle_ms; (void)why; }
+void kl_vulkan_texture_budget(unsigned max_dim) { (void)max_dim; }
 void kl_vulkan_retire_poll(void) {}
 size_t kl_vulkan_diag_ranges(int kind, uint64_t (*out)[2], size_t max) { (void)kind; (void)out; (void)max; return 0; }
 
@@ -4123,6 +4124,8 @@ static struct {
     // weak: VPKEngine drains what the guest destroyed and the backend holds until a frame reuses a slot, when no
     // frame is in flight and none was submitted for min_idle_ms (never blocks; vpvk/config.h vpvk_idle_drain).
     size_t (*idle_drain)(unsigned min_idle_ms, char *out, size_t cap);
+    // weak: VPKEngine's cap on the size of the plain sampled textures created from now on (vpvk/config.h vpvk_texture_budget).
+    void (*texture_budget)(unsigned max_dim);
     // weak: VPKEngine's call counters as "dt=<ms> key=<delta> ..." (vpvk/config.h vpvk_diag_line; 0 = layer, 1 = backend).
     size_t (*diag_line)(int which, char *out, size_t cap);
     // weak: VPKEngine memory ownership ranges (vpvk/config.h vpvk_diag_ranges): {addr, size} pairs, kind 0 host-visible
@@ -4168,6 +4171,7 @@ static void klvk_vpvk_resolve(void) {
         g_vpvk.gpu_lost        = (int (*)(void))dlsym(lib, "vpvk_gpu_lost");
         g_vpvk.trim_memory     = (size_t (*)(int, char *, size_t))dlsym(lib, "vpvk_trim_memory");
         g_vpvk.idle_drain      = (size_t (*)(unsigned, char *, size_t))dlsym(lib, "vpvk_idle_drain");
+        g_vpvk.texture_budget  = (void (*)(unsigned))dlsym(lib, "vpvk_texture_budget");
         g_vpvk.diag_line       = (size_t (*)(int, char *, size_t))dlsym(lib, "vpvk_diag_line");
         g_vpvk.diag_ranges     = (size_t (*)(int, void *, size_t))dlsym(lib, "vpvk_diag_ranges");
         g_vpvk.ui_mask_texture = (void *(*)(int, int *, int *, int *))dlsym(lib, "vpvk_ui_mask_texture");
@@ -4476,6 +4480,13 @@ void kl_vulkan_idle_drain(unsigned min_idle_ms, const char *why) {
         said++;
         VKI("[mem] idle drain (%s): VPKEngine released %zu MiB (%s)\n", why ? why : "?", freed >> 20, out);
     }
+}
+
+// The texture budget (kl_libc.c, kl_memrule.h kl_texbudget_cap) handed to VPKEngine. Any thread.
+void kl_vulkan_texture_budget(unsigned max_dim) {
+    klvk_vpvk_resolve();
+    if (g_vpvk.texture_budget) g_vpvk.texture_budget(max_dim);
+    else VKI("[mem] texture budget: VPKEngine exports no vpvk_texture_budget\n");
 }
 
 // Memory ownership for the heartbeat's region dump (vpvk_diag_ranges): {address, size} pairs, sorted by address.

@@ -30,6 +30,9 @@ uint32_t kl_spatial_count(int kind);
 int  kl_spatial_get(int kind, uint32_t i, kl_uuid *id, float m4[16]);
 int  kl_spatial_plane_info(kl_uuid id, float *w, float *h, int *label, uint32_t cap, float *poly2d, uint32_t *npoly);
 int  kl_spatial_mesh_info(kl_uuid id, uint32_t vcap, float *v, uint32_t *nv, uint32_t tcap, uint32_t *t, uint32_t *nt);
+// The room's global mesh as one entity (all the mesh chunks joined; kl_spatial_mesh_info takes its id): 1 when there is one,
+// with its id and its pose in guest space (the tracking origin: its vertices are already in that frame).
+int  kl_spatial_global_mesh(kl_uuid *id, float m4[16]);
 int  kl_spatial_raycast(const float o[3], const float d[3], float maxd, float *hit_pos, float *hit_nrm, kl_uuid *hit_id);
 uint64_t kl_spatial_handle_for(kl_uuid id);   // ovrpSpace == internal stable XrSpace id
 

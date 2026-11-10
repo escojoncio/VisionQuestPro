@@ -68,6 +68,10 @@ static void once(int *flag, const char *msg) {
 static int uuid_eq(kl_uuid a, kl_uuid b) { return memcmp(a.b, b.b, 16) == 0; }
 static int uuid_zero(kl_uuid a) { return uuid_eq(a, k_zero); }
 static kl_uuid k_synth_room = {{'K','L','S','P','A','T','I','A','L','-','R','O','O','M','0','1'}};
+// The room's global mesh as ONE entity, as a Quest hands it out (MRUK keeps a single GLOBAL_MESH anchor per room): the visor's
+// scene mesh arrives in chunks (KLSP_MESH entities, each with its own pose), and this id stands for all of them joined, with
+// the identity pose of the tracking origin and its vertices in that frame.
+static kl_uuid k_synth_gmesh = {{'K','L','S','P','A','T','I','A','L','-','G','M','E','S','H','1'}};
 
 static void uuid_str(kl_uuid u, char out[37]) {
     static const char *hx = "0123456789ABCDEF";
@@ -630,6 +634,10 @@ static int kind_locked(kl_uuid id) {
         for (uint32_t i = 0; i < g_n; i++) if (g_e[i].kind == KLSP_PLANE) return KLSP_ROOM;
         return 0;
     }
+    if (uuid_eq(id, k_synth_gmesh)) {
+        for (uint32_t i = 0; i < g_n; i++) if (g_e[i].kind == KLSP_MESH && g_e[i].nt) return KLSP_MESH;
+        return 0;
+    }
     ent *e = find_locked(id);
     if (!e) return 0;
     if (e->kind == KLSP_ANCHOR && !e->mine) return 0;
@@ -827,8 +835,46 @@ int kl_spatial_plane_info(kl_uuid id, float *w, float *h, int *label, uint32_t c
     pthread_mutex_unlock(&g_mu);
     return ok;
 }
+int kl_spatial_global_mesh(kl_uuid *id, float m4[16]) {
+    pthread_mutex_lock(&g_mu);
+    int ok = kind_locked(k_synth_gmesh) == KLSP_MESH;
+    if (ok) {
+        if (id) *id = k_synth_gmesh;
+        if (m4) { const float a[16] = {1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1}; to_guest_locked(a, m4); }
+    }
+    pthread_mutex_unlock(&g_mu);
+    return ok;
+}
+// The global mesh: every chunk joined, vertices moved to the tracking origin's frame by the chunk's pose, indices rebased.
+// Without buffers the counts are the totals; with them only whole chunks that fit both are written (a chunk cut short would
+// leave indices past the vertices) and the counts are what was written.
+static int gmesh_info_locked(uint32_t vcap, float *v, uint32_t *nv, uint32_t tcap, uint32_t *t, uint32_t *nt) {
+    uint32_t cv = 0, ct = 0;
+    const int fill = v || t;
+    for (uint32_t i = 0; i < g_n; i++) {
+        const ent *e = &g_e[i];
+        if (e->kind != KLSP_MESH || !e->nt || !e->nv) continue;
+        if (fill && ((v && cv + e->nv > vcap) || (t && ct + e->nt > tcap))) continue;
+        if (v) for (uint32_t k = 0; k < e->nv; k++) {
+            const float x = e->v[3 * k], y = e->v[3 * k + 1], z = e->v[3 * k + 2], *m = e->m;
+            v[3 * (cv + k)]     = m[0] * x + m[4] * y + m[8] * z + m[12];
+            v[3 * (cv + k) + 1] = m[1] * x + m[5] * y + m[9] * z + m[13];
+            v[3 * (cv + k) + 2] = m[2] * x + m[6] * y + m[10] * z + m[14];
+        }
+        if (t) for (uint32_t k = 0; k < e->nt * 3; k++) t[3 * ct + k] = e->t[k] + cv;
+        cv += e->nv; ct += e->nt;
+    }
+    if (nv) *nv = cv;
+    if (nt) *nt = ct;
+    return ct > 0 || !fill;
+}
 int kl_spatial_mesh_info(kl_uuid id, uint32_t vcap, float *v, uint32_t *nv, uint32_t tcap, uint32_t *t, uint32_t *nt) {
     pthread_mutex_lock(&g_mu);
+    if (uuid_eq(id, k_synth_gmesh)) {
+        int r = kind_locked(id) == KLSP_MESH && gmesh_info_locked(vcap, v, nv, tcap, t, nt);
+        pthread_mutex_unlock(&g_mu);
+        return r;
+    }
     ent *e = find_locked(id);
     int ok = e && e->kind == KLSP_MESH;
     if (ok) {

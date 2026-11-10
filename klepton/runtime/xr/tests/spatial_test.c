@@ -390,8 +390,32 @@ int main(void) {
     ident(m, 10, 0.2f, 10); kl_spatial_available(KLSP_CAP_MESH);
     kl_spatial_mesh(U16(30), 0, m, mv, 3, mt, 1);
     uint64_t mh = kl_spatial_handle_for(U16(30));
-    int32_t nvv = 0, nii = 0; float vout[9]; uint32_t iout[3];
-    CK(((int32_t(*)(uint64_t, int32_t, int32_t *, float *, int32_t, int32_t *, uint32_t *))F("ovrp_GetSpaceTriangleMesh"))(mh, 3, &nvv, vout, 3, &nii, iout) == 0 && nvv == 3 && nii == 3);
+    // ovrp_GetSpaceTriangleMesh(ref UInt64 space, ref TriangleMeshInternal): two pointers, the OpenXR two-call struct.
+    typedef struct { int32_t vcap, vcount; float *verts; int32_t icap, icount; uint32_t *indices; } tm;
+    int32_t (*trimesh)(uint64_t *, tm *) = (int32_t(*)(uint64_t *, tm *))F("ovrp_GetSpaceTriangleMesh");
+    float vout[18]; uint32_t iout[6];
+    tm one = {3, 0, vout, 3, 0, iout};
+    CK(trimesh(&mh, &one) == 0 && one.vcount == 3 && one.icount == 3);
+    // The room's global mesh: every chunk as one GLOBAL_MESH member of the room, vertices in the tracking origin's frame.
+    ident(m, 20, 0, 0); kl_spatial_mesh(U16(31), 0, m, mv, 3, mt, 1);
+    kl_uuid gid; float gm[16];
+    CK(kl_spatial_global_mesh(&gid, gm) && !memcmp(gid.b, "KLSPATIAL-GMESH1", 16) && kl_spatial_kind_of(gid) == KLSP_MESH);
+    {
+        kl_uuid mem[16]; cl gc = {16, 0, mem};
+        CK(((int32_t(*)(uint64_t *, cl *))F("ovrp_GetSpaceContainer"))(&room, &gc) == 0 && gc.count == 8 && !memcmp(mem[7].b, gid.b, 16));
+        uint64_t gh = kl_spatial_handle_for(gid);
+        char gl[32] = {0}; cl gs = {32, 0, gl};
+        CK(((int32_t(*)(uint64_t *, cl *))F("ovrp_GetSpaceSemanticLabels"))(&gh, &gs) == 0 && gs.count == 11 && !strcmp(gl, "GLOBAL_MESH"));
+        tm cnt = {0, 0, NULL, 0, 0, NULL};
+        CK(trimesh(&gh, &cnt) == 0 && cnt.vcount == 6 && cnt.icount == 6);
+        tm all = {6, 0, vout, 6, 0, iout};
+        CK(trimesh(&gh, &all) == 0 && all.vcount == 6 && all.icount == 6);
+        CK(fabsf(vout[0] - 10) < 1e-5f && fabsf(vout[1] - 0.2f) < 1e-5f && fabsf(vout[2] - 10) < 1e-5f);     // chunk 30, vertex 0
+        CK(fabsf(vout[12] - 21) < 1e-5f && fabsf(vout[13]) < 1e-5f && iout[3] == 3 && iout[5] == 5);        // chunk 31, vertex 1; rebased indices
+        tm part = {3, 0, vout, 3, 0, iout};   // room for one chunk only: a whole chunk, never indices past the vertices
+        CK(trimesh(&gh, &part) == 0 && part.vcount == 3 && part.icount == 3 && iout[2] == 2);
+    }
+    kl_spatial_mesh(U16(31), 1, m, NULL, 0, NULL, 0);
     float om[3] = {10.2f, 3, 10.2f}; CK(kl_spatial_raycast(om, d, 10, hp, hn, &hid) && hid.b[0] == 30 && fabsf(hp[1] - 0.2f) < 1e-5f);
 
     // anchor: create -> event; not visible as saved until SaveSpace; query by Storable only after save

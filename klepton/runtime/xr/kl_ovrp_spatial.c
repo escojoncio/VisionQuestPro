@@ -386,7 +386,7 @@ static int comps_of(kl_uuid id, int kind, int32_t out[8]) {
     switch (kind) {
         case KLSP_ANCHOR: out[n++] = C_STORABLE; break;
         case KLSP_ROOM: out[n++] = C_ROOMLAYOUT; out[n++] = C_CONTAINER; break;
-        case KLSP_MESH: out[n++] = C_TRIMESH; break;
+        case KLSP_MESH: out[n++] = C_TRIMESH; out[n++] = C_LABELS; break;   // the room's global mesh: labelled GLOBAL_MESH
         case KLSP_PLANE:
             out[n++] = C_BOUNDED2D; out[n++] = C_LABELS;
             if (label_has_volume(plane_label(id))) out[n++] = C_BOUNDED3D;
@@ -415,6 +415,10 @@ static void plane_to_meta(float m[16]) {
     memcpy(m, r, sizeof r);
 }
 static int pose_of(kl_uuid id, int kind, float m[16]) {
+    if (kind == KLSP_MESH) {          // the one global mesh (kl_spatial_global_mesh): its own pose, not a chunk's
+        kl_uuid g;
+        if (kl_spatial_global_mesh(&g, m) && !memcmp(g.b, id.b, 16)) return 1;
+    }
     uint32_t n = kl_spatial_count(kind);
     for (uint32_t i = 0; i < n; i++) {
         kl_uuid u;
@@ -988,10 +992,13 @@ static void run_query(uint64_t req, int maxn, const kl_uuid *ids, int nids, cons
     if (r && IS_LOCAL_LOC(location))
         for (int ki = 0; ki < 4; ki++) {
             int kind = kinds[ki];
-            uint32_t cnt = kl_spatial_count(kind);
+            // The scene mesh is handed out as the room's single global mesh, never chunk by chunk.
+            kl_uuid gmesh;
+            uint32_t cnt = kind == KLSP_MESH ? (uint32_t)kl_spatial_global_mesh(&gmesh, NULL) : kl_spatial_count(kind);
             for (uint32_t i = 0; i < cnt && n < (uint32_t)maxn; i++) {
                 kl_uuid id;
-                if (!kl_spatial_get(kind, i, &id, NULL)) continue;
+                if (kind == KLSP_MESH) id = gmesh;
+                else if (!kl_spatial_get(kind, i, &id, NULL)) continue;
                 if (nids) { if (!in_ids(id, ids, nids) || (nw && !has_any(id, kind, want, nw))) continue; }
                 else {
                     if (kind == KLSP_MESH && !(nw && has_any(id, kind, want, nw))) continue;   // meshes only when asked for
@@ -1220,8 +1227,8 @@ SP_IMPL sp_GetSpaceSemanticLabels(uint64_t space, cap_list *out) {
     kl_ovrp_hit("ovrp_GetSpaceSemanticLabels");
     if (!out) return KLOVRP_INVALID_PARAM;
     kl_uuid id; int kind;
-    if (!space_of(space, &id, &kind) || kind != KLSP_PLANE) { out->count = 0; return KLOVRP_INVALID_PARAM; }
-    const char *s = label_name(plane_label(id));
+    if (!space_of(space, &id, &kind) || (kind != KLSP_PLANE && kind != KLSP_MESH)) { out->count = 0; return KLOVRP_INVALID_PARAM; }
+    const char *s = kind == KLSP_MESH ? "GLOBAL_MESH" : label_name(plane_label(id));
     int n = (int)strlen(s);   // count is the byte count WITHOUT a NUL: Meta's C# copies `count` bytes and compares "FLOOR" exactly
     if (out->cap <= 0 || !out->data) { out->count = n; return KLOVRP_SUCCESS; }   // size query
     if (out->cap < n) return KLOVRP_INSUFFICIENT_SIZE;                              // too small: nothing written
@@ -1238,7 +1245,8 @@ static ovrpResult klovrp_GetSpaceSemanticLabels(uint64_t space, cap_list *out) {
         float y = 0.0f, m[16];
         int have = space_of(space, &id, &kind);
         if (have && kind == KLSP_PLANE && pose_of(id, kind, m)) y = m[13];
-        sp_label_line("GetSpaceSemanticLabels", &lc, sp_h(space), kind, have && kind == KLSP_PLANE ? label_name(plane_label(id)) : "-", y);
+        sp_label_line("GetSpaceSemanticLabels", &lc, sp_h(space), kind,
+                      have && kind == KLSP_PLANE ? label_name(plane_label(id)) : have && kind == KLSP_MESH ? "GLOBAL_MESH" : "-", y);
     }
     SPT("ovrp_GetSpaceSemanticLabels", r, "space=0x%llx cap=%d count=%d", ULL(sp_h(space)), out ? out->cap : -1, out ? out->count : -1);
     return r;
@@ -1284,6 +1292,13 @@ SP_IMPL sp_GetSpaceContainer(uint64_t space, cap_list *out) {
     if (!space_of(space, &id, &kind) || kind != KLSP_ROOM) { out->count = 0; return KLOVRP_INVALID_PARAM; }
     uint32_t cap = (out->cap > 0 && out->data) ? (uint32_t)out->cap : 0;
     if (!kl_spatial_room_info(id, NULL, NULL, 0, NULL, NULL, cap, cap ? (kl_uuid *)out->data : NULL, &nm)) return KLOVRP_OPERATION_FAILED;
+    // The room's global mesh is its last member (a Quest room holds one GLOBAL_MESH anchor next to its planes: what MRUK's
+    // MRUKAnchor.GlobalMesh, EffectMesh and a game's mesh collider read).
+    kl_uuid gmesh;
+    if (kl_spatial_global_mesh(&gmesh, NULL)) {
+        if (cap && nm < cap) ((kl_uuid *)out->data)[nm] = gmesh;
+        nm++;
+    }
     out->count = (int32_t)(cap && nm > cap ? cap : nm);
     return KLOVRP_SUCCESS;
 }
@@ -1292,25 +1307,27 @@ static ovrpResult klovrp_GetSpaceContainer(uint64_t space, cap_list *out) {
     SPT("ovrp_GetSpaceContainer", r, "space=0x%llx cap=%d count=%d", ULL(sp_h(space)), out ? out->cap : -1, out ? out->count : -1);
     return r;
 }
-// ovrp_GetSpaceTriangleMesh(space, vertexCap, out vertexCount, vertices*, indexCap, out indexCount, indices*)
-// (the OpenXR-style two-call shape; indices are triangle corners, 3 per triangle).
-SP_IMPL sp_GetSpaceTriangleMesh(uint64_t space, int32_t vcap, int32_t *vcount, float *verts,
-                                              int32_t icap, int32_t *icount, uint32_t *indices) {
+// ovrp_GetSpaceTriangleMesh(ref UInt64 space, ref TriangleMeshInternal mesh): OVRPlugin.cs passes two pointers (checked against
+// the P/Invoke of HLVR's libil2cpp and libOVRPlugin.so 1.103); the struct is the OpenXR two-call shape, indices are triangle
+// corners (3 per triangle). The seven-argument form served before wrote its counts through whatever sat in x2 / x5.
+typedef struct { int32_t vcap, vcount; float *verts; int32_t icap, icount; uint32_t *indices; } trimesh;
+_Static_assert(__builtin_offsetof(trimesh, verts) == 8 && __builtin_offsetof(trimesh, icap) == 16 &&
+               __builtin_offsetof(trimesh, indices) == 24 && sizeof(trimesh) == 32, "OVRPlugin.TriangleMeshInternal layout");
+SP_IMPL sp_GetSpaceTriangleMesh(uint64_t space, trimesh *m) {
     kl_ovrp_hit("ovrp_GetSpaceTriangleMesh");
-    if (vcount) *vcount = 0;
-    if (icount) *icount = 0;
+    if (!m) return KLOVRP_INVALID_PARAM;
+    m->vcount = 0; m->icount = 0;
     kl_uuid id; int kind; uint32_t nv = 0, nt = 0;
     if (!space_of(space, &id, &kind) || kind != KLSP_MESH) return KLOVRP_INVALID_PARAM;
-    uint32_t vc = (vcap > 0 && verts) ? (uint32_t)vcap : 0, tc = (icap > 0 && indices) ? (uint32_t)icap / 3u : 0;
-    if (!kl_spatial_mesh_info(id, vc, vc ? verts : NULL, &nv, tc, tc ? indices : NULL, &nt)) return KLOVRP_OPERATION_FAILED;
-    if (vcount) *vcount = (int32_t)(vc && nv > vc ? vc : nv);
-    if (icount) *icount = (int32_t)(tc && nt > tc ? tc * 3u : nt * 3u);
+    uint32_t vc = (m->vcap > 0 && m->verts) ? (uint32_t)m->vcap : 0, tc = (m->icap > 0 && m->indices) ? (uint32_t)m->icap / 3u : 0;
+    if (!kl_spatial_mesh_info(id, vc, vc ? m->verts : NULL, &nv, tc, tc ? m->indices : NULL, &nt)) return KLOVRP_OPERATION_FAILED;
+    m->vcount = (int32_t)(vc && nv > vc ? vc : nv);
+    m->icount = (int32_t)(tc && nt > tc ? tc * 3u : nt * 3u);
     return KLOVRP_SUCCESS;
 }
-static ovrpResult klovrp_GetSpaceTriangleMesh(uint64_t space, int32_t vcap, int32_t *vcount, float *verts,
-                                              int32_t icap, int32_t *icount, uint32_t *indices) {
-    ovrpResult r = sp_GetSpaceTriangleMesh(space, vcap, vcount, verts, icap, icount, indices);
-    SPT("ovrp_GetSpaceTriangleMesh", r, "space=0x%llx vcap=%d vcount=%d icap=%d icount=%d", ULL(sp_h(space)), vcap, vcount ? *vcount : -1, icap, icount ? *icount : -1);
+static ovrpResult klovrp_GetSpaceTriangleMesh(uint64_t space, trimesh *m) {
+    ovrpResult r = sp_GetSpaceTriangleMesh(space, m);
+    SPT("ovrp_GetSpaceTriangleMesh", r, "space=0x%llx vcap=%d vcount=%d icap=%d icount=%d", ULL(sp_h(space)), m ? m->vcap : -1, m ? m->vcount : -1, m ? m->icap : -1, m ? m->icount : -1);
     return r;
 }
 

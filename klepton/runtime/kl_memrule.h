@@ -116,6 +116,21 @@ static inline int kl_tele_due(kl_tele_state *s, uint64_t now_ms, uint64_t foot, 
     return 1;
 }
 
+// Texture budget (VPKEngine vpvk_texture_budget): the largest side of the plain sampled textures the engine creates from now on,
+// from the footprint as a share of the real limit. 0 = no cap. A Quest carries a title through its texture peaks with swap
+// (4 GiB of zram on a Quest 3) and no per-process line; here GPU memory cannot be swapped and the process ends at the limit, so
+// past half of it new textures above 4096 lose their largest mip level(s), past 70 % above 2048, past 85 % above 1024.
+static inline unsigned kl_texbudget_cap(uint64_t used, uint64_t limit) {
+    if (!limit) return 0;
+    uint64_t pct = used * 100 / limit;
+    return pct >= 85 ? 1024 : pct >= 70 ? 2048 : pct >= 50 ? 4096 : 0;
+}
+// The cap in force after asking for `want`: it only tightens within a run, so two textures of one family (a streamed-in copy
+// and the one it replaces) never disagree on which levels exist in the direction that would leave a level unwritten.
+static inline unsigned kl_texbudget_next(unsigned cur, unsigned want) {
+    return !want ? cur : (!cur || want < cur) ? want : cur;
+}
+
 // Value of `key` in a "k=v k=v ..." line (the key must start the line or follow a space); 0 when absent or not a number.
 static inline uint64_t kl_kv_u64(const char *line, const char *key) {
     size_t kn = strlen(key);
