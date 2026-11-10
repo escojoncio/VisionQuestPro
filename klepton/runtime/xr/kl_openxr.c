@@ -1055,6 +1055,7 @@ typedef struct {
     int       ext_opengl_es;      // did it enable XR_KHR_opengl_es_enable?
     int       gl_requirements_queried;   // ...and did it then ask for the range?
     int       ext_vulkan;         // ...or XR_KHR_vulkan_enable? (Open Brush)
+    int       ext_spatial_entity; // enabled XR_FB_spatial_entity (its events are wanted)
     int       ext_sysprops;       // enabled an extension whose system-properties
                                   // struct we write (hand tracking, render model)
     int       vk_requirements_queried;   // its own gate, separate from GLES's:
@@ -1929,7 +1930,9 @@ static XrResult klxr_CreateInstance_rt(const XrInstanceCreateInfo *info, void **
             strcmp(name, "XR_META_environment_depth") == 0 ||
             strncmp(name, "XR_FB_spatial_entity", 20) == 0 ||
             strcmp(name, "XR_FB_scene") == 0 ||
+            strcmp(name, "XR_META_spatial_entity_discovery") == 0 ||
             strcmp(name, "XR_EXT_plane_detection") == 0)   g_instance.ext_sysprops = 1;
+        if (strcmp(name, "XR_FB_spatial_entity") == 0)     g_instance.ext_spatial_entity = 1;
     }
 
     *instance = &g_instance;
@@ -3899,6 +3902,9 @@ void *klxr_space_create_external(void *user) {
     return sp;
 }
 
+int klxr_spatial_entity_enabled(void) {
+    return g_instance.magic == KLXR_MAGIC_INSTANCE && g_instance.ext_spatial_entity;
+}
 void *klxr_current_instance(void) {
     return g_instance.magic == KLXR_MAGIC_INSTANCE ? (void *)&g_instance : NULL;
 }

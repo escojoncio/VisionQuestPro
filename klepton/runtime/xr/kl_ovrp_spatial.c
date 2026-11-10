@@ -475,6 +475,7 @@ static void on_done(uint64_t req, int ok, kl_uuid id) {
         e.requestId = req; e.result = ok ? KLOVRP_SUCCESS : KLOVRP_OPERATION_FAILED;
         if (ok) { e.space = kl_spatial_handle_for(id); e.uuid = id; }
         push(EV_ANCHOR_CREATE, &e, sizeof e);
+        kl_spatial_notify_create(req, ok, id);     // OpenXR guests (Unity) never poll the ovrp queue: same result on theirs
     } else if (p.kind == P_ERASES) {
         ev_simple e; memset(&e, 0, sizeof e);
         e.requestId = req; e.result = ok ? KLOVRP_SUCCESS : KLOVRP_OPERATION_FAILED;

@@ -78,6 +78,7 @@ int  klxr_push_event(uint32_t type, const void *payload, size_t len);   // len <
 void *klxr_current_session(void);   // the XrSession handle, NULL until xrCreateSession
 int64_t klxr_time_now(void);        // XrTime as xrWaitFrame's clock
 void *klxr_current_instance(void);  // the XrInstance handle, NULL until xrCreateInstance
+int   klxr_spatial_entity_enabled(void);   // 1 when the live instance enabled XR_FB_spatial_entity
 
 // External spaces (kl_openxr.c): a pooled XrSpace whose pose is owned by a batch.
 // xrLocateSpace calls kl_openxr_spatial_pose(user, q, p) (1 tracked / 0 lost);

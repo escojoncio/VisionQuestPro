@@ -58,6 +58,11 @@ enum {   // XrStructureType / event types
     T_SPACE_CONTAINER = 1000199000,
     T_TRIMESH_GET_INFO = 1000269001, T_TRIMESH = 1000269002,
     T_TRIANGLE_MESH_CREATE_INFO = 1000117001, T_SYS_PLANE_DETECTION = 1000429007,
+    // XR_META_spatial_entity_discovery (extension 248) and XR_META_spatial_entity_room_mesh (554), openxr.h
+    T_SYS_DISCOVERY = 1000247000, T_DISC_INFO = 1000247001, T_DISC_FILTER_UUID = 1000247003,
+    T_DISC_FILTER_COMP = 1000247004, T_DISC_RESULTS = 1000247006,
+    E_DISC_RESULTS_AVAILABLE = 1000247007, E_DISC_COMPLETE = 1000247008,
+    T_ROOM_MESH_GET_INFO = 1000553001, T_ROOM_MESH = 1000553002,
 };
 enum {   // XrSpaceComponentTypeFB
     C_LOCATABLE = 0, C_STORABLE = 1, C_SHARABLE = 2, C_BOUNDED_2D = 3, C_BOUNDED_3D = 4,
@@ -294,6 +299,11 @@ static void ev_anchor(int32_t type, uint64_t req, int32_t res, ent_t *e) {
     EvAnchor ev = { type, NULL, req, res, 0, e ? space_for(e) : NULL, {{0}} };
     if (e) memcpy(&ev.uuid, &e->id, 16);
     push(type, &ev, sizeof ev);
+    if (type == E_ANCHOR_CREATE_COMPLETE) {
+        static int n;
+        if (__atomic_add_fetch(&n, 1, __ATOMIC_RELAXED) <= 50)
+            fprintf(stderr, "  [xr-sp] anchor create complete delivered via xr req=%llu result=%d\n", (unsigned long long)req, (int)res);
+    }
 }
 
 // ---------------------------------------------------------------- locating other spaces
@@ -355,6 +365,22 @@ static void on_done(uint64_t req, int ok, kl_uuid id) {
 static int g_listening;
 static void ensure_listener(void) {
     if (!__atomic_exchange_n(&g_listening, 1, __ATOMIC_RELAXED)) kl_spatial_add_listener(on_done);
+}
+// Anchors the guest created through the ovrp facade (ovrp_CreateSpatialAnchor) complete on the ovrp event queue, which a Unity
+// OpenXR guest without an OVRManager never polls. kl_ovrp_spatial.c reports them through kl_spatial_notify_create: deliver the same
+// completion on the OpenXR queue, once per requestId (ring of the last 32), when the instance enabled XR_FB_spatial_entity.
+static uint64_t g_bridged[32];
+static unsigned g_bridged_n;
+static void bridge_create(uint64_t req, int ok, kl_uuid id) {
+    if (!klxr_spatial_entity_enabled()) return;
+    int dup = 0;
+    pthread_mutex_lock(&g_fp_mu);
+    for (unsigned i = 0; i < 32 && i < g_bridged_n; i++) if (g_bridged[i] == req) { dup = 1; break; }
+    if (!dup) g_bridged[g_bridged_n++ % 32] = req;
+    pthread_mutex_unlock(&g_fp_mu);
+    if (dup) return;
+    ent_t *e = ok ? ent_get(KLSP_ANCHOR, id) : NULL;
+    ev_anchor(E_ANCHOR_CREATE_COMPLETE, req, ok && e ? R_OK : R_RUNTIME, e);
 }
 
 // ================================================================ XR_FB_spatial_entity
@@ -486,6 +512,9 @@ typedef struct { int32_t type; const void *next; uint32_t cap, count; QueryResul
 #define PEND_MAX 8
 static struct { uint64_t req; uint32_t n; QueryResult *r; } g_pend[PEND_MAX];
 static unsigned g_pend_next;
+static pthread_mutex_t g_pend_mu = PTHREAD_MUTEX_INITIALIZER;   // guards g_pend / g_pend_next / g_done (no calls out while held)
+static uint64_t g_done[16];                                     // discovery requestIds already retrieved (0 = empty; ids start at 1)
+static unsigned g_done_next;
 
 static int filter_pass(const Filter *f, const ent_t *e) {   // 1 pass, -1 invalid
     if (!f) return 1;
@@ -526,9 +555,11 @@ static XrResult QuerySpacesFB(void *session, const QueryInfo *qi, XrAsyncRequest
     }
     free(all);
     *req = next_req();
+    pthread_mutex_lock(&g_pend_mu);
     unsigned slot = g_pend_next++ % PEND_MAX;
     free(g_pend[slot].r);
     g_pend[slot].req = *req; g_pend[slot].n = cnt; g_pend[slot].r = res;
+    pthread_mutex_unlock(&g_pend_mu);
     EvReq ra = { E_QUERY_RESULTS_AVAILABLE, NULL, *req, 0, 0 };
     push(E_QUERY_RESULTS_AVAILABLE, &ra, 24);                    // type,next,requestId
     EvReq qc = { E_QUERY_COMPLETE, NULL, *req, R_OK, 0 };
@@ -539,19 +570,112 @@ static XrResult RetrieveSpaceQueryResultsFB(void *session, XrAsyncRequestIdFB re
     if (!sess_ok(session)) return R_HANDLE;
     if (!out) return R_VALIDATION;
     CHK_TYPE(out, T_QUERY_RESULTS);
+    XrResult rr = R_VALIDATION;
+    pthread_mutex_lock(&g_pend_mu);
     for (unsigned i = 0; i < PEND_MAX; i++) {
         if (!g_pend[i].r || g_pend[i].req != req) continue;
         out->count = g_pend[i].n;
-        if (out->cap == 0) return R_OK;
-        if (out->cap < g_pend[i].n) return R_SIZE;
-        if (!out->results) return R_VALIDATION;
+        if (out->cap == 0) { rr = R_OK; break; }
+        if (out->cap < g_pend[i].n) { rr = R_SIZE; break; }
+        if (!out->results) { rr = R_VALIDATION; break; }
         memcpy(out->results, g_pend[i].r, g_pend[i].n * sizeof(QueryResult));
         free(g_pend[i].r); g_pend[i].r = NULL;
-        return R_OK;
+        rr = R_OK; break;
     }
-    return R_VALIDATION;
+    pthread_mutex_unlock(&g_pend_mu);
+    return rr;
 }
 
+// ================================================================ XR_META_spatial_entity_discovery
+// xrDiscoverSpacesMETA completes inside the call (like xrQuerySpacesFB, whose store and result table it shares): the results-available
+// and complete events are queued, xrRetrieveSpaceDiscoveryResultsMETA hands the spaces out once. Filters: component filters are OR
+// (any of them enabled), uuid filters OR, the two groups AND, as the ovrp facade's ovrp_DiscoverSpaces (unverified against the spec).
+typedef struct { int32_t type; const void *next; uint32_t n; const Filter *const *filters; } DiscInfo;
+static XrResult DiscoverSpacesMETA(void *session, const DiscInfo *di, XrAsyncRequestIdFB *req) {
+    if (!sess_ok(session)) return R_HANDLE;
+    if (!di || !req) return R_VALIDATION;
+    CHK_TYPE(di, T_DISC_INFO);
+    if (di->n && !di->filters) return R_VALIDATION;
+    int has_c = 0, has_u = 0;
+    for (uint32_t i = 0; i < di->n; i++) {
+        const Filter *f = di->filters[i];
+        if (!f) return R_VALIDATION;
+        if (f->type == T_DISC_FILTER_UUID) has_u = 1;
+        else if (f->type == T_DISC_FILTER_COMP) has_c = 1;
+        else if (!g_lax()) return R_VALIDATION;
+    }
+    ent_t **all; int n = ent_all(&all);
+    QueryResult *res = calloc(n ? (size_t)n : 1, sizeof *res);
+    if (!res) { free(all); return R_RUNTIME; }
+    uint32_t cnt = 0;
+    int lbl[8] = {0};
+    for (int i = 0; i < n; i++) {
+        int pass_c = !has_c, pass_u = !has_u;
+        for (uint32_t k = 0; k < di->n; k++) {
+            const Filter *f = di->filters[k];
+            if (f->type == T_DISC_FILTER_COMP) {
+                uint32_t b = comp_bit(((const CompFilter *)f)->comp);
+                if (b && (comp_enabled(all[i]) & b)) pass_c = 1;
+            } else if (f->type == T_DISC_FILTER_UUID) {
+                const UuidFilter *u = (const UuidFilter *)f;
+                if (u->n && !u->uuids) { free(res); free(all); return R_VALIDATION; }
+                for (uint32_t j = 0; j < u->n; j++) if (memcmp(&u->uuids[j], &all[i]->id, 16) == 0) pass_u = 1;
+            }
+        }
+        if (!pass_c || !pass_u) continue;
+        void *sp = space_for(all[i]);
+        if (!sp) continue;
+        res[cnt].space = sp;
+        memcpy(&res[cnt].uuid, &all[i]->id, 16);
+        cnt++;
+        if (all[i]->kind == KLSP_PLANE) { int l = KLSP_LBL_OTHER; plane_geom(all[i]->id, NULL, NULL, &l); lbl[l & 7]++; }
+    }
+    static int logged; static uint32_t last_n = ~0u;
+    if (__atomic_add_fetch(&logged, 1, __ATOMIC_RELAXED) <= 20 || cnt != last_n) {
+        last_n = cnt;
+        char ls[160]; int o = 0;
+        for (int l = 0; l < 8 && o < 140; l++)
+            if (lbl[l]) o += snprintf(ls + o, sizeof ls - (size_t)o, "%s%s:%d", o ? "," : "", label_str(l), lbl[l]);
+        if (!o) ls[0] = 0;
+        fprintf(stderr, "  [xr-sp] discover results n=%u labels=%s filters=%u\n", cnt, ls[0] ? ls : "-", di->n);
+    }
+    free(all);
+    *req = next_req();
+    pthread_mutex_lock(&g_pend_mu);
+    unsigned slot = g_pend_next++ % PEND_MAX;
+    free(g_pend[slot].r);
+    g_pend[slot].req = *req; g_pend[slot].n = cnt; g_pend[slot].r = res;
+    pthread_mutex_unlock(&g_pend_mu);
+    EvReq ra = { E_DISC_RESULTS_AVAILABLE, NULL, *req, 0, 0 };
+    push(E_DISC_RESULTS_AVAILABLE, &ra, 24);                     // type,next,requestId
+    EvReq dc = { E_DISC_COMPLETE, NULL, *req, R_OK, 0 };
+    push(E_DISC_COMPLETE, &dc, sizeof dc);
+    return R_OK;
+}
+// XrSpaceDiscoveryResultsMETA {type,next,resultCapacityInput,resultCountOutput,results}: QueryResults' layout; results are handed out once.
+static XrResult RetrieveSpaceDiscoveryResultsMETA(void *session, XrAsyncRequestIdFB req, QueryResults *out) {
+    if (!sess_ok(session)) return R_HANDLE;
+    if (!out) return R_VALIDATION;
+    CHK_TYPE(out, T_DISC_RESULTS);
+    XrResult rr = R_VALIDATION;
+    pthread_mutex_lock(&g_pend_mu);
+    for (unsigned i = 0; i < PEND_MAX; i++) {
+        if (!g_pend[i].r || g_pend[i].req != req) continue;
+        out->count = g_pend[i].n;
+        if (out->cap == 0) { rr = R_OK; break; }
+        if (out->cap < g_pend[i].n) { rr = R_SIZE; break; }
+        if (g_pend[i].n && !out->results) break;
+        memcpy(out->results, g_pend[i].r, g_pend[i].n * sizeof(QueryResult));
+        free(g_pend[i].r); g_pend[i].r = NULL;
+        g_done[g_done_next++ % 16] = req;
+        rr = R_OK;
+        break;
+    }
+    if (rr == R_VALIDATION && req)            // already handed out (two events name the same request): success, nothing left
+        for (unsigned i = 0; i < 16; i++) if (g_done[i] == req) { out->count = 0; rr = R_OK; break; }
+    pthread_mutex_unlock(&g_pend_mu);
+    return rr;
+}
 // ================================================================ XR_FB_spatial_entity_storage (+_batch)
 typedef struct { int32_t type; const void *next; void *space; int32_t location, mode; } SaveInfo;
 typedef struct { int32_t type; const void *next; void *space; int32_t location; } EraseInfo;
@@ -1041,6 +1165,96 @@ static XrResult GetPlanePolygonBufferEXT(void *h, uint64_t plane_id, uint32_t in
 // Create/Start/Get on a feature this host will not have.
 static XrResult FeatureUnsupported(void) { return R_FEATURE_UNSUP; }
 
+// ================================================================ XR_META_spatial_entity_room_mesh
+// xrGetSpaceRoomMeshMETA: the room's floor / ceiling / wall / door / window planes as one quad each (4 vertices, one face per plane;
+// the plane's own rectangle, not its polygon), vertices in the ROOM space. Only the mesh is served; xrGetSpaceRoomMeshFaceIndicesMETA
+// stays refused (its signature is unverified here).
+typedef struct { int32_t type; const void *next; uint32_t n; const int32_t *labels; } RoomMeshGetInfo;
+typedef struct { XrUuidEXT uuid, parent; int32_t label; } RoomFace;
+typedef struct { int32_t type; void *next; uint32_t vcap, vcount; float (*v)[3]; uint32_t fcap, fcount; RoomFace *faces; } RoomMesh;
+static int meta_label(int l) {    // XrSemanticLabelMETA; 0 = not a room-mesh face
+    switch (l) { case KLSP_LBL_FLOOR: return 1; case KLSP_LBL_CEILING: return 2; case KLSP_LBL_WALL: return 3;
+                 case KLSP_LBL_DOOR: return 6; case KLSP_LBL_WINDOW: return 7; default: return 0; }
+}
+static XrResult GetSpaceRoomMeshMETA(void *space, const RoomMeshGetInfo *gi, RoomMesh *m) {
+    ent_t *e = space_ent(space);
+    if (!e) return R_HANDLE;
+    if (!gi || !m) return R_VALIDATION;
+    CHK_TYPE(gi, T_ROOM_MESH_GET_INFO);
+    CHK_TYPE(m, T_ROOM_MESH);
+    if (gi->n && !gi->labels) return R_VALIDATION;
+    if (!(comp_supported(e) & comp_bit(C_ROOM_LAYOUT))) return R_COMP_UNSUP;
+    float room_inv[16]; int have_inv = 0;
+    if (e->kind == KLSP_ROOM) {          // the planes are in the tracking space; the mesh is in the room's: invert its rigid pose
+        float r[16];
+        if (sp_find(KLSP_ROOM, e->id, r)) {
+            memset(room_inv, 0, sizeof room_inv);
+            for (int i = 0; i < 3; i++) for (int j = 0; j < 3; j++) room_inv[j*4+i] = r[i*4+j];
+            for (int i = 0; i < 3; i++) room_inv[12+i] = -(room_inv[i]*r[12] + room_inv[4+i]*r[13] + room_inv[8+i]*r[14]);
+            room_inv[15] = 1; have_inv = 1;
+        }
+    }
+    uint32_t np = kl_spatial_count(KLSP_PLANE), nf = 0;
+    RoomFace *fc = calloc(np ? np : 1, sizeof *fc);
+    float (*vv)[3] = calloc(np ? np * 4 : 4, sizeof *vv);
+    if (!fc || !vv) { free(fc); free(vv); return R_RUNTIME; }
+    for (uint32_t i = 0; i < np; i++) {
+        kl_uuid u; float pm[16], w = 0, h = 0; int l = KLSP_LBL_OTHER;
+        memset(&u, 0, sizeof u);
+        if (!kl_spatial_get(KLSP_PLANE, i, &u, pm)) continue;
+        plane_geom(u, &w, &h, &l);
+        int ml = meta_label(l);
+        if (!ml || w <= 0 || h <= 0) continue;
+        if (gi->n) { int hit = 0; for (uint32_t k = 0; k < gi->n; k++) if (gi->labels[k] == ml) hit = 1; if (!hit) continue; }
+        static const float cx[4] = { -.5f, .5f, .5f, -.5f }, cz[4] = { -.5f, -.5f, .5f, .5f };
+        for (int c = 0; c < 4; c++) {     // ARKit plane frame: rectangle in local X/Z
+            float lx = cx[c] * w, lz = cz[c] * h, p[3];
+            for (int k = 0; k < 3; k++) p[k] = pm[k]*lx + pm[8+k]*lz + pm[12+k];
+            if (have_inv) { float q[3]; for (int k = 0; k < 3; k++) q[k] = room_inv[k]*p[0] + room_inv[4+k]*p[1] + room_inv[8+k]*p[2] + room_inv[12+k]; memcpy(p, q, sizeof p); }
+            memcpy(vv[nf * 4 + (uint32_t)c], p, sizeof p);
+        }
+        memcpy(&fc[nf].uuid, &u, 16); memcpy(&fc[nf].parent, &e->id, 16); fc[nf].label = ml;
+        nf++;
+    }
+    m->vcount = nf * 4; m->fcount = nf;
+    XrResult r = R_OK;
+    if (m->vcap || m->fcap) {
+        if (m->vcap < nf * 4 || m->fcap < nf) r = R_SIZE;
+        else if (nf && (!m->v || !m->faces)) r = R_VALIDATION;
+        else { memcpy(m->v, vv, nf * 4 * sizeof *vv); memcpy(m->faces, fc, nf * sizeof *fc); }
+    }
+    free(fc); free(vv);
+    return r;
+}
+
+typedef struct { int32_t type; void *next; uint32_t cap, count; uint32_t *indices; } RoomFaceIdx;
+// openxr.h: XrResult xrGetSpaceRoomMeshFaceIndicesMETA(XrSpace, const XrUuid *faceUuid, XrRoomMeshFaceIndicesMETA *). Indices are into the
+// vertices of the UNFILTERED mesh above (a label-filtered xrGetSpaceRoomMeshMETA renumbers the quads: unverified), 2 triangles per quad.
+static XrResult GetSpaceRoomMeshFaceIndicesMETA(void *space, const XrUuidEXT *face, RoomFaceIdx *o) {
+    ent_t *e = space_ent(space);
+    if (!e) return R_HANDLE;
+    if (!face || !o) return R_VALIDATION;
+    CHK_TYPE(o, 1000553000);
+    if (!(comp_supported(e) & comp_bit(C_ROOM_LAYOUT))) return R_COMP_UNSUP;
+    uint32_t np = kl_spatial_count(KLSP_PLANE), k = 0; int found = 0;
+    for (uint32_t i = 0; i < np && !found; i++) {
+        kl_uuid u; float pm[16], w = 0, h = 0; int l = KLSP_LBL_OTHER;
+        memset(&u, 0, sizeof u);
+        if (!kl_spatial_get(KLSP_PLANE, i, &u, pm)) continue;
+        plane_geom(u, &w, &h, &l);
+        if (!meta_label(l) || w <= 0 || h <= 0) continue;
+        if (memcmp(&u, face, 16) == 0) found = 1; else k++;
+    }
+    if (!found) return R_VALIDATION;
+    o->count = 6;
+    if (o->cap == 0) return R_OK;
+    if (o->cap < 6) return R_SIZE;
+    if (!o->indices) return R_VALIDATION;
+    static const uint32_t q[6] = { 0, 1, 2, 0, 2, 3 };
+    for (int i = 0; i < 6; i++) o->indices[i] = k * 4 + q[i];
+    return R_OK;
+}
+
 // ================================================================ XR_META_environment_depth
 // Served from the ARKit scene mesh (kl_envdepth.c; KleptonEnvDepth.swift draws it). Layouts as the
 // spec has them, and cross-checked against the real libOVRPlugin's own use of the extension:
@@ -1217,6 +1431,9 @@ int kl_openxr_spatial_system_props(void *chain) {
         if (h->type == T_SYS_SPATIAL_ENTITY) {
             ((struct { int32_t t; const void *n; XrBool32 supports; } *)(void *)h)->supports = gate_anchors();
             n++;
+        } else if (h->type == T_SYS_DISCOVERY) {   // XrSystemSpaceDiscoveryPropertiesMETA {XrBool32 supportsSpaceDiscovery @16}
+            *(XrBool32 *)((char *)h + 16) = gate_scene();
+            n++;
         } else if (h->type == T_SYS_ENV_DEPTH) {   // XrSystemEnvironmentDepthPropertiesMETA {supportsEnvironmentDepth, supportsHandRemoval}
             XrBool32 *b = (XrBool32 *)((char *)h + 16);
             b[0] = b[1] = gate_envdepth();
@@ -1278,6 +1495,10 @@ static const klxr_row_def k_rows[] = {
     {"xrUpdatePassthroughColorLutMETA", (void *)UpdatePassthroughColorLutMETA},
     {"xrGetPassthroughPreferencesMETA", (void *)GetPassthroughPreferencesMETA},
     {"xrPassthroughLayerSetKeyboardHandsIntensityFB", (void *)PassthroughLayerSetKeyboardHandsIntensityFB},
+    {"xrDiscoverSpacesMETA", (void *)DiscoverSpacesMETA},
+    {"xrRetrieveSpaceDiscoveryResultsMETA", (void *)RetrieveSpaceDiscoveryResultsMETA},
+    {"xrGetSpaceRoomMeshMETA", (void *)GetSpaceRoomMeshMETA},
+    {"xrGetSpaceRoomMeshFaceIndicesMETA", (void *)GetSpaceRoomMeshFaceIndicesMETA},
     {"xrCreatePlaneDetectorEXT", (void *)CreatePlaneDetectorEXT},
     {"xrDestroyPlaneDetectorEXT", (void *)DestroyPlaneDetectorEXT},
     {"xrBeginPlaneDetectionEXT", (void *)BeginPlaneDetectionEXT},
@@ -1316,8 +1537,8 @@ static const char *const k_feature_unsupported[] = {
     "xrGetVirtualKeyboardModelAnimationStatesMETA", "xrGetVirtualKeyboardDirtyTexturesMETA",
     "xrGetVirtualKeyboardTextureDataMETA", "xrChangeVirtualKeyboardTextContextMETA",
     "xrSendVirtualKeyboardInputMETA",
-    "xrDiscoverSpacesMETA", "xrRetrieveSpaceDiscoveryResultsMETA", "xrSaveSpacesMETA", "xrEraseSpacesMETA",
-    "xrGetSpaceRoomMeshMETA", "xrGetSpaceRoomMeshFaceIndicesMETA", "xrGetSpaceRoomMeshMETAX2",
+    "xrSaveSpacesMETA", "xrEraseSpacesMETA",
+    "xrGetSpaceRoomMeshMETAX2",
     "xrGetSpaceRoomFaceIndicesMETAX2", "xrGetSpaceRoomLabelMETAX1",
     "xrCreateEnvironmentRaycasterAsyncMETA", "xrCreateEnvironmentRaycasterCompleteMETA",
     "xrPerformEnvironmentRaycastMETA", "xrCreateEnvironmentRaycasterAsyncMETAX1",
@@ -1383,12 +1604,15 @@ static const char *const k_fns_envdepth[] = { "xrCreateEnvironmentDepthProviderM
     "xrDestroyEnvironmentDepthSwapchainMETA", "xrGetEnvironmentDepthSwapchainStateMETA",
     "xrEnumerateEnvironmentDepthSwapchainImagesMETA", "xrAcquireEnvironmentDepthImageMETA",
     "xrSetEnvironmentDepthHandRemovalMETA", NULL };
+static const char *const k_fns_discovery[] = { "xrDiscoverSpacesMETA", "xrRetrieveSpaceDiscoveryResultsMETA", NULL };
+static const char *const k_fns_roommesh[] = { "xrGetSpaceRoomMeshMETA", "xrGetSpaceRoomMeshFaceIndicesMETA", NULL };
 static const char *const k_fns_planes[] = { "xrCreatePlaneDetectorEXT", "xrDestroyPlaneDetectorEXT",
     "xrBeginPlaneDetectionEXT", "xrGetPlaneDetectionStateEXT", "xrGetPlaneDetectionsEXT",
     "xrGetPlanePolygonBufferEXT", NULL };
 
 void kl_openxr_spatial_register(void) {
     klxr_register_rows(k_rows, sizeof k_rows / sizeof k_rows[0]);
+    kl_spatial_set_create_hook(bridge_create);
     // FEATURE_UNSUPPORTED rows: same function for every name (args are ignored).
     klxr_row_def fu[96]; size_t nfu = 0;
     for (const char *const *n = k_feature_unsupported; *n && nfu < 96; n++)
@@ -1407,6 +1631,11 @@ void kl_openxr_spatial_register(void) {
     klxr_register_extension("XR_FB_scene", 4, gate_scene, k_fns_scene);
     klxr_register_extension("XR_FB_scene_capture", 1, gate_scene, k_fns_capture);
     klxr_register_extension("XR_META_spatial_entity_mesh", 1, gate_mesh, k_fns_mesh);
+    // Unity's "Meta Quest: Planes / Bounding Boxes" features need these three to register their plane / bounding-box subsystems.
+    // semantic_label defines only the XrSemanticLabelMETA enum (no entry point).
+    klxr_register_extension("XR_META_spatial_entity_discovery", 1, gate_scene, k_fns_discovery);
+    klxr_register_extension("XR_META_spatial_entity_semantic_label", 1, gate_scene, NULL);
+    klxr_register_extension("XR_META_spatial_entity_room_mesh", 1, gate_scene, k_fns_roommesh);
     klxr_register_extension("XR_EXT_plane_detection", 2, gate_planes, k_fns_planes);
     // Depth is the mesh, so it follows the scene reconstruction (ARKit running and authorised).
     klxr_register_extension("XR_META_environment_depth", 1, gate_envdepth, k_fns_envdepth);

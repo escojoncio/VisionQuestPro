@@ -71,6 +71,10 @@ uint64_t kl_spatial_new_request(void);
 int      kl_spatial_create_anchor(uint64_t req, const float guest_m4[16]);   // 0 issued, -1 no host / anchors unavailable
 int      kl_spatial_remove_anchor(uint64_t req, kl_uuid id);                 // 0 issued, -1 no host
 typedef void (*kl_spatial_listener)(uint64_t req, int ok, kl_uuid id);
+// Anchor-create completion seen by the OTHER facade: the ovrp facade calls kl_spatial_notify_create when ITS create request completes;
+// the OpenXR facade sets the hook to also deliver it on the OpenXR event queue. NULL hook = nothing.
+void     kl_spatial_set_create_hook(kl_spatial_listener fn);
+void     kl_spatial_notify_create(uint64_t req, int ok, kl_uuid id);
 void     kl_spatial_add_listener(kl_spatial_listener fn);       // up to 4; called on the thread that completed
 // Handles <-> uuids. kind 0 = handle valid but the entity is gone.
 int      kl_spatial_uuid_for_handle(uint64_t h, kl_uuid *id, int *kind);

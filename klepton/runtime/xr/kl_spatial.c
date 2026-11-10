@@ -966,6 +966,12 @@ void kl_spatial_add_listener(kl_spatial_listener fn) {
     if (g_nlis < KLSP_MAX_LISTENERS) g_lis[g_nlis++] = fn;
     pthread_mutex_unlock(&g_mu);
 }
+static kl_spatial_listener g_create_hook;
+void kl_spatial_set_create_hook(kl_spatial_listener fn) { __atomic_store_n(&g_create_hook, fn, __ATOMIC_RELEASE); }
+void kl_spatial_notify_create(uint64_t req, int ok, kl_uuid id) {
+    kl_spatial_listener fn = __atomic_load_n(&g_create_hook, __ATOMIC_ACQUIRE);
+    if (fn) fn(req, ok, id);
+}
 void kl_spatial_set_host(const kl_spatial_host *h) {
     pthread_mutex_lock(&g_mu);
     if (h) { g_host = *h; g_have_host = 1; } else { memset(&g_host, 0, sizeof g_host); g_have_host = 0; }
