@@ -379,6 +379,11 @@ static int plane_label(kl_uuid id) {
     kl_spatial_plane_info(id, NULL, NULL, &l, 0, NULL, NULL);
     return l;
 }
+// The room's global mesh is something a Quest 3 has (its depth sensor builds it); a title that runs as a Quest 2 gets the rooms
+// a Quest 2 has, planes only. kl_ovrp.c says which one this is; on by default (the host tests).
+static int g_gmesh_on = 1;
+void kl_ovrp_spatial_global_mesh(int on) { g_gmesh_on = on; }
+static int gmesh_of(kl_uuid *id, float *m) { return g_gmesh_on && kl_spatial_global_mesh(id, m); }
 // Components an entity supports; returns the count (<= 8).
 static int comps_of(kl_uuid id, int kind, int32_t out[8]) {
     int n = 0;
@@ -417,7 +422,7 @@ static void plane_to_meta(float m[16]) {
 static int pose_of(kl_uuid id, int kind, float m[16]) {
     if (kind == KLSP_MESH) {          // the one global mesh (kl_spatial_global_mesh): its own pose, not a chunk's
         kl_uuid g;
-        if (kl_spatial_global_mesh(&g, m) && !memcmp(g.b, id.b, 16)) return 1;
+        if (gmesh_of(&g, m) && !memcmp(g.b, id.b, 16)) return 1;
     }
     uint32_t n = kl_spatial_count(kind);
     for (uint32_t i = 0; i < n; i++) {
@@ -994,7 +999,7 @@ static void run_query(uint64_t req, int maxn, const kl_uuid *ids, int nids, cons
             int kind = kinds[ki];
             // The scene mesh is handed out as the room's single global mesh, never chunk by chunk.
             kl_uuid gmesh;
-            uint32_t cnt = kind == KLSP_MESH ? (uint32_t)kl_spatial_global_mesh(&gmesh, NULL) : kl_spatial_count(kind);
+            uint32_t cnt = kind == KLSP_MESH ? (uint32_t)gmesh_of(&gmesh, NULL) : kl_spatial_count(kind);
             for (uint32_t i = 0; i < cnt && n < (uint32_t)maxn; i++) {
                 kl_uuid id;
                 if (kind == KLSP_MESH) id = gmesh;
@@ -1295,7 +1300,7 @@ SP_IMPL sp_GetSpaceContainer(uint64_t space, cap_list *out) {
     // The room's global mesh is its last member (a Quest room holds one GLOBAL_MESH anchor next to its planes: what MRUK's
     // MRUKAnchor.GlobalMesh, EffectMesh and a game's mesh collider read).
     kl_uuid gmesh;
-    if (kl_spatial_global_mesh(&gmesh, NULL)) {
+    if (gmesh_of(&gmesh, NULL)) {
         if (cap && nm < cap) ((kl_uuid *)out->data)[nm] = gmesh;
         nm++;
     }

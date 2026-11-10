@@ -10825,6 +10825,7 @@ static void klovrp_register_all_once(void) {
     kl_ovrp_render_register();
     kl_ovrp_input_register();
     kl_ovrp_spatial_register();
+    kl_ovrp_spatial_global_mesh(kl_env_on("KL_OVRP_GLOBAL_MESH", kl_env_on("KL_QUEST3", 0)));
     kl_ovrp_misc_register();
 }
 static void klovrp_register_all(void) { pthread_once(&g_reg_once, klovrp_register_all_once); }

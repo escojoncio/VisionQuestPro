@@ -108,6 +108,7 @@ void kl_ovrp_register(const kl_ovrp_entry *tab, size_t n, const char *const *ref
 void kl_ovrp_render_register(void);    // kl_ovrp_render.c
 void kl_ovrp_input_register(void);     // kl_ovrp_input.c
 void kl_ovrp_spatial_register(void);   // kl_ovrp_spatial.c
+void kl_ovrp_spatial_global_mesh(int on);   // kl_ovrp_spatial.c: whether rooms carry a GLOBAL_MESH anchor (Quest 3 identity)
 void kl_ovrp_misc_register(void);      // kl_ovrp_misc.c
 
 // ---- helpers over kl_ovrp.c internals ---------------------------------------
