@@ -19,8 +19,11 @@
 //     The compositor logs the convention once: "[envdepth] depth convention: forward-Z ...";
 //   * rendered with the usual perspective for the eye's pose and asymmetric
 //     field of view, so the guest reprojects it exactly as it would on Quest.
-//     Vulkan: row 0 is the top of the view. GL: row 0 is the bottom (uploaded
-//     flipped), as a GL render would leave it.
+//     Vertically, BOTH APIs: row 0 is the BOTTOM of the view and the top is the last row (v = 1 is
+//     up), because Meta's occlusion shader samples uv = (ndc.xy + 1) / 2 of a GL-style reprojection
+//     (EnvironmentDepthUtils.CalculateReprojection, no Y flip) with no flip of its own. Unproven on a
+//     real Quest (the raw image's orientation is inferred from that code); KleptonEnvDepth.projection
+//     negates Y for it.
 //
 // Nothing here runs unless a guest created a provider AND started it, and it
 // only exists when ARKit's scene reconstruction runs and is authorised.
@@ -78,7 +81,7 @@ typedef struct {
     uint32_t seq;                 // which job it is (job_done ignores one that timed out and was replaced)
     int      w, h;
     void    *mtl_tex;             // Vulkan guest: the image's MTLTexture (2D array, depth16). NULL for GL
-    uint16_t *cpu;                // GL guest: 2 layers of w*h depth16 to fill, layer 0 first, row 0 = top
+    uint16_t *cpu;                // GL guest: 2 layers of w*h depth16 to fill, layer 0 first, row 0 = bottom of the view
     float    near_z, far_z;
     float    pose[2][7];
     float    tan[2][4];

@@ -7,8 +7,8 @@
 // old or taken). If so, the scene mesh (or, when there is none yet, the planes)
 // is rasterised from each eye's pose into a 320x320, 2-layer D16 image, FORWARD-Z (clear 1)
 // in [0,1] with near/far from the job (see kl_envdepth.h for the exact
-// convention). No game asking for depth = no work, not even a lock beyond one
-// mutex in kl_envdepth_job_begin.
+// convention, including the vertical one: the top of the view is the LAST row). No game
+// asking for depth = no work, not even a lock beyond one mutex in kl_envdepth_job_begin.
 //
 // Two ways the image reaches the guest:
 //   * Vulkan guest: the target is the MTLTexture that backs the guest's own
@@ -151,7 +151,7 @@ enum KleptonEnvDepth {
             device = d
             queue = q
             depthState = ds
-            NSLog("[envdepth] depth convention: forward-Z (0 = near, 1 = far / no geometry), clear 1, near \(KLED_NEAR) far \(KLED_FAR), D16, \(KLED_W)x\(KLED_H) x2 eyes")
+            NSLog("[envdepth] depth convention: forward-Z (0 = near, 1 = far / no geometry), clear 1, near \(KLED_NEAR) far \(KLED_FAR), D16, \(KLED_W)x\(KLED_H) x2 eyes, Y flipped (row 0 = bottom of the view, top = last row, v = (ndc.y + 1) / 2)")
         }
 
         // MARK: pipelines
@@ -242,13 +242,15 @@ enum KleptonEnvDepth {
         /// Asymmetric perspective from the four positive tangents, eye looks down -Z,
         /// Metal clip depth [0,1], FORWARD-Z: d = f (z - n) / ((f - n) z) (z = n -> 0, z = f -> 1), the
         /// convention of kl_envdepth.h (kled_proj_ab in kl_envdepth.c is the tested form of a and b).
+        /// Y is FLIPPED (the y row is negated): the top of the view lands on the LAST row, row 0 is the bottom.
+        /// Meta's shader samples uv = (ndc.xy + 1) / 2 of a GL-style reprojection with no flip, so v = 1 is the top.
         static func projection(_ t: [Float], near n: Float, far f: Float) -> simd_float4x4 {
             let l = t[0], r = t[1], u = t[2], d = t[3]
             let a = -f / (f - n), b = -f * n / (f - n)
             return simd_float4x4(columns: (
                 SIMD4<Float>(2 / (l + r), 0, 0, 0),
-                SIMD4<Float>(0, 2 / (u + d), 0, 0),
-                SIMD4<Float>((r - l) / (r + l), (u - d) / (u + d), a, -1),
+                SIMD4<Float>(0, -2 / (u + d), 0, 0),
+                SIMD4<Float>((r - l) / (r + l), (d - u) / (u + d), a, -1),
                 SIMD4<Float>(0, 0, b, 0)))
         }
 
@@ -346,7 +348,7 @@ enum KleptonEnvDepth {
                 lastDrawn = drawn
                 var tris = 0
                 for (mesh, _) in drawMeshes { tris += Int(mesh.nt) }
-                NSLog("[envdepth] picture \(pictures): \(drawMeshes.count) of \(nMesh) scene meshes (\(tris) triangles), \(drawPlanes.count) planes, eye0 at (\(poses[0][0]), \(poses[0][1]), \(poses[0][2])), tangents \(tans[0]), into \(useColor ? "a private image (GL readback)" : "the guest's image") \(depthTarget.width)x\(depthTarget.height) format \(depthTarget.pixelFormat.rawValue)")
+                NSLog("[envdepth] picture \(pictures): \(drawMeshes.count) of \(nMesh) scene meshes (\(tris) triangles), \(drawPlanes.count) planes, eye0 at (\(poses[0][0]), \(poses[0][1]), \(poses[0][2])), eye0 forward.y \(simd_quatf(ix: poses[0][3], iy: poses[0][4], iz: poses[0][5], r: poses[0][6]).act(SIMD3<Float>(0, 0, -1)).y), tangents \(tans[0]), into \(useColor ? "a private image (GL readback)" : "the guest's image") \(depthTarget.width)x\(depthTarget.height) format \(depthTarget.pixelFormat.rawValue)")
             }
 
             for eye in 0..<2 {

@@ -104,7 +104,7 @@ static struct {
     uint32_t gen;                         // bumps on every free
     uint64_t img[KLED_IMAGES];            // VkImage / GL name
     void    *mtl[KLED_IMAGES];            // Vulkan: borrowed MTLTexture
-    uint16_t *cpu[KLED_IMAGES];           // GL: 2 layers of w*h, row 0 = top (kept for the process)
+    uint16_t *cpu[KLED_IMAGES];           // GL: 2 layers of w*h, row 0 = bottom of the view (kept for the process)
     int state[KLED_IMAGES];
     kl_envdepth_frame fr[KLED_IMAGES];
     int ready, held, prev, rendering;
@@ -363,10 +363,9 @@ void kl_envdepth_free(void) {
 }
 
 // ---- acquire -----------------------------------------------------------------------
-// GL: the finished picture goes into the guest's texture, rows flipped (GL row 0
-// is the bottom of the view). The guest's own bindings are put back.
+// GL: the finished picture goes into the guest's texture as it is (the compositor already
+// leaves row 0 at the bottom of the view, as GL has it). The guest's own bindings are put back.
 static void gl_upload(int slot, uint64_t name) {
-    static uint16_t flip[KLED_W * KLED_H];
     if (!kl_egl_current_context() || !gl_resolve() || !g.cpu[slot]) return;
     int32_t bound = 0, pbo = 0;
     gl_GetIntegerv(GL_TEXTURE_BINDING_2DA, &bound);
@@ -375,10 +374,8 @@ static void gl_upload(int slot, uint64_t name) {
     gl_BindTexture(GL_TEXTURE_2D_ARRAY_, (uint32_t)name);
     for (int layer = 0; layer < 2; layer++) {
         const uint16_t *src = g.cpu[slot] + (size_t)layer * KLED_W * KLED_H;
-        for (int y = 0; y < KLED_H; y++)
-            memcpy(flip + (size_t)y * KLED_W, src + (size_t)(KLED_H - 1 - y) * KLED_W, KLED_W * sizeof(uint16_t));
         gl_TexSubImage3D(GL_TEXTURE_2D_ARRAY_, 0, 0, 0, layer, KLED_W, KLED_H, 1,
-                         GL_DEPTH_COMPONENT_, GL_UNSIGNED_SHORT_, flip);
+                         GL_DEPTH_COMPONENT_, GL_UNSIGNED_SHORT_, src);
     }
     gl_BindTexture(GL_TEXTURE_2D_ARRAY_, (uint32_t)bound);
     if (pbo && gl_BindBuffer) gl_BindBuffer(GL_PIXEL_UNPACK_BUFFER_, (uint32_t)pbo);
