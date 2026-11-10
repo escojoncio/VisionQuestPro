@@ -3030,6 +3030,7 @@ static void kl_media_probe_log(const char *op, const char *path, const char *hos
 // enough storage space to install required resources" for a failed extract), so
 // the only reliable way to find which call actually failed is to watch them all.
 // KL_TRACE_FS=fail narrows it to the failures.
+#define KL_FS_SEEN 65536   // power of two; 512 KB, filled up to 24000 distinct op+path+outcome
 static int kl_fs_trace_mode(void) {
     static int mode = -1;   // 0 off, 1 failures only, 2 everything
     if (mode < 0) {
@@ -3052,8 +3053,45 @@ static void kl_fs_trace(const char *op, const char *path, const char *extra, int
         return;
     }
     if (!mode || (mode == 1 && !failed)) return;
-    if (failed) fprintf(stderr, "[fs] %s(\"%s\", \"%s\") FAILED: %s\n", op, path, extra, strerror(errno));
-    else        fprintf(stderr, "[fs] %s(\"%s\", \"%s\") ok\n", op, path, extra);
+    // A loader can stat/fopen the same few thousand paths tens of thousands of times
+    // (Gundam: 8500 lines/s). Each distinct (op, path, outcome) is logged once; repeats
+    // are only counted, and a one-line total goes out every 5 s. A failure is a distinct
+    // outcome, so the first ENOENT of every path is always in the log.
+    int saved = errno;
+    uint64_t h = 1469598103934665603ull;   // FNV-1a over op, path, outcome (a collision hides one repeat line, nothing else)
+    for (const char *c = op; *c; c++) h = (h ^ (uint8_t)*c) * 1099511628211ull;
+    h = (h ^ 0xff) * 1099511628211ull;
+    for (const char *c = path ? path : ""; *c; c++) h = (h ^ (uint8_t)*c) * 1099511628211ull;
+    h = ((h ^ (failed ? 1 : 2)) * 1099511628211ull) | 1;   // 0 marks an empty slot
+    static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
+    static uint64_t seen[KL_FS_SEEN];   // fixed: no growth whatever the game does
+    static unsigned nseen, over_fail;
+    static unsigned long n_ops, n_failed, n_quiet;
+    static struct timespec last;
+    struct timespec now; clock_gettime(CLOCK_MONOTONIC, &now);
+    int emit = 1, tick = 0;
+    unsigned long t_ops = 0, t_failed = 0, t_quiet = 0;
+    pthread_mutex_lock(&mu);
+    n_ops++; if (failed) n_failed++;
+    unsigned i = (unsigned)(h >> 7) & (KL_FS_SEEN - 1);
+    for (unsigned k = 0; k < 64 && seen[i] && seen[i] != h; k++) i = (i + 1) & (KL_FS_SEEN - 1);
+    if (seen[i] == h) emit = 0;
+    else if (!seen[i] && nseen < 24000) { seen[i] = h; nseen++; }
+    else if (!failed || ++over_fail > 2000) emit = 0;   // table full: failures stay visible, capped
+    if (!emit) n_quiet++;
+    if (!last.tv_sec) last = now;
+    if (now.tv_sec - last.tv_sec >= 5) {
+        tick = 1; last = now;
+        t_ops = n_ops; t_failed = n_failed; t_quiet = n_quiet; n_ops = n_failed = n_quiet = 0;
+    }
+    pthread_mutex_unlock(&mu);
+    errno = saved;
+    if (emit) {
+        if (failed) fprintf(stderr, "[fs] %s(\"%s\", \"%s\") FAILED: %s\n", op, path, extra, strerror(errno));
+        else        fprintf(stderr, "[fs] %s(\"%s\", \"%s\") ok\n", op, path, extra);
+    }
+    if (tick) fprintf(stderr, "[fs] %lu ops (%lu failed) in the last 5 s, %lu repeats not listed\n", t_ops, t_failed, t_quiet);
+    errno = saved;
 }
 
 void kl_file_note(void *f, const char *path);

@@ -522,6 +522,10 @@ final class VQSettings: ObservableObject {
         let frameAsync = VQGameFrameAsync.load(key: gameKey)
         if frameAsync { setenv("KL_VK_FRAME_ASYNC", "1", 1) } else { unsetenv("KL_VK_FRAME_ASYNC") }
         VQLog.log("Gráficos: fin de frame asíncrono \(frameAsync)")
+        // «Mostrar malla de escena», per game (VQGameSceneMesh): off = the wireframe the game draws of the scene mesh is hidden (KL_HIDE_SCENE_MESH).
+        let showMesh = VQGameSceneMesh.load(key: gameKey)
+        if showMesh { unsetenv("KL_HIDE_SCENE_MESH") } else { setenv("KL_HIDE_SCENE_MESH", "1", 1) }
+        VQLog.log("Gráficos: malla de escena visible \(showMesh)")
         // Per-pass GPU timing in VPKEngine (gpu.passtime lines, one rendering frame every 90).
         if perfDiag { setenv("VP_PASS_TIMING", "90", 1) } else { unsetenv("VP_PASS_TIMING") }
         if fsDiag { setenv("KL_TRACE_FS", "1", 1) } else { unsetenv("KL_TRACE_FS") }
@@ -722,6 +726,19 @@ enum VQGameFrameAsync {
         guard !key.isEmpty else { return }
         if on { UserDefaults.standard.set(true, forKey: "vq.frameasync." + key) }
         else { UserDefaults.standard.removeObject(forKey: "vq.frameasync." + key) }
+    }
+}
+
+/// «Mostrar malla de escena» per game, off by default (the mesh the game draws over passthrough is hidden). Saved as vq.scenemesh.<key>.
+enum VQGameSceneMesh {
+    static func load(key: String) -> Bool {
+        !key.isEmpty && UserDefaults.standard.object(forKey: "vq.scenemesh." + key) as? Bool == true
+    }
+
+    static func save(_ on: Bool, key: String) {
+        guard !key.isEmpty else { return }
+        if on { UserDefaults.standard.set(true, forKey: "vq.scenemesh." + key) }
+        else { UserDefaults.standard.removeObject(forKey: "vq.scenemesh." + key) }
     }
 }
 

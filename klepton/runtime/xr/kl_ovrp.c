@@ -6,6 +6,7 @@
 // serving the soname and naming every lookup gives the real surface without
 // guessing at any of the 466 exported entry points.
 #include <stdio.h>
+#include <stdarg.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stddef.h>
@@ -8031,6 +8032,28 @@ static void klovrp_fill_eye_desc(ovrp_layer_desc_eyefov *d, int layout,
         klovrp_asw_mv_size(w, h, &d->mv_texture_size.w, &d->mv_texture_size.h);
 }
 
+// The layer-desc queries run every frame (ITR2: 5500 identical lines in 50 s). A line is
+// printed when its text is not among the last 16 distinct ones, so a changed size, flags or
+// format (and an alternation between two layouts) still shows, and a repeat does not.
+static void klovrp_log_new(const char *fmt, ...) {
+    static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
+    static uint64_t recent[16];
+    static unsigned next;
+    char line[320];
+    va_list ap; va_start(ap, fmt);
+    vsnprintf(line, sizeof line, fmt, ap);
+    va_end(ap);
+    uint64_t h = 1469598103934665603ull;
+    for (const char *c = line; *c; c++) h = (h ^ (uint8_t)*c) * 1099511628211ull;
+    h |= 1;
+    int seen = 0;
+    pthread_mutex_lock(&mu);
+    for (int i = 0; i < 16; i++) seen |= recent[i] == h;
+    if (!seen) { recent[next] = h; next = (next + 1) % 16; }
+    pthread_mutex_unlock(&mu);
+    if (!seen) fputs(line, stderr);
+}
+
     // ovrp_CalculateEyeLayerDesc3(layout, mipLevels, sampleCount, format,
     //                             depthFormat, mvFormat, mvDepthFormat, layerFlags,
 //                             desc*, textureScale, scale2)
@@ -8060,7 +8083,7 @@ static uint64_t klovrp_CalculateEyeLayerDesc3(int layout, int mip_levels,
                          layer_flags, texture_scale);
     const char *fname = NULL;
     uint32_t gl = klovrp_gl_format(format, &fname);
-    fprintf(stderr, "  [ovrp] CalculateEyeLayerDesc: layout=%d %dx%d mips=%d "
+    klovrp_log_new("  [ovrp] CalculateEyeLayerDesc: layout=%d %dx%d mips=%d "
                     "samples=%d fmt=%d (%s -> GL %#x) depth=%d mv=%d/%d "
                     "flags=%#x scale=%.3f/%.3f\n",
             layout, out->texture_size.w, out->texture_size.h, mip_levels,
@@ -8163,7 +8186,7 @@ static uint64_t klovrp_CalculateLayerDesc(int shape, int layout,
     out->sample_count = sample_count;
     out->format       = format;
     out->layer_flags  = layer_flags;
-    fprintf(stderr, "  [ovrp] CalculateLayerDesc: shape=%d layout=%d %dx%d "
+    klovrp_log_new("  [ovrp] CalculateLayerDesc: shape=%d layout=%d %dx%d "
                     "mips=%d samples=%d fmt=%d flags=%#x\n",
             shape, layout, sz.w, sz.h, out->mip_levels, sample_count,
             format, (unsigned)layer_flags);

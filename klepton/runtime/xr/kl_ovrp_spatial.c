@@ -1318,6 +1318,28 @@ static ovrpResult klovrp_GetSpaceContainer(uint64_t space, cap_list *out) {
 typedef struct { int32_t vcap, vcount; float *verts; int32_t icap, icount; uint32_t *indices; } trimesh;
 _Static_assert(__builtin_offsetof(trimesh, verts) == 8 && __builtin_offsetof(trimesh, icap) == 16 &&
                __builtin_offsetof(trimesh, indices) == 24 && sizeof(trimesh) == 32, "OVRPlugin.TriangleMeshInternal layout");
+void kl_vulkan_hide_index_count(unsigned n);     // kl_vulkan.c
+// KL_HIDE_SCENE_MESH=1 (the per-game «Mostrar malla de escena» switch is off): the game draws the mesh it is served here as a wireframe
+// (indexCount == icount); VPKEngine drops the draws with that index count. Collisions and environment depth read the store, not the draw.
+static void sp_hide_scene_mesh(int32_t icount) {
+    static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
+    static int32_t seen[4];                       // the counts handed to the engine (it keeps the same four, oldest replaced first)
+    static unsigned next;
+    static int small_logged;
+    const char *e = getenv("KL_HIDE_SCENE_MESH");
+    if (icount <= 0 || !e || e[0] != '1') return;
+    pthread_mutex_lock(&mu);
+    int known = 0, tiny = icount < 10000;         // a real room is tens of thousands of indices: a small mesh could be anything else
+    for (int i = 0; i < 4; i++) known |= seen[i] == icount;
+    int log_tiny = tiny && !small_logged;
+    if (log_tiny) small_logged = 1;
+    if (!known && !tiny) { seen[next] = icount; next = (next + 1) % 4; }
+    pthread_mutex_unlock(&mu);
+    if (log_tiny) fprintf(stderr, "[ovrp] scene mesh icount=%d too small, not hidden\n", (int)icount);
+    if (known || tiny) return;
+    fprintf(stderr, "[ovrp] scene mesh icount=%d registered for hiding\n", (int)icount);
+    kl_vulkan_hide_index_count((unsigned)icount);
+}
 SP_IMPL sp_GetSpaceTriangleMesh(uint64_t space, trimesh *m) {
     kl_ovrp_hit("ovrp_GetSpaceTriangleMesh");
     if (!m) return KLOVRP_INVALID_PARAM;
@@ -1328,6 +1350,7 @@ SP_IMPL sp_GetSpaceTriangleMesh(uint64_t space, trimesh *m) {
     if (!kl_spatial_mesh_info(id, vc, vc ? m->verts : NULL, &nv, tc, tc ? m->indices : NULL, &nt)) return KLOVRP_OPERATION_FAILED;
     m->vcount = (int32_t)(vc && nv > vc ? vc : nv);
     m->icount = (int32_t)(tc && nt > tc ? tc * 3u : nt * 3u);
+    sp_hide_scene_mesh(m->icount);
     return KLOVRP_SUCCESS;
 }
 static ovrpResult klovrp_GetSpaceTriangleMesh(uint64_t space, trimesh *m) {

@@ -510,6 +510,8 @@ size_t kl_vulkan_diag(int which, char *out, size_t cap);
 void kl_vulkan_idle_drain(unsigned min_idle_ms, const char *why);
 // VPKEngine's texture budget: the largest side of the plain sampled textures created from now on (0 = none). Any thread.
 void kl_vulkan_texture_budget(unsigned max_dim);
+// VPKEngine drops the direct indexed draws with exactly this index count (0 = off): the game's scene-mesh wireframe. Any thread.
+void kl_vulkan_hide_index_count(unsigned n);
 // Frees the retired (replaced) images that are due, without waiting for a frame end. Never blocks long; any thread.
 void kl_vulkan_retire_poll(void);
 size_t kl_vulkan_diag_ranges(int kind, uint64_t (*out)[2], size_t max);   // 0 = VkDeviceMemory host windows, 1 = VPKEngine buffer contents; {addr, size} sorted

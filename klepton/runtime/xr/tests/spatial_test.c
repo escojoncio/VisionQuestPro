@@ -76,6 +76,8 @@ static uint64_t clock_stub(void) { struct timespec ts; clock_gettime(CLOCK_MONOT
 static int g_resync_finish = 1;
 static void resync_stub(void) { g_resyncs++; if (g_resync_finish) kl_spatial_resync_done(); }
 
+void kl_vulkan_hide_index_count(unsigned n) { (void)n; }
+
 // host: completes anchors synchronously from a worker-less stub
 static kl_uuid g_next_anchor;
 static void h_create(uint64_t req, const float m[16]) {

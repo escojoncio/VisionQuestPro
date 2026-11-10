@@ -737,6 +737,7 @@ struct VQGameSettingsView: View {
     @State private var capture: VQGameCapture
     @State private var d24: Bool
     @State private var frameAsync: Bool
+    @State private var sceneMesh: Bool
 
     init(game: VQGame) {
         self.game = game
@@ -750,6 +751,7 @@ struct VQGameSettingsView: View {
         _capture = State(initialValue: VQGameCapture.load(key: game.aaKey))
         _d24 = State(initialValue: VQGameD24.load(key: game.aaKey))
         _frameAsync = State(initialValue: VQGameFrameAsync.load(key: game.aaKey))
+        _sceneMesh = State(initialValue: VQGameSceneMesh.load(key: game.aaKey))
     }
 
     var body: some View {
@@ -819,6 +821,11 @@ struct VQGameSettingsView: View {
                     Text(VQL("Apagado por defecto; puede cambiar el ritmo de los frames", "Off by default; it may change frame pacing"))
                         .font(.caption)
                 }
+                Section(VQL("Mostrar malla de escena (wireframe de algunos juegos)", "Show scene mesh (wireframe of some games)")) {
+                    Toggle(VQL("Mostrar malla de escena (wireframe de algunos juegos)", "Show scene mesh (wireframe of some games)"), isOn: $sceneMesh)
+                    Text(VQL("Apagado: se oculta la malla que el juego dibuja sobre el passthrough", "Off: hides the mesh the game draws over passthrough"))
+                        .font(.caption)
+                }
                 Section(VQL("Perfil del visor", "Headset profile")) {
                     Picker(VQL("Perfil del visor", "Headset profile"), selection: $profile) {
                         Text(VQL("Automático", "Automatic")).tag(0)
@@ -881,6 +888,10 @@ struct VQGameSettingsView: View {
             .onChange(of: d24) { _, new in
                 VQGameD24.save(new, key: game.aaKey)
                 VQLog.log("Ajustes del juego \(game.aaKey): profundidad de 24 bits emulada \(new ? "sí" : "no")")
+            }
+            .onChange(of: sceneMesh) { _, new in
+                VQGameSceneMesh.save(new, key: game.aaKey)
+                VQLog.log("Ajustes del juego \(game.aaKey): malla de escena visible \(new ? "sí" : "no")")
             }
             .onChange(of: frameAsync) { _, new in
                 VQGameFrameAsync.save(new, key: game.aaKey)
