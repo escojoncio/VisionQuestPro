@@ -460,11 +460,48 @@ static uint64_t klovrp_unsupported(const char *name) {
 //
 // Set by Initialize5/7, cleared by the Shutdown pair — what the real plugin
 // reports.
+// KL-TEST-BEGIN ovrpinit
 static int g_ovrp_initialized;
+// The guest's XR API is OpenXR (kl_openxr.c: frame loop, spaces, layer list) and OVRPlugin is only
+// Meta's bridge beside it, serving OVRManager (presence, input, events). Set by
+// ovrp_UnityOpenXR_OnInstanceCreate, cleared by OnInstanceDestroy. While it is set the OVRPlugin
+// path leaves alone what it shares with kl_openxr.c: a node read does not turn the guest-origin
+// add-back on (klovrp_space_mark, kl_ovrp_guest_origin_y), ovrp_SetTrackingOriginType does not move
+// OpenXR's LOCAL origin (kl_ovrp_tracking_origin, kl_ovrp_eye_height) and ovrp_RecenterTrackingOrigin*
+// does not re-latch it, enqueued layers are refused and not published (klovrp_bridge_enq_refused,
+// klovrp_enq_flush: the overlay list is xrEndFrame's; an enqueued passthrough layer is voted there,
+// kl_ovrp_bridge_passthrough) and ovrp_Update2/3 neither parks the thread nor latches the OVRPlugin
+// frame (klovrp_Update2: xrWaitFrame does both).
+static int g_ovrp_openxr_bridge;
+static int klovrp_bridge(void) { return __atomic_load_n(&g_ovrp_openxr_bridge, __ATOMIC_ACQUIRE); }
 
 static uint64_t klovrp_GetInitialized(void) {
     ovrp_hit("ovrp_GetInitialized");
     return g_ovrp_initialized ? OVRP_TRUE : 0;
+}
+
+// The other way in. A Unity guest on Meta's OpenXR bridge never calls
+// ovrp_Initialize*: in the real plugin ovrp_GetInitialized is "the instance
+// global is set", written by ovrp_UnityOpenXR_OnInstanceCreate and cleared by
+// OnInstanceDestroy. As success no-ops they left GetInitialized at 0 for the
+// whole run, and OVRManager never initialised (no PollEvent, no OVRInput).
+// No instance, no bridge: a null XrInstance fails and changes nothing.
+static uint64_t klovrp_UnityOpenXR_OnInstanceCreate(uint64_t xr_instance) {
+    ovrp_hit("ovrp_UnityOpenXR_OnInstanceCreate");
+    if (!xr_instance) return OVRP_FAIL_INVALID_PARAM;
+    __atomic_store_n(&g_ovrp_openxr_bridge, 1, __ATOMIC_RELEASE);
+    g_ovrp_initialized = 1;
+    return OVRP_SUCCESS;
+}
+static uint64_t klovrp_UnityOpenXR_OnInstanceDestroy(uint64_t xr_instance) {
+    (void)xr_instance;
+    ovrp_hit("ovrp_UnityOpenXR_OnInstanceDestroy");
+    // The init state first: a thread that finds the bridge down must not find the plugin still up
+    // (a guest that goes on reading while ovrp_GetInitialized is true would mark the OVRPlugin
+    // space and frame latch of a plain OVRPlugin guest).
+    g_ovrp_initialized = 0;
+    __atomic_store_n(&g_ovrp_openxr_bridge, 0, __ATOMIC_RELEASE);
+    return OVRP_SUCCESS;
 }
 
 // Bring-up, answering SUCCESS by decision rather than reporting a failure the
@@ -478,6 +515,7 @@ static uint64_t klovrp_Initialize(const char *name) {
     g_ovrp_initialized = 1;
     return OVRP_SUCCESS;
 }
+// KL-TEST-END ovrpinit
 // Audio/display device-id getters, the `ovrpResult f(void **out)` shape.
 // ieytd2's libOculusXRPlugin (OculusSystem::Initialize, guest va 0xd2c0/0xd2f4)
 // calls each with a ZEROED stack slot as out, checks only the result sign, then
@@ -498,11 +536,14 @@ static uint64_t klovrp_GetDeviceId2(const char *name, const void **out) {
 // answers when recentering is deferred. ieytd2 calls it during session setup.
 // The floor origin never moves (as on Quest); only the EyeLevel height is
 // re-latched to the current head Y and the recenter counter bumped.
+// Not under the OpenXR bridge: that height is OpenXR's LOCAL origin there
+// (kl_openxr.c klxr_local_origin_y), so the request is acknowledged and nothing is written.
+// KL-TEST-BEGIN ovrpbridge
 static void klovrp_recenter_now(const char *why);
 static uint64_t klovrp_RecenterTrackingOrigin2(int flags) {
     (void)flags;
     ovrp_hit("ovrp_RecenterTrackingOrigin2");
-    klovrp_recenter_now("ovrp_RecenterTrackingOrigin2");
+    if (!klovrp_bridge()) klovrp_recenter_now("ovrp_RecenterTrackingOrigin2");
     return OVRP_SUCCESS;
 }
 // Un-suffixed v1 form (bool return in the real plugin); the guest ignores it,
@@ -510,9 +551,10 @@ static uint64_t klovrp_RecenterTrackingOrigin2(int flags) {
 static uint64_t klovrp_RecenterTrackingOrigin(unsigned flags) {
     (void)flags;
     ovrp_hit("ovrp_RecenterTrackingOrigin");
-    klovrp_recenter_now("ovrp_RecenterTrackingOrigin");
+    if (!klovrp_bridge()) klovrp_recenter_now("ovrp_RecenterTrackingOrigin");
     return 0;
 }
+// KL-TEST-END ovrpbridge
 
 static uint64_t klovrp_GetAudioOutId2(const void **out)      { return klovrp_GetDeviceId2("ovrp_GetAudioOutId2", out); }
 static uint64_t klovrp_GetAudioInId2(const void **out)       { return klovrp_GetDeviceId2("ovrp_GetAudioInId2", out); }
@@ -552,6 +594,7 @@ static uint64_t klovrp_GetDisplayAdapterId2(const void **out) {
     return OVRP_SUCCESS;
 }
 
+// KL-TEST-BEGIN ovrpinit
 static uint64_t klovrp_Initialize5(void) { return klovrp_Initialize("ovrp_Initialize5"); }
 // The 6 revision sits between the two we already answer; ieytd2's
 // libOculusXRPlugin calls it and the unimplemented-entry abort was its whole
@@ -566,6 +609,10 @@ static uint64_t klovrp_Initialize7(void) { return klovrp_Initialize("ovrp_Initia
 // above. ovrp_Shutdown2, the ovrpResult form, is
 // deliberately NOT implemented here: nothing has ever called it, and an
 // abort-by-name is how this project finds out that something does.
+// After ovrp_UnityOpenXR_OnInstanceCreate too: the real plugin (1.103, +0x1a8f60) has ONE singleton
+// behind ovrp_GetInitialized, cleared here whoever created it — its OnInstanceDestroy (+0x1bbd48)
+// calls ovrp_Shutdown2 itself. g_ovrp_openxr_bridge is not this pair's to clear: the XR instance is
+// still alive, and only OnInstanceDestroy ends it.
 static uint64_t klovrp_Shutdown(void) {
     ovrp_hit("ovrp_Shutdown");
     g_ovrp_initialized = 0;
@@ -583,6 +630,7 @@ static uint64_t klovrp_Shutdown2(void) {
     g_ovrp_initialized = 0;
     return OVRP_SUCCESS;
 }
+// KL-TEST-END ovrpinit
 
 // Who is driving. UE4's OculusHMD calls this immediately after Initialize5 with
 // "UnrealEngine" and the engine version — printed once because a version string
@@ -2119,8 +2167,12 @@ static uint64_t klovrp_GetTiledMultiResLevel(int* out) {
 // to sit at standing eye height above y=0, and an identity (y=0) head puts the
 // camera on the floor — the menu then renders above the view and the hands are
 // below the floor, out of frustum. Recorded here and read by the pose defaults.
+// KL-TEST-BEGIN ovrpbridge
 static int g_tracking_origin;          // 0 = eye level, until the guest says otherwise
-int kl_ovrp_tracking_origin(void) { return g_tracking_origin; }
+// For kl_openxr.c (klxr_local_origin_y). Under the OpenXR bridge the origin OVRManager sets stays
+// OVRPlugin's own (its getters, its node reads): OpenXR's LOCAL is the guest's xrCreateReferenceSpace.
+int kl_ovrp_tracking_origin(void) { return klovrp_bridge() ? 0 : g_tracking_origin; }
+// KL-TEST-END ovrpbridge
 //
 // **The v1 and v2 spellings of this pair are four different ABIs, not two**, and
 // three of the four were wrong here. Read out of the real plugin (SUPERHOT's
@@ -2659,11 +2711,14 @@ static void klovrp_pose_write(klovrp_pose *dst, const klovrp_pose *v) {
 // eye height, so it renders above the view, and anything parked near y=0 (the
 // hands) is a metre and a half below the frustum. Under EyeLevel the eye *is*
 // the origin, so the offset is zero and nothing moves.
+// KL-TEST-BEGIN ovrpbridge
 static float klovrp_eye_height(void) {
     return g_tracking_origin == 0 ? 0.0f : klovrp_measured_eye_height();
 }
 
-float kl_ovrp_eye_height(void) { return klovrp_eye_height(); }
+// kl_openxr.c's (klxr_local_origin_y): as kl_ovrp_tracking_origin, eye level under the OpenXR bridge.
+float kl_ovrp_eye_height(void) { return klovrp_bridge() ? 0.0f : klovrp_eye_height(); }
+// KL-TEST-END ovrpbridge
 
 // --- EyeLevel is a SPACE, not just a default height ------------------------
 // The published head is in the display's world: y measured from the floor
@@ -2677,8 +2732,19 @@ float kl_ovrp_eye_height(void) { return klovrp_eye_height(); }
 // anything the guest states in its tracking space. Only once an OVRPlugin node
 // read has happened (`g_ovrp_space_used`): an OpenXR guest never speaks
 // OVRPlugin, keeps g_tracking_origin at 0 and does its own LOCAL/STAGE.
+// One on Meta's OpenXR bridge does speak it (OVRManager reads nodes), but what it
+// submits is still in its OpenXR spaces: there a read marks nothing and the
+// add-back stays 0 (g_ovrp_openxr_bridge).
 // KL_OVRP_EYELEVEL_ZERO=0 restores the old absolute height.
+// KL-TEST-BEGIN ovrpbridge
 static int g_ovrp_space_used;
+static void klovrp_space_mark(void) {      // an OVRPlugin node read
+    if (!klovrp_bridge()) __atomic_store_n(&g_ovrp_space_used, 1, __ATOMIC_RELEASE);
+}
+static int klovrp_space_live(void) {
+    return !klovrp_bridge() && __atomic_load_n(&g_ovrp_space_used, __ATOMIC_ACQUIRE);
+}
+// KL-TEST-END ovrpbridge
 static int klovrp_eyelevel_zero(void) {
     static int on = -1;
     if (on < 0) on = kl_env_on("KL_OVRP_EYELEVEL_ZERO", 1);
@@ -2751,10 +2817,12 @@ float klovrp_guest_origin_y(void) {
     if ((g_tracking_origin == 1 || g_tracking_origin == 2) && kl_guardian_get_floor(&gy)) o += gy;   // the guardian's floor is the floor origin
     return o;
 }
+// KL-TEST-BEGIN ovrpbridge
 float kl_ovrp_guest_origin_y(void) {
-    if (!__atomic_load_n(&g_ovrp_space_used, __ATOMIC_ACQUIRE)) return 0.0f;
+    if (!klovrp_space_live()) return 0.0f;
     return klovrp_guest_origin_y();
 }
+// KL-TEST-END ovrpbridge
 // [floor]: the guardian floor and what the guest is told about it, one line per change (origin, eye height, or the guardian's floor once it
 // has settled for 0.5 s -- sliding it on the guardian screen changes it every frame). floor_in_guest_y is where the floor lies in the guest's
 // tracking space (0 under floor/stage = the floor IS y 0; -eye height over the floor under EyeLevel, as GetTrackingTransformRelativePose
@@ -3225,7 +3293,9 @@ static int klovrp_fring_get(int frame, int part, klovrp_pose *out) {
 static uint64_t klovrp_Update2(int step, int frame_index, double prediction) {
     ovrp_hit("ovrp_Update2");
     kl_game_beat(0);          // also covers ovrp_Update3, which calls this
-    kl_bg_wait();             // frame start: a backgrounded app starts no frame (Metal refuses its GPU work)
+    // Under the OpenXR bridge this is OVRManager's pose update, not a frame start: xrWaitFrame parks.
+    int bridge = klovrp_bridge();
+    if (!bridge) kl_bg_wait();   // frame start: a backgrounded app starts no frame (Metal refuses its GPU work)
     { static unsigned n; if (n < 48 || n % 600 == 0)
         fprintf(stderr, "  [ovrp] frameloop Update2 #%u step=%d\n", n, step); n++; }
     (void)prediction;
@@ -3284,7 +3354,7 @@ static uint64_t klovrp_Update2(int step, int frame_index, double prediction) {
     if (ix == 0) g_render_sample = h;
     __atomic_store_n(&g_step_seq, s + 2, __ATOMIC_RELEASE);
     __atomic_store_n(&g_step_valid[ix], 1, __ATOMIC_RELEASE);
-    __atomic_store_n(&g_saw_update2, 1, __ATOMIC_RELEASE);
+    if (!bridge) __atomic_store_n(&g_saw_update2, 1, __ATOMIC_RELEASE);
 
     // OVRPlugin declares ovrp_Update2 returning ovrpBool, where 0 is false, and
     // both libunity and libil2cpp reference the name — the two conventions
@@ -3321,7 +3391,7 @@ static klovrp_pose klovrp_step_head(int step) {
         (void)klovrp_fring_get(__atomic_load_n(&g_fring_newest, __ATOMIC_ACQUIRE), 0, &h);
     // OVRPlugin's read: into the guest's tracking space (see
     // kl_ovrp_guest_origin_y). The stored sample stays in display space.
-    __atomic_store_n(&g_ovrp_space_used, 1, __ATOMIC_RELEASE);
+    klovrp_space_mark();
     h.py -= klovrp_guest_origin_y();
     return h;
 }
@@ -3404,7 +3474,7 @@ static klovrp_pose klovrp_step_hand(int step, int hand) {
         p = klovrp_hand(hand);
     if (ix == 0 && !klovrp_fring_get(t_req_frame, 1 + hand, &p))
         (void)klovrp_fring_get(__atomic_load_n(&g_fring_newest, __ATOMIC_ACQUIRE), 1 + hand, &p);
-    __atomic_store_n(&g_ovrp_space_used, 1, __ATOMIC_RELEASE);
+    klovrp_space_mark();
     p.py -= klovrp_guest_origin_y();      // guest tracking space, as the head
     // Here and not in klovrp_hand: this is the OVRPlugin guest's read.
     // kl_ovrp_hand_motion is kl_openxr's and must keep the grip.
@@ -6444,11 +6514,15 @@ static uint64_t klovrp_GetSystemDisplayAvailableFrequencies(float *buf, int *cou
     // ovrpResult with an enum OUT-PARAM. ovrpXrApiType: 0 Unknown, 1 Oculus
 // (legacy VrApi), 2 OpenXR. This APK's plugin is the VrApi build — no OpenXR
 // string exists anywhere in it — so 1 is the only coherent answer.
+// Under Unity's OpenXR bridge (g_ovrp_openxr_bridge) the answer is OpenXR, and that is 3, not 2:
+// read out of an OpenXR build of the plugin (1.103, +0x1a90c0: `mov w9, #3; str w9, [x0]; mov w0, wzr`).
+// KL-TEST-BEGIN ovrpbridge
 static uint64_t klovrp_GetNativeXrApiType(int *out) {
     ovrp_hit("ovrp_GetNativeXrApiType");
-    *out = 1;
+    *out = klovrp_bridge() ? 3 : 1;
     return OVRP_SUCCESS;
 }
+// KL-TEST-END ovrpbridge
 
 // The two-attempt contract (libunity 0x9bbb48/0x9bbb9c): attempt 1 passes
 // handle=0 and must FAIL; the retry passes Unity's own GL texture name
@@ -7171,8 +7245,33 @@ static int klovrp_pt_enq_frame(struct klovrp_pt_enq *s, int list_idx, int list_i
     *id = s->live ? s->id : 0; *underlay = s->live ? s->underlay : 0;
     return s->live;
 }
+// Unity's OpenXR bridge: the frame ends in xrEndFrame and ovrp_EndFrame4 is never called, so the
+// scan below never reads the enqueued layer. One xrEndFrame is its frame there (same idle count);
+// without the bridge the scan is the only reader and this answers nothing.
+static int klovrp_pt_enq_bridge_frame(struct klovrp_pt_enq *s, int bridge, int *id, int *underlay) {
+    if (!bridge) { *id = 0; *underlay = 0; return 0; }
+    return klovrp_pt_enq_frame(s, -1, 0, -1, id, underlay);
+}
+// ...and nothing sent through the Enqueue ABI is composited there (the layer list is xrEndFrame's,
+// klovrp_enq_flush), so its setup and its submit are refused: OVROverlay hides the object's own
+// renderer only while the submit answers Success (`rend.enabled = !isOverlayVisible` in Meta's
+// published OVROverlay.cs; that source is not in this repo: unverified), and no swapchain is made for
+// a layer nobody shows. A passthrough-shaped layer has no picture: it is only the request
+// klovrp_pt_enq_note records, and is taken.
+static int klovrp_bridge_enq_refused(int bridge, int shape) {
+    return bridge && !klovrp_shape_is_passthrough(shape);
+}
 // KL-TEST-END ptscan
 static struct klovrp_pt_enq g_pt_enq;   // under g_pt_enq_mu
+// For kl_openxr.c's xrEndFrame (klxr_passthrough_scan), once per frame: whether an OVRPassthroughLayer
+// enqueued through the bridge is live, with its id and underlay flag. It is voted there with the guest's
+// own XR_FB_passthrough layer and blend mode — one kl_passthrough_note_frame per frame, not a second one.
+int kl_ovrp_bridge_passthrough(int *layer_id, int *underlay) {
+    pthread_mutex_lock(&g_pt_enq_mu);
+    int present = klovrp_pt_enq_bridge_frame(&g_pt_enq, klovrp_bridge(), layer_id, underlay);
+    pthread_mutex_unlock(&g_pt_enq_mu);
+    return present;
+}
 // Expiry diagnostics: EndFrame4s seen by the scan, the one in which a passthrough layer was last (re-)enqueued (under
 // g_pt_enq_mu), and g_ovrp[].calls at the entry of each of the last 4 scans (valid while g_pt_snap_ef matches).
 static unsigned g_pt_ef4, g_pt_last_enq_ef4, g_pt_last_enq_flags;
@@ -8351,10 +8450,21 @@ static uint64_t klovrp_SetupLayer(void *device, const ovrp_layer_desc_eyefov *de
 // instead of calling ovrp_SetupLayer. It delegates to the same allocator so the
 // two entry points cannot end up describing a layer differently; the device arg
 // is only used for SetupLayer's log line, so NULL is fine.
+// KL-TEST-BEGIN ovrpbridge
 static uint64_t klovrp_EnqueueSetupLayer2(const ovrp_layer_desc_eyefov *desc,
                                           int composition_depth, int *layer_id) {
     ovrp_hit("ovrp_EnqueueSetupLayer2");
     (void)composition_depth;
+    // Under the OpenXR bridge an overlay gets no layer (klovrp_bridge_enq_refused): no id is written.
+    if (desc && klovrp_bridge_enq_refused(klovrp_bridge(), desc->shape)) {
+        static int said;
+        if (said < 4) {
+            said++;
+            fprintf(stderr, "  [ovrp] OpenXR bridge: EnqueueSetupLayer2 refused for shape %d — a layer sent through "
+                            "ovrp_Enqueue* is not composited (the layer list is xrEndFrame's)\n", desc->shape);
+        }
+        return OVRP_FAIL_UNSUPPORTED;
+    }
     // ENABLED again, so AC Nexus's UI/menu OVROverlays (Quad layers) get a real
     // swapchain and composite. Its video-background overlays still end up with
     // uninitialised VkImage handles (no Android Surface here), but those no longer
@@ -8362,6 +8472,7 @@ static uint64_t klovrp_EnqueueSetupLayer2(const ovrp_layer_desc_eyefov *desc,
     // create produced. So the UI shows and the video background is simply absent.
     return klovrp_SetupLayer(NULL, desc, layer_id);
 }
+// KL-TEST-END ovrpbridge
 
 // ovrp_EnqueueSubmitLayer2 - THE per-frame overlay submit AC Nexus uses (~28k
 // calls/run, ~7-8 layers every frame). It was a benign no-op, so every overlay
@@ -8404,7 +8515,15 @@ static void klovrp_enq_census(void) {
     fprintf(stderr, "\n");
 }
 static void klovrp_enq_flush(void) {
-    if (g_enq_n) { klovrp_enq_census(); kl_ovrp_overlays_external(g_enq, g_enq_n); }
+    // Under the OpenXR bridge the published overlay list is xrEndFrame's (kl_openxr.c): this set is dropped, not a second producer.
+    if (g_enq_n && klovrp_bridge()) {
+        static int said;
+        if (!said) {
+            said = 1;
+            fprintf(stderr, "  [ovrp] OpenXR bridge: %d layer(s) sent through ovrp_EnqueueSubmitLayer2 are NOT composited "
+                            "(the layer list is xrEndFrame's)\n", g_enq_n);
+        }
+    } else if (g_enq_n) { klovrp_enq_census(); kl_ovrp_overlays_external(g_enq, g_enq_n); }
     g_enq_n = 0;
 }
 // The frame boundary of the Enqueue'd overlay set. The frameIndex argument is
@@ -8535,6 +8654,10 @@ static uint64_t klovrp_EnqueueSubmitLayer2(uint32_t flags, void *texL, void *tex
                 pthread_mutex_unlock(&g_pt_enq_mu);
             }
         }
+        // Under the OpenXR bridge that request (voted at xrEndFrame, kl_ovrp_bridge_passthrough) is all a
+        // submit is: no overlay set is built, and an overlay's submit fails (klovrp_bridge_enq_refused).
+        if (klovrp_bridge())
+            return (el && !klovrp_bridge_enq_refused(1, el->desc.shape)) ? OVRP_SUCCESS : OVRP_FAIL_UNSUPPORTED;
     }
     // Log the SUBMITTED texture handles per layer (once each): if texL differs
     // from the VkImage we handed out via GetLayerTexture2 for this layer, the
@@ -10179,6 +10302,8 @@ static const struct { const char *name; void *fn; } g_ovrp_impl[] = {
     {"ovrp_GetDisplayAdapterId2", (void *)klovrp_GetDisplayAdapterId2},
     {"ovrp_Initialize7",   (void *)klovrp_Initialize7},
     {"ovrp_GetInitialized", (void *)klovrp_GetInitialized},
+    {"ovrp_UnityOpenXR_OnInstanceCreate", (void *)klovrp_UnityOpenXR_OnInstanceCreate},
+    {"ovrp_UnityOpenXR_OnInstanceDestroy", (void *)klovrp_UnityOpenXR_OnInstanceDestroy},
     {"ovrp_Shutdown",      (void *)klovrp_Shutdown},
     {"ovrp_Shutdown2",     (void *)klovrp_Shutdown2},
     {"ovrp_GetAppChromaticCorrection", (void *)klovrp_GetAppChromaticCorrection},
@@ -10400,9 +10525,9 @@ static const char *const g_ovrp_result_ok[] = {
     // Tearing down a passthrough that never initialised trivially succeeds.
     "ovrp_ShutdownInsightPassthrough",
     // Unity OpenXR bridge (Meta XR SDK C#). Setters/notifications: success no-ops.
-    // HookGetInstanceProcAddr returns a pointer and has its own impl.
+    // HookGetInstanceProcAddr returns a pointer and has its own impl; so do
+    // OnInstanceCreate / OnInstanceDestroy (the init state, klovrp_GetInitialized).
     "ovrp_UnityOpenXR_SetClientVersion", "ovrp_UnityOpenXR_OnBeforeInstanceCreate",
-    "ovrp_UnityOpenXR_OnInstanceCreate", "ovrp_UnityOpenXR_OnInstanceDestroy",
     "ovrp_UnityOpenXR_OnSessionCreate", "ovrp_UnityOpenXR_OnAppSpaceChange",
     "ovrp_UnityOpenXR_OnSessionStateChange", "ovrp_UnityOpenXR_OnSessionBegin",
     "ovrp_UnityOpenXR_OnSessionEnd", "ovrp_UnityOpenXR_OnSessionExiting",

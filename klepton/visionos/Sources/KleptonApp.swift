@@ -225,6 +225,7 @@ enum Lifecycle {
 
     static func scenePhaseChanged(to phase: ScenePhase) {
         NSLog("[app] scene phase -> \(phase) at \(Date().formatted(.iso8601)) (immersive open: \(immersiveOpen))")
+        VQLog.log("[ui] fase de escena \(phase) (espacio inmersivo abierto: \(immersiveOpen))")
         lastPhase = phase
         // Metal refuses every command buffer while backgrounded: the guest's submit paths block
         // until the app is foreground again (kl_bg.c; thread-safe, never blocks this one).
@@ -263,7 +264,18 @@ enum Lifecycle {
         // turn a clean exit into a watchdog kill with a truncated log.
         VQSession.end()   // deliberate exit, not a jetsam: no "unclean close" report next launch
         fflush(nil)
-        flushEngineCaches { exit(0) }
+        // _exit, as immersiveEnded: this is also where the launcher brought back after a game is closed, with
+        // guest threads still running. A log copy immersiveEnded did not wait for finishes first (20 s at
+        // most, off the main thread) and outside `then`: the flush's 8 s limit must end in the exit itself,
+        // not in a `then` that is still waiting.
+        DispatchQueue.global(qos: .userInitiated).async {
+            VQLog.waitSessionEndSaved()
+            Lifecycle.flushEngineCaches {
+                UserDefaults.standard.synchronize()
+                fflush(nil)
+                _exit(0)
+            }
+        }
     }
 }
 
@@ -441,6 +453,10 @@ struct BootView: View {
     // VisionQuestPro: the boot log stays in the log file; the window shows a loading screen
     // unless the player asks to see it.
     @State private var showLog = false
+    /// boot() has been entered in this process (main-thread state; cleared only if configure fails).
+    /// Not @State: a second configure (environment, shader prewarm, guardian) must not run under the
+    /// live guest when the window, and with it this view, is made again.
+    nonisolated(unsafe) private static var bootEntered = false
     // The game-facing builds (hl1/hl2/portal) show a launcher: a chosen game
     // folder plus per-title options, and boot on a button rather than on their own.
     // Observe the active files object so the Start button tracks file readiness;
@@ -685,7 +701,10 @@ struct BootView: View {
         // numbers stop being comparable to the host's. Disabling the button
         // while running is not enough: the run *finishes*, and the obvious
         // next thing to do with a finished run is press Boot again.
-        guard !running, !finished else { return }
+        // bootEntered is the same guard for the process: a BootView the system makes anew (the
+        // launcher window reopened while the game runs) starts with fresh @State.
+        guard !running, !finished, !BootView.bootEntered else { return }
+        BootView.bootEntered = true
         running = true; log = ""
 
         // Off the main thread: the guest blocks — Unity's Baselib waits on
@@ -704,6 +723,7 @@ struct BootView: View {
                 // sitting in a SwiftUI label nobody was looking at.
                 NSLog("[app] configure failed: \(String(cString: kl_app_status()))")
                 DispatchQueue.main.async {
+                    BootView.bootEntered = false   // boot never ran: a retry stays possible, as before
                     status = String(cString: kl_app_status())
                     if isLauncher {
                         // A game build has its own file UI — don't scare the player

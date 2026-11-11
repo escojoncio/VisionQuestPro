@@ -7926,6 +7926,18 @@ static void klxr_endframe_layers_diag(const XrFrameEndInfo *info) {
     }
 }
 
+// The frame's one verdict, out of the three ways a guest asks: its own XrCompositionLayerPassthroughFB
+// (wins: its index and order are in the list), an OVRPassthroughLayer enqueued through Meta's OpenXR
+// bridge (kl_ovrp_bridge_passthrough) and the environment blend mode. KL-TEST xrptvote.
+// KL-TEST-BEGIN xrptvote
+static int klxr_pt_vote(int by_layer, int pt_idx, int eye_idx, int by_ovrp, int ovrp_id, int ovrp_underlay,
+                        int by_blend, int *layer, int *underlay) {
+    if (by_layer)     { *layer = pt_idx;  *underlay = eye_idx < 0 || pt_idx < eye_idx; }
+    else if (by_ovrp) { *layer = ovrp_id; *underlay = ovrp_underlay; }
+    else              { *layer = -1;      *underlay = 1; }
+    return by_layer || by_ovrp || by_blend;
+}
+// KL-TEST-END xrptvote
 static void klxr_passthrough_scan(const XrFrameEndInfo *info) {
     int pt_idx = -1, eye_idx = -1, unpremul = 0;
     klxr_endframe_layers_diag(info);
@@ -7942,8 +7954,10 @@ static void klxr_passthrough_scan(const XrFrameEndInfo *info) {
     int by_layer = pt_idx >= 0 && g_pt_running && g_pt_layer_live;
     int by_blend = info->environmentBlendMode == KLXR_BLEND_ALPHA_BLEND ||
                    info->environmentBlendMode == KLXR_BLEND_ADDITIVE;
-    kl_passthrough_note_frame(by_layer || by_blend, by_layer ? pt_idx : -1,
-                              by_layer ? (eye_idx < 0 || pt_idx < eye_idx) : 1, unpremul);
+    int ovrp_id = 0, ovrp_underlay = 0, layer, underlay;
+    int by_ovrp = kl_ovrp_bridge_passthrough(&ovrp_id, &ovrp_underlay);   // every frame: its idle count runs here
+    int present = klxr_pt_vote(by_layer, pt_idx, eye_idx, by_ovrp, ovrp_id, ovrp_underlay, by_blend, &layer, &underlay);
+    kl_passthrough_note_frame(present, layer, underlay, unpremul);
 }
 
 // ---------------------------------------------------------------- XR_FB_foveation (off)

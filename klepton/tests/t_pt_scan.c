@@ -1,8 +1,10 @@
 // Host test of kl_ovrp.c's KL-TEST ptscan block (cut out at build time): which submitted layers make
 // a frame a passthrough frame. Only a passthrough-shaped (OVRPlugin enum 7, 8, 10, 11) non-eye layer
-// counts, and only once InsightPassthrough is initialised.
+// counts, and only once InsightPassthrough is initialised. Also kl_openxr.c's KL-TEST xrptvote block: the one
+// passthrough verdict of an xrEndFrame, with the OVRPlugin layer of Unity's OpenXR bridge in it.
 #include <stdio.h>
 #include "ptscan.inc"
+#include "xrptvote.inc"
 
 static int fails;
 #define CHECK(c, what) do { if (!(c)) { printf("FAIL %s\n", what); fails++; } } while (0)
@@ -75,6 +77,59 @@ int main(void) {
     CHECK(klovrp_pt_enq_frame(&z, 0, 7, 1, &id, &under) == 1 && id == 7 && under == 1, "list underlay");
     CHECK(klovrp_pt_enq_frame(&z, 1, 7, 0, &id, &under) == 1 && under == 0, "list overlay");
     CHECK(klovrp_pt_enq_frame(&z, -1, 0, 0, &id, &under) == 0, "empty list, nothing enqueued -> off");
+
+    // Unity's OpenXR bridge: no ovrp_EndFrame4, so the enqueued OVRPassthroughLayer is read once per xrEndFrame
+    // (klovrp_pt_enq_bridge_frame) and voted there with the guest's own XR_FB_passthrough layer (klxr_pt_vote).
+    struct klovrp_pt_enq b = { 0 };
+    int layer, vunder;
+    klovrp_pt_enq_note(&b, 1, 0, 7, 4, 0x4);
+    // Without the bridge the EndFrame4 scan is the only reader: nothing is answered and the idle count does not run.
+    for (int i = 0; i < 2 * KLOVRP_PT_ENQ_IDLE; i++)
+        CHECK(klovrp_pt_enq_bridge_frame(&b, 0, &id, &under) == 0 && id == 0, "no bridge -> not xrEndFrame's");
+    CHECK(b.live && b.idle == 0, "no bridge -> the enqueued layer is left to the scan");
+    // Under the bridge it reaches the vote: ON, underlay, its own id.
+    CHECK(klovrp_pt_enq_bridge_frame(&b, 1, &id, &under) == 1 && id == 4 && under == 1, "bridge: enqueued shape 7 -> on");
+    CHECK(klxr_pt_vote(0, -1, 0, 1, id, under, 0, &layer, &vunder) == 1 && layer == 4 && vunder == 1, "vote: OVRPlugin layer alone -> on, underlay");
+    klovrp_pt_enq_note(&b, 1, 0, 7, 4, 0x5);
+    CHECK(klovrp_pt_enq_bridge_frame(&b, 1, &id, &under) == 1 && under == 0, "bridge: OnTop -> overlay");
+    CHECK(klxr_pt_vote(0, -1, 0, 1, id, under, 0, &layer, &vunder) == 1 && vunder == 0, "vote: OVRPlugin overlay");
+    // Not re-enqueued (paused / hidden): off after KLOVRP_PT_ENQ_IDLE xrEndFrames; its destroy: off at once.
+    int on = 1;
+    for (int i = 0; i < KLOVRP_PT_ENQ_IDLE; i++) on = klovrp_pt_enq_bridge_frame(&b, 1, &id, &under);
+    CHECK(on == 0 && klxr_pt_vote(0, -1, 0, on, id, under, 0, &layer, &vunder) == 0, "bridge: no re-enqueue -> off");
+    klovrp_pt_enq_note(&b, 1, 0, 8, 6, 0x4);
+    klovrp_pt_enq_destroy(&b, 6);
+    CHECK(klovrp_pt_enq_bridge_frame(&b, 1, &id, &under) == 0, "bridge: destroy -> off");
+    // The guest ALSO submits its own XrCompositionLayerPassthroughFB (index 0, before the eye layer 1): one verdict per
+    // frame, its own layer named every frame, whatever the OVRPlugin layer does meanwhile (enqueued once, then expiring).
+    klovrp_pt_enq_note(&b, 1, 0, 7, 4, 0x5);
+    for (int f = 0; f < 3 * KLOVRP_PT_ENQ_IDLE; f++) {
+        int o = klovrp_pt_enq_bridge_frame(&b, 1, &id, &under);
+        CHECK(klxr_pt_vote(1, 0, 1, o, id, under, 0, &layer, &vunder) == 1 && layer == 0 && vunder == 1,
+              "vote: own XR_FB layer + OVRPlugin layer -> on every frame, the own layer wins");
+    }
+    // The own layer paused (not live) while the OVRPlugin one is enqueued every frame: still on, no gap.
+    for (int f = 0; f < 3 * KLOVRP_PT_ENQ_IDLE; f++) {
+        klovrp_pt_enq_note(&b, 1, 0, 7, 4, 0x4);
+        int o = klovrp_pt_enq_bridge_frame(&b, 1, &id, &under);
+        CHECK(klxr_pt_vote(0, 0, 1, o, id, under, 0, &layer, &vunder) == 1 && layer == 4, "vote: own layer paused, OVRPlugin layer live -> on");
+    }
+    // Without an OVRPlugin layer the vote is what it was: the own layer (underlay by index), the blend mode, or off.
+    CHECK(klxr_pt_vote(1, 2, 1, 0, 0, 0, 0, &layer, &vunder) == 1 && layer == 2 && vunder == 0, "vote: own layer after the eye layer -> overlay");
+    CHECK(klxr_pt_vote(1, 0, -1, 0, 0, 0, 0, &layer, &vunder) == 1 && layer == 0 && vunder == 1, "vote: own layer, no eye layer -> underlay");
+    CHECK(klxr_pt_vote(0, -1, 0, 0, 0, 0, 1, &layer, &vunder) == 1 && layer == -1 && vunder == 1, "vote: blend mode alone");
+    CHECK(klxr_pt_vote(0, -1, 0, 0, 0, 0, 0, &layer, &vunder) == 0 && layer == -1, "vote: nothing -> off");
+
+    // Under the bridge a layer sent through the Enqueue ABI is never composited: every shape with a picture is refused
+    // (OVROverlay keeps the object's renderer in the scene), a passthrough shape (state only) is taken. No bridge: all taken.
+    for (unsigned i = 0; i < sizeof no / sizeof *no; i++) {
+        CHECK(klovrp_bridge_enq_refused(1, no[i]), "bridge: overlay shape refused");
+        CHECK(!klovrp_bridge_enq_refused(0, no[i]), "no bridge: overlay shape taken");
+    }
+    for (unsigned i = 0; i < sizeof pt / sizeof *pt; i++) {
+        CHECK(!klovrp_bridge_enq_refused(1, pt[i]), "bridge: passthrough shape taken");
+        CHECK(!klovrp_bridge_enq_refused(0, pt[i]), "no bridge: passthrough shape taken");
+    }
 
     printf(fails ? "FAILED (%d)\n" : "all ok\n", fails);
     return fails != 0;

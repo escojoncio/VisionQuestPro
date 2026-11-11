@@ -38,7 +38,11 @@ klepton_tests() {
   run kl_ovrp_eyesize_test -I. tests/kl_ovrp_eyesize_test.c -lm
   run t_ovrp_input -I.. -I../.. tests/t_ovrp_input.c -lm
   run t_ovrp_render -Wno-unused-function -I.. -I../.. tests/t_ovrp_render.c -lm
-  run t_ovrp_misc -Wno-unused-function -I.. -I../.. tests/t_ovrp_misc.c
+  awk '/KL-TEST-BEGIN ovrpinit/{p=1;next} /KL-TEST-END ovrpinit/{p=0} p' kl_ovrp.c > "$T/ovrpinit.inc"
+  awk '/KL-TEST-BEGIN ovrpbridge/{p=1;next} /KL-TEST-END ovrpbridge/{p=0} p' kl_ovrp.c > "$T/ovrpbridge.inc"
+  awk '/KL-TEST-BEGIN ptscan/{p=1;next} /KL-TEST-END ptscan/{p=0} p' kl_ovrp.c > "$T/ptscan.inc"
+  awk '/^    [{]"ovrp_(GetInitialized|Initialize7|Shutdown2?|GetNativeXrApiType|UnityOpenXR_OnInstance(Create|Destroy))", /' kl_ovrp.c > "$T/ovrpinit_tab.inc"
+  run t_ovrp_misc -Wno-unused-function -I.. -I../.. -I"$T" tests/t_ovrp_misc.c
   run spatial_test -I.. -I../jni -I../libc -I../gfx -I. -I../media -I../guest -I../diag \
       tests/spatial_test.c kl_spatial.c kl_guardian.c kl_ovrp_spatial.c -lm -lpthread
   run t_room_build -I.. -I../jni -I../libc -I../gfx -I. -I../media -I../guest -I../diag tests/t_room_build.c kl_guardian.c -lm -lpthread
@@ -99,6 +103,7 @@ klepton_tests() {
   awk '/KL-TEST-BEGIN aswsize/{p=1;next} /KL-TEST-END aswsize/{p=0} p' runtime/xr/kl_ovrp.c > "$T/newt/aswsize.inc"
   run t_asw_size -Wno-unused-function -I"$T/newt" tests/t_asw_size.c
   awk '/KL-TEST-BEGIN ptscan/{p=1;next} /KL-TEST-END ptscan/{p=0} p' runtime/xr/kl_ovrp.c > "$T/newt/ptscan.inc"
+  awk '/KL-TEST-BEGIN xrptvote/{p=1;next} /KL-TEST-END xrptvote/{p=0} p' runtime/xr/kl_openxr.c > "$T/newt/xrptvote.inc"
   run t_pt_scan -Wno-unused-function -I"$T/newt" tests/t_pt_scan.c
   awk '/KL-TEST-BEGIN bslash/{p=1;next} /KL-TEST-END bslash/{p=0} p' runtime/libc/kl_libc.c > "$T/newt/bslash.inc"
   run t_bslash -Wno-unused-function -I"$T/newt" tests/t_bslash.c

@@ -259,6 +259,14 @@ struct VQLauncherView: View {
                         }
                         .padding(24)
                     }
+                    // Touch diagnostics (buttons that need several taps): where every touch ended and what the
+                    // scroll view made of it. Simultaneous and log-only: the buttons and the scroll keep their gestures.
+                    .simultaneousGesture(SpatialEventGesture().onEnded { events in
+                        for e in events {
+                            VQLog.log("[ui] toque kind=\(e.kind) fase=\(e.phase) loc=" + String(format: "%.0f,%.0f", e.location.x, e.location.y))
+                        }
+                    })
+                    .onScrollPhaseChange { old, new in VQLog.log("[ui] scroll \(old) -> \(new)") }
                 }
             }
             .safeAreaInset(edge: .bottom) {
@@ -598,6 +606,8 @@ struct VQLoadingView: View {
 /// so playing again needs the app to start again.
 struct VQEndedView: View {
     @ObservedObject private var model = VQModel.shared
+    /// «Cerrar app» was tapped: the exit is on its way (log copy, cache flush).
+    @State private var closing = false
 
     var body: some View {
         VStack(spacing: 24) {
@@ -615,12 +625,25 @@ struct VQEndedView: View {
                 ShareLink(items: model.shareable) { Label(VQL("Compartir registros", "Share logs"), systemImage: "square.and.arrow.up") }
                     .buttonStyle(.bordered)
                 Button {
+                    guard !closing else { return }   // the exit below takes a while: one block, not one per tap
+                    closing = true
                     VQLog.log("Cerrar app tras la partida")
                     VQSession.end()
-                    fflush(nil)
-                    exit(0)
+                    // Not exit(): it runs C++ static destructors (std::mutex globals) while guest threads
+                    // still run and lock them -> "mutex lock failed" abort (as Lifecycle.immersiveEnded).
+                    // immersiveEnded brought this window back without waiting for the log copy or the
+                    // cache flush it started: both finish first (off the main thread), then the _exit.
+                    DispatchQueue.global(qos: .userInitiated).async {
+                        VQLog.waitSessionEndSaved()
+                        Lifecycle.flushEngineCaches {
+                            UserDefaults.standard.synchronize()
+                            fflush(nil)
+                            _exit(0)
+                        }
+                    }
                 } label: { Label(VQL("Cerrar app", "Close app"), systemImage: "xmark.circle") }
                     .buttonStyle(.borderedProminent)
+                    .disabled(closing)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)

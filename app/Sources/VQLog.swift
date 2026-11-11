@@ -513,6 +513,7 @@ enum VQLog {
         fflush(nil)
         let label = "fin-" + (game.map { String($0.prefix(24)).replacingOccurrences(of: " ", with: "_") } ?? "juego")
         let done = DispatchSemaphore(value: 0)
+        sessionEndSaves.enter()
         DispatchQueue.global(qos: .userInitiated).async {
             if saveToQuest(label) != nil,
                let date = (try? FileManager.default.attributesOfItem(atPath: bootLog.path))?[.modificationDate] as? Date {
@@ -520,9 +521,16 @@ enum VQLog {
                 UserDefaults.standard.synchronize()
             }
             done.signal()
+            sessionEndSaves.leave()
         }
         if wait { _ = done.wait(timeout: .now() + 20) }
     }
+
+    private static let sessionEndSaves = DispatchGroup()
+
+    /// Blocks until every saveSessionEnd still copying (one started with `wait: false`) is done, at
+    /// most 20 s — for a later path that _exit()s. Returns at once when there is none.
+    static func waitSessionEndSaved() { _ = sessionEndSaves.wait(timeout: .now() + 20) }
 
     /// At launch: the previous session's logs (guest log, crash report) go to QUEST/Registros once,
     /// so a session that ended in a crash can be read from the Files app.

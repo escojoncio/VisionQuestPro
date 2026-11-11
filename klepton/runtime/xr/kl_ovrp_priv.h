@@ -123,7 +123,8 @@ void kl_ovrp_sp_note_poll(int32_t type);
 // without a table entry of its own: returns 0 / -1004 after kl_ovrp_hit(name).
 ovrpResult kl_ovrp_ok(const char *name);
 ovrpResult kl_ovrp_unsupported(const char *name);
-// ovrp_Initialize* has run (and ovrp_Shutdown has not).
+// ovrp_Initialize* or ovrp_UnityOpenXR_OnInstanceCreate has run (and no ovrp_Shutdown* /
+// OnInstanceDestroy since).
 int  kl_ovrp_is_initialized(void);
 
 // Poses exactly as the guest is told them: the pinned per-frame head/hand, with

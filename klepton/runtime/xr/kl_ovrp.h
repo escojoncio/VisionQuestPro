@@ -493,6 +493,13 @@ void kl_ovrp_frame_end_external(int stage, const float *pose7, const float *tan8
 // which eyes were named, and nothing downstream can recover either.
 void kl_ovrp_overlays_external(const kl_ovrp_overlay *v, int n);
 
+// The other thing `xrEndFrame` needs from the OVRPlugin half, for a Unity guest on Meta's OpenXR
+// bridge: its OVRPassthroughLayer arrives through ovrp_EnqueueSubmitLayer2, not in the layer list.
+// Call once per xrEndFrame. Returns 1 while that layer is live (re-enqueued within the last 3 frames,
+// not destroyed), with its id and whether it is an underlay; 0 (and zeros) otherwise, and always
+// without the bridge. The caller folds it into its one kl_passthrough_note_frame.
+int kl_ovrp_bridge_passthrough(int *layer_id, int *underlay);
+
 // ---------------------------------------------------------------------------
 // The PROJECTION layers — the eye picture, once per layer instead of flattened
 //

@@ -588,6 +588,9 @@ struct VQCoverView: View {
         } }
         .frame(maxWidth: .infinity)
         .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+        // clipShape clips the drawing, not the hit-testing: a filled picture overflows the 16:9 box and
+        // would take the taps meant for the buttons of the neighbouring card. Nothing here is tappable.
+        .allowsHitTesting(false)
         .task(id: game.id) { await load() }
         .onReceive(NotificationCenter.default.publisher(for: .vqCoverUpdated)) { n in
             if n.object as? String == game.id { Task { await load() } }
