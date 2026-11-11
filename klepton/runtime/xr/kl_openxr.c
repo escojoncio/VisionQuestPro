@@ -3895,6 +3895,19 @@ static XrResult klxr_CreateReferenceSpace(void *session,
     return KLXR_SUCCESS;
 }
 
+int kl_openxr_app_space_origin(uint64_t space) {
+    // Range first: the argument is a guest's number, not a pointer klxr_space_of may dereference.
+    const klxr_space *sp = (const klxr_space *)(uintptr_t)space;
+    if (sp < g_spaces || sp >= g_spaces + KLXR_SPACE_MAX || (space - (uintptr_t)g_spaces) % sizeof *sp) return -1;
+    if (sp->magic != KLXR_MAGIC_SPACE) return -1;
+    switch (sp->reference_type) {
+        case KLXR_REF_SPACE_LOCAL:       return 0;
+        case KLXR_REF_SPACE_LOCAL_FLOOR: return 1;
+        case KLXR_REF_SPACE_STAGE:       return 2;
+        default:                         return -1;
+    }
+}
+
 static XrResult klxr_DestroySpace(void *space) {
     klxr_space *sp = klxr_space_of(space);
     if (!sp) KLXR_RET(KLXR_ERROR_HANDLE_INVALID);
@@ -9122,6 +9135,37 @@ int kl_openxr_input_selftest(FILE *f) {
         ok &= klxr_st_ok(f, "Valve: a source path has a display name",
                          lr == KLXR_SUCCESS &&
                          strstr(nb, "Right Controller") != NULL);
+    }
+
+    // kl_openxr_app_space_origin (ovrp_UnityOpenXR_OnAppSpaceChange*): the origin of a real app space,
+    // and -1 for anything that is not one (the argument is a guest's number, not a pointer).
+    {
+        static const int types[4] = { KLXR_REF_SPACE_LOCAL, KLXR_REF_SPACE_LOCAL_FLOOR,
+                                      KLXR_REF_SPACE_STAGE, KLXR_REF_SPACE_VIEW };
+        static const int want[4] = { 0, 1, 2, -1 };
+        void *rs[4] = { NULL, NULL, NULL, NULL };
+        int got_ok = 1;
+        for (int i = 0; i < 4; i++) {
+            XrReferenceSpaceCreateInfo ci;
+            memset(&ci, 0, sizeof ci);
+            ci.type = XR_TYPE_REFERENCE_SPACE_CREATE_INFO;
+            ci.referenceSpaceType = types[i];
+            ci.poseInReferenceSpace.orientation = (XrQuaternionf){0, 0, 0, 1};
+            got_ok &= klxr_CreateReferenceSpace(&g_session, &ci, &rs[i]) == KLXR_SUCCESS && rs[i] &&
+                      kl_openxr_app_space_origin((uint64_t)(uintptr_t)rs[i]) == want[i];
+        }
+        ok &= klxr_st_ok(f, "app space origin: LOCAL 0, LOCAL_FLOOR 1, STAGE 2, VIEW none", got_ok);
+        int stack_obj = 0;
+        ok &= klxr_st_ok(f, "app space origin: null, outside the pool, misaligned and a number are none",
+                         kl_openxr_app_space_origin(0) == -1 &&
+                         kl_openxr_app_space_origin((uint64_t)(uintptr_t)&stack_obj) == -1 &&
+                         kl_openxr_app_space_origin((uint64_t)(uintptr_t)(g_spaces + KLXR_SPACE_MAX)) == -1 &&
+                         kl_openxr_app_space_origin((uint64_t)(uintptr_t)g_spaces - 1) == -1 &&
+                         kl_openxr_app_space_origin((uint64_t)(uintptr_t)rs[0] + 1) == -1 &&
+                         kl_openxr_app_space_origin(0x1000) == -1);
+        for (int i = 0; i < 4; i++) if (rs[i]) klxr_DestroySpace(rs[i]);
+        ok &= klxr_st_ok(f, "app space origin: a destroyed space is none",
+                         rs[0] && kl_openxr_app_space_origin((uint64_t)(uintptr_t)rs[0]) == -1);
     }
 
     memset(&g_session, 0, sizeof g_session);

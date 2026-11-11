@@ -17,6 +17,7 @@
 #include "klepton.h"
 #include "kl_ovrp.h"
 #include "kl_ovrp_priv.h"   // batch seam: registration, events, pose helpers
+#include "kl_openxr.h"        // kl_openxr_app_space_origin: ovrp_UnityOpenXR_OnAppSpaceChange*
 #include "kl_evgate.h"      // when a queued event may reach the guest
 #include "kl_ovrp_eyesize.h"   // the app's resolution slider: target size, desc compensation
 #include "kl_guardian.h"        // floor / play space the user confirmed
@@ -474,6 +475,75 @@ static int g_ovrp_initialized;
 // frame (klovrp_Update2: xrWaitFrame does both).
 static int g_ovrp_openxr_bridge;
 static int klovrp_bridge(void) { return __atomic_load_n(&g_ovrp_openxr_bridge, __ATOMIC_ACQUIRE); }
+// The ovrpTrackingOrigin ovrp_GetTrackingOriginType answers under the bridge (-1 until Unity's OpenXR
+// plugin has handed ovrp_UnityOpenXR_OnAppSpaceChange* an app space). The real plugin answers it from
+// the OpenXR runtime's own state (1.103: ovrp_GetTrackingOriginType2 is a virtual call), and OVRManager.Update
+// compares it every frame with the origin it wants (_trackingOriginType, unreadable from here): a
+// different answer makes it set the origin again (xrCreateReferenceSpace + OnAppSpaceChange2, ~2 per
+// frame). It is a guess that learns: LOCAL is Eye (0); LOCAL_FLOOR and STAGE are the same here, so which
+// of 1 / 2 the game wants is found by the loop itself (klovrp_bridge_learn: app-space changes on
+// consecutive probes while the guess is a floor one swap 1 <-> 2; the right value ends the changes).
+// An explicit ovrp_SetTrackingOriginType* from the guest (g_bridge_explicit) wins over the guess.
+static int g_bridge_origin = -1;
+static int g_bridge_explicit = -1;
+static unsigned g_bridge_probes;      // getter calls
+static unsigned g_bridge_prev_probe;  // g_bridge_probes at the previous app-space change
+static unsigned g_bridge_nchg;        // app-space changes seen
+static unsigned g_bridge_streak;      // consecutive changes <= 2 probes apart
+static unsigned g_bridge_flips;       // 1 <-> 2 swaps made (bounded)
+#define KLOVRP_BRIDGE_MAX_FLIPS 4
+static int klovrp_bridge_ld(const int *p) { return __atomic_load_n(p, __ATOMIC_RELAXED); }
+static unsigned klovrp_bridge_ldu(const unsigned *p) { return __atomic_load_n(p, __ATOMIC_RELAXED); }
+static void klovrp_bridge_reset(void) {
+    __atomic_store_n(&g_bridge_origin, -1, __ATOMIC_RELAXED);
+    __atomic_store_n(&g_bridge_explicit, -1, __ATOMIC_RELAXED);
+    __atomic_store_n(&g_bridge_probes, 0, __ATOMIC_RELAXED);
+    __atomic_store_n(&g_bridge_prev_probe, 0, __ATOMIC_RELAXED);
+    __atomic_store_n(&g_bridge_nchg, 0, __ATOMIC_RELAXED);
+    __atomic_store_n(&g_bridge_streak, 0, __ATOMIC_RELAXED);
+    __atomic_store_n(&g_bridge_flips, 0, __ATOMIC_RELAXED);
+}
+// One getter call; a bounded summary every 600.
+static void klovrp_bridge_probe(void) {
+    unsigned k = __atomic_add_fetch(&g_bridge_probes, 1, __ATOMIC_RELAXED);
+    if (k % 600 == 0)
+        fprintf(stderr, "  [ovrp] bridge origin probes=%u guess=%d explicit=%d changes=%u flips=%u\n", k,
+                klovrp_bridge_ld(&g_bridge_origin), klovrp_bridge_ld(&g_bridge_explicit),
+                klovrp_bridge_ldu(&g_bridge_nchg), klovrp_bridge_ldu(&g_bridge_flips));
+}
+// The guest itself set the origin (ovrp_SetTrackingOriginType*): that value is the answer.
+static void klovrp_bridge_explicit(int origin) {
+    if (klovrp_bridge()) __atomic_store_n(&g_bridge_explicit, origin, __ATOMIC_RELAXED);
+}
+// An app space of origin `o` (0 eye, 1 floor, 2 stage) arrived.
+static void klovrp_bridge_learn(int o) {
+    unsigned probes = klovrp_bridge_ldu(&g_bridge_probes);
+    unsigned since = probes - klovrp_bridge_ldu(&g_bridge_prev_probe);
+    unsigned n = __atomic_fetch_add(&g_bridge_nchg, 1, __ATOMIC_RELAXED);
+    __atomic_store_n(&g_bridge_prev_probe, probes, __ATOMIC_RELAXED);
+    int g = klovrp_bridge_ld(&g_bridge_origin), ng = g;
+    const char *why = NULL;
+    if (g < 0) {
+        ng = o; why = "first app space";
+        __atomic_store_n(&g_bridge_streak, 0, __ATOMIC_RELAXED);
+    } else if ((o == 0) != (g == 0)) {          // Eye <-> floor: a real change of class
+        ng = o; why = o == 0 ? "app space LOCAL" : "app space floor class";
+        __atomic_store_n(&g_bridge_streak, 0, __ATOMIC_RELAXED);
+    } else {                                    // same class: only a loop moves the guess
+        unsigned st = (n > 0 && since <= 2) ? klovrp_bridge_ldu(&g_bridge_streak) + 1 : 0;
+        if (st >= 2 && g != 0 && klovrp_bridge_ld(&g_bridge_explicit) < 0 &&
+            klovrp_bridge_ldu(&g_bridge_flips) < KLOVRP_BRIDGE_MAX_FLIPS) {
+            ng = 3 - g; why = "app space changing every probe";
+            __atomic_fetch_add(&g_bridge_flips, 1, __ATOMIC_RELAXED);
+            st = 0;
+        }
+        __atomic_store_n(&g_bridge_streak, st, __ATOMIC_RELAXED);
+    }
+    if (ng != g) {
+        __atomic_store_n(&g_bridge_origin, ng, __ATOMIC_RELAXED);
+        fprintf(stderr, "  [ovrp] bridge origin guess=%d (why=%s)\n", ng, why);
+    }
+}
 
 static uint64_t klovrp_GetInitialized(void) {
     ovrp_hit("ovrp_GetInitialized");
@@ -490,6 +560,7 @@ static uint64_t klovrp_UnityOpenXR_OnInstanceCreate(uint64_t xr_instance) {
     ovrp_hit("ovrp_UnityOpenXR_OnInstanceCreate");
     if (!xr_instance) return OVRP_FAIL_INVALID_PARAM;
     __atomic_store_n(&g_ovrp_openxr_bridge, 1, __ATOMIC_RELEASE);
+    klovrp_bridge_reset();
     g_ovrp_initialized = 1;
     return OVRP_SUCCESS;
 }
@@ -501,6 +572,31 @@ static uint64_t klovrp_UnityOpenXR_OnInstanceDestroy(uint64_t xr_instance) {
     // space and frame latch of a plain OVRPlugin guest).
     g_ovrp_initialized = 0;
     __atomic_store_n(&g_ovrp_openxr_bridge, 0, __ATOMIC_RELEASE);
+    klovrp_bridge_reset();
+    return OVRP_SUCCESS;
+}
+// The app space Unity created (xrCreateReferenceSpace LOCAL / LOCAL_FLOOR / STAGE), as the XrSpace
+// handle (the log's "OnAppSpaceChange: <ulong>" is this argument; 1.103 passes x0 on to its runtime).
+// A space that is not one of those three (kl_openxr_app_space_origin < 0) changes nothing.
+static void klovrp_bridge_app_space(uint64_t xr_space) {
+    if (!klovrp_bridge()) return;
+    int o = kl_openxr_app_space_origin(xr_space);
+    // Diagnostic (bounded): one call per frame here means OVRManager still re-sets the origin every frame.
+    static unsigned n;
+    unsigned k = __atomic_add_fetch(&n, 1, __ATOMIC_RELAXED);
+    if (k <= 6 || k % 600 == 0)
+        fprintf(stderr, "  [ovrp] bridge app space #%u 0x%llx -> origin %d (0 eye, 1 floor, 2 stage, -1 not one; was %d)\n",
+                k, (unsigned long long)xr_space, o, __atomic_load_n(&g_bridge_origin, __ATOMIC_RELAXED));
+    if (o >= 0) klovrp_bridge_learn(o);
+}
+static uint64_t klovrp_UnityOpenXR_OnAppSpaceChange(uint64_t xr_space) {
+    ovrp_hit("ovrp_UnityOpenXR_OnAppSpaceChange");
+    klovrp_bridge_app_space(xr_space);
+    return OVRP_SUCCESS;
+}
+static uint64_t klovrp_UnityOpenXR_OnAppSpaceChange2(uint64_t xr_space) {
+    ovrp_hit("ovrp_UnityOpenXR_OnAppSpaceChange2");
+    klovrp_bridge_app_space(xr_space);
     return OVRP_SUCCESS;
 }
 
@@ -2195,6 +2291,7 @@ static uint64_t klovrp_SetTrackingOriginType(int origin) {
     ovrp_log_arg("ovrp_SetTrackingOriginType", origin, __builtin_return_address(0));
     int old = g_tracking_origin;
     g_tracking_origin = origin;
+    klovrp_bridge_explicit(origin);
     if (old != origin) klovrp_origin_note("ovrp_SetTrackingOriginType");
     return OVRP_TRUE;                       // ovrpBool
 }
@@ -2203,6 +2300,7 @@ static uint64_t klovrp_SetTrackingOriginType2(int origin) {
     ovrp_log_arg("ovrp_SetTrackingOriginType2", origin, __builtin_return_address(0));
     int old = g_tracking_origin;
     g_tracking_origin = origin;
+    klovrp_bridge_explicit(origin);
     if (old != origin) klovrp_origin_note("ovrp_SetTrackingOriginType2");
     return OVRP_SUCCESS;                    // ovrpResult
 }
@@ -2357,16 +2455,28 @@ static uint64_t klovrp_PollEvent(void *buf) {
     return OVRP_SUCCESS;
 }
 
+// KL-TEST-BEGIN ovrpbridge
+// Under the OpenXR bridge: the guest's own ovrp_SetTrackingOriginType* if it made one, else the learned
+// guess (klovrp_bridge_learn) once Unity has created an app space.
+static int klovrp_origin_now(void) {
+    if (!klovrp_bridge()) return g_tracking_origin;
+    klovrp_bridge_probe();
+    int e = klovrp_bridge_ld(&g_bridge_explicit);
+    if (e >= 0) return e;
+    int b = klovrp_bridge_ld(&g_bridge_origin);
+    return b >= 0 ? b : g_tracking_origin;
+}
 static uint64_t klovrp_GetTrackingOriginType(void) {
     ovrp_hit("ovrp_GetTrackingOriginType");
-    return (uint64_t)(uint32_t)g_tracking_origin;
+    return (uint64_t)(uint32_t)klovrp_origin_now();
 }
 static uint64_t klovrp_GetTrackingOriginType2(int *out) {
     ovrp_hit("ovrp_GetTrackingOriginType2");
     if (!out) return OVRP_FAIL_INVALID_PARAM;
-    *out = g_tracking_origin;
+    *out = klovrp_origin_now();
     return OVRP_SUCCESS;
 }
+// KL-TEST-END ovrpbridge
 
 // The pose of a tracking origin relative to the current tracking transform.
 // Real signature: (ovrpPosef* out, ovrpTrackingOrigin origin). Nothing has been
@@ -5591,6 +5701,14 @@ static void fill_controller_state(int mask, void *out, int version) {
 static uint32_t g_ctrl_conn = 0xffffffffu;   // the last ConnectedControllers handed to the game (menu diagnosis)
 static void ctrl_state_log(const char *name, int mask, void *out) {
     __atomic_store_n(&g_ctrl_conn, ((const uint32_t *)out)[0], __ATOMIC_RELAXED);
+    {   // Diagnostic (bounded): the first presses the guest's OVRInput can see, whatever the poll count.
+        const uint32_t *pw = (const uint32_t *)out; const float *pf = (const float *)out;
+        static unsigned seen;
+        unsigned k;
+        if ((pw[1] || pf[4] > 0.5f || pf[5] > 0.5f) && (k = __atomic_add_fetch(&seen, 1, __ATOMIC_RELAXED)) <= 6)
+            fprintf(stderr, "  [ctrl] press seen by OVRInput #%u %s(mask=0x%x) Connected=0x%x Buttons=0x%x LIdxTrig=%.2f RIdxTrig=%.2f\n",
+                    k, name, (unsigned)mask, pw[0], pw[1], (double)pf[4], (double)pf[5]);
+    }
     static int verbose = -1;
     if (verbose < 0) verbose = (int)kl_env_uint("KL_OVRP_VERBOSE", 0);
     static unsigned total;
@@ -10302,6 +10420,8 @@ static const struct { const char *name; void *fn; } g_ovrp_impl[] = {
     {"ovrp_GetDisplayAdapterId2", (void *)klovrp_GetDisplayAdapterId2},
     {"ovrp_Initialize7",   (void *)klovrp_Initialize7},
     {"ovrp_GetInitialized", (void *)klovrp_GetInitialized},
+    {"ovrp_UnityOpenXR_OnAppSpaceChange", (void *)klovrp_UnityOpenXR_OnAppSpaceChange},
+    {"ovrp_UnityOpenXR_OnAppSpaceChange2", (void *)klovrp_UnityOpenXR_OnAppSpaceChange2},
     {"ovrp_UnityOpenXR_OnInstanceCreate", (void *)klovrp_UnityOpenXR_OnInstanceCreate},
     {"ovrp_UnityOpenXR_OnInstanceDestroy", (void *)klovrp_UnityOpenXR_OnInstanceDestroy},
     {"ovrp_Shutdown",      (void *)klovrp_Shutdown},
@@ -10528,7 +10648,7 @@ static const char *const g_ovrp_result_ok[] = {
     // HookGetInstanceProcAddr returns a pointer and has its own impl; so do
     // OnInstanceCreate / OnInstanceDestroy (the init state, klovrp_GetInitialized).
     "ovrp_UnityOpenXR_SetClientVersion", "ovrp_UnityOpenXR_OnBeforeInstanceCreate",
-    "ovrp_UnityOpenXR_OnSessionCreate", "ovrp_UnityOpenXR_OnAppSpaceChange",
+    "ovrp_UnityOpenXR_OnSessionCreate",
     "ovrp_UnityOpenXR_OnSessionStateChange", "ovrp_UnityOpenXR_OnSessionBegin",
     "ovrp_UnityOpenXR_OnSessionEnd", "ovrp_UnityOpenXR_OnSessionExiting",
     "ovrp_UnityOpenXR_OnSessionDestroy",

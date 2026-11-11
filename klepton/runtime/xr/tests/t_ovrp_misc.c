@@ -5,7 +5,7 @@
 // awk '/KL-TEST-BEGIN ovrpinit/{p=1;next} /KL-TEST-END ovrpinit/{p=0} p' kl_ovrp.c > /tmp/ovrpinit.inc
 // awk '/KL-TEST-BEGIN ovrpbridge/{p=1;next} /KL-TEST-END ovrpbridge/{p=0} p' kl_ovrp.c > /tmp/ovrpbridge.inc
 // awk '/KL-TEST-BEGIN ptscan/{p=1;next} /KL-TEST-END ptscan/{p=0} p' kl_ovrp.c > /tmp/ptscan.inc
-// awk '/^    [{]"ovrp_(GetInitialized|Initialize7|Shutdown2?|GetNativeXrApiType|UnityOpenXR_OnInstance(Create|Destroy))", /' kl_ovrp.c > /tmp/ovrpinit_tab.inc
+// awk '/^    [{]"ovrp_(GetInitialized|Initialize7|Shutdown2?|GetNativeXrApiType|UnityOpenXR_(OnAppSpaceChange2?|OnInstance(Create|Destroy)))", /' kl_ovrp.c > /tmp/ovrpinit_tab.inc
 // clang -I.. -I../.. -I/tmp -o /tmp/t_ovrp_misc tests/t_ovrp_misc.c && /tmp/t_ovrp_misc
 #include "../kl_ovrp_misc.c"
 #include <assert.h>
@@ -17,6 +17,9 @@
 #define OVRP_TRUE    1
 #define OVRP_FAIL_INVALID_PARAM (-1001)
 static void ovrp_hit(const char *n) { (void)n; }
+// kl_openxr.c: the tracking origin (0 eye, 1 floor, 2 stage; -1 none) of the reference space `s` names.
+static int g_xr_origin = -1;
+int kl_openxr_app_space_origin(uint64_t s) { (void)s; return g_xr_origin; }
 #include "ovrpinit.inc"
 // What the ovrpbridge blocks read from the rest of kl_ovrp.c: the OVRPlugin guest origin (EyeLevel:
 // the eye height) and the measured eye height.
@@ -171,6 +174,111 @@ int main(void) {
     assert(klovrp_EnqueueSetupLayer2(&surf, 0, &lid) == 0 && lid == 43 && n_setup == 3);
     assert(destroyed(1) == 0);
     assert(klovrp_EnqueueSetupLayer2(&equirect, 0, &lid) == 0 && lid == 44 && n_setup == 4);
+
+    // ovrp_GetTrackingOriginType under the bridge answers the origin of the app space Unity's OpenXR
+    // plugin created (OnAppSpaceChange*), as the real plugin's does: OVRManager sets its origin through
+    // Unity, and while the getter said EyeLevel it set it again every frame (a new XrSpace and a recenter
+    // event per frame: 1121 xrCreateReferenceSpace in 1117 frames).
+    uint64_t (*appspace)(uint64_t) = (uint64_t (*)(uint64_t))find_impl("ovrp_UnityOpenXR_OnAppSpaceChange2");
+    uint64_t (*appspace1)(uint64_t) = (uint64_t (*)(uint64_t))find_impl("ovrp_UnityOpenXR_OnAppSpaceChange");
+    assert(appspace && appspace1 && "own implementations in g_ovrp_impl");
+    int org = -1;
+    g_tracking_origin = 0;
+    assert(created(1) == 0);
+    assert(klovrp_GetTrackingOriginType() == 0 && klovrp_GetTrackingOriginType2(&org) == 0 && org == 0);   // no app space yet
+    g_xr_origin = 1;                                                  // Unity: LOCAL_FLOOR
+    assert(appspace(0x1000) == 0);
+    assert(klovrp_GetTrackingOriginType() == 1 && klovrp_GetTrackingOriginType2(&org) == 0 && org == 1);
+    g_xr_origin = 0;                                                  // ...then a LOCAL one
+    assert(appspace1(0x1008) == 0 && klovrp_GetTrackingOriginType() == 0);
+    g_xr_origin = 2;
+    assert(appspace(0x1010) == 0 && klovrp_GetTrackingOriginType() == 2);
+    g_xr_origin = -1;                                                 // not a tracking-origin space: kept
+    assert(appspace(0x1018) == 0 && klovrp_GetTrackingOriginType() == 2);
+    assert(klovrp_GetTrackingOriginType2(NULL) == OVRP_FAIL_INVALID_PARAM);
+    // The bridge's answer is the bridge's: gone with the XR instance, and a plugin guest never had it.
+    assert(destroyed(1) == 0);
+    g_tracking_origin = 1;
+    assert(klovrp_GetTrackingOriginType() == 1);                      // the origin the guest itself set
+    g_xr_origin = 2;
+    assert(appspace(0x1020) == 0 && klovrp_GetTrackingOriginType() == 1);   // no bridge: not recorded
+    assert(created(1) == 0 && klovrp_GetTrackingOriginType() == 1);   // a stale one from a previous instance is not kept
+    assert(destroyed(1) == 0);
+
+    // The answer learns (OVRManager.Update sets its wanted origin again every frame the getter differs, and
+    // the wanted one is unreadable from here: LOCAL_FLOOR and STAGE are the same space to us).
+    // A frame of OVRManager.Update: probe; on a mismatch Unity creates the app space twice (2 changes/frame).
+    #define FRAME(want, unity_o, chg) do { int v_ = (int)klovrp_GetTrackingOriginType(); \
+        if (v_ != (want)) { g_xr_origin = (unity_o); appspace(0x2000); appspace(0x2008); (chg) += 2; } } while (0)
+    int chg;
+    g_tracking_origin = 0;                                            // the answer before any app space exists
+    // Game wants STAGE, Unity builds LOCAL_FLOOR: first guess 1 is wrong, the loop swaps it to 2 and ends.
+    assert(created(1) == 0);
+    chg = 0;
+    for (int f = 0; f < 6; f++) FRAME(2, 1, chg);
+    assert(klovrp_GetTrackingOriginType() == 2 && g_bridge_flips == 1);
+    int chg_at = chg;
+    for (int f = 0; f < 50; f++) FRAME(2, 1, chg);
+    assert(chg == chg_at && klovrp_GetTrackingOriginType() == 2);     // stable: no more changes
+    // ...and the other way round: wants FLOOR, Unity builds STAGE.
+    assert(destroyed(1) == 0 && created(1) == 0);
+    chg = 0;
+    for (int f = 0; f < 6; f++) FRAME(1, 2, chg);
+    assert(klovrp_GetTrackingOriginType() == 1 && g_bridge_flips == 1);
+    chg_at = chg;
+    for (int f = 0; f < 50; f++) FRAME(1, 2, chg);
+    assert(chg == chg_at);
+    // A right first guess never flips; isolated changes (many probes apart) leave it alone, even an
+    // app space of the other floor type.
+    assert(destroyed(1) == 0 && created(1) == 0);
+    chg = 0;
+    for (int f = 0; f < 4; f++) FRAME(1, 1, chg);
+    assert(klovrp_GetTrackingOriginType() == 1 && g_bridge_flips == 0);
+    for (int i = 0; i < 10; i++) {
+        for (int j = 0; j < 5; j++) (void)klovrp_GetTrackingOriginType();
+        g_xr_origin = i & 1 ? 1 : 2;
+        assert(appspace(0x3000) == 0 && klovrp_GetTrackingOriginType() == 1 && g_bridge_flips == 0);
+    }
+    // Two close changes are not yet a loop (a pair per legit recreate); the third in a row is.
+    g_xr_origin = 2;
+    for (int j = 0; j < 5; j++) (void)klovrp_GetTrackingOriginType();
+    appspace(0x3008); appspace(0x3008);
+    assert(klovrp_GetTrackingOriginType() == 1 && g_bridge_flips == 0);
+    appspace(0x3008);
+    assert(klovrp_GetTrackingOriginType() == 2 && g_bridge_flips == 1);
+    // Eye <-> floor is a change of class: followed at once, nothing swapped.
+    g_xr_origin = 0; assert(appspace(0x3010) == 0 && klovrp_GetTrackingOriginType() == 0);
+    g_xr_origin = 2; assert(appspace(0x3018) == 0 && klovrp_GetTrackingOriginType() == 2);
+    g_xr_origin = 0; assert(appspace(0x3020) == 0 && klovrp_GetTrackingOriginType() == 0);
+    // Eye class never swaps, however often it changes.
+    unsigned flips0 = g_bridge_flips;
+    for (int f = 0; f < 20; f++) { (void)klovrp_GetTrackingOriginType(); appspace(0x3028); appspace(0x3030); }
+    assert(klovrp_GetTrackingOriginType() == 0 && g_bridge_flips == flips0);
+    // A game that wants what no swap can give (3: never equal): bounded, then the last guess is fixed.
+    assert(destroyed(1) == 0 && created(1) == 0);
+    chg = 0;
+    for (int f = 0; f < 40; f++) FRAME(3, 1, chg);
+    assert(g_bridge_flips == KLOVRP_BRIDGE_MAX_FLIPS);
+    int fixed = klovrp_GetTrackingOriginType();
+    assert(fixed == 1 || fixed == 2);
+    chg_at = chg;
+    for (int f = 0; f < 40; f++) FRAME(3, 1, chg);
+    assert(klovrp_GetTrackingOriginType() == fixed && g_bridge_flips == KLOVRP_BRIDGE_MAX_FLIPS);
+    assert(chg > chg_at);                                             // (it does go on: only the guess stops moving)
+    // The guest's own ovrp_SetTrackingOriginType* wins, and stops the swapping.
+    assert(destroyed(1) == 0 && created(1) == 0);
+    klovrp_bridge_explicit(2);
+    g_xr_origin = 1;
+    for (int f = 0; f < 10; f++) { appspace(0x4000); appspace(0x4008); (void)klovrp_GetTrackingOriginType(); }
+    assert(klovrp_GetTrackingOriginType() == 2 && g_bridge_flips == 0);
+    klovrp_bridge_explicit(0);
+    assert(klovrp_GetTrackingOriginType() == 0);                      // an explicit EyeLevel too
+    assert(destroyed(1) == 0);
+    klovrp_bridge_explicit(2);                                        // no bridge: the OVRPlugin path's own
+    assert(g_bridge_explicit == -1);
+    assert(created(1) == 0 && g_bridge_explicit == -1);               // and nothing stale into a new instance
+    #undef FRAME
+    assert(destroyed(1) == 0);
     puts("t_ovrp_misc: ok");
     return 0;
 }

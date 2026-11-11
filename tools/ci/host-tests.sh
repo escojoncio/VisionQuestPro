@@ -41,7 +41,7 @@ klepton_tests() {
   awk '/KL-TEST-BEGIN ovrpinit/{p=1;next} /KL-TEST-END ovrpinit/{p=0} p' kl_ovrp.c > "$T/ovrpinit.inc"
   awk '/KL-TEST-BEGIN ovrpbridge/{p=1;next} /KL-TEST-END ovrpbridge/{p=0} p' kl_ovrp.c > "$T/ovrpbridge.inc"
   awk '/KL-TEST-BEGIN ptscan/{p=1;next} /KL-TEST-END ptscan/{p=0} p' kl_ovrp.c > "$T/ptscan.inc"
-  awk '/^    [{]"ovrp_(GetInitialized|Initialize7|Shutdown2?|GetNativeXrApiType|UnityOpenXR_OnInstance(Create|Destroy))", /' kl_ovrp.c > "$T/ovrpinit_tab.inc"
+  awk '/^    [{]"ovrp_(GetInitialized|Initialize7|Shutdown2?|GetNativeXrApiType|UnityOpenXR_(OnAppSpaceChange2?|OnInstance(Create|Destroy)))", /' kl_ovrp.c > "$T/ovrpinit_tab.inc"
   run t_ovrp_misc -Wno-unused-function -I.. -I../.. -I"$T" tests/t_ovrp_misc.c
   run spatial_test -I.. -I../jni -I../libc -I../gfx -I. -I../media -I../guest -I../diag \
       tests/spatial_test.c kl_spatial.c kl_guardian.c kl_ovrp_spatial.c -lm -lpthread

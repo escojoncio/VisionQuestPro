@@ -1504,9 +1504,6 @@ static ovrpResult klovrp_GetStationaryReferenceSpaceId(kl_uuid *out) {
     *out = u;
     return KLOVRP_SUCCESS;
 }
-static ovrpResult klovrp_UnityOpenXR_OnAppSpaceChange2(void) {
-    return kl_ovrp_ok("ovrp_UnityOpenXR_OnAppSpaceChange2");
-}
 
 // ---- environment raycast (CPU over the ARKit mesh / planes) --------------------------------
 static ovrpResult klovrp_GetEnvironmentRaycastSupported(ovrpBool *out) {
@@ -1721,7 +1718,6 @@ static const kl_ovrp_entry k_tab[] = {
     {"ovrp_RequestSceneCapture", (void *)klovrp_RequestSceneCapture},
     {"ovrp_GetAppSpace", (void *)klovrp_GetAppSpace},
     {"ovrp_GetStationaryReferenceSpaceId", (void *)klovrp_GetStationaryReferenceSpaceId},
-    {"ovrp_UnityOpenXR_OnAppSpaceChange2", (void *)klovrp_UnityOpenXR_OnAppSpaceChange2},
     {"ovrp_GetEnvironmentRaycastSupported", (void *)klovrp_GetEnvironmentRaycastSupported},
     {"ovrp_CreateEnvironmentRaycasterAsync", (void *)klovrp_CreateEnvironmentRaycasterAsync},
     {"ovrp_CreateEnvironmentRaycasterComplete", (void *)klovrp_CreateEnvironmentRaycasterComplete},

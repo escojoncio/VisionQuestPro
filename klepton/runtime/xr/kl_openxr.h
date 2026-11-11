@@ -47,6 +47,11 @@
 // a gateway that can never say no.
 void *kl_openxr_lookup(const char *name);
 
+// kl_ovrp.c, ovrp_UnityOpenXR_OnAppSpaceChange*: the ovrpTrackingOrigin (0 eye = LOCAL, 1 floor =
+// LOCAL_FLOOR, 2 stage = STAGE) of the reference space the XrSpace handle `space` names; -1 for a handle
+// that is not one of those three (not ours, destroyed, VIEW, an action space).
+int kl_openxr_app_space_origin(uint64_t space);
+
 // XR_KHR_android_surface_swapchain seam, reached from kl_ndk and kl_egl:
 //   - kl_xr_swapchain_for_surface: which surface-backed swapchain a
 //     android/view/Surface jobject belongs to (NULL if none). kl_ndk uses it in
