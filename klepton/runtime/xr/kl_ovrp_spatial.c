@@ -199,6 +199,7 @@ void kl_ovrp_sp_sum_tick_at(uint64_t now_ns) {
     pthread_mutex_unlock(&mu);
 }
 static void sp_sum_tick(void) {
+    kl_spatial_life_tick();                                         // [sp-life]: requests still pending after 5 s
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     kl_ovrp_sp_sum_tick_at((uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec);
@@ -470,6 +471,7 @@ static int g_listening;
 static void on_done(uint64_t req, int ok, kl_uuid id) {
     fpend p;
     if (!pend_take(req, &p)) return;               // not ours (xr facade / fire-and-forget)
+    kl_spatial_life_close(req, "ovrp-event-queued", ok ? KLOVRP_SUCCESS : KLOVRP_OPERATION_FAILED);   // [sp-life]: queued for ovrp_PollEvent2, see [sp-ev] polled
     if (p.kind == P_CREATE) {
         ev_create e; memset(&e, 0, sizeof e);
         e.requestId = req; e.result = ok ? KLOVRP_SUCCESS : KLOVRP_OPERATION_FAILED;
@@ -495,13 +497,22 @@ SP_IMPL sp_CreateSpatialAnchor(const ci_anchor *info, uint64_t *req_out) {
     kl_ovrp_hit("ovrp_CreateSpatialAnchor");
     if (!info || !req_out) return KLOVRP_INVALID_PARAM;
     *req_out = 0;
-    if (!kl_spatial_available(KLSP_CAP_ANCHORS)) { ONCE("CreateSpatialAnchor: anchors unavailable (no world sensing)"); return KLOVRP_UNSUPPORTED; }
+    if (!kl_spatial_available(KLSP_CAP_ANCHORS)) {
+        ONCE("CreateSpatialAnchor: anchors unavailable (no world sensing)");
+        kl_spatial_life("create-refused", "fac=ovrp reason=anchors-unavailable (kl_spatial_available(ANCHORS)=0)");
+        return KLOVRP_UNSUPPORTED;
+    }
     ensure_listener();
     float m[16];
     pose_to_m(&info->pose, m);
     uint64_t req = kl_spatial_new_request();
     pend_add(req, P_CREATE, 0);
-    if (kl_spatial_create_anchor(req, m) != 0) { fpend p; pend_take(req, &p); return KLOVRP_OPERATION_FAILED; }
+    kl_spatial_life_open(req, "create", "ovrp", NULL);   // before the host call: it may complete inside it
+    if (kl_spatial_create_anchor(req, m) != 0) {
+        fpend p; pend_take(req, &p);
+        kl_spatial_life_close(req, "ovrp-refused-by-host-layer", KLOVRP_OPERATION_FAILED);
+        return KLOVRP_OPERATION_FAILED;
+    }
     *req_out = req;
     return KLOVRP_SUCCESS;
 }
@@ -549,6 +560,7 @@ SP_IMPL sp_DestroySpace(uint64_t space) {
     // ephemeral until SaveSpace); a saved one stays until EraseSpace.
     if (kind == KLSP_ANCHOR && !kl_spatial_anchor_saved(id)) {
         ensure_listener();
+        { char us[37]; kl_spatial_uuid_str(id, us); kl_spatial_life("destroy-anchor", "fac=ovrp space=0x%llx uuid=%s never saved: removal requested", ULL(sp_h(space)), us); }
         (void)kl_spatial_remove_anchor(kl_spatial_new_request(), id);
     }
     return KLOVRP_SUCCESS;
@@ -578,7 +590,9 @@ SP_IMPL sp_SaveSpace(uint64_t space, int32_t location, int32_t mode, uint64_t *r
     kl_uuid id; int kind;
     if (!space_of(space, &id, &kind)) return KLOVRP_INVALID_PARAM;
     uint64_t req = kl_spatial_new_request();
-    save_one_event(req, id, save_space(id, kind, location));
+    int sok = save_space(id, kind, location);
+    save_one_event(req, id, sok);
+    { char us[37]; kl_spatial_uuid_str(id, us); kl_spatial_life("ovrp-save", "req=%llu uuid=%s kind=%d loc=%d saved=%d event=queued(53)", ULL(req), us, kind, location, sok); }
     *req_out = req;
     return KLOVRP_SUCCESS;
 }
@@ -600,6 +614,7 @@ static ovrpResult save_list(const uint64_t *spaces, uint32_t n, int32_t location
     ev_simple e; memset(&e, 0, sizeof e);
     e.requestId = req; e.result = ok ? KLOVRP_SUCCESS : KLOVRP_UNSUPPORTED;
     push(ev_type, &e, sizeof e);
+    kl_spatial_life("ovrp-save-list", "req=%llu n=%u loc=%d all_saved=%d event=queued(%d)", ULL(req), n, location, ok, ev_type);
     *req_out = req;
     return KLOVRP_SUCCESS;
 }
@@ -645,12 +660,15 @@ static void erase_event(uint64_t req, int32_t result, kl_uuid id, int32_t locati
 static ovrpResult erase_one(kl_uuid id, int kind, int32_t location, uint64_t req, int spaces) {
     ensure_listener();
     if (kind != KLSP_ANCHOR || !IS_LOCAL_LOC(location)) {
+        kl_spatial_life("ovrp-erase-unsupported", "req=%llu kind=%d loc=%d (only local anchors are erased): event UNSUPPORTED queued", ULL(req), kind, location);
         erase_event(req, KLOVRP_UNSUPPORTED, id, location, spaces);
         return KLOVRP_SUCCESS;
     }
     pend_add(req, spaces ? P_ERASES : P_ERASE, location);
+    kl_spatial_life_open(req, "erase", "ovrp", &id);
     if (kl_spatial_remove_anchor(req, id) != 0) {
         fpend p; pend_take(req, &p);
+        kl_spatial_life_close(req, "ovrp-refused-by-host-layer", KLOVRP_OPERATION_FAILED);
         erase_event(req, KLOVRP_OPERATION_FAILED, id, location, spaces);
     }
     return KLOVRP_SUCCESS;
@@ -1031,6 +1049,7 @@ static void query_events(uint64_t req) {
     ev_qdone b; memset(&b, 0, sizeof b);
     b.requestId = req; b.result = KLOVRP_SUCCESS;
     push(EV_QUERY_COMPLETE, &b, sizeof b);
+    kl_spatial_life("ovrp-query", "req=%llu results=%d events=queued(51,52)", ULL(req), sp_qcount(req));
 }
 static int plausible_array(const void *p, int n) { return p && isptr((uint64_t)(uintptr_t)p) && n > 0 && n <= 4096; }
 
@@ -1168,6 +1187,7 @@ SP_IMPL sp_DiscoverSpaces(const dinfo *info, uint64_t *req_out) {
     ev_qdone b; memset(&b, 0, sizeof b);
     b.requestId = req; b.result = KLOVRP_SUCCESS;
     push(EV_DISC_COMPLETE, &b, sizeof b);
+    kl_spatial_life("ovrp-discover", "req=%llu results=%d events=queued(300,301)", ULL(req), sp_qcount(req));
     return KLOVRP_SUCCESS;
 }
 static ovrpResult klovrp_DiscoverSpaces(const dinfo *info, uint64_t *req_out) {

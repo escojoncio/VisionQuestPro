@@ -199,6 +199,20 @@ int main(void) {
     feed(4, "Foo", "Exception", 300);
     CHECK(count("[unity-kw]") == 100, "mr budget bounded by a custom global cap");
 
+    // A guest string cannot forge log lines: control characters (newline, CR, ESC, DEL) in the message or the tag become '_'.
+    reset(-1);
+    feed(4, "Fo\no", "anchor one\ntwo\r\x1b[31m\x7f three", 1);
+    CHECK(count("[unity-kw] I/Fo_o: anchor one_two_?[31m_ three") + count("[unity-kw] I/Fo_o: anchor one_two__[31m_ three") == 1,
+          "control characters in tag and message become '_'");
+    {
+        char *b = calloc(1, 1 << 16);
+        ssize_t n = pread(capfd, b, (1 << 16) - 1, 0);
+        int lines = 0;
+        for (ssize_t i = 0; i < n; i++) lines += b[i] == '\n';
+        free(b);
+        CHECK(lines == 1, "one log line, not several");
+    }
+
     dup2(savedfd, 2);
     if (fails) { printf("t_kwcopy: %d FAILED\n", fails); return 1; }
     printf("t_kwcopy: ok\n");

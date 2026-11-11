@@ -456,6 +456,43 @@ static int kl_net_offline(void) {
     if (off < 0) off = kl_env_on("KL_NET_OFFLINE", 1);
     return off;
 }
+// [net] census, always on and silent until the heartbeat (kl_app.c) asks for the line: how many name lookups / connects / datagrams the guest
+// tried, how many KL_NET_OFFLINE refused and the first distinct names / addresses refused, so "offline blocked something the menu needs" is a
+// number and a name instead of a guess. Counters only; nothing here changes an answer.
+static struct { unsigned gai, gai_blocked, gai_fail, host, host_blocked, conn, conn_blocked, conn_ok, conn_err, udp_blocked, nnames; } g_netc;
+static char g_net_names[6][56];
+static pthread_mutex_t g_net_names_mu = PTHREAD_MUTEX_INITIALIZER;
+static void kl_net_note_name(const char *what, const char *n) {
+    char b[56];
+    snprintf(b, sizeof b, "%s:%s", what, n ? n : "(null)");
+    for (char *c = b; *c; c++) if ((unsigned char)*c < 0x20 || *c == 0x7f || *c == ' ' || *c == ',') *c = '_';   // guest string: no forged lines, ',' separates the names
+    pthread_mutex_lock(&g_net_names_mu);
+    unsigned i = 0;
+    while (i < g_netc.nnames && strcmp(g_net_names[i], b) != 0) i++;
+    if (i == g_netc.nnames && i < 6) { memcpy(g_net_names[i], b, sizeof b); g_netc.nnames = i + 1; }
+    pthread_mutex_unlock(&g_net_names_mu);
+}
+// gethostbyname*_r (kl_bionic_extra3.c): name looked up and whether KL_NET_OFFLINE refused it.
+void kl_net_life_host(const char *name, int blocked) {
+    __atomic_add_fetch(&g_netc.host, 1u, __ATOMIC_RELAXED);
+    if (blocked) { __atomic_add_fetch(&g_netc.host_blocked, 1u, __ATOMIC_RELAXED); kl_net_note_name("host", name); }
+}
+// One line body for "[net]"; 0 when the guest never touched the network. *total changes whenever any counter does.
+size_t kl_net_life_line(char *out, size_t cap, unsigned *total) {
+    unsigned c[11], t = 0;
+    const unsigned *src = &g_netc.gai;
+    for (int i = 0; i < 10; i++) { c[i] = __atomic_load_n(&src[i], __ATOMIC_RELAXED); t += c[i]; }
+    if (total) *total = t;
+    if (!t || !out || !cap) return 0;
+    int o = snprintf(out, cap, "offline=%d getaddrinfo=%u(refused=%u failed=%u) gethostbyname=%u(refused=%u) connect=%u(refused=%u ok=%u err=%u) datagrams_refused=%u names=",
+                     kl_net_offline(), c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7], c[8], c[9]);
+    pthread_mutex_lock(&g_net_names_mu);
+    for (unsigned i = 0; i < g_netc.nnames && o > 0 && (size_t)o + 60 < cap; i++)
+        o += snprintf(out + o, cap - (size_t)o, "%s%s", i ? "," : "", g_net_names[i]);
+    if (!g_netc.nnames && o > 0 && (size_t)o + 2 < cap) o += snprintf(out + o, cap - (size_t)o, "-");
+    pthread_mutex_unlock(&g_net_names_mu);
+    return o < 0 ? 0 : (size_t)o < cap ? (size_t)o : cap - 1;
+}
 // KL_TRACE_NET_HEX=<n>: the first n bytes of every payload, alongside the
 // [net] line. A discovery probe and its own broadcast echo are the same length,
 // and a TLS record is identified by its first five bytes — neither question can
@@ -480,8 +517,11 @@ static void kl_sa_to_guest(struct sockaddr *sa, socklen_t *len);
 static int kl_getaddrinfo(const char *node, const char *serv,
                           const void *hints, void *res) {
     // Offline (default for every game): only loopback names resolve.
+    __atomic_add_fetch(&g_netc.gai, 1u, __ATOMIC_RELAXED);
     if (kl_net_offline() && !(node && (!strcmp(node, "localhost") ||
             !strncmp(node, "127.", 4) || !strcmp(node, "::1")))) {
+        __atomic_add_fetch(&g_netc.gai_blocked, 1u, __ATOMIC_RELAXED);
+        kl_net_note_name("gai", node);
         if (kl_net_trace())
             fprintf(stderr, "  [net] getaddrinfo(\"%s\") -> EAI_NONAME (offline)\n",
                     node ? node : "(null)");
@@ -489,6 +529,7 @@ static int kl_getaddrinfo(const char *node, const char *serv,
     }
     struct addrinfo *hres = NULL;
     int r = getaddrinfo(node, serv, hints, &hres);
+    if (r) __atomic_add_fetch(&g_netc.gai_fail, 1u, __ATOMIC_RELAXED);
     if (kl_net_trace())
         fprintf(stderr, "  [net] getaddrinfo(\"%s\",\"%s\") -> %d\n",
                 node ? node : "(null)", serv ? serv : "", r);
@@ -816,7 +857,17 @@ static int kl_net_loopback(const struct sockaddr *sa) {
     return 0;
 }
 static int kl_connect(int fd, const struct sockaddr *sa, socklen_t len) {
+    __atomic_add_fetch(&g_netc.conn, 1u, __ATOMIC_RELAXED);
     if (kl_net_offline() && !kl_net_loopback(sa)) {
+        __atomic_add_fetch(&g_netc.conn_blocked, 1u, __ATOMIC_RELAXED);
+        if (sa) {                                    // guest layout: family u16, port be16 @2, IPv4 address @4
+            char an[48] = "?";
+            uint16_t fam; memcpy(&fam, sa, 2);
+            if (fam == 2) snprintf(an, sizeof an, "%u.%u.%u.%u:%u", ((const uint8_t *)sa)[4], ((const uint8_t *)sa)[5], ((const uint8_t *)sa)[6],
+                                   ((const uint8_t *)sa)[7], ((unsigned)((const uint8_t *)sa)[2] << 8) | ((const uint8_t *)sa)[3]);
+            else snprintf(an, sizeof an, "fam%u", fam);
+            kl_net_note_name("connect", an);
+        }
         if (kl_net_trace()) fprintf(stderr, "  [net] connect() -> ENETUNREACH (offline)\n");
         errno = ENETUNREACH;
         return -1;
@@ -837,6 +888,7 @@ static int kl_connect(int fd, const struct sockaddr *sa, socklen_t len) {
     clock_gettime(CLOCK_MONOTONIC, &t0);
     int r = connect(fd, sa, len);
     clock_gettime(CLOCK_MONOTONIC, &t1);
+    __atomic_add_fetch(r ? &g_netc.conn_err : &g_netc.conn_ok, 1u, __ATOMIC_RELAXED);
     if (kl_net_trace())
         fprintf(stderr, "  [net] connect(%s) -> %d (%s) in %.2fs [fam=%d len=%d]\n", host, r,
                 r ? strerror(errno) : "ok",
@@ -1283,7 +1335,7 @@ static void kl_sendmsg_fanout(int fd, struct msghdr *h, int dflags) {
 
 static ssize_t kl_sendto(int fd, const void *buf, size_t n, int flags,
                          const struct sockaddr *sa, socklen_t len) {
-    if (kl_net_offline() && sa && !kl_net_loopback(sa)) { errno = ENETUNREACH; return -1; }  // offline: no datagrams out
+    if (kl_net_offline() && sa && !kl_net_loopback(sa)) { __atomic_add_fetch(&g_netc.udp_blocked, 1u, __ATOMIC_RELAXED); errno = ENETUNREACH; return -1; }  // offline: no datagrams out
     struct sockaddr_storage hs;
     char host[80] = "-";
     if (sa && kl_sa_to_host(&hs, sa, len) == 0) {
@@ -1539,6 +1591,7 @@ static ssize_t kl_sendmsg(int fd, const void *gmsg, int flags) {
     const kl_lx_msghdr *g = gmsg;
     if (!g) { errno = EFAULT; return -1; }
     if (kl_net_offline() && g->msg_name && g->msg_namelen && !kl_net_loopback(g->msg_name)) {
+        __atomic_add_fetch(&g_netc.udp_blocked, 1u, __ATOMIC_RELAXED);
         errno = ENETUNREACH;   // offline: no datagrams out
         return -1;
     }
@@ -1945,6 +1998,7 @@ static void kl_android_log_write(int p, const char *t, const char *m) {
     extern void kl_log_keyword_copy(int, const char *, const char *);
     if (!t && kl_log_default_tag) t = kl_log_default_tag;
     kl_log_keyword_copy(p, t, m);   // run-state lines once more, tagged, whichever logger prints them
+    { extern void kl_life_scene_note(const char *); kl_life_scene_note(m); }   // "[life] scene" lines (kl_va_handlers.c)
     kl_log_ring_note(p, t, m);      // the guest's last errors, for the [fatal] dump (kl_fault.c)
     if (kl_log_custom_logger) {          // the guest replaced liblog's logger: every write goes through it
         // Its logger decides where the line goes and may print nothing of ours: INFO and above are copied to our

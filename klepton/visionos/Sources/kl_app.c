@@ -31,6 +31,9 @@
 #include "kl_bg.h"        // kl_bg_shutdown — release the guest's blocked submit paths before joining it
 #include "kl_mtl_attr.h"  // kl_mtl_attr_print — live Metal objects by creation site
 #include "kl_uelog.h"     // kl_uelog_scan — the "[ue-log]" line: Unreal logs under the guest's files folder
+#include "kl_logcap.h"    // the "[life]" line cap
+#include "kl_mprobe.h"    // kl_mprobe_last_canvas — the "[life]" line
+#include "kl_spatial.h"   // kl_spatial_life_tick — "[sp-life]" requests pending > 5 s
 
 // --- Which guest ------------------------------------------------------------
 //
@@ -807,6 +810,9 @@ static void *heartbeat(void *arg) {
     uint64_t next_slow = t0, next_sec = t0, fast_until = 0, hbm_last_foot = 0;
     unsigned hbm_lines = 0, vk_lines = 0, mtl_lines = 0, vms_lines = 0, dumps = 0;
     int ue_checks = 0;   // [ue-log] scans done (0, 1 = found none at 45 s, 2 = finished)
+    // "[life]" every 10 s (first 60 lines, then 1 in 6), "[net]" at 30 s and then every 120 s while a counter changed (6 lines), "[text]" at 60 s and 180 s.
+    uint64_t next_life = t0 + 10000, next_net = t0 + 30000, next_text = t0 + 60000, life_prev_frames = 0;
+    unsigned life_n = 0, net_lines = 0, net_last_total = 0, text_lines = 0;
     for (;;) {
         const uint64_t now = kl_mono_ms();
         const int slow_tick = now >= next_slow;
@@ -836,6 +842,47 @@ static void *heartbeat(void *arg) {
             next_sec = now + 1000;
             kl_sample_threads_baseline();
             kl_mem_telemetry(now - t0);   // [mem] line: 5 s cadence, 120 lines then only >10 % footprint changes (kl_libc.c)
+            kl_spatial_life_tick();       // [sp-life]: requests pending > 5 s, whatever the guest polls
+            if (now >= next_life) {       // [life]: is the game alive, and in which scene / menu (counters that already exist; nothing new in the engine)
+                next_life += 10000;
+                extern unsigned kl_life_scene_info(char *last, size_t cap);   // kl_va_handlers.c
+                char gl[200], last[160], cv[48] = "canvas=n/a";
+                gl[0] = 0;
+                kl_glfb_life(gl, sizeof gl);
+                int ca, cl, cf;
+                if (kl_mprobe_last_canvas(&ca, &cl, &cf)) snprintf(cv, sizeof cv, "canvas=%d/%d(f%d)", ca, cl, cf);
+                unsigned sn = kl_life_scene_info(last, sizeof last);
+                unsigned long long ovf = 0;
+                int st = kl_ovrp_last_complete_stage();
+                kl_ovrp_render_pose rp;
+                if (st >= 0 && kl_ovrp_stage_render_pose(st, &rp)) ovf = rp.serial;
+                if (kl_logcap_hit(&life_n, 60, 6, NULL))
+                    fprintf(stderr, "[life] t=%llus mono=%.1f frames_ovrp=%llu(+%llu in 10 s) vk_frame_serial=%llu egl_swaps=%lu %s %s scene_lines=%u last_scene=\"%.120s\" "
+                                    "(draws_3d/draws_ui are the engine's own vk.taa uimask lines, not readable from here)\n",
+                            (unsigned long long)((now - t0) / 1000), (double)now / 1000.0, ovf, ovf - (unsigned long long)life_prev_frames,
+                            kl_vulkan_frame_serial(), kl_egl_swap_count(), gl, cv, sn, last);
+                life_prev_frames = ovf;
+            }
+            if (now >= next_net) {
+                next_net += 120000;
+                extern size_t kl_net_life_line(char *out, size_t cap, unsigned *total);   // kl_shim.c
+                char nb[420];
+                unsigned nt = 0;
+                size_t nl = kl_net_life_line(nb, sizeof nb, &nt);
+                if (nl && nt != net_last_total && net_lines < 6) {
+                    net_last_total = nt;
+                    net_lines++;
+                    fprintf(stderr, "[net] t=%llus %s\n", (unsigned long long)((now - t0) / 1000), nb);
+                }
+            }
+            if (now >= next_text && text_lines < 2) {
+                next_text += 120000;
+                text_lines++;
+                char tb[900];
+                tb[0] = 0;
+                kl_glfb_text_census(tb, sizeof tb);
+                fprintf(stderr, "[text] t=%llus %s\n", (unsigned long long)((now - t0) / 1000), tb[0] ? tb : "no GLES draw seen (Vulkan guest, or not started)");
+            }
             // [ue-log]: did Unreal write any *.log this run (kl_uelog.h)? Once at 45 s; if none, once more at 150 s. UE guests only.
             if (ue_checks < 2 && g_target && g_target->kind == KL_GUEST_UE4 && g_files[0] && now - t0 >= (ue_checks ? 150000u : 45000u)) {
                 kl_uelog_res ur;

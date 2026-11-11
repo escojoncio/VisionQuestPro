@@ -11,7 +11,10 @@
 #include <strings.h>
 #include <fcntl.h>
 #include <sys/ioctl.h>
+#include <pthread.h>
+#include <time.h>
 #include "kl_va.h"
+#include "../diag/kl_logcap.h"   // [life] scene line caps
 #include "klepton.h"
 
 // Darwin arm64's va_list is a bare char*, so a marshalled buffer *is* a va_list.
@@ -247,8 +250,17 @@ static int kl_kw_mr_hit(int prio, const char *tag, const char *msg) {
     }
     return -1;
 }
+// A guest string on its way into our log: control characters (a newline would forge a second log line) become '_'; at most `max` bytes.
+static void kl_log_clean(char *dst, size_t cap, const char *src, size_t max) {
+    size_t i = 0;
+    for (; src[i] && i < max && i + 1 < cap; i++) { unsigned char c = (unsigned char)src[i]; dst[i] = (c < 0x20 || c == 0x7f) ? '_' : (char)c; }
+    dst[i] = 0;
+}
 void kl_log_keyword_copy(int prio, const char *tag, const char *msg) {
     if (!msg || !kl_log_keyword_open()) return;
+    char ctag[48], cmsg[401];
+    kl_log_clean(ctag, sizeof ctag, tag ? tag : "", sizeof ctag - 1);
+    kl_log_clean(cmsg, sizeof cmsg, msg, sizeof cmsg - 1);
     int k = kl_kw_find(prio, tag, msg);
     if (k < 0) {
         int m = kl_kw_mr_hit(prio, tag, msg);
@@ -258,7 +270,7 @@ void kl_log_keyword_copy(int prio, const char *tag, const char *msg) {
         __atomic_add_fetch(&g_kw_mr_grp[g_kw_mr[m].grp], 1, __ATOMIC_RELAXED);
         int word_last = g_kw_mr[m].cap && __atomic_add_fetch(&g_kw_mr_word[m], 1, __ATOMIC_RELAXED) == g_kw_mr[m].cap;
         static const char lv[] = "??VDIWEF";
-        fprintf(stderr, "  [unity-kw] %c/%s: %.*s%s\n", (prio >= 0 && prio < 8) ? lv[prio] : '?', tag ? tag : "", KL_KW_MR_LEN, msg,
+        fprintf(stderr, "  [unity-kw] %c/%s: %.*s%s\n", (prio >= 0 && prio < 8) ? lv[prio] : '?', ctag, KL_KW_MR_LEN, cmsg,
                 n + 1 == kl_kw_mr_cap() ? " (kw mr line cap reached)" : word_last ? " (kw mr word cap reached)" : "");
         return;
     }
@@ -267,10 +279,47 @@ void kl_log_keyword_copy(int prio, const char *tag, const char *msg) {
     if (n >= cap) return;
     int sub_last = g_kw[k].sub && __atomic_add_fetch(&g_kw_sub_n[k], 1, __ATOMIC_RELAXED) == g_kw[k].sub;
     static const char lv[] = "??VDIWEF";
-    fprintf(stderr, "  [unity-kw] %c/%s: %.400s%s\n", (prio >= 0 && prio < 8) ? lv[prio] : '?', tag ? tag : "", msg,
+    fprintf(stderr, "  [unity-kw] %c/%s: %.400s%s\n", (prio >= 0 && prio < 8) ? lv[prio] : '?', ctag, cmsg,
             n + 1 == cap ? (g_kw[k].sub ? " (kw new-word line cap reached)" : " (kw line cap reached)") : sub_last ? " (kw word cap reached)" : "");
 }
 /* KL-TEST-END kwcopy */
+
+// Scene / menu lifecycle of a Unity guest ("[life] scene"): the game's own log lines that name a scene load or a state change (LoadScene,
+// SceneManager, sceneLoaded, MainMenu, "ChangeState from X to Y"), written to our log whatever the keyword budgets above have left.
+// First KL_LIFE_SCENE_FIRST lines, then 1 in KL_LIFE_SCENE_EVERY (its own caps, not the keyword budgets); every match is counted and the last one kept for the "[life]" heartbeat.
+// Called with the formatted text of __android_log_print / __android_log_write. Never changes what the guest sees.
+#define KL_LIFE_SCENE_FIRST 60
+#define KL_LIFE_SCENE_EVERY 100
+static unsigned g_life_scene_n;
+static char g_life_scene_last[160];
+static pthread_mutex_t g_life_scene_mu = PTHREAD_MUTEX_INITIALIZER;
+// 1 while fewer than KL_LIFE_SCENE_FIRST matches were seen: the callers that would have to FORMAT a line only for this scan stop paying once it is 0.
+int kl_life_scene_open(void) { return __atomic_load_n(&g_life_scene_n, __ATOMIC_RELAXED) < KL_LIFE_SCENE_FIRST; }
+void kl_life_scene_note(const char *msg) {
+    static const char *const w[] = { "LoadScene", "SceneManager", "sceneLoaded", "SceneLoaded", "Loading scene", "Scene loaded", "MainMenu",
+                                     "ChangeState from" };
+    // Cheap prefilter first: every word below holds "cene", "MainMenu" or "ChangeState"; almost every log line holds none.
+    if (!msg || !(strstr(msg, "cene") || strstr(msg, "MainMenu") || strstr(msg, "ChangeState"))) return;
+    int hit = 0;
+    for (unsigned i = 0; i < sizeof w / sizeof *w && !hit; i++) hit = strstr(msg, w[i]) != NULL;
+    if (!hit) return;
+    unsigned n;
+    int write = kl_logcap_hit(&g_life_scene_n, KL_LIFE_SCENE_FIRST, KL_LIFE_SCENE_EVERY, &n);
+    pthread_mutex_lock(&g_life_scene_mu);
+    kl_log_clean(g_life_scene_last, sizeof g_life_scene_last, msg, sizeof g_life_scene_last - 1);
+    char shown[201];
+    kl_log_clean(shown, sizeof shown, g_life_scene_last, 200);
+    pthread_mutex_unlock(&g_life_scene_mu);
+    if (write) {
+        struct timespec ts;
+        clock_gettime(CLOCK_MONOTONIC, &ts);
+        fprintf(stderr, "  [life] scene #%u mono=%.1f: %s\n", n, (double)ts.tv_sec + 1e-9 * (double)ts.tv_nsec, shown);
+    }
+}
+unsigned kl_life_scene_info(char *last, size_t cap) {
+    if (last && cap) { pthread_mutex_lock(&g_life_scene_mu); snprintf(last, cap, "%s", g_life_scene_last); pthread_mutex_unlock(&g_life_scene_mu); }
+    return __atomic_load_n(&g_life_scene_n, __ATOMIC_RELAXED);
+}
 
 /* KL-TEST-BEGIN lring */
 // The guest's last errors, so a fatal can say WHY. UE4's fatal handler ends in AndroidThunkJava_ForceQuit (ignored here)
@@ -350,12 +399,24 @@ void kl_log_ring_dump(void (*emit)(const char *, size_t)) {
 
 int klh_android_log_print(int prio, const char *tag, const char *fmt, kl_va *va) {
     KL_MARSHAL(fmt, va, KL_VA_PRINTF);
-    if (kl_log_keyword_open() && (prio >= 4 || (tag && strstr(tag, "Unity")))) {   // a copy of the run-state lines (see kl_log_keyword_copy)
+    // The "[life] scene" scan costs no formatting of its own: while a keyword budget is open the line is formatted anyway (a copy of the
+    // run-state lines, see kl_log_keyword_copy); otherwise a Unity line whose format is exactly "%s" is scanned straight from its argument,
+    // and only while the scene scan still has room (kl_life_scene_open). Any other case is skipped.
+    int unity = tag && strstr(tag, "Unity") != NULL;
+    if (!(kl_log_keyword_open() && (prio >= 4 || unity)) && unity && kl_life_scene_open() && fmt && fmt[0] == '%' && fmt[1] == 's' && !fmt[2]) {
+        va_list scp;
+        va_copy(scp, _ap);
+        const char *sm = va_arg(scp, const char *);
+        va_end(scp);
+        kl_life_scene_note(sm);
+    }
+    if (kl_log_keyword_open() && (prio >= 4 || unity)) {
         char kwtext[1024];
         va_list kwcp;
         va_copy(kwcp, _ap);
         vsnprintf(kwtext, sizeof kwtext, fmt, kwcp);
         va_end(kwcp);
+        kl_life_scene_note(kwtext);
         kl_log_keyword_copy(prio, tag, kwtext);
     }
     if (kl_log_ring_wants(prio, tag)) {   // the guest's last errors, for the [fatal] dump (kl_fault.c)

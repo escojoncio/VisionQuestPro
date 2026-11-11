@@ -887,6 +887,7 @@ static int gethost_common(const char *name, int af, kl_hostent *ret, char *buf, 
     if (af != LX_AF_INET && af != LX_AF_INET6) { if (herr) *herr = H_NO_RECOVERY; return LX_EINVAL; }
     int found = host_lookup(name, af, a);
 #ifndef KL_EXTRA3_TEST
+    { extern void kl_net_life_host(const char *, int); kl_net_life_host(name, !found && net_offline()); }   // [net] census (kl_shim.c)
     if (!found && !net_offline() && name) {
         struct hostent *d = gethostbyname2(name, af == LX_AF_INET6 ? AF_INET6 : AF_INET);
         if (d && d->h_addr_list && d->h_addr_list[0]) { memcpy(a, d->h_addr_list[0], af == LX_AF_INET6 ? 16 : 4); found = 1; }

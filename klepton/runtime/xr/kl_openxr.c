@@ -960,6 +960,7 @@ static int klxr_pop_pushed(void *data) {
         g_xr_drains++;
     }
     pthread_mutex_unlock(&g_xr_push_mu);
+    if (rc) { uint32_t t; memcpy(&t, data, 4); kl_openxr_spatial_event_delivered(t, data); }   // outside the lock
     return rc;
 }
 
@@ -2914,6 +2915,7 @@ static XrResult klxr_RequestExitSession(void *session) {
 // specified code rather than an error.
 static XrResult klxr_PollEvent(void *instance, XrEventDataBuffer *data) {
     KLXR_TRACE("xrPollEvent");
+    kl_openxr_spatial_poll_tick();
     if (!klxr_inst(instance)) KLXR_RET(KLXR_ERROR_HANDLE_INVALID);
     if (!data) KLXR_RET(KLXR_ERROR_VALIDATION_FAILURE);
     klxr_session *s = &g_session;
@@ -3020,6 +3022,18 @@ static klxr_space *klxr_space_alloc(void) {
         if (!g_spaces[i].magic) { g_spaces[i].magic = KLXR_MAGIC_SPACE; r = &g_spaces[i]; break; }
     pthread_mutex_unlock(&g_space_mu);
     return r;
+}
+
+// Diagnostics ([sp-life]): what a handle the guest passed IS, without following it. Pointer comparisons only.
+const char *klxr_handle_class(void *h) {
+    if (!h) return "null";
+    if (h == klxr_current_session()) return "session";
+    if (h == (void *)&g_instance) return "instance";
+    klxr_space *s = (klxr_space *)h;
+    if (s < g_spaces || s >= g_spaces + KLXR_SPACE_MAX) return "other";
+    if (((uintptr_t)h - (uintptr_t)g_spaces) % sizeof *s) return "inside-space-pool-misaligned";
+    if (s->magic != KLXR_MAGIC_SPACE) return "freed-pool-slot";
+    return s->reference_type == KLXR_REF_SPACE_EXTERNAL ? "external-space" : s->reference_type ? "reference-space" : "action-space";
 }
 
 static const char *klxr_ref_space_name(int t) {

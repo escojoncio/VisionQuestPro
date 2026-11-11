@@ -441,6 +441,15 @@ static const MethodInfo *quiet_method(const char *ns, const char *cls,
 
 static int unbox_bool(Il2CppObject *r) { return r ? *(uint8_t *)il.object_unbox(r) : -1; }
 
+// Last "Canvas=active/all" of the scene census below (-1 = never taken / not counted), for the "[life]" heartbeat.
+static int g_canvas_act = -1, g_canvas_all = -1, g_canvas_frame = -1;
+int kl_mprobe_last_canvas(int *active, int *all, int *frame) {
+    if (active) *active = __atomic_load_n(&g_canvas_act, __ATOMIC_RELAXED);
+    if (all) *all = __atomic_load_n(&g_canvas_all, __ATOMIC_RELAXED);
+    if (frame) *frame = __atomic_load_n(&g_canvas_frame, __ATOMIC_RELAXED);
+    return __atomic_load_n(&g_canvas_frame, __ATOMIC_RELAXED) >= 0;
+}
+
 static void probe_scene_detail(unsigned frame, Il2CppObject *const *types,
                                char (*tnames)[64], unsigned n_types,
                                const MethodInfo *m_findall) {
@@ -752,6 +761,11 @@ void kl_mprobe_tick(unsigned frame) {
             fprintf(stderr, " %s=%d/%d", tnames[i],
                     a ? (int)il.array_length(a) : -1,
                     b ? (int)il.array_length(b) : -1);
+            if (strcmp(tnames[i], "Canvas") == 0) {   // the "[life]" heartbeat repeats the last census
+                __atomic_store_n(&g_canvas_act, a ? (int)il.array_length(a) : -1, __ATOMIC_RELAXED);
+                __atomic_store_n(&g_canvas_all, b ? (int)il.array_length(b) : -1, __ATOMIC_RELAXED);
+                __atomic_store_n(&g_canvas_frame, (int)frame, __ATOMIC_RELAXED);
+            }
         }
         fprintf(stderr, "  (active/all)\n");
     }

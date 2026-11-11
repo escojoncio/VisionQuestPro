@@ -490,6 +490,12 @@ final class VQSettings: ObservableObject {
         let frameAsync = VQGameFrameAsync.load(key: gameKey)
         if frameAsync { setenv("KL_VK_FRAME_ASYNC", "1", 1) } else { unsetenv("KL_VK_FRAME_ASYNC") }
         VQLog.log("Gráficos: fin de frame asíncrono \(frameAsync)")
+        // «Volcado de pases» / «Saltar pases», per game (VQGamePassDump / VQGameSkipPass): diagnostic of the engine, off / empty unless set.
+        let passDump = VQGamePassDump.load(key: gameKey)
+        if passDump { setenv("VPVK_PASS_DUMP", "1", 1) } else { unsetenv("VPVK_PASS_DUMP") }
+        let skipPass = VQGameSkipPass.load(key: gameKey)
+        if skipPass.isEmpty { unsetenv("VPVK_SKIP_PASS") } else { setenv("VPVK_SKIP_PASS", skipPass, 1) }
+        VQLog.log("Gráficos: VPVK_PASS_DUMP \(passDump ? "=1" : "sin exportar"), VPVK_SKIP_PASS \(skipPass.isEmpty ? "sin exportar" : "=" + skipPass)")
         // «Mostrar malla de escena», per game (VQGameSceneMesh): off = the wireframe the game draws of the scene mesh is hidden (KL_HIDE_SCENE_MESH).
         let showMesh = VQGameSceneMesh.load(key: gameKey)
         if showMesh { unsetenv("KL_HIDE_SCENE_MESH") } else { setenv("KL_HIDE_SCENE_MESH", "1", 1) }
@@ -694,6 +700,58 @@ enum VQGameFrameAsync {
         guard !key.isEmpty else { return }
         if on { UserDefaults.standard.set(true, forKey: "vq.frameasync." + key) }
         else { UserDefaults.standard.removeObject(forKey: "vq.frameasync." + key) }
+    }
+}
+
+/// «Volcado de pases (diagnóstico)» per game, off by default (VPVK_PASS_DUMP=1). Saved as vq.passdump.<key>.
+enum VQGamePassDump {
+    static func load(key: String) -> Bool {
+        !key.isEmpty && UserDefaults.standard.object(forKey: "vq.passdump." + key) as? Bool == true
+    }
+
+    static func save(_ on: Bool, key: String) {
+        guard !key.isEmpty else { return }
+        if on { UserDefaults.standard.set(true, forKey: "vq.passdump." + key) }
+        else { UserDefaults.standard.removeObject(forKey: "vq.passdump." + key) }
+    }
+}
+
+/// «Saltar pases (experimento)» per game, empty by default (VPVK_SKIP_PASS, e.g. "5,6" or "4-7"). Only digits, commas and
+/// hyphens are typed; only a list of integers or ranges "a-b" (a <= b, up to 6 digits each) is saved or exported, else "" (nothing exported).
+/// Saved as vq.skippass.<key>.
+enum VQGameSkipPass {
+    /// Live filter of the text field: drops what can never be part of a valid value.
+    static func typed(_ s: String) -> String {
+        String(s.filter { $0.isASCII && ($0.isNumber || $0 == "," || $0 == "-") }.prefix(40))
+    }
+
+    static func sanitize(_ s: String) -> String {
+        guard !s.isEmpty, s.utf8.count <= 40 else { return "" }
+        func num(_ t: Substring) -> Int? {
+            guard !t.isEmpty, t.count <= 6, t.utf8.allSatisfy({ $0 >= 48 && $0 <= 57 }) else { return nil }
+            return Int(t)
+        }
+        for part in s.split(separator: ",", omittingEmptySubsequences: false) {
+            let ends = part.split(separator: "-", omittingEmptySubsequences: false)
+            switch ends.count {
+            case 1: if num(ends[0]) == nil { return "" }
+            case 2: guard let a = num(ends[0]), let b = num(ends[1]), a <= b else { return "" }
+            default: return ""
+            }
+        }
+        return s
+    }
+
+    static func load(key: String) -> String {
+        guard !key.isEmpty else { return "" }
+        return sanitize(UserDefaults.standard.string(forKey: "vq.skippass." + key) ?? "")
+    }
+
+    static func save(_ value: String, key: String) {
+        guard !key.isEmpty else { return }
+        let v = sanitize(value)
+        if v.isEmpty { UserDefaults.standard.removeObject(forKey: "vq.skippass." + key) }
+        else { UserDefaults.standard.set(v, forKey: "vq.skippass." + key) }
     }
 }
 

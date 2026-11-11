@@ -86,6 +86,9 @@ int   klxr_spatial_entity_enabled(void);   // 1 when the live instance enabled X
 void *klxr_space_create_external(void *user);
 int   kl_openxr_spatial_pose(void *user, float q[4], float p[3]);
 void  kl_openxr_spatial_space_destroyed(void *user);
+const char *klxr_handle_class(void *h);   // kl_openxr.c, diagnostics: "session" / "instance" / "reference-space" / "action-space" / "external-space" / "freed-pool-slot" / "other"
+void  kl_openxr_spatial_event_delivered(uint32_t type, const void *buf);   // [sp-life]: xrPollEvent just handed this pushed event (XrEventDataBuffer) to the guest
+void  kl_openxr_spatial_poll_tick(void);   // [sp-life]: every xrPollEvent; reports requests still pending after 5 s
 int   kl_openxr_spatial_system_props(void *chain);   // fills spatial caps in an xrGetSystemProperties chain
 
 // One per batch, defined (empty) in each batch file.

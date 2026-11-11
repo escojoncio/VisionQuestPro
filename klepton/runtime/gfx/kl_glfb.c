@@ -1811,6 +1811,61 @@ void kl_glfb_gl_census(FILE *f) {
     fprintf(f, "\n");
 }
 
+// ---- [text] atlas census + [life] draw counters (diagnostic only; read by kl_glfb_life / kl_glfb_text_census) ------------------------
+// A font atlas is a ONE-CHANNEL texture (Unity's Alpha8 arrives as R8 with a swizzle). Every one-channel texture with a side >= 256 that the
+// guest allocates is recorded (KLFB_ATL_MAX at a time; a deleted one frees its slot); each draw counts the ones bound on a GL_TEXTURE_2D unit
+// (units 0..31), and a glTexSubImage2D into one counts as an upload. "Bound" is not "sampled": the shader is not inspected. No GL call is made.
+#define KLFB_ATL_MAX 32
+#define KLFB_ATL_BITS 65536
+typedef struct { uint32_t name, fmt; int32_t w, h; unsigned long draws, subs, reallocs; } klfb_atl;
+static klfb_atl g_atl[KLFB_ATL_MAX];
+static unsigned g_atl_n, g_atl_dropped;                        // slots in use (dead ones included) / candidates that found no slot
+static uint64_t g_atl_bm[KLFB_ATL_BITS / 64];                  // texture names that are candidates now (read lock-free by the draw hook)
+static unsigned long g_life_draws, g_atl_draws;                // draws seen by klfb_note_draw / of them with a candidate bound
+static uint64_t g_life_prog_bm[512];                           // program names drawn with (< 32768)
+static unsigned g_life_progs;                                  // ... distinct
+static pthread_mutex_t g_atl_mu = PTHREAD_MUTEX_INITIALIZER;   // writers only
+
+static int klfb_one_channel(uint32_t f) {
+    return f == 0x8229 /* R8 */ || f == 0x1906 /* ALPHA */ || f == 0x1909 /* LUMINANCE */ ||
+           f == 0x803C /* ALPHA8 */ || f == 0x8040 /* LUMINANCE8 */;
+}
+static void klfb_atlas_note(uint32_t name, uint32_t fmt, int32_t w, int32_t h) {
+    if (!name || !klfb_one_channel(fmt) || (w < 256 && h < 256)) return;
+    pthread_mutex_lock(&g_atl_mu);
+    unsigned n = g_atl_n, i = 0, dead = n;
+    while (i < n && g_atl[i].name != name) { if (!g_atl[i].name && dead == n) dead = i; i++; }
+    if (i < n) {                                               // the same name allocated again
+        g_atl[i].fmt = fmt; g_atl[i].w = w; g_atl[i].h = h; g_atl[i].reallocs++;
+    } else if (name < KLFB_ATL_BITS && (dead < n || n < KLFB_ATL_MAX)) {
+        klfb_atl *a = &g_atl[dead];
+        memset(a, 0, sizeof *a);
+        a->name = name; a->fmt = fmt; a->w = w; a->h = h;
+        __atomic_fetch_or(&g_atl_bm[name >> 6], 1ull << (name & 63), __ATOMIC_RELAXED);
+        if (dead == n) __atomic_store_n(&g_atl_n, n + 1, __ATOMIC_RELEASE);
+    } else {
+        g_atl_dropped++;
+    }
+    pthread_mutex_unlock(&g_atl_mu);
+}
+static void klfb_atlas_forget(int32_t cnt, const uint32_t *ids) {
+    if (!__atomic_load_n(&g_atl_n, __ATOMIC_ACQUIRE)) return;
+    pthread_mutex_lock(&g_atl_mu);
+    for (int32_t k = 0; k < cnt; k++) {
+        uint32_t t = ids[k];
+        if (!t || t >= KLFB_ATL_BITS || !(g_atl_bm[t >> 6] >> (t & 63) & 1)) continue;
+        __atomic_fetch_and(&g_atl_bm[t >> 6], ~(1ull << (t & 63)), __ATOMIC_RELAXED);
+        for (unsigned i = 0; i < g_atl_n; i++) if (g_atl[i].name == t) g_atl[i].name = 0;
+    }
+    pthread_mutex_unlock(&g_atl_mu);
+}
+// which: 0 a draw had it bound, 1 an upload into it
+static void klfb_atlas_bump(uint32_t t, int which) {
+    unsigned n = __atomic_load_n(&g_atl_n, __ATOMIC_ACQUIRE);
+    for (unsigned i = 0; i < n; i++)
+        if (g_atl[i].name == t) { __atomic_add_fetch(which ? &g_atl[i].subs : &g_atl[i].draws, 1ul, __ATOMIC_RELAXED); return; }
+}
+
 // The gen/delete pairs, as a macro: the only thing that varies is which counter
 // moves, and a typo in one hand-written copy is a census that lies about exactly
 // one class.
@@ -1823,6 +1878,7 @@ void kl_glfb_gl_census(FILE *f) {
     }                                                                         \
     static void klfb_Delete##Name(int32_t n, const uint32_t *ids) {           \
         klfb_census_killed(KIND, n);                                          \
+        if ((KIND) == KLC_TEX && ids) klfb_atlas_forget(n, ids);              \
         if (klfb_census_every() && ids &&                                     \
             ((KIND) == KLC_TEX || (KIND) == KLC_RBO))                         \
             for (int32_t i = 0; i < n; i++) klfb_vram_forget(KIND, ids[i]);   \
@@ -2609,6 +2665,8 @@ static unsigned g_uploads;
 static void klfb_TexSubImage2D(uint32_t target, int32_t level, int32_t xoff,
                                int32_t yoff, int32_t w, int32_t h, uint32_t format,
                                uint32_t type, const void *pixels) {
+    if (target == 0x0DE1 && g_tb_active_unit >= 0 && g_tb_active_unit < KLFB_TB_UNITS && g_tb_bound2d[g_tb_active_unit])
+        klfb_atlas_bump(g_tb_bound2d[g_tb_active_unit], 1);   // [text]: an upload into a font-atlas candidate
     int budget = klfb_upload_budget();
     unsigned idx = g_uploads++;
     if (budget >= 0 && (int)idx >= budget) {
@@ -2703,6 +2761,7 @@ static unsigned g_ntex;
 
 static void klfb_note_tex_storage(uint32_t name, uint32_t fmt, int32_t w,
                                   int32_t h) {
+    klfb_atlas_note(name, fmt, w, h);   // [text] census, before the table lock
     pthread_mutex_lock(&g_compile_lock);
     for (unsigned i = 0; i < g_ntex; i++)
         if (g_tex[i].name == name) {          // reallocation replaces
@@ -5802,7 +5861,60 @@ static void klfb_CompressedTexSubImage3D(uint32_t target, int32_t level, int32_t
 static struct { int32_t fb; unsigned draws; uint64_t tid; } g_draw_fbs[KLFB_MAX_FBS];
 static unsigned g_ndraw_fbs;
 
+// [life] / [text] readers (kl_glfb.h). Draws are those klfb_note_draw sees; the program is the one the draw thread last glUseProgram'd.
+static void klfb_life_draw(void) {
+    __atomic_add_fetch(&g_life_draws, 1ul, __ATOMIC_RELAXED);
+    uint32_t p = g_cur_prog;
+    if (p && p < 32768) {
+        uint64_t m = 1ull << (p & 63);
+        if (!(__atomic_fetch_or(&g_life_prog_bm[p >> 6], m, __ATOMIC_RELAXED) & m)) __atomic_add_fetch(&g_life_progs, 1u, __ATOMIC_RELAXED);
+    }
+    if (__atomic_load_n(&g_atl_n, __ATOMIC_ACQUIRE)) {
+        int hit = 0;
+        for (int u = 0; u < 32 && u < KLFB_TB_UNITS; u++) {
+            uint32_t t = g_tb_bound2d[u];
+            if (t && t < KLFB_ATL_BITS && (g_atl_bm[t >> 6] >> (t & 63) & 1)) { klfb_atlas_bump(t, 0); hit = 1; }
+        }
+        if (hit) __atomic_add_fetch(&g_atl_draws, 1ul, __ATOMIC_RELAXED);
+    }
+}
+size_t kl_glfb_life(char *out, size_t cap) {
+    if (!out || !cap) return 0;
+    int n = snprintf(out, cap, "gl_draws=%lu gl_progs=%u atlas_cand=%u atlas_bound_draws=%lu",
+                     __atomic_load_n(&g_life_draws, __ATOMIC_RELAXED), __atomic_load_n(&g_life_progs, __ATOMIC_RELAXED),
+                     __atomic_load_n(&g_atl_n, __ATOMIC_RELAXED), __atomic_load_n(&g_atl_draws, __ATOMIC_RELAXED));
+    return n < 0 ? 0 : (size_t)n < cap ? (size_t)n : cap - 1;
+}
+size_t kl_glfb_text_census(char *out, size_t cap) {
+    if (!out || !cap) return 0;
+    pthread_mutex_lock(&g_atl_mu);
+    unsigned live = 0, used[6] = {0}, nu = 0;
+    for (unsigned i = 0; i < g_atl_n; i++) live += g_atl[i].name != 0;
+    for (unsigned k = 0; k < 6; k++) {                          // the six largest by area
+        int best = -1;
+        for (unsigned i = 0; i < g_atl_n; i++) {
+            int taken = 0;
+            for (unsigned j = 0; j < nu; j++) taken |= used[j] == i;
+            if (!g_atl[i].name || taken) continue;
+            if (best < 0 || (int64_t)g_atl[i].w * g_atl[i].h > (int64_t)g_atl[best].w * g_atl[best].h) best = (int)i;
+        }
+        if (best < 0) break;
+        used[nu++] = (unsigned)best;
+    }
+    int o = snprintf(out, cap, "atlas candidates=%u (one-channel textures with a side >= 256: R8/ALPHA/LUMINANCE; %u more found no slot) "
+                     "bound_in_draws=%lu of %lu gl draws (bound != sampled: the shader is not inspected)",
+                     live, g_atl_dropped, __atomic_load_n(&g_atl_draws, __ATOMIC_RELAXED), __atomic_load_n(&g_life_draws, __ATOMIC_RELAXED));
+    for (unsigned j = 0; j < nu && o > 0 && (size_t)o < cap; j++) {
+        const klfb_atl *a = &g_atl[used[j]];
+        o += snprintf(out + o, cap - (size_t)o, " | tex=%u fmt=0x%04x %dx%d draws=%lu uploads=%lu reallocs=%lu", a->name, a->fmt, a->w, a->h,
+                      a->draws, a->subs, a->reallocs);
+    }
+    pthread_mutex_unlock(&g_atl_mu);
+    return o < 0 ? 0 : (size_t)o < cap ? (size_t)o : cap - 1;
+}
+
 static void klfb_note_draw(void) {
+    klfb_life_draw();
     int32_t fb = -1;
     if (a_glGetIntegerv) a_glGetIntegerv(0x8CA6 /* DRAW_FRAMEBUFFER_BINDING */, &fb);
     // Fall back to the binding Klepton tracks in the glBindFramebuffer wrapper when

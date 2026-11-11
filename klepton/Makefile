@@ -1305,6 +1305,23 @@ build/t_evgate: tests/t_evgate.c runtime/xr/kl_evgate.h
 evgate: build/t_evgate
 	@./build/t_evgate
 
+# Cap rule of the [sp-life] / [life] / [net] / [text] diagnostic lines (runtime/diag/kl_logcap.h, pure). Plain C.
+build/t_logcap: tests/t_logcap.c runtime/diag/kl_logcap.h
+	@mkdir -p build
+	$(CC) -g -fsanitize=address,undefined -Wall -Wextra -Iruntime/diag -o $@ tests/t_logcap.c
+.PHONY: logcap
+logcap: build/t_logcap
+	@./build/t_logcap
+
+# OpenXR spatial discovery (xrGetSpaceContainerFB, plane/room queries, ...) on the shared spatial store. Plain C.
+build/t_xr_discovery: runtime/xr/tests/t_xr_discovery.c runtime/xr/kl_openxr_spatial.c runtime/xr/kl_spatial.c runtime/xr/kl_guardian.c
+	@mkdir -p build
+	$(CC) -g -fsanitize=address,undefined -Wall $(RUNTIME_INC) -o $@ runtime/xr/tests/t_xr_discovery.c \
+	  runtime/xr/kl_openxr_spatial.c runtime/xr/kl_spatial.c runtime/xr/kl_guardian.c -lm -lpthread
+.PHONY: xr_discovery
+xr_discovery: build/t_xr_discovery
+	@./build/t_xr_discovery
+
 # Guest swap: file-backed guest mappings (runtime/libc/kl_gswap.h, POSIX; used by kl_libc.c). Plain C.
 build/t_gswap: tests/t_gswap.c runtime/libc/kl_gswap.h
 	@mkdir -p build

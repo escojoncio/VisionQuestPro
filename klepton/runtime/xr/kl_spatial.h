@@ -137,4 +137,17 @@ int  kl_spatial_scan_auto(uint32_t window_ms);              // launch rescan: me
 void kl_spatial_set_resync(void (*fn)(void));               // the host resends every plane / mesh / room it holds when a scan begins
 void kl_spatial_set_clock(uint64_t (*fn)(void));            // host tests (monotonic ns)
 
+// ---- [sp-life]: lifecycle of the async spatial requests, both facades (diagnostic only, no behaviour) ----
+// Lines are capped per tag (kl_logcap.h: the first SPL_FIRST, then 1 in SPL_EVERY) and carry mono=<CLOCK_MONOTONIC s> tid=<thread>.
+//   kl_spatial_life        one capped line "[sp-life] <tag> #<n> mono= tid= <text>"
+//   kl_spatial_life_open   a request was issued (op "create", "erase", ...; fac "ovrp" / "xr"; id may be NULL): it is pending until closed
+//   kl_spatial_life_close  its completion was produced / delivered through `via`; 1 = was pending, 0 = already closed or never opened here
+//   kl_spatial_life_tick   any thread, cheap: writes "[sp-life] pending5s ..." ONCE per request still open after 5 s, and a "[sp-life] sum"
+//                          line every 30 s while anything changed (at most 40 of them)
+void kl_spatial_life(const char *tag, const char *fmt, ...) __attribute__((format(printf, 2, 3)));
+void kl_spatial_life_open(uint64_t req, const char *op, const char *fac, const kl_uuid *id);
+int  kl_spatial_life_close(uint64_t req, const char *via, int result);
+void kl_spatial_life_tick(void);
+void kl_spatial_uuid_str(kl_uuid u, char out[37]);
+
 #endif

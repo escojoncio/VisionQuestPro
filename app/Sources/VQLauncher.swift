@@ -726,6 +726,8 @@ struct VQGameSettingsView: View {
     @State private var capture: VQGameCapture
     @State private var d24: Bool
     @State private var frameAsync: Bool
+    @State private var passDump: Bool
+    @State private var skipPass: String
     @State private var sceneMesh: Bool
 
     init(game: VQGame) {
@@ -740,6 +742,8 @@ struct VQGameSettingsView: View {
         _capture = State(initialValue: VQGameCapture.load(key: game.aaKey))
         _d24 = State(initialValue: VQGameD24.load(key: game.aaKey))
         _frameAsync = State(initialValue: VQGameFrameAsync.load(key: game.aaKey))
+        _passDump = State(initialValue: VQGamePassDump.load(key: game.aaKey))
+        _skipPass = State(initialValue: VQGameSkipPass.load(key: game.aaKey))
         _sceneMesh = State(initialValue: VQGameSceneMesh.load(key: game.aaKey))
     }
 
@@ -809,6 +813,21 @@ struct VQGameSettingsView: View {
                     Toggle(VQL("Fin de frame asíncrono (experimental)", "Asynchronous frame end (experimental)"), isOn: $frameAsync)
                     Text(VQL("Apagado por defecto; puede cambiar el ritmo de los frames", "Off by default; it may change frame pacing"))
                         .font(.caption)
+                }
+                Section(VQL("Volcado de pases (diagnóstico)", "Pass dump (diagnostic)")) {
+                    Toggle(VQL("Volcado de pases (diagnóstico)", "Pass dump (diagnostic)"), isOn: $passDump)
+                    Text(VQL("Apagado por defecto; escribe los pases del motor en el log (VPVK_PASS_DUMP)", "Off by default; writes the engine's passes to the log (VPVK_PASS_DUMP)"))
+                        .font(.caption)
+                }
+                Section(VQL("Saltar pases (experimento)", "Skip passes (experiment)")) {
+                    TextField(VQL("Vacío = ninguno; ej. 5,6 o 4-7", "Empty = none; e.g. 5,6 or 4-7"), text: $skipPass)
+                        .autocorrectionDisabled()
+                    Text(VQL("Solo dígitos, comas y guiones (VPVK_SKIP_PASS); puede romper la imagen", "Digits, commas and hyphens only (VPVK_SKIP_PASS); it may break the picture"))
+                        .font(.caption)
+                    if !skipPass.isEmpty && VQGameSkipPass.sanitize(skipPass).isEmpty {
+                        Text(VQL("Valor no válido: no se exportará (usa enteros o rangos a-b, separados por comas)", "Invalid value: it will not be exported (use integers or a-b ranges, separated by commas)"))
+                            .font(.caption)
+                    }
                 }
                 Section(VQL("Mostrar malla de escena (wireframe de algunos juegos)", "Show scene mesh (wireframe of some games)")) {
                     Toggle(VQL("Mostrar malla de escena (wireframe de algunos juegos)", "Show scene mesh (wireframe of some games)"), isOn: $sceneMesh)
@@ -885,6 +904,15 @@ struct VQGameSettingsView: View {
             .onChange(of: frameAsync) { _, new in
                 VQGameFrameAsync.save(new, key: game.aaKey)
                 VQLog.log("Ajustes del juego \(game.aaKey): fin de frame asíncrono \(new ? "sí" : "no")")
+            }
+            .onChange(of: passDump) { _, new in
+                VQGamePassDump.save(new, key: game.aaKey)
+                VQLog.log("Ajustes del juego \(game.aaKey): volcado de pases \(new ? "sí" : "no")")
+            }
+            .onChange(of: skipPass) { _, new in
+                let typed = VQGameSkipPass.typed(new)
+                if typed != new { skipPass = typed }
+                VQGameSkipPass.save(typed, key: game.aaKey)
             }
             .onChange(of: aniso) { _, new in
                 VQGameAniso.save(new < 0 ? nil : new, key: game.aaKey)

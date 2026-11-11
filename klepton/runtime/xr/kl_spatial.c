@@ -17,6 +17,8 @@
 #include "kl_ovrp.h"      // kl_ovrp_guest_origin_y
 #include "kl_jni.h"       // kl_jni_files_dir
 #include "kl_guardian.h"  // floor height, room rules
+#include "../diag/kl_logcap.h"   // [sp-life] line caps
+#include <stdarg.h>
 #include <math.h>
 #include <pthread.h>
 #include <stdio.h>
@@ -949,6 +951,145 @@ void kl_spatial_anchor(kl_uuid id, int removed, const float m4[16], int tracked)
     once(&lg, "first world anchor received");
 }
 
+// ---- [sp-life]: lifecycle of the async requests, both facades (kl_spatial.h) -------------------------------------
+// Diagnostic only: nothing here changes what a request does. Caps: kl_logcap.h, per tag (first SPL_FIRST, then 1 in SPL_EVERY).
+#define SPL_FIRST 40
+#define SPL_EVERY 500
+#define SPL_PEND 64
+#define SPL_TAGS 32
+#define SPL_AGE_NS 5000000000ull
+#define SPL_SUM_NS 30000000000ull
+#define SPL_SUM_MAX 40
+#define SPL_OVER_MAX 500   // pending5s lines in all (one per request)
+typedef struct { uint64_t req, t0; unsigned long long tid; char op[16], fac[8]; kl_uuid id; int used, reported; } spl_req;
+static spl_req g_spl[SPL_PEND];
+static struct { char tag[40]; unsigned n; } g_spl_tag[SPL_TAGS];   // the last slot is the "other" bucket once the table is full
+static uint64_t g_spl_closed[32];                                  // ring of the last requests closed (a second close says "again")
+static unsigned g_spl_nclosed, g_spl_opened, g_spl_done, g_spl_unmatched, g_spl_overdue;
+static pthread_mutex_t g_spl_mu = PTHREAD_MUTEX_INITIALIZER;
+static uint64_t g_spl_next_tick, g_spl_next_sum, g_spl_sum_seen;
+static unsigned g_spl_sum_lines, g_spl_over_lines;
+
+static uint64_t spl_mono_ns(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
+}
+static unsigned long long spl_tid(void) {
+#ifdef __APPLE__
+    uint64_t t = 0;
+    pthread_threadid_np(NULL, &t);
+    return t;
+#else
+    return (unsigned long long)(uintptr_t)pthread_self();
+#endif
+}
+static unsigned spl_tag_n(const char *tag) {
+    pthread_mutex_lock(&g_spl_mu);
+    unsigned i = 0;
+    while (i < SPL_TAGS - 1 && g_spl_tag[i].tag[0] && strcmp(g_spl_tag[i].tag, tag) != 0) i++;
+    if (!g_spl_tag[i].tag[0]) snprintf(g_spl_tag[i].tag, sizeof g_spl_tag[i].tag, "%s", i == SPL_TAGS - 1 ? "other" : tag);
+    unsigned n = ++g_spl_tag[i].n;
+    pthread_mutex_unlock(&g_spl_mu);
+    return n;
+}
+void kl_spatial_uuid_str(kl_uuid u, char out[37]) { uuid_str(u, out); }
+void kl_spatial_life(const char *tag, const char *fmt, ...) {
+    unsigned n = spl_tag_n(tag);
+    if (!kl_logcap_pass(n, SPL_FIRST, SPL_EVERY)) return;
+    char b[360];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(b, sizeof b, fmt, ap);
+    va_end(ap);
+    fprintf(stderr, "  [sp-life] %s #%u mono=%.1f tid=%llu %s%s\n", tag, n, (double)spl_mono_ns() / 1e9, spl_tid(), b,
+            n == SPL_FIRST ? " (then 1 in 500)" : "");
+}
+void kl_spatial_life_open(uint64_t req, const char *op, const char *fac, const kl_uuid *id) {
+    char us[37] = "-", tag[40];
+    if (id) uuid_str(*id, us);
+    unsigned pend = 0;
+    pthread_mutex_lock(&g_spl_mu);
+    int slot = -1;
+    for (int i = 0; i < SPL_PEND && slot < 0; i++) if (!g_spl[i].used) slot = i;
+    if (slot < 0) { slot = 0; for (int i = 1; i < SPL_PEND; i++) if (g_spl[i].t0 < g_spl[slot].t0) slot = i; }   // full: the oldest goes
+    spl_req *r = &g_spl[slot];
+    memset(r, 0, sizeof *r);
+    r->used = 1; r->req = req; r->t0 = spl_mono_ns(); r->tid = spl_tid();
+    snprintf(r->op, sizeof r->op, "%s", op);
+    snprintf(r->fac, sizeof r->fac, "%s", fac);
+    if (id) r->id = *id;
+    g_spl_opened++;
+    for (int i = 0; i < SPL_PEND; i++) pend += (unsigned)g_spl[i].used;
+    pthread_mutex_unlock(&g_spl_mu);
+    snprintf(tag, sizeof tag, "open-%s", op);
+    kl_spatial_life(tag, "fac=%s req=%llu uuid=%s pending=%u", fac, (unsigned long long)req, us, pend);
+    kl_spatial_life_tick();
+}
+int kl_spatial_life_close(uint64_t req, const char *via, int result) {
+    char op[16] = "?", fac[8] = "?", tag[40];
+    double dt_ms = -1.0;
+    int found = 0, again = 0;
+    pthread_mutex_lock(&g_spl_mu);
+    for (int i = 0; i < SPL_PEND; i++) {
+        if (!g_spl[i].used || g_spl[i].req != req) continue;
+        snprintf(op, sizeof op, "%s", g_spl[i].op);
+        snprintf(fac, sizeof fac, "%s", g_spl[i].fac);
+        dt_ms = (double)(spl_mono_ns() - g_spl[i].t0) / 1e6;
+        g_spl[i].used = 0;
+        g_spl_closed[g_spl_nclosed++ % 32] = req;
+        found = 1;
+        break;
+    }
+    if (!found) for (int i = 0; i < 32; i++) if (g_spl_closed[i] == req) again = 1;
+    if (found) g_spl_done++; else g_spl_unmatched++;
+    pthread_mutex_unlock(&g_spl_mu);
+    snprintf(tag, sizeof tag, "done-%s", op);
+    kl_spatial_life(tag, "fac=%s req=%llu via=%s result=%d dt_ms=%.1f%s", fac, (unsigned long long)req, via ? via : "?", result, dt_ms,
+                    found ? "" : again ? " (request already closed: a second channel)" : " (request not opened here)");
+    kl_spatial_life_tick();
+    return found;
+}
+void kl_spatial_life_tick(void) {
+    uint64_t now = spl_mono_ns(), nx = __atomic_load_n(&g_spl_next_tick, __ATOMIC_RELAXED);
+    if (now < nx || !__atomic_compare_exchange_n(&g_spl_next_tick, &nx, now + 1000000000ull, 0, __ATOMIC_RELAXED, __ATOMIC_RELAXED)) return;
+    spl_req over[8];
+    unsigned no = 0, pend = 0, opened, done, unmatched, overdue;
+    int sum = 0;
+    struct { char tag[40]; unsigned n; } tg[SPL_TAGS];
+    pthread_mutex_lock(&g_spl_mu);
+    for (int i = 0; i < SPL_PEND; i++) {
+        if (!g_spl[i].used) continue;
+        pend++;
+        if (no < 8 && kl_logcap_overdue(now, g_spl[i].t0, SPL_AGE_NS, g_spl[i].reported)) { g_spl[i].reported = 1; over[no++] = g_spl[i]; g_spl_overdue++; }
+    }
+    opened = g_spl_opened; done = g_spl_done; unmatched = g_spl_unmatched; overdue = g_spl_overdue;
+    if (!g_spl_next_sum) g_spl_next_sum = now + SPL_SUM_NS;
+    else if (now >= g_spl_next_sum) {
+        g_spl_next_sum = now + SPL_SUM_NS;
+        uint64_t seen = (uint64_t)opened + done + unmatched + overdue;
+        for (int i = 0; i < SPL_TAGS; i++) seen += g_spl_tag[i].n;
+        if (seen != g_spl_sum_seen && g_spl_sum_lines < SPL_SUM_MAX) { g_spl_sum_seen = seen; g_spl_sum_lines++; sum = 1; }
+    }
+    if (sum) memcpy(tg, g_spl_tag, sizeof tg);
+    pthread_mutex_unlock(&g_spl_mu);
+    for (unsigned i = 0; i < no; i++) {   // once per request: the cap is on requests (SPL_OVER_MAX in all), not the per-tag cap of the other lines
+        char us[37];
+        uuid_str(over[i].id, us);
+        unsigned on;
+        if (!kl_logcap_hit(&g_spl_over_lines, SPL_OVER_MAX, 0, &on)) continue;
+        fprintf(stderr, "  [sp-life] pending5s #%u mono=%.1f tid=%llu op=%s fac=%s req=%llu uuid=%s age_ms=%.0f opened_on_tid=%llu (still no completion)%s\n",
+                on, (double)now / 1e9, spl_tid(), over[i].op, over[i].fac, (unsigned long long)over[i].req, us, (double)(now - over[i].t0) / 1e6, over[i].tid,
+                on == SPL_OVER_MAX ? " (last one written)" : "");
+    }
+    if (sum) {
+        char b[330];
+        int o = snprintf(b, sizeof b, "open=%u opened=%u done=%u unmatched_done=%u overdue=%u tags:", pend, opened, done, unmatched, overdue);
+        for (int i = 0; i < SPL_TAGS && tg[i].tag[0] && o < (int)sizeof b - 40; i++) o += snprintf(b + o, sizeof b - (size_t)o, " %s=%u", tg[i].tag, tg[i].n);
+        fprintf(stderr, "  [sp-life] sum mono=%.1f %s\n", (double)now / 1e9, b);
+    }
+}
+
 // ---- async requests ---------------------------------------------------------
 typedef struct { uint64_t req; int kind; kl_uuid id; } pend;      // kind 1 create, 2 remove
 static pend g_pend[KLSP_MAX_PEND];
@@ -970,6 +1111,7 @@ static kl_spatial_listener g_create_hook;
 void kl_spatial_set_create_hook(kl_spatial_listener fn) { __atomic_store_n(&g_create_hook, fn, __ATOMIC_RELEASE); }
 void kl_spatial_notify_create(uint64_t req, int ok, kl_uuid id) {
     kl_spatial_listener fn = __atomic_load_n(&g_create_hook, __ATOMIC_ACQUIRE);
+    kl_spatial_life("notify-create", "req=%llu ok=%d xr_hook=%d", (unsigned long long)req, ok, fn != NULL);
     if (fn) fn(req, ok, id);
 }
 void kl_spatial_set_host(const kl_spatial_host *h) {
@@ -988,7 +1130,9 @@ int kl_spatial_create_anchor(uint64_t req, const float guest_m4[16]) {
     pthread_mutex_lock(&g_mu);
     void (*fn)(uint64_t, const float *) = (g_have_host && g_cap_anchors) ? g_host.create_anchor : NULL;
     int ok = fn && pend_add_locked(req, 1, k_zero);
+    int hh = g_have_host, ca = g_cap_anchors;
     pthread_mutex_unlock(&g_mu);
+    kl_spatial_life("host-create", "req=%llu have_host=%d anchors_cap=%d -> %s", (unsigned long long)req, hh, ca, ok ? "sent to the host" : "REFUSED");
     if (!ok) return -1;
     fn(req, a);
     return 0;
@@ -997,7 +1141,9 @@ int kl_spatial_remove_anchor(uint64_t req, kl_uuid id) {
     pthread_mutex_lock(&g_mu);
     void (*fn)(uint64_t, kl_uuid) = (g_have_host && g_cap_anchors) ? g_host.remove_anchor : NULL;
     int ok = fn && pend_add_locked(req, 2, id);
+    int hh = g_have_host, ca = g_cap_anchors;
     pthread_mutex_unlock(&g_mu);
+    kl_spatial_life("host-remove", "req=%llu have_host=%d anchors_cap=%d -> %s", (unsigned long long)req, hh, ca, ok ? "sent to the host" : "REFUSED");
     if (!ok) return -1;
     fn(req, id);
     return 0;
@@ -1005,10 +1151,12 @@ int kl_spatial_remove_anchor(uint64_t req, kl_uuid id) {
 void kl_spatial_request_done(uint64_t req, int ok, kl_uuid id) {
     kl_spatial_listener ls[KLSP_MAX_LISTENERS];
     uint32_t nl;
+    int known = 0;
     pthread_mutex_lock(&g_mu);
     sv_load_locked();
     for (uint32_t i = 0; i < g_npend; i++) {
         if (g_pend[i].req != req) continue;
+        known = 1;
         int kind = g_pend[i].kind;
         kl_uuid rid = uuid_zero(id) ? g_pend[i].id : id;
         g_pend[i] = g_pend[--g_npend];
@@ -1026,6 +1174,8 @@ void kl_spatial_request_done(uint64_t req, int ok, kl_uuid id) {
     }
     nl = g_nlis; memcpy(ls, g_lis, sizeof ls);
     pthread_mutex_unlock(&g_mu);
+    { char us[37]; uuid_str(id, us);
+      kl_spatial_life("host-done", "req=%llu ok=%d known=%d uuid=%s listeners=%u", (unsigned long long)req, ok, known, us, nl); }
     for (uint32_t i = 0; i < nl; i++) ls[i](req, ok, id);
 }
 

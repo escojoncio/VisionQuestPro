@@ -25,4 +25,8 @@ void kl_mprobe_tick(unsigned frame);
 // logs what OVRInput.GetConnectedControllers / GetActiveController say (diagnosis only; any thread).
 void kl_mprobe_note_menu(int overlays_before, int overlays_after);
 
+// The last "Canvas=active/all" of the scene census ("[mprobe fN] scene: ... Canvas=a/b (active/all)"): 1 when one was taken (then *frame is its
+// frame), 0 otherwise (the probe is off, or the game has no Canvas type). Any thread; -1 in a count = not counted.
+int kl_mprobe_last_canvas(int *active, int *all, int *frame);
+
 #endif

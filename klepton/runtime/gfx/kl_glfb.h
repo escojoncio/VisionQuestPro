@@ -5,6 +5,7 @@
 // Opt-in with KL_GLFB=1; without it the null driver in kl_egl.c is unchanged.
 #ifndef KL_GLFB_H
 #define KL_GLFB_H
+#include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
 
@@ -84,6 +85,11 @@ uint64_t kl_glfb_gpu_fence_value(void);
 // KL_GLFB_SKIP bisected the AGX abort to glTexStorage* + glTexSubImage*, which
 // makes this the population that matters. Safe to call when nothing was allocated.
 void kl_glfb_report_formats(void);
+
+// Heartbeat counters ("[life]" in kl_app.c) and the font-atlas census ("[text]"): the GL draws klfb_note_draw saw, the distinct programs they
+// used, and the one-channel textures >= 256 px (font-atlas candidates) allocated / bound in draws / uploaded into. Text for the log; returns its length.
+size_t kl_glfb_life(char *out, size_t cap);
+size_t kl_glfb_text_census(char *out, size_t cap);
 
 // The GL object census (KL_GL_CENSUS=<swaps>): per class, how many objects the
 // guest has created and how many it has deleted, plus the immutable texture and

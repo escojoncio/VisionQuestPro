@@ -45,6 +45,7 @@ klepton_tests() {
   run t_guardian -I. tests/t_guardian.c kl_guardian.c -lm -lpthread
   run t_room_live -I.. -I../jni -I../libc -I../gfx -I. -I../media -I../guest -I../diag tests/t_room_live.c kl_spatial.c kl_guardian.c -lm -lpthread
   run t_plane_order -I.. -I../jni -I../libc -I../gfx -I. -I../media -I../guest -I../diag tests/t_plane_order.c kl_spatial.c kl_guardian.c -lm -lpthread
+  run t_xr_discovery -I.. -I../jni -I../libc -I../gfx -I. -I../media -I../guest -I../diag tests/t_xr_discovery.c kl_openxr_spatial.c kl_spatial.c kl_guardian.c -lm -lpthread
   cd "$ROOT/klepton" || return 1
   run t_ptw tests/t_ptw.c runtime/gfx/kl_reproject_ptw.c -lm
   run t_pt_force -Iruntime/xr tests/t_pt_force.c runtime/xr/kl_passthrough.c
@@ -61,6 +62,7 @@ klepton_tests() {
   run t_lowmem -Wextra -Iruntime tests/t_lowmem.c
   run t_uelog -Wextra -Iruntime tests/t_uelog.c
   run t_evgate -Wextra -Iruntime tests/t_evgate.c
+  run t_logcap -Wextra -Iruntime/diag tests/t_logcap.c
   run t_gswap -Wextra -Iruntime tests/t_gswap.c
   mkdir -p "$T/libcsem"
   awk '/KL-TEST-BEGIN (affinity|madvclip)/{p=1;next} /KL-TEST-END (affinity|madvclip)/{p=0} p' runtime/libc/kl_libc.c > "$T/libcsem/libc_blocks.inc"

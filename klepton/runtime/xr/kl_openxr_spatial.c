@@ -18,6 +18,7 @@
 #include "kl_openxr_priv.h"
 #include "kl_spatial.h"
 #include "kl_envdepth.h"
+#include "../diag/kl_logcap.h"   // [sp-life] caps
 #include <math.h>
 #include <pthread.h>
 #include <stdio.h>
@@ -174,20 +175,52 @@ static ent_t *ent_of_space(void *h) {
     pthread_mutex_unlock(&g_mu);
     return r;
 }
+// [sp-life] handle history: every XrSpace this file created for an entity ('C') and every one the guest destroyed ('D'), newest last.
+// Answers "was this handle ever ours, and was it already destroyed" when a call comes back XR_ERROR_HANDLE_INVALID. Leaf lock.
+#define HH_N 256
+static struct { void *h; uint64_t t; int kind; char op; } g_hh[HH_N];
+static unsigned g_hh_n;
+static pthread_mutex_t g_hh_mu = PTHREAD_MUTEX_INITIALIZER;
+static uint64_t hh_now_ns(void) { struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts); return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec; }
+static void hh_note(void *h, int kind, char op) {
+    pthread_mutex_lock(&g_hh_mu);
+    unsigned i = g_hh_n++ % HH_N;
+    g_hh[i].h = h; g_hh[i].kind = kind; g_hh[i].op = op; g_hh[i].t = hh_now_ns();
+    pthread_mutex_unlock(&g_hh_mu);
+}
+static void hh_describe(void *h, char *out, size_t n) {
+    int o = snprintf(out, n, "-");
+    if (!h) return;
+    pthread_mutex_lock(&g_hh_mu);
+    unsigned total = g_hh_n < HH_N ? g_hh_n : HH_N, shown = 0;
+    for (unsigned k = 0; k < total; k++) {                    // oldest first
+        unsigned i = (g_hh_n - total + k) % HH_N;
+        if (g_hh[i].h != h || o >= (int)n - 24) continue;
+        o += snprintf(out + o, n - (size_t)o, "%s%c(kind=%d)@%.1f", shown++ ? "," : "", g_hh[i].op, g_hh[i].kind, (double)g_hh[i].t / 1e9);
+    }
+    if (!shown) snprintf(out, n, "never-created-by-spatial");
+    pthread_mutex_unlock(&g_hh_mu);
+}
 static void *space_for(ent_t *e) {
     pthread_mutex_lock(&g_mu);
-    if (!e->handle) e->handle = klxr_space_create_external(e);
+    int fresh = !e->handle;
+    if (fresh) e->handle = klxr_space_create_external(e);
     void *h = e->handle;
+    int kind = e->kind;
     pthread_mutex_unlock(&g_mu);
+    if (fresh && h) hh_note(h, kind, 'C');
     return h;
 }
 void kl_openxr_spatial_space_destroyed(void *user) {
     ent_t *e = user;
     if (e < g_ent || e >= g_ent + ENT_MAX) return;
     pthread_mutex_lock(&g_mu);
+    void *dead = e->handle;
     e->handle = NULL;
     int drop = e->used && !e->erased && e->kind == KLSP_ANCHOR;
+    int dkind = e->kind;
     pthread_mutex_unlock(&g_mu);
+    if (dead) hh_note(dead, dkind, 'D');   // the entity had no live XrSpace: nothing was destroyed
     // Quest semantics (as the ovrp facade): an anchor never saved dies with its handle.
     if (drop && !kl_spatial_anchor_saved(e->id)) {
         ensure_listener();
@@ -287,8 +320,16 @@ done:
 
 // ---------------------------------------------------------------- events
 static void push(int32_t type, void *ev, size_t size) {
-    if (klxr_push_event((uint32_t)type, (char *)ev + 16, size - 16) != 0)
+    int rc = klxr_push_event((uint32_t)type, (char *)ev + 16, size - 16);
+    if (rc != 0)
         fprintf(stderr, "  [xr] spatial: event queue full, %d dropped\n", type);
+    // [sp-life]: the event is queued for xrPollEvent (kl_openxr_spatial_event_delivered says when the guest takes it)
+    uint64_t rq = 0; int32_t rs = -999;
+    memcpy(&rq, (char *)ev + 16, 8);
+    if (size >= 28) memcpy(&rs, (char *)ev + 24, 4);
+    char tag[40];
+    snprintf(tag, sizeof tag, "xr-push-%d", type);
+    kl_spatial_life(tag, "req=%llu result=%d queue=%s", (unsigned long long)rq, (int)rs, rc ? "FULL (dropped)" : "ok");
 }
 typedef struct { int32_t type; const void *next; uint64_t req; int32_t result, _p; void *space; XrUuidEXT uuid; } EvAnchor;
 typedef struct { EvAnchor a; int32_t comp; XrBool32 enabled; } EvStatus;
@@ -353,6 +394,7 @@ static int pend_take(uint64_t req, fpend *out) {
 static void on_done(uint64_t req, int ok, kl_uuid id) {
     fpend p;
     if (!pend_take(req, &p)) return;
+    kl_spatial_life_close(req, "xr-on_done", ok ? R_OK : R_RUNTIME);
     if (p.kind == P_CREATE) {
         ent_t *e = ok ? ent_get(KLSP_ANCHOR, id) : NULL;
         ev_anchor(E_ANCHOR_CREATE_COMPLETE, req, ok && e ? R_OK : R_RUNTIME, e);
@@ -372,14 +414,15 @@ static void ensure_listener(void) {
 static uint64_t g_bridged[32];
 static unsigned g_bridged_n;
 static void bridge_create(uint64_t req, int ok, kl_uuid id) {
-    if (!klxr_spatial_entity_enabled()) return;
+    if (!klxr_spatial_entity_enabled()) { kl_spatial_life("xr-bridge", "req=%llu NOT delivered on the OpenXR queue: XR_FB_spatial_entity not enabled by the guest", (unsigned long long)req); return; }
     int dup = 0;
     pthread_mutex_lock(&g_fp_mu);
     for (unsigned i = 0; i < 32 && i < g_bridged_n; i++) if (g_bridged[i] == req) { dup = 1; break; }
     if (!dup) g_bridged[g_bridged_n++ % 32] = req;
     pthread_mutex_unlock(&g_fp_mu);
-    if (dup) return;
+    if (dup) { kl_spatial_life("xr-bridge", "req=%llu duplicate, not delivered twice", (unsigned long long)req); return; }
     ent_t *e = ok ? ent_get(KLSP_ANCHOR, id) : NULL;
+    kl_spatial_life("xr-bridge", "req=%llu ok=%d entity=%s -> OpenXR create-complete event", (unsigned long long)req, ok, e ? "yes" : "none");
     ev_anchor(E_ANCHOR_CREATE_COMPLETE, req, ok && e ? R_OK : R_RUNTIME, e);
 }
 
@@ -396,16 +439,29 @@ static XrResult CreateSpatialAnchorFB(void *session, const AnchorCI *ci, XrAsync
     if (!sess_ok(session)) return R_HANDLE;
     if (!ci || !req) return R_VALIDATION;
     CHK_TYPE(ci, T_SPATIAL_ANCHOR_CREATE_INFO);
-    if (!kl_spatial_available(KLSP_CAP_ANCHORS)) { LOG1("anchors unavailable (no world sensing)"); return R_FEATURE_UNSUP; }
+    if (!kl_spatial_available(KLSP_CAP_ANCHORS)) {
+        LOG1("anchors unavailable (no world sensing)");
+        kl_spatial_life("create-refused", "fac=xr reason=anchors-unavailable (kl_spatial_available(ANCHORS)=0) -> FEATURE_UNSUPPORTED");
+        return R_FEATURE_UNSUP;
+    }
     void *stage = stage_space();
     KPose base;
-    if (!stage || !locate_in(ci->space, stage, ci->time, &base)) return R_POSE_INVALID;
+    if (!stage || !locate_in(ci->space, stage, ci->time, &base)) {
+        kl_spatial_life("create-refused", "fac=xr reason=base-space-not-locatable stage=%p base_space=%p class=%s time=%lld -> POSE_INVALID",
+                        stage, ci->space, klxr_handle_class(ci->space), (long long)ci->time);
+        return R_POSE_INVALID;
+    }
     float m[16];
     m4_from_pose(pose_mul(base, ci->pose), m);
     ensure_listener();
     uint64_t id = kl_spatial_new_request();
     pend_add(id, P_CREATE, 0);
-    if (kl_spatial_create_anchor(id, m) != 0) { fpend p; pend_take(id, &p); return R_RUNTIME; }
+    kl_spatial_life_open(id, "create", "xr", NULL);   // before the host call: it may complete inside it
+    if (kl_spatial_create_anchor(id, m) != 0) {
+        fpend p; pend_take(id, &p);
+        kl_spatial_life_close(id, "xr-refused-by-host-layer", R_RUNTIME);
+        return R_RUNTIME;
+    }
     *req = id;          // the completion event arrives through on_done
     return R_OK;
 }
@@ -735,8 +791,10 @@ static XrResult EraseSpaceFB(void *session, const EraseInfo *ei, XrAsyncRequestI
     }
     ensure_listener();
     pend_add(*req, P_ERASE, ei->location);
+    kl_spatial_life_open(*req, "erase", "xr", &e->id);
     if (kl_spatial_remove_anchor(*req, e->id) != 0) {
         fpend p; pend_take(*req, &p);
+        kl_spatial_life_close(*req, "xr-refused-by-host-layer", R_RUNTIME);
         ev_store(E_ERASE_COMPLETE, *req, R_RUNTIME, e, ei->location);
     }
     return R_OK;
@@ -744,7 +802,10 @@ static XrResult EraseSpaceFB(void *session, const EraseInfo *ei, XrAsyncRequestI
 
 // ================================================================ XR_FB_spatial_entity_container
 typedef struct { int32_t type; const void *next; uint32_t cap, count; XrUuidEXT *uuids; } Container;
-static XrResult GetSpaceContainerFB(void *space, Container *c) {
+// xrGetSpaceContainerFB(XrSession session, XrSpace space, XrSpaceContainerFB *out): the session comes first (it was missing: the session
+// was read as the space and every call answered HANDLE_INVALID).
+static XrResult GetSpaceContainerFB(void *session, void *space, Container *c) {
+    if (!sess_ok(session)) return R_HANDLE;
     ent_t *e = space_ent(space);
     if (!e) return R_HANDLE;
     if (!c) return R_VALIDATION;
@@ -1455,13 +1516,98 @@ int kl_openxr_spatial_system_props(void *chain) {
     return n;
 }
 
+// ================================================================ [sp-life] call trace
+// The entry points of the anchor / query / storage / container families go through spl_call: it calls the real function and, for the
+// first SPL_CALLS calls of each, then 1 in SPL_CALLS_EVERY, and for the first SPL_ERRS failures of each (then 1 in SPL_ERRS_EVERY), writes
+// "[sp-life] <fn> ... ret=<code> a0=.. a1=.. a2=.. a3=.." where each argument says what it is when it is a handle: the session, an entity
+// space (kind, uuid), another kind of XrSpace, a freed pool slot -- and, for a failure, the history of the first two ('C' created by this
+// file, 'D' destroyed by the guest, at mono seconds). The real function receives the first four argument registers untouched (AAPCS64 /
+// SysV: integers and pointers; none of the wrapped functions takes a float), so the wrapper needs no per-function signature.
+#define SPL_CALLS 12
+#define SPL_CALLS_EVERY 500
+#define SPL_ERRS 12
+#define SPL_ERRS_EVERY 200
+static const char *spl_res(XrResult r) {
+    switch (r) {
+        case R_OK: return "XR_SUCCESS"; case R_VALIDATION: return "XR_ERROR_VALIDATION_FAILURE"; case R_RUNTIME: return "XR_ERROR_RUNTIME_FAILURE";
+        case R_FUNC_UNSUP: return "XR_ERROR_FUNCTION_UNSUPPORTED"; case R_FEATURE_UNSUP: return "XR_ERROR_FEATURE_UNSUPPORTED";
+        case R_LIMIT: return "XR_ERROR_LIMIT_REACHED"; case R_SIZE: return "XR_ERROR_SIZE_INSUFFICIENT"; case R_HANDLE: return "XR_ERROR_HANDLE_INVALID";
+        case R_POSE_INVALID: return "XR_ERROR_POSE_INVALID"; case R_COMP_UNSUP: return "XR_ERROR_SPACE_COMPONENT_NOT_SUPPORTED_FB";
+        case R_COMP_NOT_ENABLED: return "XR_ERROR_SPACE_COMPONENT_NOT_ENABLED_FB"; case R_COMP_ALREADY_SET: return "XR_ERROR_SPACE_COMPONENT_STATUS_ALREADY_SET_FB";
+        case R_CLOUD_DISABLED: return "XR_ERROR_SPACE_CLOUD_STORAGE_DISABLED_FB"; default: return "?";
+    }
+}
+// Codes that are an ordinary step of a correct caller, not a failure: SIZE_INSUFFICIENT (the two-call idiom with a too small buffer) and
+// SPACE_COMPONENT_STATUS_ALREADY_SET (re-asserting a state). They count as plain calls and never use the failure slots.
+static int spl_benign(XrResult r) { return r == R_SIZE || r == R_COMP_ALREADY_SET; }
+static void spl_arg(char *o, size_t n, uint64_t a) {
+    void *h = (void *)(uintptr_t)a;
+    if (!a) { snprintf(o, n, "0"); return; }
+    ent_t *e = ent_of_space(h);
+    if (e) {
+        char us[37];
+        kl_spatial_uuid_str(e->id, us);
+        snprintf(o, n, "0x%llx=entity-space(kind=%d erased=%d uuid=%.8s)", (unsigned long long)a, e->kind, e->erased, us);
+    } else {
+        snprintf(o, n, "0x%llx=%s", (unsigned long long)a, klxr_handle_class(h));
+    }
+}
+static XrResult spl_call(const char *name, void *impl, unsigned *cc, unsigned *ec, uint64_t a, uint64_t b, uint64_t c, uint64_t d) {
+    XrResult r = ((XrResult (*)(uint64_t, uint64_t, uint64_t, uint64_t))impl)(a, b, c, d);
+    unsigned n = 0, en = 0;
+    int w = kl_logcap_hit(cc, SPL_CALLS, SPL_CALLS_EVERY, &n);
+    int bad = r < 0 && !spl_benign(r);
+    int we = bad && kl_logcap_hit(ec, SPL_ERRS, SPL_ERRS_EVERY, &en);
+    if (!w && !we) return r;
+    char s0[120], s1[120], s2[120], h0[120] = "", h1[120] = "";
+    spl_arg(s0, sizeof s0, a); spl_arg(s1, sizeof s1, b); spl_arg(s2, sizeof s2, c);
+    if (bad) {
+        char t0[100], t1[100];
+        hh_describe((void *)(uintptr_t)a, t0, sizeof t0);
+        hh_describe((void *)(uintptr_t)b, t1, sizeof t1);
+        snprintf(h0, sizeof h0, " hist(a0)=%s", t0);
+        snprintf(h1, sizeof h1, " hist(a1)=%s", t1);
+    }
+    kl_spatial_life(name, "call#%u%s ret=%d(%s) a0=%s a1=%s a2=%s a3=0x%llx session=%p%s%s", n, bad ? " FAILED" : "", (int)r, spl_res(r), s0, s1, s2,
+                    (unsigned long long)d, klxr_current_session(), h0, h1);
+    return r;
+}
+#define SPL_WRAP(FN) \
+    static XrResult FN##_life(uint64_t a, uint64_t b, uint64_t c, uint64_t d) { \
+        static unsigned _cc, _ec; return spl_call("xr" #FN, (void *)FN, &_cc, &_ec, a, b, c, d); }
+SPL_WRAP(CreateSpatialAnchorFB)
+SPL_WRAP(GetSpaceUuidFB)
+SPL_WRAP(EnumerateSpaceSupportedComponentsFB)
+SPL_WRAP(SetSpaceComponentStatusFB)
+SPL_WRAP(GetSpaceComponentStatusFB)
+SPL_WRAP(QuerySpacesFB)
+SPL_WRAP(RetrieveSpaceQueryResultsFB)
+SPL_WRAP(SaveSpaceFB)
+SPL_WRAP(SaveSpaceListFB)
+SPL_WRAP(EraseSpaceFB)
+SPL_WRAP(GetSpaceContainerFB)
+SPL_WRAP(DiscoverSpacesMETA)
+SPL_WRAP(RetrieveSpaceDiscoveryResultsMETA)
+
+// xrPollEvent just gave the guest a pushed event (kl_openxr.c): one capped line per spatial event type with its requestId / result.
+void kl_openxr_spatial_event_delivered(uint32_t type, const void *buf) {
+    if (type < 1000113000u || type > 1000247999u) return;   // XR_FB_spatial_entity .. XR_META_spatial_entity_discovery event numbers
+    uint64_t rq = 0; int32_t rs = 0;
+    memcpy(&rq, (const char *)buf + 16, 8);
+    memcpy(&rs, (const char *)buf + 24, 4);
+    char tag[40];
+    snprintf(tag, sizeof tag, "xr-delivered-%u", type);
+    kl_spatial_life(tag, "req=%llu result=%d (xrPollEvent returned it to the guest)", (unsigned long long)rq, (int)rs);
+}
+void kl_openxr_spatial_poll_tick(void) { kl_spatial_life_tick(); }
+
 // ================================================================ registration
 static const klxr_row_def k_rows[] = {
-    {"xrCreateSpatialAnchorFB", (void *)CreateSpatialAnchorFB},
-    {"xrGetSpaceUuidFB", (void *)GetSpaceUuidFB},
-    {"xrEnumerateSpaceSupportedComponentsFB", (void *)EnumerateSpaceSupportedComponentsFB},
-    {"xrSetSpaceComponentStatusFB", (void *)SetSpaceComponentStatusFB},
-    {"xrGetSpaceComponentStatusFB", (void *)GetSpaceComponentStatusFB},
+    {"xrCreateSpatialAnchorFB", (void *)CreateSpatialAnchorFB_life},
+    {"xrGetSpaceUuidFB", (void *)GetSpaceUuidFB_life},
+    {"xrEnumerateSpaceSupportedComponentsFB", (void *)EnumerateSpaceSupportedComponentsFB_life},
+    {"xrSetSpaceComponentStatusFB", (void *)SetSpaceComponentStatusFB_life},
+    {"xrGetSpaceComponentStatusFB", (void *)GetSpaceComponentStatusFB_life},
     {"xrSetSpaceComponentStatusPrivilegedFB", (void *)SetSpaceComponentStatusPrivilegedFB},
     {"xrGetSpaceConfidenceFB", (void *)GetSpaceConfidenceFB},
     {"xrRebaseSpacesFB", (void *)NoopSession},
@@ -1469,12 +1615,12 @@ static const klxr_row_def k_rows[] = {
     {"xrCreateSpaceUserFB", (void *)CreateSpaceUserFB},
     {"xrGetSpaceUserIdFB", (void *)GetSpaceUserIdFB},
     {"xrDestroySpaceUserFB", (void *)DestroySpaceUserFB},
-    {"xrQuerySpacesFB", (void *)QuerySpacesFB},
-    {"xrRetrieveSpaceQueryResultsFB", (void *)RetrieveSpaceQueryResultsFB},
-    {"xrSaveSpaceFB", (void *)SaveSpaceFB},
-    {"xrSaveSpaceListFB", (void *)SaveSpaceListFB},
-    {"xrEraseSpaceFB", (void *)EraseSpaceFB},
-    {"xrGetSpaceContainerFB", (void *)GetSpaceContainerFB},
+    {"xrQuerySpacesFB", (void *)QuerySpacesFB_life},
+    {"xrRetrieveSpaceQueryResultsFB", (void *)RetrieveSpaceQueryResultsFB_life},
+    {"xrSaveSpaceFB", (void *)SaveSpaceFB_life},
+    {"xrSaveSpaceListFB", (void *)SaveSpaceListFB_life},
+    {"xrEraseSpaceFB", (void *)EraseSpaceFB_life},
+    {"xrGetSpaceContainerFB", (void *)GetSpaceContainerFB_life},
     {"xrGetSpaceBoundingBox2DFB", (void *)GetSpaceBoundingBox2DFB},
     {"xrGetSpaceBoundingBox3DFB", (void *)GetSpaceBoundingBox3DFB},
     {"xrGetSpaceSemanticLabelsFB", (void *)GetSpaceSemanticLabelsFB},
@@ -1495,8 +1641,8 @@ static const klxr_row_def k_rows[] = {
     {"xrUpdatePassthroughColorLutMETA", (void *)UpdatePassthroughColorLutMETA},
     {"xrGetPassthroughPreferencesMETA", (void *)GetPassthroughPreferencesMETA},
     {"xrPassthroughLayerSetKeyboardHandsIntensityFB", (void *)PassthroughLayerSetKeyboardHandsIntensityFB},
-    {"xrDiscoverSpacesMETA", (void *)DiscoverSpacesMETA},
-    {"xrRetrieveSpaceDiscoveryResultsMETA", (void *)RetrieveSpaceDiscoveryResultsMETA},
+    {"xrDiscoverSpacesMETA", (void *)DiscoverSpacesMETA_life},
+    {"xrRetrieveSpaceDiscoveryResultsMETA", (void *)RetrieveSpaceDiscoveryResultsMETA_life},
     {"xrGetSpaceRoomMeshMETA", (void *)GetSpaceRoomMeshMETA},
     {"xrGetSpaceRoomMeshFaceIndicesMETA", (void *)GetSpaceRoomMeshFaceIndicesMETA},
     {"xrCreatePlaneDetectorEXT", (void *)CreatePlaneDetectorEXT},

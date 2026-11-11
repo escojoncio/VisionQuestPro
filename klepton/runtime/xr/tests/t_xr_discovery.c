@@ -29,6 +29,7 @@ void *kl_openxr_lookup(const char *n) { (void)n; return NULL; }
 void *kl_openxr_sym(const char *n) { (void)n; return NULL; }
 static char g_sess;
 void *klxr_current_session(void) { return &g_sess; }
+const char *klxr_handle_class(void *h) { return h == (void *)&g_sess ? "session" : "stub-handle"; }
 int64_t klxr_time_now(void) { return 1; }
 static int g_enabled = 1;
 int klxr_spatial_entity_enabled(void) { return g_enabled; }
@@ -167,6 +168,31 @@ int main(void) {
     out = (Results){ 1000247006, NULL, 16, 0, buf };
     r = ret(S, rq, &out); CK(r == 0 && out.count == 1);
     void *room = buf[0].space;
+
+    // xrGetSpaceContainerFB(XrSession session, XrSpace space, XrSpaceContainerFB*): session + room -> the list; a bad space or session -> HANDLE_INVALID
+    {
+        typedef struct { int32_t type; const void *next; uint32_t cap, count; uint8_t (*uuids)[16]; } Cont;
+        int32_t (*gc)(void *, void *, Cont *) = (int32_t (*)(void *, void *, Cont *))ROW("xrGetSpaceContainerFB");
+        CK(gc != NULL);
+        Cont c = { 1000199000, NULL, 0, 0, NULL };
+        CK(gc(S, room, &c) == 0 && c.count == 5);                                   // size query: the 5 planes
+        uint8_t ids[8][16];
+        c = (Cont){ 1000199000, NULL, 8, 0, ids };
+        CK(gc(S, room, &c) == 0 && c.count == 5);
+        int found = 0;
+        for (uint32_t i = 0; i < c.count; i++) for (int n = 1; n <= 5; n++) if (!memcmp(ids[i], U16(n).b, 16)) found++;
+        CK(found == 5);                                                              // every plane listed once
+        c = (Cont){ 1000199000, NULL, 2, 0, ids };
+        CK(gc(S, room, &c) == -11 && c.count == 5);                                  // capacity too small
+        c = (Cont){ 1000199000, NULL, 0, 0, NULL };
+        CK(gc(S, &fails, &c) == -12);                                                // not a space
+        CK(gc(S, NULL, &c) == -12);
+        CK(gc(S, S, &c) == -12);                                                     // the session passed as the space (the old 2-argument shape)
+        CK(gc((void *)&fails, room, &c) == -12);                                     // not our session
+        CK(gc(S, room, NULL) == -1);
+        c = (Cont){ 5, NULL, 0, 0, NULL };
+        CK(gc(S, room, &c) == -1);                                                   // wrong struct type
+    }
     MeshInfo mi = { 1000553001, NULL, 0, NULL };
     Mesh mm = { 1000553002, NULL, 0, 0, NULL, 0, 0, NULL };
     r = mesh(room, &mi, &mm); CK(r == 0 && mm.fcount == 4 && mm.vcount == 16);
