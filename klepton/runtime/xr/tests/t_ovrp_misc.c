@@ -10,6 +10,10 @@
 #include "../kl_ovrp_misc.c"
 #include <assert.h>
 #include <string.h>
+#include <stdlib.h>
+#include <unistd.h>
+#include <sys/wait.h>
+#include "../kl_ar_switch.h"
 
 // kl_ovrp.c's init state, resolved as kl_ovrp_sym does for a name kl_ovrp.c implements itself:
 // g_ovrp_impl is searched before the registered tables and the shared answers.
@@ -61,6 +65,24 @@ static int refused(const char *name) {
 }
 
 int main(void) {
+    // KL_NO_OVRM_BRIDGE (kl_ar_switch.h, read once per process): in a forked child, before anything here reads it, the
+    // OnInstanceCreate / OnInstanceDestroy pair is a success no-op again: no bridge, no init flag, even for a null instance.
+    fflush(stdout); fflush(stderr);
+    pid_t pid = fork();
+    if (pid == 0) {
+        setenv("KL_NO_OVRM_BRIDGE", "1", 1);
+        uint64_t (*c)(uint64_t) = (uint64_t (*)(uint64_t))find_impl("ovrp_UnityOpenXR_OnInstanceCreate");
+        uint64_t (*d)(uint64_t) = (uint64_t (*)(uint64_t))find_impl("ovrp_UnityOpenXR_OnInstanceDestroy");
+        assert(c && d);
+        assert(c(1) == 0 && !klovrp_bridge() && !g_ovrp_initialized && klovrp_GetInitialized() == 0);
+        assert(c(0) == 0 && !klovrp_bridge());
+        g_ovrp_initialized = 1;                                            // set by an ovrp_Initialize*: Destroy must leave it
+        assert(d(1) == 0 && g_ovrp_initialized == 1 && !klovrp_bridge());
+        fflush(stdout); fflush(stderr);
+        _exit(0);
+    }
+    int st = 0;
+    assert(pid > 0 && waitpid(pid, &st, 0) == pid && WIFEXITED(st) && WEXITSTATUS(st) == 0);
     kl_ovrp_misc_register();
     const int32_t SENT = 0x5A5A5A5A;
     int32_t o;

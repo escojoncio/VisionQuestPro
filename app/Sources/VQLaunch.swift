@@ -496,6 +496,13 @@ final class VQSettings: ObservableObject {
         let skipPass = VQGameSkipPass.load(key: gameKey)
         if skipPass.isEmpty { unsetenv("VPVK_SKIP_PASS") } else { setenv("VPVK_SKIP_PASS", skipPass, 1) }
         VQLog.log("Gráficos: VPVK_PASS_DUMP \(passDump ? "=1" : "sin exportar"), VPVK_SKIP_PASS \(skipPass.isEmpty ? "sin exportar" : "=" + skipPass)")
+        // «Aislar AR (diagnóstico)», per game (VQGameARIso): each switch turns one piece of the spatial AR off in Klepton (kl_ar_switch.h); unset = the piece runs.
+        // Set or unset on every launch, so a game never inherits the previous one's switches.
+        for piece in VQGameARIso.Piece.allCases {
+            let on = VQGameARIso.load(piece, key: gameKey)
+            if on { setenv(piece.env, "1", 1) } else { unsetenv(piece.env) }
+            VQLog.log("Gráficos/AR: \(piece.env) \(on ? "=1" : "sin exportar")")
+        }
         // «Mostrar malla de escena», per game (VQGameSceneMesh): off = the wireframe the game draws of the scene mesh is hidden (KL_HIDE_SCENE_MESH).
         let showMesh = VQGameSceneMesh.load(key: gameKey)
         if showMesh { unsetenv("KL_HIDE_SCENE_MESH") } else { setenv("KL_HIDE_SCENE_MESH", "1", 1) }
@@ -752,6 +759,42 @@ enum VQGameSkipPass {
         let v = sanitize(value)
         if v.isEmpty { UserDefaults.standard.removeObject(forKey: "vq.skippass." + key) }
         else { UserDefaults.standard.set(v, forKey: "vq.skippass." + key) }
+    }
+}
+
+/// «Aislar AR (diagnóstico)» per game: four switches, all off by default (every piece of the spatial AR runs). On = the variable
+/// is exported as 1 and Klepton turns that piece off. Saved as vq.noovrm.<key>, vq.noanchor.<key>, vq.nodisc.<key>, vq.norescan.<key>.
+enum VQGameARIso {
+    enum Piece: CaseIterable {
+        case ovrm, anchor, disc, rescan
+
+        var defaultsPrefix: String {
+            switch self {
+            case .ovrm: return "vq.noovrm."
+            case .anchor: return "vq.noanchor."
+            case .disc: return "vq.nodisc."
+            case .rescan: return "vq.norescan."
+            }
+        }
+
+        var env: String {
+            switch self {
+            case .ovrm: return "KL_NO_OVRM_BRIDGE"
+            case .anchor: return "KL_NO_ANCHOR_BRIDGE"
+            case .disc: return "KL_NO_XR_DISCOVERY"
+            case .rescan: return "KL_NO_SCENE_RESCAN"
+            }
+        }
+    }
+
+    static func load(_ piece: Piece, key: String) -> Bool {
+        !key.isEmpty && UserDefaults.standard.object(forKey: piece.defaultsPrefix + key) as? Bool == true
+    }
+
+    static func save(_ on: Bool, _ piece: Piece, key: String) {
+        guard !key.isEmpty else { return }
+        if on { UserDefaults.standard.set(true, forKey: piece.defaultsPrefix + key) }
+        else { UserDefaults.standard.removeObject(forKey: piece.defaultsPrefix + key) }
     }
 }
 

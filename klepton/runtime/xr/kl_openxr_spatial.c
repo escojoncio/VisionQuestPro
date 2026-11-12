@@ -18,6 +18,7 @@
 #include "kl_openxr_priv.h"
 #include "kl_spatial.h"
 #include "kl_envdepth.h"
+#include "kl_ar_switch.h"   // KL_NO_ANCHOR_BRIDGE, KL_NO_XR_DISCOVERY
 #include "../diag/kl_logcap.h"   // [sp-life] caps
 #include <math.h>
 #include <pthread.h>
@@ -1758,12 +1759,21 @@ static const char *const k_fns_planes[] = { "xrCreatePlaneDetectorEXT", "xrDestr
 
 void kl_openxr_spatial_register(void) {
     klxr_register_rows(k_rows, sizeof k_rows / sizeof k_rows[0]);
-    kl_spatial_set_create_hook(bridge_create);
+    if (!kl_ar_switch_off(KL_ARSW_ANCHOR_BRIDGE)) kl_spatial_set_create_hook(bridge_create);   // KL_NO_ANCHOR_BRIDGE: no hook, no OpenXR event
     // FEATURE_UNSUPPORTED rows: same function for every name (args are ignored).
     klxr_row_def fu[96]; size_t nfu = 0;
     for (const char *const *n = k_feature_unsupported; *n && nfu < 96; n++)
         fu[nfu++] = (klxr_row_def){ *n, (void *)FeatureUnsupported };
     klxr_register_rows(fu, nfu);
+    // KL_NO_XR_DISCOVERY: the state before 9d069a7 -- the discovery / room-mesh entry points answer FEATURE_UNSUPPORTED (the later row
+    // wins over k_rows') and the three extensions below are not announced.
+    const int no_disc = kl_ar_switch_off(KL_ARSW_XR_DISCOVERY);
+    if (no_disc) {
+        klxr_row_def nd[4]; size_t nnd = 0;
+        for (const char *const *n = k_fns_discovery; *n && nnd < 4; n++) nd[nnd++] = (klxr_row_def){ *n, (void *)FeatureUnsupported };
+        for (const char *const *n = k_fns_roommesh; *n && nnd < 4; n++) nd[nnd++] = (klxr_row_def){ *n, (void *)FeatureUnsupported };
+        klxr_register_rows(nd, nnd);
+    }
     klxr_register_refused("XR_META/FB/EXT spatial (not served)", k_refused);
 
     // Anchors need no ARKit; scene data does (gate_scene). None is advertised until
@@ -1779,9 +1789,11 @@ void kl_openxr_spatial_register(void) {
     klxr_register_extension("XR_META_spatial_entity_mesh", 1, gate_mesh, k_fns_mesh);
     // Unity's "Meta Quest: Planes / Bounding Boxes" features need these three to register their plane / bounding-box subsystems.
     // semantic_label defines only the XrSemanticLabelMETA enum (no entry point).
-    klxr_register_extension("XR_META_spatial_entity_discovery", 1, gate_scene, k_fns_discovery);
-    klxr_register_extension("XR_META_spatial_entity_semantic_label", 1, gate_scene, NULL);
-    klxr_register_extension("XR_META_spatial_entity_room_mesh", 1, gate_scene, k_fns_roommesh);
+    if (!no_disc) {
+        klxr_register_extension("XR_META_spatial_entity_discovery", 1, gate_scene, k_fns_discovery);
+        klxr_register_extension("XR_META_spatial_entity_semantic_label", 1, gate_scene, NULL);
+        klxr_register_extension("XR_META_spatial_entity_room_mesh", 1, gate_scene, k_fns_roommesh);
+    }
     klxr_register_extension("XR_EXT_plane_detection", 2, gate_planes, k_fns_planes);
     // Depth is the mesh, so it follows the scene reconstruction (ARKit running and authorised).
     klxr_register_extension("XR_META_environment_depth", 1, gate_envdepth, k_fns_envdepth);

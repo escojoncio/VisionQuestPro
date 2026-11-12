@@ -8,6 +8,7 @@
 #include <unistd.h>
 #include <time.h>
 #include <fcntl.h>
+#include <sys/wait.h>
 #include "kl_ovrp_priv.h"
 #include "kl_spatial.h"
 #include "kl_envdepth.h"
@@ -116,9 +117,51 @@ static int cap_line(char *out, size_t cap, const char *a, const char *b, const c
     }
     return 0;
 }
+// KL_NO_SCENE_RESCAN (kl_ar_switch.h, read once per process): run in a forked child, with the switch set (off = 1) or not (control).
+// Off: no snapshot saved or loaded, no calib-mesh.bin, no launch rescan, L3+R3 held 5 s does nothing; the store stays live.
+static void child_rescan_switch(const char *dir, int off) {
+    static const float tv[9] = {0,0,0, 1,0,0, 0,1,0};
+    static const uint32_t tt[3] = {0, 1, 2};
+    const uint64_t sec = 1000000000ull;
+    float m[16], mA[16];
+    char path[300];
+    snprintf(path, sizeof path, "%s/sw%d-calib-mesh.bin", dir, off);
+    if (off) setenv("KL_NO_SCENE_RESCAN", "1", 1); else unsetenv("KL_NO_SCENE_RESCAN");
+    kl_spatial_snapshot_set_path(path);
+    kl_spatial_set_resync(resync_stub);
+    kl_spatial_set_clock(clock_stub);
+    ident(m, 2, 0, 3); ident(mA, 1, 0, 2);
+    kl_uuid aid = U16(77);
+    kl_spatial_mesh(U16(300), 0, m, tv, 3, tt, 1);
+    if (off) {
+        CK(kl_spatial_snapshot_save(aid, mA) == 0 && access(path, F_OK) != 0 && !kl_spatial_snapshot_frozen());
+        kl_spatial_mesh(U16(301), 0, m, tv, 3, tt, 1);                       // live: ARKit writes still go through
+        CK(kl_spatial_kind_of(U16(301)) == KLSP_MESH && kl_spatial_count(KLSP_MESH) == 2);
+        CK(kl_spatial_snapshot_load(aid, mA) == 0 && !kl_spatial_snapshot_frozen());
+        CK(kl_spatial_scan_auto(5000) == 0 && g_resyncs == 0 && !kl_spatial_scan_active());
+        kl_spatial_scan_input_at(1, 500 * sec); kl_spatial_scan_input_at(1, 506 * sec);
+        CK(!kl_spatial_scan_active() && g_resyncs == 0);
+        kl_spatial_scan_input_at(0, 507 * sec);
+        CK(access(path, F_OK) != 0);
+    } else {
+        CK(kl_spatial_snapshot_save(aid, mA) >= 3 && access(path, F_OK) == 0 && kl_spatial_snapshot_frozen());
+        CK(kl_spatial_snapshot_load(aid, mA) == 1);
+        CK(kl_spatial_scan_auto(5000) == 1 && g_resyncs == 1 && kl_spatial_scan_active());
+    }
+    fflush(stdout); fflush(stderr);
+    _exit(fails ? 1 : 0);
+}
+
 int main(void) {
     snprintf(g_dir, sizeof g_dir, "/tmp/kl_spatial_test_%d", (int)getpid());
     char cmd[300]; snprintf(cmd, sizeof cmd, "mkdir -p %s", g_dir); if (system(cmd)) return 2;
+    for (int off = 0; off < 2; off++) {          // before anything caches the switch in this process
+        fflush(stdout); fflush(stderr);
+        pid_t pid = fork();
+        if (pid == 0) child_rescan_switch(g_dir, off);
+        int st = 0;
+        CK(pid > 0 && waitpid(pid, &st, 0) == pid && WIFEXITED(st) && WEXITSTATUS(st) == 0);
+    }
     kl_ovrp_spatial_register();
     CK(g_ntab >= 40);
 

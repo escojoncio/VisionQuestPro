@@ -5,6 +5,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+#include <unistd.h>
+#include <sys/wait.h>
 #include "kl_openxr_priv.h"
 #include "kl_spatial.h"
 #include "kl_envdepth.h"
@@ -75,7 +77,42 @@ static void plane_at(int n, float x, float y, float z, float w, float h, int lab
     kl_spatial_plane(U16(n), 0, m, w, h, label, NULL, 0);
 }
 
+// Diagnostic switches (kl_ar_switch.h, read once per process): each case runs in a forked child that sets one variable before the
+// first register call. KL_NO_XR_DISCOVERY: the three extensions are not announced and the entry points answer FEATURE_UNSUPPORTED (-8),
+// the rest stays. KL_NO_ANCHOR_BRIDGE: the ovrp create result is not delivered on the OpenXR queue.
+static void child_no_discovery(void) {
+    setenv("KL_NO_XR_DISCOVERY", "1", 1);
+    kl_openxr_spatial_register();
+    CK(EXT("XR_META_spatial_entity_discovery") < 0 && EXT("XR_META_spatial_entity_semantic_label") < 0 && EXT("XR_META_spatial_entity_room_mesh") < 0);
+    static const char *const fns[] = { "xrDiscoverSpacesMETA", "xrRetrieveSpaceDiscoveryResultsMETA", "xrGetSpaceRoomMeshMETA", "xrGetSpaceRoomMeshFaceIndicesMETA" };
+    for (size_t i = 0; i < 4; i++) { int32_t (*f)(void) = ROW(fns[i]); CK(f && f() == -8); }
+    CK(EXT("XR_FB_spatial_entity") >= 0 && EXT("XR_FB_scene") >= 0 && EXT("XR_EXT_plane_detection") >= 0);   // the rest of spatial stays
+    kl_uuid aid = U16(60);                                                                                   // the anchor bridge is another switch
+    float am[16] = {0}; am[0] = am[5] = am[10] = am[15] = 1; kl_spatial_anchor(aid, 0, am, 1);
+    kl_spatial_notify_create(7, 1, aid);
+    CK(g_nev == 1);
+}
+static void child_no_anchor_bridge(void) {
+    setenv("KL_NO_ANCHOR_BRIDGE", "1", 1);
+    kl_openxr_spatial_register();
+    CK(EXT("XR_META_spatial_entity_discovery") >= 0 && EXT("XR_FB_spatial_entity") >= 0);                  // discovery is another switch
+    kl_uuid aid = U16(60);
+    float am[16] = {0}; am[0] = am[5] = am[10] = am[15] = 1; kl_spatial_anchor(aid, 0, am, 1);
+    kl_spatial_notify_create(7, 1, aid);
+    kl_spatial_notify_create(8, 0, aid);
+    CK(g_nev == 0);
+}
+static void run_child(void (*fn)(void)) {
+    fflush(stdout); fflush(stderr);
+    pid_t pid = fork();
+    if (pid == 0) { fn(); fflush(stdout); fflush(stderr); _exit(fails ? 1 : 0); }
+    int st = 0;
+    CK(pid > 0 && waitpid(pid, &st, 0) == pid && WIFEXITED(st) && WEXITSTATUS(st) == 0);
+}
+
 int main(void) {
+    run_child(child_no_discovery);
+    run_child(child_no_anchor_bridge);
     kl_openxr_spatial_register();
     CK(EXT("XR_META_spatial_entity_discovery") >= 0 && EXT("XR_META_spatial_entity_semantic_label") >= 0 &&
        EXT("XR_META_spatial_entity_room_mesh") >= 0);

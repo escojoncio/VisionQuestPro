@@ -751,6 +751,10 @@ struct VQGameSettingsView: View {
     @State private var frameAsync: Bool
     @State private var passDump: Bool
     @State private var skipPass: String
+    @State private var noOvrm: Bool
+    @State private var noAnchor: Bool
+    @State private var noDisc: Bool
+    @State private var noRescan: Bool
     @State private var sceneMesh: Bool
 
     init(game: VQGame) {
@@ -767,6 +771,10 @@ struct VQGameSettingsView: View {
         _frameAsync = State(initialValue: VQGameFrameAsync.load(key: game.aaKey))
         _passDump = State(initialValue: VQGamePassDump.load(key: game.aaKey))
         _skipPass = State(initialValue: VQGameSkipPass.load(key: game.aaKey))
+        _noOvrm = State(initialValue: VQGameARIso.load(.ovrm, key: game.aaKey))
+        _noAnchor = State(initialValue: VQGameARIso.load(.anchor, key: game.aaKey))
+        _noDisc = State(initialValue: VQGameARIso.load(.disc, key: game.aaKey))
+        _noRescan = State(initialValue: VQGameARIso.load(.rescan, key: game.aaKey))
         _sceneMesh = State(initialValue: VQGameSceneMesh.load(key: game.aaKey))
     }
 
@@ -852,10 +860,22 @@ struct VQGameSettingsView: View {
                             .font(.caption)
                     }
                 }
-                Section(VQL("Mostrar malla de escena (wireframe de algunos juegos)", "Show scene mesh (wireframe of some games)")) {
-                    Toggle(VQL("Mostrar malla de escena (wireframe de algunos juegos)", "Show scene mesh (wireframe of some games)"), isOn: $sceneMesh)
-                    Text(VQL("Apagado: se oculta la malla que el juego dibuja sobre el passthrough", "Off: hides the mesh the game draws over passthrough"))
-                        .font(.caption)
+                // Group: agrupa las secciones de diagnóstico (el Form ya tiene muchas secciones; un Group no cambia el comportamiento).
+                Group {
+                    Section(VQL("Aislar AR (diagnóstico)", "Isolate AR (diagnostic)")) {
+                        Toggle(VQL("Sin puente OVRManager", "No OVRManager bridge"), isOn: $noOvrm)
+                        Toggle(VQL("Sin puente de anclas", "No anchor bridge"), isOn: $noAnchor)
+                        Toggle(VQL("Sin descubrimiento de salas", "No room discovery"), isOn: $noDisc)
+                        Toggle(VQL("Sin reescaneo de escena", "No scene rescan"), isOn: $noRescan)
+                        Text(VQL("Todo apagado por defecto (AR completa). Cada interruptor desactiva una pieza para localizar cuál rompe el passthrough, el texto o el rayo (KL_NO_OVRM_BRIDGE, KL_NO_ANCHOR_BRIDGE, KL_NO_XR_DISCOVERY, KL_NO_SCENE_RESCAN). Se aplica al lanzar el juego.",
+                                 "All off by default (full AR). Each switch disables one piece to find which one breaks passthrough, text or the ray (KL_NO_OVRM_BRIDGE, KL_NO_ANCHOR_BRIDGE, KL_NO_XR_DISCOVERY, KL_NO_SCENE_RESCAN). Applied when the game launches."))
+                            .font(.caption)
+                    }
+                    Section(VQL("Mostrar malla de escena (wireframe de algunos juegos)", "Show scene mesh (wireframe of some games)")) {
+                        Toggle(VQL("Mostrar malla de escena (wireframe de algunos juegos)", "Show scene mesh (wireframe of some games)"), isOn: $sceneMesh)
+                        Text(VQL("Apagado: se oculta la malla que el juego dibuja sobre el passthrough", "Off: hides the mesh the game draws over passthrough"))
+                            .font(.caption)
+                    }
                 }
                 Section(VQL("Perfil del visor", "Headset profile")) {
                     Picker(VQL("Perfil del visor", "Headset profile"), selection: $profile) {
@@ -931,6 +951,22 @@ struct VQGameSettingsView: View {
             .onChange(of: passDump) { _, new in
                 VQGamePassDump.save(new, key: game.aaKey)
                 VQLog.log("Ajustes del juego \(game.aaKey): volcado de pases \(new ? "sí" : "no")")
+            }
+            .onChange(of: noOvrm) { _, new in
+                VQGameARIso.save(new, .ovrm, key: game.aaKey)
+                VQLog.log("Ajustes del juego \(game.aaKey): sin puente OVRManager \(new ? "sí" : "no")")
+            }
+            .onChange(of: noAnchor) { _, new in
+                VQGameARIso.save(new, .anchor, key: game.aaKey)
+                VQLog.log("Ajustes del juego \(game.aaKey): sin puente de anclas \(new ? "sí" : "no")")
+            }
+            .onChange(of: noDisc) { _, new in
+                VQGameARIso.save(new, .disc, key: game.aaKey)
+                VQLog.log("Ajustes del juego \(game.aaKey): sin descubrimiento de salas \(new ? "sí" : "no")")
+            }
+            .onChange(of: noRescan) { _, new in
+                VQGameARIso.save(new, .rescan, key: game.aaKey)
+                VQLog.log("Ajustes del juego \(game.aaKey): sin reescaneo de escena \(new ? "sí" : "no")")
             }
             .onChange(of: skipPass) { _, new in
                 let typed = VQGameSkipPass.typed(new)

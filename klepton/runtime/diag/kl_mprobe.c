@@ -2,6 +2,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include "klepton.h"
 #include "kl_mprobe.h"
 
@@ -550,6 +551,95 @@ static void probe_scene_detail(unsigned frame, Il2CppObject *const *types,
     }
 }
 
+// "[ui-canvas]": where the ACTIVE Canvases are, every 30 s, 6 times at most (first one on the first census tick), to tell a world-space
+// menu that sits somewhere else from one that is not drawn. Per Canvas (12 lines at most): name, renderMode (0 overlay, 1 camera,
+// 2 world), worldCamera, world position / rotation / lossy scale of its transform. Then Camera.main and the XR Origin (when the game
+// has one: Unity.XR.CoreUtils.XROrigin / XRRig). Same managed getters, same thread (game thread between frames) as the census above;
+// a getter this build lacks prints "?".
+static void ui_vec(char *out, size_t cap, Il2CppObject *tf, const MethodInfo *m, int n) {
+    Il2CppObject *r = (tf && m) ? invoke_on(tf, m, NULL, "Transform vector getter") : NULL;
+    if (!r) { snprintf(out, cap, "?"); return; }
+    const float *v = (const float *)il.object_unbox(r);
+    if (n == 4) snprintf(out, cap, "(%.3f,%.3f,%.3f,%.3f)", v[0], v[1], v[2], v[3]);
+    else snprintf(out, cap, "(%.3f,%.3f,%.3f)", v[0], v[1], v[2]);
+}
+
+static void probe_canvas_dump(unsigned frame, Il2CppObject *const *types, char (*tnames)[64],
+                              unsigned n_types, const MethodInfo *m_find) {
+    static unsigned dumps;
+    static uint64_t next_ms;
+    if (dumps >= 6 || !m_find) return;
+    unsigned ci = n_types;
+    for (unsigned t = 0; t < n_types; t++) if (strcmp(tnames[t], "Canvas") == 0) { ci = t; break; }
+    if (ci == n_types) return;                       // the game has no Canvas type: nothing consumed
+    struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
+    const uint64_t now = (uint64_t)ts.tv_sec * 1000u + (uint64_t)ts.tv_nsec / 1000000u;
+    if (dumps && now < next_ms) return;
+    dumps++; next_ms = now + 30000u;
+
+    const MethodInfo *m_name   = quiet_method("UnityEngine", "Object", "get_name", 0);
+    const MethodInfo *m_go     = quiet_method("UnityEngine", "Component", "get_gameObject", 0);
+    const MethodInfo *m_tf     = quiet_method("UnityEngine", "Component", "get_transform", 0);
+    const MethodInfo *m_ahier  = quiet_method("UnityEngine", "GameObject", "get_activeInHierarchy", 0);
+    const MethodInfo *m_pos    = quiet_method("UnityEngine", "Transform", "get_position", 0);
+    const MethodInfo *m_rot    = quiet_method("UnityEngine", "Transform", "get_rotation", 0);
+    const MethodInfo *m_scale  = quiet_method("UnityEngine", "Transform", "get_lossyScale", 0);
+    const MethodInfo *m_rmode  = quiet_method("UnityEngine", "Canvas", "get_renderMode", 0);
+    const MethodInfo *m_wcam   = quiet_method("UnityEngine", "Canvas", "get_worldCamera", 0);
+    const MethodInfo *m_cam    = quiet_method("UnityEngine", "Camera", "get_main", 0);
+    if (!m_tf) { fprintf(stderr, "  [ui-canvas] f%u no Component.transform: nothing to dump\n", frame); return; }
+
+    void *ta[1] = { types[ci] };
+    Il2CppObject *arr = invoke(m_find, ta, "FindObjectsOfType(Canvas)");
+    const uint32_t total = arr ? il.array_length(arr) : 0;
+    fprintf(stderr, "  [ui-canvas] f%u dump %u/6: %u Canvas in FindObjectsOfType (active ones listed, 12 at most)\n", frame, dumps, total);
+    unsigned shown = 0;
+    for (uint32_t i = 0; i < total && shown < 12; i++) {
+        Il2CppObject *c = ((Il2CppObject **)((uint8_t *)arr + ARR_DATA))[i];
+        if (!c) continue;
+        Il2CppObject *go = m_go ? invoke_on(c, m_go, NULL, "Component.gameObject") : NULL;
+        if (m_ahier && go && unbox_bool(invoke_on(go, m_ahier, NULL, "activeInHierarchy")) != 1) continue;
+        char nb[96] = "?", wn[96] = "<null>", p[64], r[80], sc[64];
+        if (m_name) str_ascii(invoke_on(c, m_name, NULL, "Object.get_name"), nb, sizeof nb);
+        Il2CppObject *rm = m_rmode ? invoke_on(c, m_rmode, NULL, "Canvas.renderMode") : NULL;
+        Il2CppObject *wc = m_wcam ? invoke_on(c, m_wcam, NULL, "Canvas.worldCamera") : NULL;
+        if (wc && m_name) str_ascii(invoke_on(wc, m_name, NULL, "Object.get_name"), wn, sizeof wn);
+        else if (!m_wcam) snprintf(wn, sizeof wn, "?");
+        Il2CppObject *tf = invoke_on(c, m_tf, NULL, "Component.transform");
+        ui_vec(p, sizeof p, tf, m_pos, 3); ui_vec(r, sizeof r, tf, m_rot, 4); ui_vec(sc, sizeof sc, tf, m_scale, 3);
+        fprintf(stderr, "  [ui-canvas] f%u #%u name=\"%s\" renderMode=%d worldCamera=\"%s\" pos=%s rot=%s scale=%s\n",
+                frame, shown, nb, rm ? *(int32_t *)il.object_unbox(rm) : -1, wn, p, r, sc);
+        shown++;
+    }
+    if (m_cam) {
+        Il2CppObject *cam = invoke(m_cam, NULL, "Camera.main");
+        char cn[96] = "?", p[64] = "?";
+        if (cam) {
+            if (m_name) str_ascii(invoke_on(cam, m_name, NULL, "Object.get_name"), cn, sizeof cn);
+            ui_vec(p, sizeof p, invoke_on(cam, m_tf, NULL, "Component.transform"), m_pos, 3);
+        }
+        fprintf(stderr, "  [ui-canvas] f%u Camera.main %s%s%s pos=%s\n", frame, cam ? "\"" : "<null>", cam ? cn : "", cam ? "\"" : "", p);
+    }
+    static const char *const origin_cls[][2] = { { "Unity.XR.CoreUtils", "XROrigin" }, { "Unity.XR.CoreUtils", "XRRig" },
+                                                  { "UnityEngine.XR.Interaction.Toolkit", "XRRig" } };
+    unsigned found = 0;
+    for (unsigned k = 0; k < sizeof origin_cls / sizeof origin_cls[0] && !found; k++) {
+        Il2CppClass *oc = find_class(origin_cls[k][0], origin_cls[k][1]);
+        if (!oc) continue;
+        void *oa[1] = { il.type_get_object(il.class_get_type(oc)) };
+        Il2CppObject *os = invoke(m_find, oa, "FindObjectsOfType(XR Origin)");
+        if (!os || !il.array_length(os)) continue;
+        Il2CppObject *o = ((Il2CppObject **)((uint8_t *)os + ARR_DATA))[0];
+        char on[96] = "?", p[64], r[80];
+        if (o && m_name) str_ascii(invoke_on(o, m_name, NULL, "Object.get_name"), on, sizeof on);
+        Il2CppObject *tf = o ? invoke_on(o, m_tf, NULL, "Component.transform") : NULL;
+        ui_vec(p, sizeof p, tf, m_pos, 3); ui_vec(r, sizeof r, tf, m_rot, 4);
+        fprintf(stderr, "  [ui-canvas] f%u XR Origin %s.%s \"%s\" pos=%s rot=%s\n", frame, origin_cls[k][0], origin_cls[k][1], on, p, r);
+        found = 1;
+    }
+    if (!found) fprintf(stderr, "  [ui-canvas] f%u XR Origin: none (no Unity.XR.CoreUtils.XROrigin / XRRig instance)\n", frame);
+}
+
 void kl_mprobe_tick(unsigned frame) {
     // Independent of KL_PROBE_INPUT and of KL_PROBE_FROM: this one has to land
     // BEFORE the throw it exists to describe, and the throw here is on the
@@ -769,6 +859,7 @@ void kl_mprobe_tick(unsigned frame) {
         }
         fprintf(stderr, "  (active/all)\n");
     }
+    if (n_types) probe_canvas_dump(frame, types, tnames, n_types, m_find);
     // Per-object detail, twice: first probe tick at/after f1800 and after f3600.
     static unsigned detail_stage;
     const unsigned stage = frame >= 3600 ? 2 : frame >= 1800 ? 1 : 0;

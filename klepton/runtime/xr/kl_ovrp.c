@@ -19,6 +19,7 @@
 #include "kl_ovrp_priv.h"   // batch seam: registration, events, pose helpers
 #include "kl_openxr.h"        // kl_openxr_app_space_origin: ovrp_UnityOpenXR_OnAppSpaceChange*
 #include "kl_evgate.h"      // when a queued event may reach the guest
+#include "kl_ar_switch.h"   // KL_NO_OVRM_BRIDGE: diagnostic switch, the OnInstance* pair back to success no-ops
 #include "kl_ovrp_eyesize.h"   // the app's resolution slider: target size, desc compensation
 #include "kl_guardian.h"        // floor / play space the user confirmed
 #include "kl_spatial.h"         // kl_spatial_scan_input: L3+R3 held 5 s refreshes the frozen room mesh
@@ -558,6 +559,7 @@ static uint64_t klovrp_GetInitialized(void) {
 // No instance, no bridge: a null XrInstance fails and changes nothing.
 static uint64_t klovrp_UnityOpenXR_OnInstanceCreate(uint64_t xr_instance) {
     ovrp_hit("ovrp_UnityOpenXR_OnInstanceCreate");
+    if (kl_ar_switch_off(KL_ARSW_OVRM_BRIDGE)) return OVRP_SUCCESS;   // diagnostic: no bridge, no init flag
     if (!xr_instance) return OVRP_FAIL_INVALID_PARAM;
     __atomic_store_n(&g_ovrp_openxr_bridge, 1, __ATOMIC_RELEASE);
     klovrp_bridge_reset();
@@ -567,6 +569,7 @@ static uint64_t klovrp_UnityOpenXR_OnInstanceCreate(uint64_t xr_instance) {
 static uint64_t klovrp_UnityOpenXR_OnInstanceDestroy(uint64_t xr_instance) {
     (void)xr_instance;
     ovrp_hit("ovrp_UnityOpenXR_OnInstanceDestroy");
+    if (kl_ar_switch_off(KL_ARSW_OVRM_BRIDGE)) return OVRP_SUCCESS;
     // The init state first: a thread that finds the bridge down must not find the plugin still up
     // (a guest that goes on reading while ovrp_GetInitialized is true would mark the OVRPlugin
     // space and frame latch of a plain OVRPlugin guest).

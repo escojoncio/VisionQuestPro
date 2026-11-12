@@ -17,6 +17,7 @@
 #include "kl_ovrp.h"      // kl_ovrp_guest_origin_y
 #include "kl_jni.h"       // kl_jni_files_dir
 #include "kl_guardian.h"  // floor height, room rules
+#include "kl_ar_switch.h"  // KL_NO_SCENE_RESCAN
 #include "../diag/kl_logcap.h"   // [sp-life] line caps
 #include <stdarg.h>
 #include <math.h>
@@ -597,6 +598,7 @@ void kl_spatial_resync_done(void) {
 // Launch, calibration anchor tracked and snapshot loaded: merge ARKit's current scene into the snapshot for window_ms after the resync,
 // in memory only. 0 (nothing done, store as it was) without a snapshot, without a host to resync from, or while a rescan is running.
 int kl_spatial_scan_auto(uint32_t window_ms) {
+    if (kl_ar_switch_off(KL_ARSW_SCENE_RESCAN)) return 0;     // diagnostic switch KL_NO_SCENE_RESCAN
     pthread_mutex_lock(&g_mu);
     void (*rs)(void) = g_resync;
     if (g_snap_have && !rs) {            // the host (ARKit session) is not up yet: asked again as soon as it registers
@@ -652,6 +654,7 @@ void kl_spatial_scan_force(int on) {
     if (rs) rs();
 }
 void kl_spatial_scan_input_at(int held, uint64_t now_ns) {
+    if (kl_ar_switch_off(KL_ARSW_SCENE_RESCAN)) return;       // diagnostic switch KL_NO_SCENE_RESCAN: L3+R3 does nothing
     void (*rs)(void) = NULL;
     int stop = 0, started = 0, reached = 0, early = 0, merged = 0;
     if (!now_ns) now_ns = 1;
@@ -756,6 +759,7 @@ static int snap_parse_locked(snrd r, const float *A, int apply, uint32_t *nvert,
 }
 // Launch: replaces the store's planes / meshes / rooms by the saved snapshot of this calibration anchor. 1 = loaded.
 int kl_spatial_snapshot_load(kl_uuid anchor, const float anchor_m4[16]) {
+    if (kl_ar_switch_off(KL_ARSW_SCENE_RESCAN)) return 0;     // diagnostic switch KL_NO_SCENE_RESCAN: no file read, the store stays live
     uint8_t *buf = NULL;
     size_t n = 0;
     char path[1024];
@@ -796,6 +800,7 @@ int kl_spatial_snapshot_load(kl_uuid anchor, const float anchor_m4[16]) {
 }
 // Calibration confirmed: the anchor is the frame, the store (live during the calibration screen) is the snapshot. Returns its vertices.
 int kl_spatial_snapshot_save(kl_uuid anchor, const float anchor_m4[16]) {
+    if (kl_ar_switch_off(KL_ARSW_SCENE_RESCAN)) return 0;     // diagnostic switch KL_NO_SCENE_RESCAN: nothing frozen, no file written
     snap_io io = {0};
     uint32_t nv = 0;
     pthread_mutex_lock(&g_mu);
