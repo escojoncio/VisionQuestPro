@@ -103,6 +103,11 @@ static const MethodInfo *find_method(const char *ns, const char *cls,
     return m;
 }
 
+// Lines of the "[ui-text]" dumps and of every "threw" report: 240 per process in all (UT_MAX_LINES).
+#define UT_MAX_LINES 240u
+static unsigned ut_lines;
+#define UT_LOG(...) do { if (ut_lines < UT_MAX_LINES) { ut_lines++; fprintf(stderr, __VA_ARGS__); } } while (0)
+
 // Invoke, reporting a managed throw by class name instead of letting it
 // escape. A probe that aborts the run it is measuring is worse than no probe.
 static Il2CppObject *invoke_on(Il2CppObject *self, const MethodInfo *m,
@@ -112,8 +117,8 @@ static Il2CppObject *invoke_on(Il2CppObject *self, const MethodInfo *m,
     Il2CppObject *r = il.runtime_invoke(m, self, args, &exc);
     if (exc) {
         Il2CppClass *k = il.object_get_class(exc);
-        fprintf(stderr, "  [mprobe] %s threw %s\n", what,
-                k ? il.class_get_name(k) : "?");
+        UT_LOG("  [mprobe] %s threw %s\n", what,
+               k ? il.class_get_name(k) : "?");
         return NULL;
     }
     return r;
@@ -640,6 +645,192 @@ static void probe_canvas_dump(unsigned frame, Il2CppObject *const *types, char (
     if (!found) fprintf(stderr, "  [ui-canvas] f%u XR Origin: none (no Unity.XR.CoreUtils.XROrigin / XRRig instance)\n", frame);
 }
 
+// "[ui-text]": why a menu text / laser line is not seen. At most 12 dumps, 60 s apart (>= 10 min covered; the first on the first
+// census tick, which is after the game is up like [ui-canvas]: frame >= KL_PROBE_FROM), and 240 lines per process in all (a dump is 18
+// lines at most, so the cap is never reached before the 12th). Per active TMP_Text (6 at most): GameObject name, text length (never the text), enabled, fontSize, own color.a,
+// CanvasRenderer.GetInheritedAlpha, the CanvasGroup.alpha of it and every parent up to the root, bounds, material shader. Per
+// LineRenderer whose Renderer is enabled on an active object (4 at most): positionCount, start/end width, start/end color.a, shader.
+// Then enabled state of XRRayInteractor / XRInteractorLineVisual (2 each). A type this build lacks logs "type-missing" once and is
+// skipped; a getter it lacks prints "?". Same managed getters and thread as the census above.
+#define UT_DUMPS 12u
+#define UT_EVERY_MS 60000u
+
+static void ut_f(char *out, size_t cap, Il2CppObject *self, const MethodInfo *m, const char *what) {
+    Il2CppObject *r = (self && m) ? invoke_on(self, m, NULL, what) : NULL;
+    if (r) snprintf(out, cap, "%.3f", *(const float *)il.object_unbox(r)); else snprintf(out, cap, "?");
+}
+
+static void ut_color_a(char *out, size_t cap, Il2CppObject *self, const MethodInfo *m, const char *what) {
+    Il2CppObject *r = (self && m) ? invoke_on(self, m, NULL, what) : NULL;
+    if (r) snprintf(out, cap, "%.3f", ((const float *)il.object_unbox(r))[3]); else snprintf(out, cap, "?");
+}
+
+static void ut_shader(char *out, size_t cap, Il2CppObject *mat, const MethodInfo *m_shader, const MethodInfo *m_name) {
+    if (!mat) { snprintf(out, cap, "<null>"); return; }
+    Il2CppObject *sh = m_shader ? invoke_on(mat, m_shader, NULL, "Material.shader") : NULL;
+    if (sh && m_name) str_ascii(invoke_on(sh, m_name, NULL, "Object.get_name"), out, cap); else snprintf(out, cap, "?");
+}
+
+static void ut_enabled_list(unsigned frame, const char *label, Il2CppClass *k, const MethodInfo *m_find, const MethodInfo *m_name,
+                            const MethodInfo *m_go, const MethodInfo *m_ahier, const MethodInfo *m_en) {
+    if (!k) return;
+    void *a[1] = { il.type_get_object(il.class_get_type(k)) };
+    Il2CppObject *arr = invoke(m_find, a, label);
+    const uint32_t n = arr ? il.array_length(arr) : 0;
+    UT_LOG("  [ui-text] f%u %s: %u on active objects (2 listed at most)\n", frame, label, n);
+    for (uint32_t i = 0; i < n && i < 2; i++) {
+        Il2CppObject *o = ((Il2CppObject **)((uint8_t *)arr + ARR_DATA))[i];
+        if (!o) continue;
+        Il2CppObject *go = m_go ? invoke_on(o, m_go, NULL, "Component.gameObject") : NULL;
+        char nb[96] = "?";
+        if (go && m_name) str_ascii(invoke_on(go, m_name, NULL, "Object.get_name"), nb, sizeof nb);
+        UT_LOG("  [ui-text] f%u %s #%u name=\"%s\" enabled=%d hier=%d\n", frame, label, i, nb,
+               unbox_bool(invoke_on(o, m_en, NULL, "Behaviour.enabled")),
+               go ? unbox_bool(invoke_on(go, m_ahier, NULL, "activeInHierarchy")) : -1);
+    }
+}
+
+static void probe_ui_text_dump(unsigned frame, const MethodInfo *m_find) {
+    static unsigned dumps;
+    static uint64_t next_ms;
+    if (dumps >= UT_DUMPS || ut_lines >= UT_MAX_LINES || !m_find) return;
+    struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
+    const uint64_t now = (uint64_t)ts.tv_sec * 1000u + (uint64_t)ts.tv_nsec / 1000000u;
+    if (dumps && now < next_ms) return;
+    dumps++; next_ms = now + UT_EVERY_MS;
+
+    static const char *const xri_ns[] = { "UnityEngine.XR.Interaction.Toolkit", "UnityEngine.XR.Interaction.Toolkit.Interactors",
+                                          "UnityEngine.XR.Interaction.Toolkit.Interactors.Visuals" };
+    static int resolved;
+    static Il2CppClass *tmp_k, *lr_k, *cg_k, *ray_k, *lv_k;
+    if (!resolved) {
+        resolved = 1;
+        tmp_k = find_class("TMPro", "TMP_Text");
+        lr_k  = find_class("UnityEngine", "LineRenderer");
+        cg_k  = find_class("UnityEngine", "CanvasGroup");
+        for (unsigned i = 0; i < 3 && !ray_k; i++) ray_k = find_class(xri_ns[i], "XRRayInteractor");
+        for (unsigned i = 0; i < 3 && !lv_k; i++)  lv_k  = find_class(xri_ns[i], "XRInteractorLineVisual");
+        if (!tmp_k) UT_LOG("  [ui-text] f%u type-missing TMPro.TMP_Text\n", frame);
+        if (!lr_k)  UT_LOG("  [ui-text] f%u type-missing UnityEngine.LineRenderer\n", frame);
+        if (!cg_k)  UT_LOG("  [ui-text] f%u type-missing UnityEngine.CanvasGroup\n", frame);
+        if (!ray_k) UT_LOG("  [ui-text] f%u type-missing XRRayInteractor\n", frame);
+        if (!lv_k)  UT_LOG("  [ui-text] f%u type-missing XRInteractorLineVisual\n", frame);
+    }
+
+    const MethodInfo *m_name   = quiet_method("UnityEngine", "Object", "get_name", 0);
+    const MethodInfo *m_go     = quiet_method("UnityEngine", "Component", "get_gameObject", 0);
+    const MethodInfo *m_tf     = quiet_method("UnityEngine", "Component", "get_transform", 0);
+    const MethodInfo *m_parent = quiet_method("UnityEngine", "Transform", "get_parent", 0);
+    const MethodInfo *m_ahier  = quiet_method("UnityEngine", "GameObject", "get_activeInHierarchy", 0);
+    const MethodInfo *m_getc   = quiet_method("UnityEngine", "GameObject", "GetComponent", 1);
+    const MethodInfo *m_en     = quiet_method("UnityEngine", "Behaviour", "get_enabled", 0);
+    const MethodInfo *m_ren_en = quiet_method("UnityEngine", "Renderer", "get_enabled", 0);
+    const MethodInfo *m_rmat   = quiet_method("UnityEngine", "Renderer", "get_sharedMaterial", 0);
+    const MethodInfo *m_shader = quiet_method("UnityEngine", "Material", "get_shader", 0);
+    const MethodInfo *m_cgalpha = quiet_method("UnityEngine", "CanvasGroup", "get_alpha", 0);
+    const MethodInfo *m_cr     = quiet_method("UnityEngine.UI", "Graphic", "get_canvasRenderer", 0);
+    const MethodInfo *m_inh    = quiet_method("UnityEngine", "CanvasRenderer", "GetInheritedAlpha", 0);
+    const MethodInfo *m_text   = quiet_method("TMPro", "TMP_Text", "get_text", 0);
+    const MethodInfo *m_fsize  = quiet_method("TMPro", "TMP_Text", "get_fontSize", 0);
+    const MethodInfo *m_color  = quiet_method("TMPro", "TMP_Text", "get_color", 0);
+    const MethodInfo *m_bounds = quiet_method("TMPro", "TMP_Text", "get_bounds", 0);
+    const MethodInfo *m_tmat   = quiet_method("TMPro", "TMP_Text", "get_fontSharedMaterial", 0);
+    const MethodInfo *m_poscnt = quiet_method("UnityEngine", "LineRenderer", "get_positionCount", 0);
+    const MethodInfo *m_sw     = quiet_method("UnityEngine", "LineRenderer", "get_startWidth", 0);
+    const MethodInfo *m_ew     = quiet_method("UnityEngine", "LineRenderer", "get_endWidth", 0);
+    const MethodInfo *m_sc     = quiet_method("UnityEngine", "LineRenderer", "get_startColor", 0);
+    const MethodInfo *m_ec     = quiet_method("UnityEngine", "LineRenderer", "get_endColor", 0);
+    // GetComponent has a (string) and a (Type) overload: use it only once its parameter is checked to BE a Type.
+    if (m_getc) {
+        const void *pt = il.method_get_param && il.class_from_type ? il.method_get_param(m_getc, 0) : NULL;
+        Il2CppClass *pk = pt ? il.class_from_type(pt) : NULL;
+        if (!pk || strcmp(il.class_get_name(pk), "Type") != 0) m_getc = NULL;
+    }
+    Il2CppObject *cg_type = cg_k ? il.type_get_object(il.class_get_type(cg_k)) : NULL;
+
+    if (tmp_k) {
+        void *ta[1] = { il.type_get_object(il.class_get_type(tmp_k)) };
+        Il2CppObject *arr = invoke(m_find, ta, "FindObjectsOfType(TMP_Text)");
+        const uint32_t total = arr ? il.array_length(arr) : 0;
+        UT_LOG("  [ui-text] f%u dump %u/%u: %u TMP_Text in FindObjectsOfType (active ones listed, 6 at most)\n", frame, dumps, UT_DUMPS, total);
+        unsigned shown = 0;
+        for (uint32_t i = 0; i < total && shown < 6; i++) {
+            Il2CppObject *o = ((Il2CppObject **)((uint8_t *)arr + ARR_DATA))[i];
+            if (!o) continue;
+            Il2CppObject *go = m_go ? invoke_on(o, m_go, NULL, "Component.gameObject") : NULL;
+            if (m_ahier && go && unbox_bool(invoke_on(go, m_ahier, NULL, "activeInHierarchy")) != 1) continue;
+            char nb[96] = "?", fs[24], ca[24], ia[24], sh[96];
+            if (go && m_name) str_ascii(invoke_on(go, m_name, NULL, "Object.get_name"), nb, sizeof nb);
+            Il2CppObject *txt = m_text ? invoke_on(o, m_text, NULL, "TMP_Text.text") : NULL;
+            const int32_t len = txt ? *(int32_t *)((uint8_t *)txt + STR_LEN) : -1;
+            ut_f(fs, sizeof fs, o, m_fsize, "TMP_Text.fontSize");
+            ut_color_a(ca, sizeof ca, o, m_color, "TMP_Text.color");
+            Il2CppObject *cr = m_cr ? invoke_on(o, m_cr, NULL, "Graphic.canvasRenderer") : NULL;
+            ut_f(ia, sizeof ia, cr, m_inh, "CanvasRenderer.GetInheritedAlpha");
+            ut_shader(sh, sizeof sh, m_tmat ? invoke_on(o, m_tmat, NULL, "TMP_Text.fontSharedMaterial") : NULL, m_shader, m_name);
+            // CanvasGroup.alpha of this object and each parent up to the root (12 levels at most), only where a group exists.
+            // groups=[api-missing]: this build lacks a piece of the lookup (CanvasGroup type, GetComponent(Type), transform / gameObject
+            // getter); groups=[none]: the lookup ran and no object up to the root has a CanvasGroup.
+            char cgs[200] = "";
+            size_t cgo = 0;
+            const int cg_api = m_tf && m_getc && cg_type && m_go;
+            Il2CppObject *tf = m_tf ? invoke_on(o, m_tf, NULL, "Component.transform") : NULL;
+            for (unsigned d = 0; tf && d < 12 && m_getc && cg_type && m_go; d++) {
+                Il2CppObject *g2 = invoke_on(tf, m_go, NULL, "Component.gameObject");
+                if (!g2) break;
+                void *ga[1] = { cg_type };
+                Il2CppObject *cg = invoke_on(g2, m_getc, ga, "GameObject.GetComponent(CanvasGroup)");
+                if (cg && cgo + 1 < sizeof cgs) {
+                    char gn[48] = "?", av[24];
+                    if (m_name) str_ascii(invoke_on(g2, m_name, NULL, "Object.get_name"), gn, sizeof gn);
+                    ut_f(av, sizeof av, cg, m_cgalpha, "CanvasGroup.alpha");
+                    cgo += (size_t)snprintf(cgs + cgo, sizeof cgs - cgo, "%s%s=%s", cgo ? "," : "", gn, av);
+                    if (cgo >= sizeof cgs) cgo = sizeof cgs - 1;
+                }
+                tf = m_parent ? invoke_on(tf, m_parent, NULL, "Transform.parent") : NULL;
+            }
+            if (!cgo) snprintf(cgs, sizeof cgs, "%s", cg_api ? "none" : "api-missing");
+            char bd[96] = "?";
+            Il2CppObject *bo = m_bounds ? invoke_on(o, m_bounds, NULL, "TMP_Text.bounds") : NULL;
+            if (bo) {   // Bounds = center(3 floats) + extents(3 floats)
+                const float *b = (const float *)il.object_unbox(bo);
+                snprintf(bd, sizeof bd, "c(%.3f,%.3f,%.3f) size(%.3f,%.3f,%.3f)", b[0], b[1], b[2], 2 * b[3], 2 * b[4], 2 * b[5]);
+            }
+            UT_LOG("  [ui-text] f%u text #%u name=\"%s\" len=%d enabled=%d fontSize=%s color.a=%s inheritedAlpha=%s groups=[%s] bounds=%s shader=\"%s\"\n",
+                   frame, shown, nb, len, unbox_bool(invoke_on(o, m_en, NULL, "Behaviour.enabled")), fs, ca, ia, cgs, bd, sh);
+            shown++;
+        }
+    }
+    if (lr_k) {
+        void *la[1] = { il.type_get_object(il.class_get_type(lr_k)) };
+        Il2CppObject *arr = invoke(m_find, la, "FindObjectsOfType(LineRenderer)");
+        const uint32_t total = arr ? il.array_length(arr) : 0;
+        UT_LOG("  [ui-text] f%u dump %u/%u: %u LineRenderer in FindObjectsOfType (enabled ones on active objects listed, 4 at most)\n",
+               frame, dumps, UT_DUMPS, total);
+        unsigned shown = 0;
+        for (uint32_t i = 0; i < total && shown < 4; i++) {
+            Il2CppObject *o = ((Il2CppObject **)((uint8_t *)arr + ARR_DATA))[i];
+            if (!o) continue;
+            Il2CppObject *go = m_go ? invoke_on(o, m_go, NULL, "Component.gameObject") : NULL;
+            if (m_ahier && go && unbox_bool(invoke_on(go, m_ahier, NULL, "activeInHierarchy")) != 1) continue;
+            if (m_ren_en && unbox_bool(invoke_on(o, m_ren_en, NULL, "Renderer.enabled")) != 1) continue;
+            char nb[96] = "?", sw[24], ew[24], sa[24], ea[24], sh[96];
+            if (go && m_name) str_ascii(invoke_on(go, m_name, NULL, "Object.get_name"), nb, sizeof nb);
+            Il2CppObject *pc = m_poscnt ? invoke_on(o, m_poscnt, NULL, "LineRenderer.positionCount") : NULL;
+            ut_f(sw, sizeof sw, o, m_sw, "LineRenderer.startWidth");
+            ut_f(ew, sizeof ew, o, m_ew, "LineRenderer.endWidth");
+            ut_color_a(sa, sizeof sa, o, m_sc, "LineRenderer.startColor");
+            ut_color_a(ea, sizeof ea, o, m_ec, "LineRenderer.endColor");
+            ut_shader(sh, sizeof sh, m_rmat ? invoke_on(o, m_rmat, NULL, "Renderer.sharedMaterial") : NULL, m_shader, m_name);
+            UT_LOG("  [ui-text] f%u line #%u name=\"%s\" positionCount=%d width=%s/%s color.a=%s/%s shader=\"%s\"\n",
+                   frame, shown, nb, pc ? *(int32_t *)il.object_unbox(pc) : -1, sw, ew, sa, ea, sh);
+            shown++;
+        }
+    }
+    ut_enabled_list(frame, "XRRayInteractor", ray_k, m_find, m_name, m_go, m_ahier, m_en);
+    ut_enabled_list(frame, "XRInteractorLineVisual", lv_k, m_find, m_name, m_go, m_ahier, m_en);
+}
+
 void kl_mprobe_tick(unsigned frame) {
     // Independent of KL_PROBE_INPUT and of KL_PROBE_FROM: this one has to land
     // BEFORE the throw it exists to describe, and the throw here is on the
@@ -860,6 +1051,7 @@ void kl_mprobe_tick(unsigned frame) {
         fprintf(stderr, "  (active/all)\n");
     }
     if (n_types) probe_canvas_dump(frame, types, tnames, n_types, m_find);
+    probe_ui_text_dump(frame, m_find);
     // Per-object detail, twice: first probe tick at/after f1800 and after f3600.
     static unsigned detail_stage;
     const unsigned stage = frame >= 3600 ? 2 : frame >= 1800 ? 1 : 0;

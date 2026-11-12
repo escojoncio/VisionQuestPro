@@ -620,6 +620,7 @@ final class KleptonCompositor {
     private var loggedUiMaskOn = false
     private var loggedUiMaskNone = false
     private var loggedUiMaskSize = false
+    private var loggedUiMaskEyeSize = (w: 0, h: 0)
     /// 1x1 r8 2DArray bound where no UI mask is (the fragment declares the slots; the flag bit says whether to read them).
     private lazy var uiMaskDummy: MTLTexture? = {
         let d = MTLTextureDescriptor()
@@ -3205,8 +3206,13 @@ final class KleptonCompositor {
     /// VPKEngine's R8 UI mask of the newest eye pass of `eye`, as a 1-slice 2DArray view the composite shader can
     /// sample (a 2D mask is viewed as an array of one; a 2-layer multiview mask is cut to the eye's layer). nil: no
     /// mask this frame (no UI drawn, mask off, no VPKEngine device), or its size is not the eye texture's (the uv
-    /// would not line up). Each state is logged once.
+    /// would not line up). Each state is logged once, and again when the eye texture's size changes.
     private func uiMaskView(eye: Int, eyeTexture: MTLTexture?) -> MTLTexture? {
+        if let et = eyeTexture, (et.width, et.height) != (loggedUiMaskEyeSize.w, loggedUiMaskEyeSize.h) {
+            loggedUiMaskEyeSize = (et.width, et.height)
+            loggedUiMaskOn = false
+            loggedUiMaskSize = false
+        }
         guard kl_vulkan_taa_ui_mask_on() != 0 else {
             if !loggedUiMaskNone {
                 loggedUiMaskNone = true
