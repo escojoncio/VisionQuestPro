@@ -645,15 +645,19 @@ static void probe_canvas_dump(unsigned frame, Il2CppObject *const *types, char (
     if (!found) fprintf(stderr, "  [ui-canvas] f%u XR Origin: none (no Unity.XR.CoreUtils.XROrigin / XRRig instance)\n", frame);
 }
 
-// "[ui-text]": why a menu text / laser line is not seen. At most 12 dumps, 60 s apart (>= 10 min covered; the first on the first
-// census tick, which is after the game is up like [ui-canvas]: frame >= KL_PROBE_FROM), and 240 lines per process in all (a dump is 18
-// lines at most, so the cap is never reached before the 12th). Per active TMP_Text (6 at most): GameObject name, text length (never the text), enabled, fontSize, own color.a,
+// "[ui-text]": why a menu text / laser line is not seen. At most 12 dumps: the first 6 are 10 s apart, then 60 s apart (the first on
+// the first census tick, which is after the game is up like [ui-canvas]: frame >= KL_PROBE_FROM), and 240 lines per process in all (a
+// dump is 19 lines at most, so the cap is never reached before the 12th). Per active TMP_Text (6 at most): GameObject name, text length (never the text), enabled, fontSize, own color.a,
 // CanvasRenderer.GetInheritedAlpha, the CanvasGroup.alpha of it and every parent up to the root, bounds, material shader. Per
 // LineRenderer whose Renderer is enabled on an active object (4 at most): positionCount, start/end width, start/end color.a, shader.
-// Then enabled state of XRRayInteractor / XRInteractorLineVisual (2 each). A type this build lacks logs "type-missing" once and is
+// One "counts" line per dump: TMP_Text active in the hierarchy with enabled=1, and CanvasRenderer objects whose GetInheritedAlpha is 0
+// (a missing type / getter, or 3 failed calls in a row, prints "?"). Then enabled state of XRRayInteractor / XRInteractorLineVisual (2 each). A type this build lacks logs "type-missing" once and is
 // skipped; a getter it lacks prints "?". Same managed getters and thread as the census above.
 #define UT_DUMPS 12u
-#define UT_EVERY_MS 60000u
+#define UT_FAST_DUMPS 6u       // the first dumps, UT_FAST_MS apart
+#define UT_FAST_MS 10000u
+#define UT_SLOW_MS 60000u      // the rest
+#define UT_COUNT_MAX 4000u     // objects looked at per count
 
 static void ut_f(char *out, size_t cap, Il2CppObject *self, const MethodInfo *m, const char *what) {
     Il2CppObject *r = (self && m) ? invoke_on(self, m, NULL, what) : NULL;
@@ -669,6 +673,52 @@ static void ut_shader(char *out, size_t cap, Il2CppObject *mat, const MethodInfo
     if (!mat) { snprintf(out, cap, "<null>"); return; }
     Il2CppObject *sh = m_shader ? invoke_on(mat, m_shader, NULL, "Material.shader") : NULL;
     if (sh && m_name) str_ascii(invoke_on(sh, m_name, NULL, "Object.get_name"), out, cap); else snprintf(out, cap, "?");
+}
+
+// "counts" line: TMP_Text active in the hierarchy with enabled=1, and CanvasRenderer with GetInheritedAlpha == 0. Every getter is
+// optional; after 3 failed calls in a row a count stops and prints "?" (a throwing getter must not eat the 240-line cap).
+static void ut_counts(unsigned frame, Il2CppClass *tmp_k, Il2CppClass *cr_k, const MethodInfo *m_find, const MethodInfo *m_go,
+                      const MethodInfo *m_ahier, const MethodInfo *m_en, const MethodInfo *m_inh) {
+    char te[24] = "?", cz[32] = "?";
+    int trunc = 0;  // a count stopped at UT_COUNT_MAX objects
+    if (tmp_k && m_en) {
+        void *a[1] = { il.type_get_object(il.class_get_type(tmp_k)) };
+        Il2CppObject *arr = invoke(m_find, a, "FindObjectsOfType(TMP_Text)");
+        const uint32_t n = arr ? il.array_length(arr) : 0;
+        unsigned on = 0, fail = 0;
+        for (uint32_t i = 0; arr && i < n && i < UT_COUNT_MAX && fail < 3; i++) {
+            Il2CppObject *o = ((Il2CppObject **)((uint8_t *)arr + ARR_DATA))[i];
+            if (!o) continue;
+            Il2CppObject *go = m_go ? invoke_on(o, m_go, NULL, "Component.gameObject") : NULL;
+            if (m_go && !go) { fail++; continue; }
+            if (m_ahier && go) {
+                const int ah = unbox_bool(invoke_on(go, m_ahier, NULL, "activeInHierarchy"));
+                if (ah < 0) { fail++; continue; }
+                fail = 0;
+                if (ah != 1) continue;
+            }
+            const int en = unbox_bool(invoke_on(o, m_en, NULL, "Behaviour.enabled"));
+            if (en < 0) fail++; else { fail = 0; on += (unsigned)(en == 1); }
+        }
+        if (arr && fail < 3) snprintf(te, sizeof te, "%u/%u", on, n);
+        if (n > UT_COUNT_MAX) trunc = 1;
+    }
+    if (cr_k && m_inh) {
+        void *a[1] = { il.type_get_object(il.class_get_type(cr_k)) };
+        Il2CppObject *arr = invoke(m_find, a, "FindObjectsOfType(CanvasRenderer)");
+        const uint32_t n = arr ? il.array_length(arr) : 0;
+        unsigned zero = 0, fail = 0;
+        for (uint32_t i = 0; arr && i < n && i < UT_COUNT_MAX && fail < 3; i++) {
+            Il2CppObject *o = ((Il2CppObject **)((uint8_t *)arr + ARR_DATA))[i];
+            if (!o) continue;
+            Il2CppObject *r = invoke_on(o, m_inh, NULL, "CanvasRenderer.GetInheritedAlpha");
+            if (!r) fail++; else { fail = 0; zero += (unsigned)(*(const float *)il.object_unbox(r) <= 0.0f); }
+        }
+        if (arr && fail < 3) snprintf(cz, sizeof cz, "%u/%u", zero, n);
+        if (n > UT_COUNT_MAX) trunc = 1;
+    }
+    UT_LOG("  [ui-text] f%u counts: TMP_Text enabled=1 on active%s objects %s, CanvasRenderer inheritedAlpha=0 %s%s\n", frame,
+           (m_go && m_ahier) ? "" : "?", te, cz, trunc ? " truncated" : "");
 }
 
 static void ut_enabled_list(unsigned frame, const char *label, Il2CppClass *k, const MethodInfo *m_find, const MethodInfo *m_name,
@@ -697,7 +747,7 @@ static void probe_ui_text_dump(unsigned frame, const MethodInfo *m_find) {
     struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
     const uint64_t now = (uint64_t)ts.tv_sec * 1000u + (uint64_t)ts.tv_nsec / 1000000u;
     if (dumps && now < next_ms) return;
-    dumps++; next_ms = now + UT_EVERY_MS;
+    dumps++; next_ms = now + (dumps < UT_FAST_DUMPS ? UT_FAST_MS : UT_SLOW_MS);
 
     static const char *const xri_ns[] = { "UnityEngine.XR.Interaction.Toolkit", "UnityEngine.XR.Interaction.Toolkit.Interactors",
                                           "UnityEngine.XR.Interaction.Toolkit.Interactors.Visuals" };
@@ -730,6 +780,7 @@ static void probe_ui_text_dump(unsigned frame, const MethodInfo *m_find) {
     const MethodInfo *m_cgalpha = quiet_method("UnityEngine", "CanvasGroup", "get_alpha", 0);
     const MethodInfo *m_cr     = quiet_method("UnityEngine.UI", "Graphic", "get_canvasRenderer", 0);
     const MethodInfo *m_inh    = quiet_method("UnityEngine", "CanvasRenderer", "GetInheritedAlpha", 0);
+    Il2CppClass *cr_k          = find_class("UnityEngine", "CanvasRenderer");
     const MethodInfo *m_text   = quiet_method("TMPro", "TMP_Text", "get_text", 0);
     const MethodInfo *m_fsize  = quiet_method("TMPro", "TMP_Text", "get_fontSize", 0);
     const MethodInfo *m_color  = quiet_method("TMPro", "TMP_Text", "get_color", 0);
@@ -827,6 +878,7 @@ static void probe_ui_text_dump(unsigned frame, const MethodInfo *m_find) {
             shown++;
         }
     }
+    ut_counts(frame, tmp_k, cr_k, m_find, m_go, m_ahier, m_en, m_inh);
     ut_enabled_list(frame, "XRRayInteractor", ray_k, m_find, m_name, m_go, m_ahier, m_en);
     ut_enabled_list(frame, "XRInteractorLineVisual", lv_k, m_find, m_name, m_go, m_ahier, m_en);
 }
