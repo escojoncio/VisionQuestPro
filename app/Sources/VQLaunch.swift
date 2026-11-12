@@ -496,6 +496,10 @@ final class VQSettings: ObservableObject {
         let skipPass = VQGameSkipPass.load(key: gameKey)
         if skipPass.isEmpty { unsetenv("VPVK_SKIP_PASS") } else { setenv("VPVK_SKIP_PASS", skipPass, 1) }
         VQLog.log("Gráficos: VPVK_PASS_DUMP \(passDump ? "=1" : "sin exportar"), VPVK_SKIP_PASS \(skipPass.isEmpty ? "sin exportar" : "=" + skipPass)")
+        // «Tinte UI (diagnóstico)», per game (VQGameUITint): 0 = nothing exported.
+        let uiTint = VQGameUITint.load(key: gameKey)
+        if uiTint == 0 { unsetenv("VPVK_UI_TINT") } else { setenv("VPVK_UI_TINT", String(uiTint), 1) }
+        VQLog.log("Gráficos: VPVK_UI_TINT \(uiTint == 0 ? "sin exportar" : "=\(uiTint)")")
         // «Aislar AR (diagnóstico)», per game (VQGameARIso): each switch turns one piece of the spatial AR off in Klepton (kl_ar_switch.h); unset = the piece runs.
         // Set or unset on every launch, so a game never inherits the previous one's switches.
         for piece in VQGameARIso.Piece.allCases {
@@ -759,6 +763,20 @@ enum VQGameSkipPass {
         let v = sanitize(value)
         if v.isEmpty { UserDefaults.standard.removeObject(forKey: "vq.skippass." + key) }
         else { UserDefaults.standard.set(v, forKey: "vq.skippass." + key) }
+    }
+}
+
+/// «Tinte UI (diagnóstico)» per game, 0 = off (default), 1...3 = VPVK_UI_TINT mode. Saved as vq.uitint.<key>.
+enum VQGameUITint {
+    static func load(key: String) -> Int {
+        guard !key.isEmpty, let n = UserDefaults.standard.object(forKey: "vq.uitint." + key) as? Int, (1...3).contains(n) else { return 0 }
+        return n
+    }
+
+    static func save(_ mode: Int, key: String) {
+        guard !key.isEmpty else { return }
+        if (1...3).contains(mode) { UserDefaults.standard.set(mode, forKey: "vq.uitint." + key) }
+        else { UserDefaults.standard.removeObject(forKey: "vq.uitint." + key) }
     }
 }
 

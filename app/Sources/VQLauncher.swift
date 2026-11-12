@@ -751,6 +751,7 @@ struct VQGameSettingsView: View {
     @State private var frameAsync: Bool
     @State private var passDump: Bool
     @State private var skipPass: String
+    @State private var uiTint: Int
     @State private var noOvrm: Bool
     @State private var noAnchor: Bool
     @State private var noDisc: Bool
@@ -771,6 +772,7 @@ struct VQGameSettingsView: View {
         _frameAsync = State(initialValue: VQGameFrameAsync.load(key: game.aaKey))
         _passDump = State(initialValue: VQGamePassDump.load(key: game.aaKey))
         _skipPass = State(initialValue: VQGameSkipPass.load(key: game.aaKey))
+        _uiTint = State(initialValue: VQGameUITint.load(key: game.aaKey))
         _noOvrm = State(initialValue: VQGameARIso.load(.ovrm, key: game.aaKey))
         _noAnchor = State(initialValue: VQGameARIso.load(.anchor, key: game.aaKey))
         _noDisc = State(initialValue: VQGameARIso.load(.disc, key: game.aaKey))
@@ -780,134 +782,172 @@ struct VQGameSettingsView: View {
 
     var body: some View {
         NavigationStack {
-            Form {
-                Section("MSAA") {
-                    VQMSAAPicker(selection: $msaa, global: true)
-                }
-                Section(VQL("Nitidez (RCAS)", "Sharpness (RCAS)")) {
-                    Toggle(VQL("Usar la global", "Use the global one"), isOn: Binding(
-                        get: { rcas == nil },
-                        set: { rcas = $0 ? nil : settings.rcasIntensity }))
-                    VQRCASSlider(value: Binding(
-                        get: { rcas ?? settings.rcasIntensity },
-                        set: { rcas = $0 }))
-                        .disabled(rcas == nil)
-                }
-                Section(VQL("Resolución", "Resolution")) {
-                    Toggle(VQL("Usar la global", "Use the global one"), isOn: $res.useGlobal)
-                    if !res.useGlobal {
-                        VQResolutionSlider(value: $res.pct)
-                    }
-                    Text(eyeResText).font(.caption)
-                }
-                Section(VQL("Modo sentado", "Seated mode")) {
-                    Toggle(VQL("Usar el global", "Use the global one"), isOn: $seat.useGlobal)
-                    if !seat.useGlobal {
-                        VQSeatedControls(seated: $seat.seated, height: $seat.height)
-                    }
-                }
-                Section(VQL("Área de juego", "Play area")) {
-                    Picker(VQL("Área de juego", "Play area"), selection: $area.seated) {
-                        Text(VQL("Libre", "Free")).tag(false)
-                        Text(VQL("Sentado", "Seated")).tag(true)
-                    }
-                    .pickerStyle(.segmented)
-                    if !area.seated {
-                        Slider(value: $area.w, in: 2...6, step: 0.25) { Text(VQL("Ancho", "Width")) }
-                        Text(VQL("Ancho: \(String(format: "%.2f", area.w)) m", "Width: \(String(format: "%.2f", area.w)) m")).font(.caption)
-                        Slider(value: $area.d, in: 2...6, step: 0.25) { Text(VQL("Fondo", "Depth")) }
-                        Text(VQL("Fondo: \(String(format: "%.2f", area.d)) m", "Depth: \(String(format: "%.2f", area.d)) m")).font(.caption)
-                    }
-                    Text(VQL("La zona de juego que el juego cree que tienes (guardián) y el tamaño de la sala si pide escanearla. «Libre»: rectángulo de ancho × fondo; «Sentado»: círculo de 1 m de radio.",
-                             "The play area the game believes you have (guardian) and the size of the room if it asks to scan it. «Free»: a width × depth rectangle; «Seated»: a circle of 1 m radius."))
-                        .font(.caption)
-                }
-                Section(VQL("Filtrado anisotrópico", "Anisotropic filtering")) {
-                    Picker(VQL("Filtrado anisotrópico", "Anisotropic filtering"), selection: $aniso) {
-                        Text(VQL("Global", "Global")).tag(-1)
-                        Text(VQL("Del juego", "Game's own")).tag(0)
-                        Text("2x").tag(2)
-                        Text("4x").tag(4)
-                        Text("8x").tag(8)
-                        Text("16x").tag(16)
-                    }
-                    Text(VQL("Fuerza el nivel en los samplers de materiales del juego. «Global» usa el ajuste de Ajustes; «Del juego» no toca nada.",
-                             "Forces the level on the game's material samplers. «Global» follows Settings; «Game's own» changes nothing."))
-                        .font(.caption)
-                }
-                Section(VQL("Emular profundidad de 24 bits (experimental)", "Emulate 24-bit depth (experimental)")) {
-                    Toggle(VQL("Emular profundidad de 24 bits (experimental)", "Emulate 24-bit depth (experimental)"), isOn: $d24)
-                    Text(VQL("Para Into The Radius 2 y juegos con z-fighting; puede costar rendimiento", "For Into The Radius 2 and games with z-fighting; it may cost performance"))
-                        .font(.caption)
-                }
-                Section(VQL("Fin de frame asíncrono (experimental)", "Asynchronous frame end (experimental)")) {
-                    Toggle(VQL("Fin de frame asíncrono (experimental)", "Asynchronous frame end (experimental)"), isOn: $frameAsync)
-                    Text(VQL("Apagado por defecto; puede cambiar el ritmo de los frames", "Off by default; it may change frame pacing"))
-                        .font(.caption)
-                }
-                Section(VQL("Volcado de pases (diagnóstico)", "Pass dump (diagnostic)")) {
-                    Toggle(VQL("Volcado de pases (diagnóstico)", "Pass dump (diagnostic)"), isOn: $passDump)
-                    Text(VQL("Apagado por defecto; escribe los pases del motor en el log (VPVK_PASS_DUMP)", "Off by default; writes the engine's passes to the log (VPVK_PASS_DUMP)"))
-                        .font(.caption)
-                }
-                Section(VQL("Saltar pases (experimento)", "Skip passes (experiment)")) {
-                    TextField(VQL("Vacío = ninguno; ej. 5,6 o 4-7", "Empty = none; e.g. 5,6 or 4-7"), text: $skipPass)
-                        .autocorrectionDisabled()
-                    Text(VQL("Solo dígitos, comas y guiones (VPVK_SKIP_PASS); puede romper la imagen", "Digits, commas and hyphens only (VPVK_SKIP_PASS); it may break the picture"))
-                        .font(.caption)
-                    if !skipPass.isEmpty && VQGameSkipPass.sanitize(skipPass).isEmpty {
-                        Text(VQL("Valor no válido: no se exportará (usa enteros o rangos a-b, separados por comas)", "Invalid value: it will not be exported (use integers or a-b ranges, separated by commas)"))
-                            .font(.caption)
-                    }
-                }
-                // Group: agrupa las secciones de diagnóstico (el Form ya tiene muchas secciones; un Group no cambia el comportamiento).
-                Group {
-                    Section(VQL("Aislar AR (diagnóstico)", "Isolate AR (diagnostic)")) {
-                        Toggle(VQL("Sin puente OVRManager", "No OVRManager bridge"), isOn: $noOvrm)
-                        Toggle(VQL("Sin puente de anclas", "No anchor bridge"), isOn: $noAnchor)
-                        Toggle(VQL("Sin descubrimiento de salas", "No room discovery"), isOn: $noDisc)
-                        Toggle(VQL("Sin reescaneo de escena", "No scene rescan"), isOn: $noRescan)
-                        Text(VQL("Todo apagado por defecto (AR completa). Cada interruptor desactiva una pieza para localizar cuál rompe el passthrough, el texto o el rayo (KL_NO_OVRM_BRIDGE, KL_NO_ANCHOR_BRIDGE, KL_NO_XR_DISCOVERY, KL_NO_SCENE_RESCAN). Se aplica al lanzar el juego.",
-                                 "All off by default (full AR). Each switch disables one piece to find which one breaks passthrough, text or the ray (KL_NO_OVRM_BRIDGE, KL_NO_ANCHOR_BRIDGE, KL_NO_XR_DISCOVERY, KL_NO_SCENE_RESCAN). Applied when the game launches."))
-                            .font(.caption)
-                    }
-                    Section(VQL("Mostrar malla de escena (wireframe de algunos juegos)", "Show scene mesh (wireframe of some games)")) {
-                        Toggle(VQL("Mostrar malla de escena (wireframe de algunos juegos)", "Show scene mesh (wireframe of some games)"), isOn: $sceneMesh)
-                        Text(VQL("Apagado: se oculta la malla que el juego dibuja sobre el passthrough", "Off: hides the mesh the game draws over passthrough"))
-                            .font(.caption)
-                    }
-                }
-                Section(VQL("Perfil del visor", "Headset profile")) {
-                    Picker(VQL("Perfil del visor", "Headset profile"), selection: $profile) {
-                        Text(VQL("Automático", "Automatic")).tag(0)
-                        Text("Quest 2").tag(2)
-                        Text("Quest 3").tag(3)
-                    }
-                    .pickerStyle(.segmented)
-                    Text(VQL("Qué visor cree el juego que es (modelo, tipo de mando, nombre de la GPU). «Automático»: Quest 3 solo si «Perfil Quest 3 cuando el juego lo tenga» (Ajustes) está activado y el manifiesto del juego lista Quest 3 (si no declara dispositivos, basta el ajuste); si no, Quest 2. Se aplica al lanzar el juego.",
-                             "Which headset the game believes it runs on (model, controller type, GPU name). «Automatic»: Quest 3 only if «Quest 3 profile when the game has one» (Settings) is on and the game's manifest lists Quest 3 (if it declares no devices, the setting alone decides); otherwise Quest 2. Applied when the game launches."))
-                        .font(.caption)
-                }
-                Section(VQL("Captura de frames (diagnóstico)", "Frame capture (diagnostics)")) {
-                    Toggle(VQL("Captura de frames (diagnóstico)", "Frame capture (diagnostics)"), isOn: $capture.enabled)
-                    Text(VQL("Usa más RAM: el motor gráfico guarda desde el arranque todo lo que crea el juego. Apágalo cuando no lo necesites.",
-                             "Uses more RAM: the graphics engine keeps everything the game creates from the start. Turn it off when you do not need it."))
-                        .font(.caption).foregroundStyle(.orange)
-                    if capture.enabled {
-                        Picker(VQL("Para capturar, mantén", "To capture, hold"), selection: $capture.button) {
-                            ForEach(VQGameCapture.Combo.allCases, id: \.self) { Text($0.title).tag($0) }
-                        }
-                        Stepper(capture.holdSeconds == 0 ? VQL("Al instante (sin mantener)", "Instantly (no hold)")
-                                    : VQL("Durante \(capture.holdSeconds) s", "For \(capture.holdSeconds) s"),
-                                value: $capture.holdSeconds, in: 0...10)
-                    }
-                    Text(VQL("En la partida, pulsa esa combinación (mantenla el tiempo elegido, si no es «al instante»): vibran los mandos (fuerte y corto = capturando; largo y suave = no se pudo) y el motor guarda un frame en QUEST/capturas/\(game.id)/. El juego también recibe la pulsación. Solo con VPKEngine. Se aplica al lanzar el juego. Para compartirlas, marca «Incluir capturas» en Ajustes > Registros.",
-                             "In the game, press that combination (hold it for the chosen time, unless it is “instantly”): the controllers vibrate (strong and short = capturing; long and soft = it could not start) and the engine saves one frame to QUEST/capturas/\(game.id)/. The game receives the press too. VPKEngine only. Applied when the game launches. To share them, tick “Include captures” in Settings > Logs."))
-                        .font(.caption)
-                }
+            observingDiagnostics(observingFeatures(observingBasic(settingsForm
+                .navigationTitle(game.name)
+                .toolbar { Button(VQL("Hecho", "Done")) { dismiss() } })))
+        }
+        .frame(minWidth: 560, minHeight: 480)
+    }
+
+    private var settingsForm: some View {
+        Form {
+            basicSections
+            filterSections
+            diagnosticSections
+            profileSection
+            captureSection
+        }
+    }
+
+    @ViewBuilder private var basicSections: some View {
+        Section("MSAA") {
+            VQMSAAPicker(selection: $msaa, global: true)
+        }
+        Section(VQL("Nitidez (RCAS)", "Sharpness (RCAS)")) {
+            Toggle(VQL("Usar la global", "Use the global one"), isOn: Binding(
+                get: { rcas == nil },
+                set: { rcas = $0 ? nil : settings.rcasIntensity }))
+            VQRCASSlider(value: Binding(
+                get: { rcas ?? settings.rcasIntensity },
+                set: { rcas = $0 }))
+                .disabled(rcas == nil)
+        }
+        Section(VQL("Resolución", "Resolution")) {
+            Toggle(VQL("Usar la global", "Use the global one"), isOn: $res.useGlobal)
+            if !res.useGlobal {
+                VQResolutionSlider(value: $res.pct)
             }
-            .navigationTitle(game.name)
-            .toolbar { Button(VQL("Hecho", "Done")) { dismiss() } }
+            Text(eyeResText).font(.caption)
+        }
+        Section(VQL("Modo sentado", "Seated mode")) {
+            Toggle(VQL("Usar el global", "Use the global one"), isOn: $seat.useGlobal)
+            if !seat.useGlobal {
+                VQSeatedControls(seated: $seat.seated, height: $seat.height)
+            }
+        }
+        Section(VQL("Área de juego", "Play area")) {
+            Picker(VQL("Área de juego", "Play area"), selection: $area.seated) {
+                Text(VQL("Libre", "Free")).tag(false)
+                Text(VQL("Sentado", "Seated")).tag(true)
+            }
+            .pickerStyle(.segmented)
+            if !area.seated {
+                Slider(value: $area.w, in: 2...6, step: 0.25) { Text(VQL("Ancho", "Width")) }
+                Text(VQL("Ancho: \(String(format: "%.2f", area.w)) m", "Width: \(String(format: "%.2f", area.w)) m")).font(.caption)
+                Slider(value: $area.d, in: 2...6, step: 0.25) { Text(VQL("Fondo", "Depth")) }
+                Text(VQL("Fondo: \(String(format: "%.2f", area.d)) m", "Depth: \(String(format: "%.2f", area.d)) m")).font(.caption)
+            }
+            Text(VQL("La zona de juego que el juego cree que tienes (guardián) y el tamaño de la sala si pide escanearla. «Libre»: rectángulo de ancho × fondo; «Sentado»: círculo de 1 m de radio.",
+                     "The play area the game believes you have (guardian) and the size of the room if it asks to scan it. «Free»: a width × depth rectangle; «Seated»: a circle of 1 m radius."))
+                .font(.caption)
+        }
+    }
+
+    @ViewBuilder private var filterSections: some View {
+        Section(VQL("Filtrado anisotrópico", "Anisotropic filtering")) {
+            Picker(VQL("Filtrado anisotrópico", "Anisotropic filtering"), selection: $aniso) {
+                Text(VQL("Global", "Global")).tag(-1)
+                Text(VQL("Del juego", "Game's own")).tag(0)
+                Text("2x").tag(2)
+                Text("4x").tag(4)
+                Text("8x").tag(8)
+                Text("16x").tag(16)
+            }
+            Text(VQL("Fuerza el nivel en los samplers de materiales del juego. «Global» usa el ajuste de Ajustes; «Del juego» no toca nada.",
+                     "Forces the level on the game's material samplers. «Global» follows Settings; «Game's own» changes nothing."))
+                .font(.caption)
+        }
+        Section(VQL("Emular profundidad de 24 bits (experimental)", "Emulate 24-bit depth (experimental)")) {
+            Toggle(VQL("Emular profundidad de 24 bits (experimental)", "Emulate 24-bit depth (experimental)"), isOn: $d24)
+            Text(VQL("Para Into The Radius 2 y juegos con z-fighting; puede costar rendimiento", "For Into The Radius 2 and games with z-fighting; it may cost performance"))
+                .font(.caption)
+        }
+        Section(VQL("Fin de frame asíncrono (experimental)", "Asynchronous frame end (experimental)")) {
+            Toggle(VQL("Fin de frame asíncrono (experimental)", "Asynchronous frame end (experimental)"), isOn: $frameAsync)
+            Text(VQL("Apagado por defecto; puede cambiar el ritmo de los frames", "Off by default; it may change frame pacing"))
+                .font(.caption)
+        }
+    }
+
+    @ViewBuilder private var diagnosticSections: some View {
+        Section(VQL("Volcado de pases (diagnóstico)", "Pass dump (diagnostic)")) {
+            Toggle(VQL("Volcado de pases (diagnóstico)", "Pass dump (diagnostic)"), isOn: $passDump)
+            Text(VQL("Apagado por defecto; escribe los pases del motor en el log (VPVK_PASS_DUMP)", "Off by default; writes the engine's passes to the log (VPVK_PASS_DUMP)"))
+                .font(.caption)
+        }
+        Section(VQL("Saltar pases (experimento)", "Skip passes (experiment)")) {
+            TextField(VQL("Vacío = ninguno; ej. 5,6 o 4-7", "Empty = none; e.g. 5,6 or 4-7"), text: $skipPass)
+                .autocorrectionDisabled()
+            Text(VQL("Solo dígitos, comas y guiones (VPVK_SKIP_PASS); puede romper la imagen", "Digits, commas and hyphens only (VPVK_SKIP_PASS); it may break the picture"))
+                .font(.caption)
+            if !skipPass.isEmpty && VQGameSkipPass.sanitize(skipPass).isEmpty {
+                Text(VQL("Valor no válido: no se exportará (usa enteros o rangos a-b, separados por comas)", "Invalid value: it will not be exported (use integers or a-b ranges, separated by commas)"))
+                    .font(.caption)
+            }
+        }
+        Section(VQL("Tinte UI (diagnóstico)", "UI tint (diagnostic)")) {
+            Picker(VQL("Tinte UI (diagnóstico)", "UI tint (diagnostic)"), selection: $uiTint) {
+                Text(VQL("Apagado", "Off")).tag(0)
+                Text("1").tag(1)
+                Text("2").tag(2)
+                Text("3").tag(3)
+            }
+            Text(VQL("Pinta la UI que la máscara de nitidez detecta (VPVK_UI_TINT): 1 magenta, 2 magenta sin profundidad ni culling, 3 su color con alfa 1. Solo diagnóstico.",
+                     "Paints the UI the sharpness mask detects (VPVK_UI_TINT): 1 magenta, 2 magenta without depth or culling, 3 its own colour with alpha 1. Diagnostic only."))
+                .font(.caption)
+        }
+        Section(VQL("Aislar AR (diagnóstico)", "Isolate AR (diagnostic)")) {
+            Toggle(VQL("Sin puente OVRManager", "No OVRManager bridge"), isOn: $noOvrm)
+            Toggle(VQL("Sin puente de anclas", "No anchor bridge"), isOn: $noAnchor)
+            Toggle(VQL("Sin descubrimiento de salas", "No room discovery"), isOn: $noDisc)
+            Toggle(VQL("Sin reescaneo de escena", "No scene rescan"), isOn: $noRescan)
+            Text(VQL("Todo apagado por defecto (AR completa). Cada interruptor desactiva una pieza para localizar cuál rompe el passthrough, el texto o el rayo (KL_NO_OVRM_BRIDGE, KL_NO_ANCHOR_BRIDGE, KL_NO_XR_DISCOVERY, KL_NO_SCENE_RESCAN). Se aplica al lanzar el juego.",
+                     "All off by default (full AR). Each switch disables one piece to find which one breaks passthrough, text or the ray (KL_NO_OVRM_BRIDGE, KL_NO_ANCHOR_BRIDGE, KL_NO_XR_DISCOVERY, KL_NO_SCENE_RESCAN). Applied when the game launches."))
+                .font(.caption)
+        }
+        Section(VQL("Mostrar malla de escena (wireframe de algunos juegos)", "Show scene mesh (wireframe of some games)")) {
+            Toggle(VQL("Mostrar malla de escena (wireframe de algunos juegos)", "Show scene mesh (wireframe of some games)"), isOn: $sceneMesh)
+            Text(VQL("Apagado: se oculta la malla que el juego dibuja sobre el passthrough", "Off: hides the mesh the game draws over passthrough"))
+                .font(.caption)
+        }
+    }
+
+    @ViewBuilder private var profileSection: some View {
+        Section(VQL("Perfil del visor", "Headset profile")) {
+            Picker(VQL("Perfil del visor", "Headset profile"), selection: $profile) {
+                Text(VQL("Automático", "Automatic")).tag(0)
+                Text("Quest 2").tag(2)
+                Text("Quest 3").tag(3)
+            }
+            .pickerStyle(.segmented)
+            Text(VQL("Qué visor cree el juego que es (modelo, tipo de mando, nombre de la GPU). «Automático»: Quest 3 solo si «Perfil Quest 3 cuando el juego lo tenga» (Ajustes) está activado y el manifiesto del juego lista Quest 3 (si no declara dispositivos, basta el ajuste); si no, Quest 2. Se aplica al lanzar el juego.",
+                     "Which headset the game believes it runs on (model, controller type, GPU name). «Automatic»: Quest 3 only if «Quest 3 profile when the game has one» (Settings) is on and the game's manifest lists Quest 3 (if it declares no devices, the setting alone decides); otherwise Quest 2. Applied when the game launches."))
+                .font(.caption)
+        }
+    }
+
+    @ViewBuilder private var captureSection: some View {
+        Section(VQL("Captura de frames (diagnóstico)", "Frame capture (diagnostics)")) {
+            Toggle(VQL("Captura de frames (diagnóstico)", "Frame capture (diagnostics)"), isOn: $capture.enabled)
+            Text(VQL("Usa más RAM: el motor gráfico guarda desde el arranque todo lo que crea el juego. Apágalo cuando no lo necesites.",
+                     "Uses more RAM: the graphics engine keeps everything the game creates from the start. Turn it off when you do not need it."))
+                .font(.caption).foregroundStyle(.orange)
+            if capture.enabled {
+                Picker(VQL("Para capturar, mantén", "To capture, hold"), selection: $capture.button) {
+                    ForEach(VQGameCapture.Combo.allCases, id: \.self) { Text($0.title).tag($0) }
+                }
+                Stepper(capture.holdSeconds == 0 ? VQL("Al instante (sin mantener)", "Instantly (no hold)")
+                            : VQL("Durante \(capture.holdSeconds) s", "For \(capture.holdSeconds) s"),
+                        value: $capture.holdSeconds, in: 0...10)
+            }
+            Text(VQL("En la partida, pulsa esa combinación (mantenla el tiempo elegido, si no es «al instante»): vibran los mandos (fuerte y corto = capturando; largo y suave = no se pudo) y el motor guarda un frame en QUEST/capturas/\(game.id)/. El juego también recibe la pulsación. Solo con VPKEngine. Se aplica al lanzar el juego. Para compartirlas, marca «Incluir capturas» en Ajustes > Registros.",
+                     "In the game, press that combination (hold it for the chosen time, unless it is “instantly”): the controllers vibrate (strong and short = capturing; long and soft = it could not start) and the engine saves one frame to QUEST/capturas/\(game.id)/. The game receives the press too. VPKEngine only. Applied when the game launches. To share them, tick “Include captures” in Settings > Logs."))
+                .font(.caption)
+        }
+    }
+
+    private func observingBasic<V: View>(_ content: V) -> some View {
+        content
             .onChange(of: capture) { _, new in
                 new.save(key: game.aaKey)
                 VQLog.log("Ajustes del juego \(game.aaKey): captura de frames \(new.enabled ? "sí, \(new.button.title), \(new.holdSeconds == 0 ? "al instante" : "\(new.holdSeconds) s")" : "no")")
@@ -932,6 +972,10 @@ struct VQGameSettingsView: View {
                 VQGameRCAS.save(new, key: game.aaKey)
                 VQLog.log("Ajustes del juego \(game.aaKey): Nitidez (RCAS) \(new.map { "\(Int($0 * 100)) %" } ?? "global")")
             }
+    }
+
+    private func observingFeatures<V: View>(_ content: V) -> some View {
+        content
             .onChange(of: profile) { _, new in
                 VQGameProfile.save(new == 0 ? nil : new, key: game.aaKey)
                 VQLog.log("Ajustes del juego \(game.aaKey): perfil del visor \(new == 0 ? "automático" : "Quest \(new)")")
@@ -952,6 +996,10 @@ struct VQGameSettingsView: View {
                 VQGamePassDump.save(new, key: game.aaKey)
                 VQLog.log("Ajustes del juego \(game.aaKey): volcado de pases \(new ? "sí" : "no")")
             }
+    }
+
+    private func observingDiagnostics<V: View>(_ content: V) -> some View {
+        content
             .onChange(of: noOvrm) { _, new in
                 VQGameARIso.save(new, .ovrm, key: game.aaKey)
                 VQLog.log("Ajustes del juego \(game.aaKey): sin puente OVRManager \(new ? "sí" : "no")")
@@ -973,12 +1021,14 @@ struct VQGameSettingsView: View {
                 if typed != new { skipPass = typed }
                 VQGameSkipPass.save(typed, key: game.aaKey)
             }
+            .onChange(of: uiTint) { _, new in
+                VQGameUITint.save(new, key: game.aaKey)
+                VQLog.log("Ajustes del juego \(game.aaKey): tinte UI \(new == 0 ? "apagado" : "modo \(new)")")
+            }
             .onChange(of: aniso) { _, new in
                 VQGameAniso.save(new < 0 ? nil : new, key: game.aaKey)
                 VQLog.log("Ajustes del juego \(game.aaKey): anisotrópico \(new < 0 ? "global" : "x\(new)")")
             }
-        }
-        .frame(minWidth: 560, minHeight: 480)
     }
 
     /// Per-eye resolution the choice gives (the global one when "Usar la global").

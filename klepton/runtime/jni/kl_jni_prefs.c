@@ -511,6 +511,33 @@ static klj_val klj_ED_clear(void *env, void *self, const klj_val *a, int n) {
     return (klj_val){.l = self};
 }
 
+// One line per key whose value differs from the published one (a put of the same
+// value, or removing an absent key, is not a change; NaN equals NaN). Strings log
+// only their length (they can be save blobs or ids), and at most 64 lines are
+// logged per process.
+static void klj_pref_log_change(const klj_prefs *p, const klj_pref *old, const klj_pref *n) {
+    char val[64];
+    if (n->kind == '-') {
+        if (!old) return;
+        snprintf(val, sizeof val, "<removed>");
+    } else {
+        if (old && old->kind == n->kind && old->ival == n->ival &&
+            (old->fval == n->fval || (old->fval != old->fval && n->fval != n->fval)) &&
+            strcmp(old->sval ? old->sval : "", n->sval ? n->sval : "") == 0) return;
+        if (n->kind == 'S') {
+            size_t len = n->sval ? strlen(n->sval) : 0;
+            snprintf(val, sizeof val, "<%zu chars>", len);
+        }
+        else if (n->kind == 'F') snprintf(val, sizeof val, "%.9g", (double)n->fval);
+        else if (n->kind == 'Z') snprintf(val, sizeof val, "%s", n->ival ? "true" : "false");
+        else                     snprintf(val, sizeof val, "%lld", (long long)n->ival);
+    }
+    static int logged;
+    int seq = __atomic_fetch_add(&logged, 1, __ATOMIC_RELAXED);
+    if (seq < 64) KLJ_LOG("pref %s.%.80s = %s", p->name, n->key, val);
+    else if (seq == 64) KLJ_LOG("pref log capped");
+}
+
 // clear() runs before the puts in the same Editor regardless of call order —
 // that ordering is the documented contract, not an implementation detail.
 // commit() writes synchronously and apply() does not; with no other process to
@@ -519,6 +546,10 @@ static void klj_editor_flush(void *self) {
     klj_editor *ed = klj_editor_of(self);
     if (!ed || !ed->store) return;
     klj_prefs *p = ed->store;
+    // Logged against the store as it was before clear(), so a put of an unchanged
+    // value after clear() is not a change.
+    for (unsigned i = 0; i < ed->pending.n; i++)
+        klj_pref_log_change(p, klj_pref_find(&p->kv, ed->pending.v[i].key), &ed->pending.v[i]);
     if (ed->clear) klj_pref_clear(&p->kv);
     for (unsigned i = 0; i < ed->pending.n; i++) {
         klj_pref *s = &ed->pending.v[i];
