@@ -540,6 +540,8 @@ final class VQSettings: ObservableObject {
         // Games: report geometry/tessellation like Adreno so Unity keeps subshaders that need
         // them (AC Nexus's magenta UI). The CTS unsets it (VQConformance).
         setenv("VPVK_REPORT_GEOM", "1", 1)
+        // DIAG bisect
+        setenv("VPVK_INVARIANT_POS", "0", 1)
         // The engine's jitter env also switches off the RCAS UI mask (set_jitter still): games never inherit a 0 from an earlier run.
         unsetenv("VPVK_TAA_JITTER")
         VQLog.log("Gráficos: foveado Quest y propio siempre apagados, MSAA forzado \(effMSAA == 0 ? "el del juego" : "x\(effMSAA)") (juego \(gameKey.isEmpty ? "?" : gameKey), \(VQGameMSAA.load(key: gameKey) == nil ? "global" : "del juego")), Nitidez (RCAS) \(Int(effRcas * 100)) % (\(VQGameRCAS.load(key: gameKey) == nil ? "global" : "del juego")), anisotrópico x\(effAniso), diagnóstico de rendimiento \(perfDiag), diagnóstico de ficheros \(fsDiag), resolución \(Int(effPct.rounded())) %, ASW apagado \(aswDisabled), perfil Quest 3 \(isQuest3), FPS en pantalla \(showFps)")
