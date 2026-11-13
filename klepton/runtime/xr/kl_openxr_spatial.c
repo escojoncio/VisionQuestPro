@@ -78,7 +78,11 @@ static int g_lax(void) {
     if (v < 0) { const char *e = getenv("KL_XR_SPATIAL_LAX"); v = e && *e == '1'; }
     return v;
 }
-#define CHK_TYPE(p, t) do { if ((p)->type != (t) && !g_lax()) return R_VALIDATION; } while (0)
+#define CHK_TYPE(p, t) do { if ((p)->type != (t) && !g_lax()) { \
+    static int _f; \
+    if (!__atomic_exchange_n(&_f, 1, __ATOMIC_RELAXED)) \
+        fprintf(stderr, "  [xr] spatial: %s: struct type %d, want %d -> VALIDATION\n", __func__, (int)(p)->type, (int)(t)); \
+    return R_VALIDATION; } } while (0)
 
 static void once_log(int *flag, const char *msg) {
     if (__atomic_exchange_n(flag, 1, __ATOMIC_RELAXED)) return;
@@ -510,7 +514,13 @@ static XrResult GetSpaceComponentStatusFB(void *space, int32_t comp, CompStatus 
     ent_t *e = space_ent(space);
     if (!e) return R_HANDLE;
     if (!st) return R_VALIDATION;
-    CHK_TYPE(st, T_COMP_STATUS);
+    // Output struct: guests (Unity's Meta OpenXR provider) hand it over without
+    // its type set, and rejecting it left every discovered space unusable.
+    if (st->type != T_COMP_STATUS) {
+        static int _f;
+        if (!__atomic_exchange_n(&_f, 1, __ATOMIC_RELAXED))
+            fprintf(stderr, "  [xr] spatial: GetSpaceComponentStatusFB: struct type %d, want %d (accepted)\n", (int)st->type, (int)T_COMP_STATUS);
+    }
     uint32_t b = comp_bit(comp);
     if (!b || !(comp_supported(e) & b)) return R_COMP_UNSUP;
     st->enabled = (comp_enabled(e) & b) != 0;
