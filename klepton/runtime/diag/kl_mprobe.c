@@ -929,6 +929,7 @@ void kl_mprobe_tick(unsigned frame) {
 
     static int on = -1;
     if (on < 0) on = kl_env_on("KL_PROBE_INPUT", 0);
+    if (!on) return;
     static unsigned every, from;
     if (!every) {
         every = kl_env_uint("KL_PROBE_EVERY", 120);
