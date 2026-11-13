@@ -1,4 +1,4 @@
-# visionos - 69e0e63c82326284ddb9332f3c27cd9a7e11c739 - 2026-11-13T04:37:38Z
+# visionos - 4c4e98095070e6f3c2a0a058775c33c3dcb93924 - 2026-11-13T10:02:16Z
 
 ## syntax.log:        2 lines
 ### errors
@@ -6,67 +6,77 @@
 syntax-xros: 89 files, -j3, sdk /Applications/Xcode_26.6.app/Contents/Developer/Platforms/XROS.platform/Developer/SDKs/XROS26.5.sdk
 syntax-xros: OK
 
-## tests.log:     1746 lines
+## tests.log:     2100 lines
 ### errors
-194-[ 99%] Building CXX object vulkan/CMakeFiles/vpvk_tests.dir/src/platform_null.cpp.o
-195-[100%] Linking CXX executable vpvk_tests
-196:ld: warning: ignoring duplicate libraries: '../core/libvpgpu_core.a'
-197-[100%] Built target vpvk_tests
-198-Test project /Users/runner/work/VisionQuestPro/VisionQuestPro/build/host-tests/gpu
-199-        Start   1: vpir.builder
-200-        Start   2: vpir.roundtrip.compute_loop
-201-        Start   3: vpir.roundtrip.deferred_light_fetched_fs
-202-  1/352 Test   #1: vpir.builder ...............................   Passed    0.01 sec
+220-[ 91%] Building CXX object vulkan/CMakeFiles/vpvk_audit2.dir/src/vpcap.cpp.o
+221-[ 91%] Linking CXX executable vpvk_audit2
+222:ld: warning: ignoring duplicate libraries: '../core/libvpgpu_core.a'
+223-[ 91%] Built target vpvk_audit2
+224-[ 91%] Building CXX object vulkan/CMakeFiles/vpvk_tests.dir/src/physical_device.cpp.o
+225-/Users/runner/work/VisionQuestPro/VisionQuestPro/vpkengine/gpu/vulkan/tests/vk_tests.cpp:297:13: warning: unused function 'destroyBufferView' [-Wunused-function]
+226-  297 | inline void destroyBufferView(VkDevice dev, VkBufferView h, const VkAllocationCallbacks* a) { drop(key(h), 101); ::vkDestroyBufferView(dev, h, a); }
+227-      |             ^~~~~~~~~~~~~~~~~
+228-[ 92%] Building CXX object vulkan/CMakeFiles/vpvk_tests.dir/src/commands.cpp.o
 --
-1393-box + attached partition: 4 walls
-1394-duplicated / overlapping walls: 4 walls
-1395:t_room_build: ok
-1396-ok: t_room_build
-1397---- t_guardian
-1398-t_guardian: all passed
-1399-ok: t_guardian
-1400---- t_room_live
-1401-  [spatial] floor plane y=0.000 4.00x5.00 (ARKit world = head_display_y's frame: ~0 = the visionOS origin is this floor)
+242-[ 99%] Building CXX object vulkan/CMakeFiles/vpvk_tests.dir/src/platform_null.cpp.o
+243-[100%] Linking CXX executable vpvk_tests
+244:ld: warning: ignoring duplicate libraries: '../core/libvpgpu_core.a'
+245-[100%] Built target vpvk_tests
+246-Test project /Users/runner/work/VisionQuestPro/VisionQuestPro/build/host-tests/gpu
+247-        Start   1: vpir.builder
+248-        Start   2: vpir.dead_chain
+249-        Start   3: vpir.deep_nest
+250-  1/506 Test   #1: vpir.builder ...............................   Passed    0.02 sec
 --
-1451-  [sp-life] xrRetrieveSpaceDiscoveryResultsMETA #4 mono=185.0 tid=15427 call#4 ret=0(XR_SUCCESS) a0=0x102379e00=session a1=0x2=stub-handle a2=0x16daf1240=stub-handle a3=0x702db7e1d0 session=0x102379e00
-1452-  [sp-life] xrRetrieveSpaceDiscoveryResultsMETA #5 mono=185.0 tid=15427 call#5 ret=0(XR_SUCCESS) a0=0x102379e00=session a1=0x2=stub-handle a2=0x16daf1240=stub-handle a3=0x702db7e1d0 session=0x102379e00
-1453:  [sp-life] xrRetrieveSpaceDiscoveryResultsMETA #6 mono=185.0 tid=15427 call#6 FAILED ret=-1(XR_ERROR_VALIDATION_FAILURE) a0=0x102379e00=session a1=0xf1206=stub-handle a2=0x16daf1240=stub-handle a3=0x16daf1260 session=0x102379e00 hist(a0)=never-created-by-spatial hist(a1)=never-created-by-spatial
-1454-  [xr-sp] discover results n=2 labels=WALL_FACE:1,TABLE:1 filters=2
-1455-  [sp-life] xr-push-1000247007 #3 mono=185.0 tid=15427 req=3 result=-999 queue=ok
-1456-  [sp-life] xr-push-1000247008 #3 mono=185.0 tid=15427 req=3 result=0 queue=ok
-1457-  [sp-life] xrDiscoverSpacesMETA #3 mono=185.0 tid=15427 call#3 ret=0(XR_SUCCESS) a0=0x102379e00=session a1=0x16daf1200=stub-handle a2=0x16daf11e0=stub-handle a3=0x16daf11b0 session=0x102379e00
-1458-  [sp-life] xrRetrieveSpaceDiscoveryResultsMETA #7 mono=185.0 tid=15427 call#7 ret=0(XR_SUCCESS) a0=0x102379e00=session a1=0x3=stub-handle a2=0x16daf1240=stub-handle a3=0x702db7e1d0 session=0x102379e00
-1459-  [xr-sp] discover results n=0 labels=- filters=1
+1747-box + attached partition: 4 walls
+1748-duplicated / overlapping walls: 4 walls
+1749:t_room_build: ok
+1750-ok: t_room_build
+1751---- t_guardian
+1752-t_guardian: all passed
+1753-ok: t_guardian
+1754---- t_room_live
+1755-  [spatial] floor plane y=0.000 4.00x5.00 (ARKit world = head_display_y's frame: ~0 = the visionOS origin is this floor)
 --
-1462-  [sp-life] xrDiscoverSpacesMETA #4 mono=185.0 tid=15427 call#4 ret=0(XR_SUCCESS) a0=0x102379e00=session a1=0x16daf1200=stub-handle a2=0x16daf11e0=stub-handle a3=0x16daf15c0 session=0x102379e00
-1463-  [sp-life] xrRetrieveSpaceDiscoveryResultsMETA #8 mono=185.0 tid=15427 call#8 ret=0(XR_SUCCESS) a0=0x102379e00=session a1=0x4=stub-handle a2=0x16daf1240=stub-handle a3=0x702db7e1d0 session=0x102379e00
-1464:  [sp-life] xrDiscoverSpacesMETA #5 mono=185.0 tid=15427 call#5 FAILED ret=-1(XR_ERROR_VALIDATION_FAILURE) a0=0x102379e00=session a1=0 a2=0x16daf11e0=stub-handle a3=0x702db7e1d0 session=0x102379e00 hist(a0)=never-created-by-spatial hist(a1)=-
-1465:  [sp-life] xrDiscoverSpacesMETA #6 mono=185.0 tid=15427 call#6 FAILED ret=-1(XR_ERROR_VALIDATION_FAILURE) a0=0x102379e00=session a1=0x16daf1200=stub-handle a2=0x16daf11e0=stub-handle a3=0x16daf1220 session=0x102379e00 hist(a0)=never-created-by-spatial hist(a1)=never-created-by-spatial
-1466:  [sp-life] xrDiscoverSpacesMETA #7 mono=185.0 tid=15427 call#7 FAILED ret=-1(XR_ERROR_VALIDATION_FAILURE) a0=0x102379e00=session a1=0x16daf1200=stub-handle a2=0x16daf11e0=stub-handle a3=0x16daf1610 session=0x102379e00 hist(a0)=never-created-by-spatial hist(a1)=never-created-by-spatial
-1467:  [sp-life] xrDiscoverSpacesMETA #8 mono=185.0 tid=15427 call#8 FAILED ret=-1(XR_ERROR_VALIDATION_FAILURE) a0=0x102379e00=session a1=0x16daf1200=stub-handle a2=0x16daf11e0=stub-handle a3=0x16daf1220 session=0x102379e00 hist(a0)=never-created-by-spatial hist(a1)=never-created-by-spatial
-1468:  [sp-life] xrRetrieveSpaceDiscoveryResultsMETA #9 mono=185.0 tid=15427 call#9 FAILED ret=-1(XR_ERROR_VALIDATION_FAILURE) a0=0x102379e00=session a1=0xf423f=stub-handle a2=0x16daf1240=stub-handle a3=0x16daf1260 session=0x102379e00 hist(a0)=never-created-by-spatial hist(a1)=never-created-by-spatial
-1469:  [sp-life] xrRetrieveSpaceDiscoveryResultsMETA #10 mono=185.0 tid=15427 call#10 FAILED ret=-1(XR_ERROR_VALIDATION_FAILURE) a0=0x102379e00=session a1=0x4=stub-handle a2=0x16daf1240=stub-handle a3=0x16daf1260 session=0x102379e00 hist(a0)=never-created-by-spatial hist(a1)=never-created-by-spatial
-1470:  [sp-life] xrDiscoverSpacesMETA #9 mono=185.0 tid=15427 call#9 FAILED ret=-12(XR_ERROR_HANDLE_INVALID) a0=0x1023898c0=stub-handle a1=0x16daf1640=stub-handle a2=0x16daf11e0=stub-handle a3=0x16daf1660 session=0x102379e00 hist(a0)=never-created-by-spatial hist(a1)=never-created-by-spatial
-1471-  [xr-sp] discover results n=1 labels=- filters=1
-1472-  [sp-life] xr-push-1000247007 #5 mono=185.0 tid=15427 req=5 result=-999 queue=ok
-1473-  [sp-life] xr-push-1000247008 #5 mono=185.0 tid=15427 req=5 result=0 queue=ok
-1474-  [sp-life] xrDiscoverSpacesMETA #10 mono=185.0 tid=15427 call#10 ret=0(XR_SUCCESS) a0=0x102379e00=session a1=0x16daf1200=stub-handle a2=0x16daf11e0=stub-handle a3=0x16daf1698 session=0x102379e00
-1475-  [sp-life] xrRetrieveSpaceDiscoveryResultsMETA #11 mono=185.0 tid=15427 call#11 ret=0(XR_SUCCESS) a0=0x102379e00=session a1=0x5=stub-handle a2=0x16daf1240=stub-handle a3=0x702db7e1d0 session=0x102379e00
-1476-  [sp-life] xrGetSpaceContainerFB #1 mono=185.0 tid=15427 call#1 ret=0(XR_SUCCESS) a0=0x102379e00=session a1=0x102379e68=entity-space(kind=4 erased=0 uuid=4B4C5350) a2=0x16daf16e0=stub-handle a3=0x16daf1700 session=0x102379e00
-1477-  [sp-life] xrGetSpaceContainerFB #2 mono=185.0 tid=15427 call#2 ret=0(XR_SUCCESS) a0=0x102379e00=session a1=0x102379e68=entity-space(kind=4 erased=0 uuid=4B4C5350) a2=0x16daf16e0=stub-handle a3=0x702db7e1d0 session=0x102379e00
-1478-  [sp-life] xrGetSpaceContainerFB #3 mono=185.0 tid=15427 call#3 ret=-11(XR_ERROR_SIZE_INSUFFICIENT) a0=0x102379e00=session a1=0x102379e68=entity-space(kind=4 erased=0 uuid=4B4C5350) a2=0x16daf16e0=stub-handle a3=0x10 session=0x102379e00
-1479:  [sp-life] xrGetSpaceContainerFB #4 mono=185.0 tid=15427 call#4 FAILED ret=-12(XR_ERROR_HANDLE_INVALID) a0=0x102379e00=session a1=0x1023898c0=stub-handle a2=0x16daf16e0=stub-handle a3=0x16daf1700 session=0x102379e00 hist(a0)=never-created-by-spatial hist(a1)=never-created-by-spatial
-1480:  [sp-life] xrGetSpaceContainerFB #5 mono=185.0 tid=15427 call#5 FAILED ret=-12(XR_ERROR_HANDLE_INVALID) a0=0x102379e00=session a1=0 a2=0x16daf16e0=stub-handle a3=0x702db7e1d0 session=0x102379e00 hist(a0)=never-created-by-spatial hist(a1)=-
-1481:  [sp-life] xrGetSpaceContainerFB #6 mono=185.0 tid=15427 call#6 FAILED ret=-12(XR_ERROR_HANDLE_INVALID) a0=0x102379e00=session a1=0x102379e00=session a2=0x16daf16e0=stub-handle a3=0x702db7e1d0 session=0x102379e00 hist(a0)=never-created-by-spatial hist(a1)=never-created-by-spatial
-1482:  [sp-life] xrGetSpaceContainerFB #7 mono=185.0 tid=15427 call#7 FAILED ret=-12(XR_ERROR_HANDLE_INVALID) a0=0x1023898c0=stub-handle a1=0x102379e68=entity-space(kind=4 erased=0 uuid=4B4C5350) a2=0x16daf16e0=stub-handle a3=0x702db7e1d0 session=0x102379e00 hist(a0)=never-created-by-spatial hist(a1)=-C(kind=4)@185.0
-1483:  [sp-life] xrGetSpaceContainerFB #8 mono=185.0 tid=15427 call#8 FAILED ret=-1(XR_ERROR_VALIDATION_FAILURE) a0=0x102379e00=session a1=0x102379e68=entity-space(kind=4 erased=0 uuid=4B4C5350) a2=0 a3=0x702db7e1d0 session=0x102379e00 hist(a0)=never-created-by-spatial hist(a1)=-C(kind=4)@185.0
-1484:  [sp-life] xrGetSpaceContainerFB #9 mono=185.0 tid=15427 call#9 FAILED ret=-1(XR_ERROR_VALIDATION_FAILURE) a0=0x102379e00=session a1=0x102379e68=entity-space(kind=4 erased=0 uuid=4B4C5350) a2=0x16daf16e0=stub-handle a3=0x16daf1700 session=0x102379e00 hist(a0)=never-created-by-spatial hist(a1)=-C(kind=4)@185.0
-1485-  [xr-sp] discover results n=5 labels=FLOOR:1,CEILING:1,WALL_FACE:2,TABLE:1 filters=1
-1486-  [sp-life] xr-push-1000247007 #6 mono=185.0 tid=15427 req=6 result=-999 queue=ok
-1487-  [sp-life] xr-push-1000247008 #6 mono=185.0 tid=15427 req=6 result=0 queue=ok
-1488-  [sp-life] xrDiscoverSpacesMETA #11 mono=185.0 tid=15427 call#11 ret=0(XR_SUCCESS) a0=0x102379e00=session a1=0x16daf1200=stub-handle a2=0x16daf11e0=stub-handle a3=0x16daf1b78 session=0x102379e00
-1489-  [sp-life] xrRetrieveSpaceDiscoveryResultsMETA #12 mono=185.0 tid=15427 call#12 ret=0(XR_SUCCESS) a0=0x102379e00=session a1=0x6=stub-handle a2=0x16daf1240=stub-handle a3=0x702db7e1d0 session=0x102379e00
-1490-  [spatial] first world anchor received
+1805-  [sp-life] xrRetrieveSpaceDiscoveryResultsMETA #4 mono=188.5 tid=14927 call#4 ret=0(XR_SUCCESS) a0=0x100af1e00=session a1=0x2=stub-handle a2=0x16f379280=stub-handle a3=0x702de8f1d8 session=0x100af1e00
+1806-  [sp-life] xrRetrieveSpaceDiscoveryResultsMETA #5 mono=188.5 tid=14927 call#5 ret=0(XR_SUCCESS) a0=0x100af1e00=session a1=0x2=stub-handle a2=0x16f379280=stub-handle a3=0x702de8f1d8 session=0x100af1e00
+1807:  [sp-life] xrRetrieveSpaceDiscoveryResultsMETA #6 mono=188.5 tid=14927 call#6 FAILED ret=-1(XR_ERROR_VALIDATION_FAILURE) a0=0x100af1e00=session a1=0xf1206=stub-handle a2=0x16f379280=stub-handle a3=0x16f3792a0 session=0x100af1e00 hist(a0)=never-created-by-spatial hist(a1)=never-created-by-spatial
+1808-  [xr-sp] discover results n=2 labels=WALL_FACE:1,TABLE:1 filters=2
+1809-  [sp-life] xr-push-1000247007 #3 mono=188.5 tid=14927 req=3 result=-999 queue=ok
+1810-  [sp-life] xr-push-1000247008 #3 mono=188.5 tid=14927 req=3 result=0 queue=ok
+1811-  [sp-life] xrDiscoverSpacesMETA #3 mono=188.5 tid=14927 call#3 ret=0(XR_SUCCESS) a0=0x100af1e00=session a1=0x16f379240=stub-handle a2=0x16f379220=stub-handle a3=0x16f3791f0 session=0x100af1e00
+1812-  [sp-life] xrRetrieveSpaceDiscoveryResultsMETA #7 mono=188.5 tid=14927 call#7 ret=0(XR_SUCCESS) a0=0x100af1e00=session a1=0x3=stub-handle a2=0x16f379280=stub-handle a3=0x702de8f1d8 session=0x100af1e00
+1813-  [xr-sp] discover results n=0 labels=- filters=1
+--
+1816-  [sp-life] xrDiscoverSpacesMETA #4 mono=188.5 tid=14927 call#4 ret=0(XR_SUCCESS) a0=0x100af1e00=session a1=0x16f379240=stub-handle a2=0x16f379220=stub-handle a3=0x16f379600 session=0x100af1e00
+1817-  [sp-life] xrRetrieveSpaceDiscoveryResultsMETA #8 mono=188.5 tid=14927 call#8 ret=0(XR_SUCCESS) a0=0x100af1e00=session a1=0x4=stub-handle a2=0x16f379280=stub-handle a3=0x702de8f1d8 session=0x100af1e00
+1818:  [sp-life] xrDiscoverSpacesMETA #5 mono=188.5 tid=14927 call#5 FAILED ret=-1(XR_ERROR_VALIDATION_FAILURE) a0=0x100af1e00=session a1=0 a2=0x16f379220=stub-handle a3=0x702de8f1d8 session=0x100af1e00 hist(a0)=never-created-by-spatial hist(a1)=-
+1819:  [sp-life] xrDiscoverSpacesMETA #6 mono=188.5 tid=14927 call#6 FAILED ret=-1(XR_ERROR_VALIDATION_FAILURE) a0=0x100af1e00=session a1=0x16f379240=stub-handle a2=0x16f379220=stub-handle a3=0x16f379260 session=0x100af1e00 hist(a0)=never-created-by-spatial hist(a1)=never-created-by-spatial
+1820:  [sp-life] xrDiscoverSpacesMETA #7 mono=188.5 tid=14927 call#7 FAILED ret=-1(XR_ERROR_VALIDATION_FAILURE) a0=0x100af1e00=session a1=0x16f379240=stub-handle a2=0x16f379220=stub-handle a3=0x16f379650 session=0x100af1e00 hist(a0)=never-created-by-spatial hist(a1)=never-created-by-spatial
+1821:  [sp-life] xrDiscoverSpacesMETA #8 mono=188.5 tid=14927 call#8 FAILED ret=-1(XR_ERROR_VALIDATION_FAILURE) a0=0x100af1e00=session a1=0x16f379240=stub-handle a2=0x16f379220=stub-handle a3=0x16f379260 session=0x100af1e00 hist(a0)=never-created-by-spatial hist(a1)=never-created-by-spatial
+1822:  [sp-life] xrRetrieveSpaceDiscoveryResultsMETA #9 mono=188.5 tid=14927 call#9 FAILED ret=-1(XR_ERROR_VALIDATION_FAILURE) a0=0x100af1e00=session a1=0xf423f=stub-handle a2=0x16f379280=stub-handle a3=0x16f3792a0 session=0x100af1e00 hist(a0)=never-created-by-spatial hist(a1)=never-created-by-spatial
+1823:  [sp-life] xrRetrieveSpaceDiscoveryResultsMETA #10 mono=188.5 tid=14927 call#10 FAILED ret=-1(XR_ERROR_VALIDATION_FAILURE) a0=0x100af1e00=session a1=0x4=stub-handle a2=0x16f379280=stub-handle a3=0x16f3792a0 session=0x100af1e00 hist(a0)=never-created-by-spatial hist(a1)=never-created-by-spatial
+1824:  [sp-life] xrDiscoverSpacesMETA #9 mono=188.5 tid=14927 call#9 FAILED ret=-12(XR_ERROR_HANDLE_INVALID) a0=0x100b018c0=stub-handle a1=0x16f379680=stub-handle a2=0x16f379220=stub-handle a3=0x16f3796a0 session=0x100af1e00 hist(a0)=never-created-by-spatial hist(a1)=never-created-by-spatial
+1825-  [xr-sp] discover results n=1 labels=- filters=1
+1826-  [sp-life] xr-push-1000247007 #5 mono=188.5 tid=14927 req=5 result=-999 queue=ok
+1827-  [sp-life] xr-push-1000247008 #5 mono=188.5 tid=14927 req=5 result=0 queue=ok
+1828-  [sp-life] xrDiscoverSpacesMETA #10 mono=188.5 tid=14927 call#10 ret=0(XR_SUCCESS) a0=0x100af1e00=session a1=0x16f379240=stub-handle a2=0x16f379220=stub-handle a3=0x16f3796d8 session=0x100af1e00
+1829-  [sp-life] xrRetrieveSpaceDiscoveryResultsMETA #11 mono=188.5 tid=14927 call#11 ret=0(XR_SUCCESS) a0=0x100af1e00=session a1=0x5=stub-handle a2=0x16f379280=stub-handle a3=0x702de8f1d8 session=0x100af1e00
+1830-  [sp-life] xrGetSpaceContainerFB #1 mono=188.5 tid=14927 call#1 ret=0(XR_SUCCESS) a0=0x100af1e00=session a1=0x100af1e68=entity-space(kind=4 erased=0 uuid=4B4C5350) a2=0x16f379720=stub-handle a3=0x16f379740 session=0x100af1e00
+1831-  [sp-life] xrGetSpaceContainerFB #2 mono=188.5 tid=14927 call#2 ret=0(XR_SUCCESS) a0=0x100af1e00=session a1=0x100af1e68=entity-space(kind=4 erased=0 uuid=4B4C5350) a2=0x16f379720=stub-handle a3=0x702de8f1d8 session=0x100af1e00
+1832-  [sp-life] xrGetSpaceContainerFB #3 mono=188.5 tid=14927 call#3 ret=-11(XR_ERROR_SIZE_INSUFFICIENT) a0=0x100af1e00=session a1=0x100af1e68=entity-space(kind=4 erased=0 uuid=4B4C5350) a2=0x16f379720=stub-handle a3=0x10 session=0x100af1e00
+1833:  [sp-life] xrGetSpaceContainerFB #4 mono=188.5 tid=14927 call#4 FAILED ret=-12(XR_ERROR_HANDLE_INVALID) a0=0x100af1e00=session a1=0x100b018c0=stub-handle a2=0x16f379720=stub-handle a3=0x16f379740 session=0x100af1e00 hist(a0)=never-created-by-spatial hist(a1)=never-created-by-spatial
+1834:  [sp-life] xrGetSpaceContainerFB #5 mono=188.5 tid=14927 call#5 FAILED ret=-12(XR_ERROR_HANDLE_INVALID) a0=0x100af1e00=session a1=0 a2=0x16f379720=stub-handle a3=0x702de8f1d8 session=0x100af1e00 hist(a0)=never-created-by-spatial hist(a1)=-
+1835:  [sp-life] xrGetSpaceContainerFB #6 mono=188.5 tid=14927 call#6 FAILED ret=-12(XR_ERROR_HANDLE_INVALID) a0=0x100af1e00=session a1=0x100af1e00=session a2=0x16f379720=stub-handle a3=0x702de8f1d8 session=0x100af1e00 hist(a0)=never-created-by-spatial hist(a1)=never-created-by-spatial
+1836:  [sp-life] xrGetSpaceContainerFB #7 mono=188.5 tid=14927 call#7 FAILED ret=-12(XR_ERROR_HANDLE_INVALID) a0=0x100b018c0=stub-handle a1=0x100af1e68=entity-space(kind=4 erased=0 uuid=4B4C5350) a2=0x16f379720=stub-handle a3=0x702de8f1d8 session=0x100af1e00 hist(a0)=never-created-by-spatial hist(a1)=-C(kind=4)@188.5
+1837:  [sp-life] xrGetSpaceContainerFB #8 mono=188.5 tid=14927 call#8 FAILED ret=-1(XR_ERROR_VALIDATION_FAILURE) a0=0x100af1e00=session a1=0x100af1e68=entity-space(kind=4 erased=0 uuid=4B4C5350) a2=0 a3=0x702de8f1d8 session=0x100af1e00 hist(a0)=never-created-by-spatial hist(a1)=-C(kind=4)@188.5
+1838:  [sp-life] xrGetSpaceContainerFB #9 mono=188.5 tid=14927 call#9 FAILED ret=-1(XR_ERROR_VALIDATION_FAILURE) a0=0x100af1e00=session a1=0x100af1e68=entity-space(kind=4 erased=0 uuid=4B4C5350) a2=0x16f379720=stub-handle a3=0x16f379740 session=0x100af1e00 hist(a0)=never-created-by-spatial hist(a1)=-C(kind=4)@188.5
+1839-  [xr-sp] discover results n=5 labels=FLOOR:1,CEILING:1,WALL_FACE:2,TABLE:1 filters=1
+1840-  [sp-life] xr-push-1000247007 #6 mono=188.5 tid=14927 req=6 result=-999 queue=ok
+1841-  [sp-life] xr-push-1000247008 #6 mono=188.5 tid=14927 req=6 result=0 queue=ok
+1842-  [sp-life] xrDiscoverSpacesMETA #11 mono=188.5 tid=14927 call#11 ret=0(XR_SUCCESS) a0=0x100af1e00=session a1=0x16f379240=stub-handle a2=0x16f379220=stub-handle a3=0x16f379bb8 session=0x100af1e00
+1843-  [sp-life] xrRetrieveSpaceDiscoveryResultsMETA #12 mono=188.5 tid=14927 call#12 ret=0(XR_SUCCESS) a0=0x100af1e00=session a1=0x6=stub-handle a2=0x16f379280=stub-handle a3=0x702de8f1d8 session=0x100af1e00
+1844-  [spatial] first world anchor received
 ### end
 t_vk_robust ok
 ok: t_vk_robust
@@ -149,13 +159,9 @@ ok: t_vq_area
 --- t_closed_room
 t_closed_room: ok
 ok: t_closed_room
-tools/ci/host-tests.sh: line 169:  3925 Terminated: 15          ( sleep 420; for g in gpu_host metal2_xros klepton_tests;
-do
-    eval "kill \$PID_$g 2>/dev/null";
-done )
 
 =================== summary
-100% tests passed out of 352
+100% tests passed out of 506
 ok: pred_frame_offset_test
 ok: kl_ovrp_eyesize_test
 ok: t_ovrp_input
@@ -217,7 +223,101 @@ ok: t_quest_profile
 ok: t_cache_complete
 ok: t_vq_area
 ok: t_closed_room
+tools/ci/host-tests.sh: line 170:  4414 Terminated: 15          ( sleep 420; for g in gpu_host metal2_xros klepton_tests;
+do
+    eval "kill \$PID_$g 2>/dev/null";
+done )
 host-tests: OK
+
+## vpvulkan.log:       86 lines
+### errors
+### end
+-- The CXX compiler identification is AppleClang 21.0.0.21000101
+-- Detecting CXX compiler ABI info
+-- Detecting CXX compiler ABI info - done
+-- Check for working CXX compiler: /usr/bin/c++ - skipped
+-- Detecting CXX compile features
+-- Detecting CXX compile features - done
+-- vpmsl translator fingerprint 07b2fbb3ef74a565
+-- Performing Test CMAKE_HAVE_LIBC_PTHREAD
+-- Performing Test CMAKE_HAVE_LIBC_PTHREAD - Success
+-- Found Threads: TRUE
+-- The OBJCXX compiler identification is AppleClang 21.0.0.21000101
+-- Detecting OBJCXX compiler ABI info
+-- Detecting OBJCXX compiler ABI info - done
+-- Check for working OBJCXX compiler: /usr/bin/clang++ - skipped
+-- Configuring done (3.8s)
+-- Generating done (0.0s)
+-- Build files have been written to: /Users/runner/work/VisionQuestPro/VisionQuestPro/build/vpvulkan-build
+ninja: Entering directory `build/vpvulkan-build'
+[0/2] Re-checking globbed directories...
+[1/60] Building CXX object shader/ir/CMakeFiles/vpir.dir/src/ir.cpp.o
+[2/60] Building CXX object shader/ir/CMakeFiles/vpir.dir/src/builder.cpp.o
+[3/60] Building CXX object shader/ir/CMakeFiles/vpir.dir/src/print.cpp.o
+[4/60] Building CXX object shader/ir/CMakeFiles/vpir.dir/src/parse.cpp.o
+[5/60] Building CXX object core/CMakeFiles/vpgpu_core.dir/src/resources.cpp.o
+[6/60] Building CXX object shader/ir/CMakeFiles/vpir.dir/src/verify.cpp.o
+[7/60] Building CXX object shader/ir/CMakeFiles/vpir.dir/src/optimize.cpp.o
+[8/60] Building CXX object shader/ir/CMakeFiles/vpir.dir/src/fbfetch.cpp.o
+[9/60] Building CXX object core/CMakeFiles/vpgpu_core.dir/src/commands.cpp.o
+[10/60] Linking CXX static library shader/ir/libvpir.a
+[11/60] Building CXX object core/CMakeFiles/vpgpu_core.dir/src/pipeline_cache.cpp.o
+[12/60] Building CXX object core/CMakeFiles/vpgpu_core.dir/src/null_backend.cpp.o
+[13/60] Building CXX object core/CMakeFiles/vpgpu_core.dir/src/background.cpp.o
+[14/60] Building CXX object core/CMakeFiles/vpgpu_core.dir/src/frame_compiler.cpp.o
+[15/60] Building CXX object gles/CMakeFiles/vpglsl.dir/glsl/types.cpp.o
+[16/60] Building CXX object core/CMakeFiles/vpgpu_core.dir/src/device.cpp.o
+[17/60] Building CXX object core/CMakeFiles/vpgpu_core.dir/src/diagnostics.cpp.o
+[18/60] Building CXX object gles/CMakeFiles/vpglsl.dir/glsl/pp.cpp.o
+[19/60] Building CXX object gles/CMakeFiles/vpglsl.dir/glsl/builtins.cpp.o
+[20/60] Building CXX object gles/CMakeFiles/vpglsl.dir/glsl/link.cpp.o
+[21/60] Building CXX object shader/spirv/CMakeFiles/vpspirv.dir/src/parse.cpp.o
+[22/60] Linking CXX static library core/libvpgpu_core.a
+[23/60] Building CXX object gles/CMakeFiles/vpglsl.dir/glsl/emit.cpp.o
+[24/60] Building CXX object gles/CMakeFiles/vpglsl.dir/glsl/parser.cpp.o
+[25/60] Building CXX object gles/CMakeFiles/vpgles.dir/src/vk.cpp.o
+[26/60] Linking CXX static library gles/libvpglsl.a
+[27/60] Building CXX object gles/CMakeFiles/vpgles.dir/src/formats.cpp.o
+[28/60] Building CXX object shader/msl/CMakeFiles/vpmsl.dir/src/msl.cpp.o
+[29/60] Building CXX object gles/CMakeFiles/vpgles.dir/src/textures.cpp.o
+[30/60] Building CXX object gles/CMakeFiles/vpgles.dir/src/device.cpp.o
+[31/60] Building CXX object gles/CMakeFiles/vpgles.dir/src/xfb.cpp.o
+[32/60] Building CXX object gles/CMakeFiles/vpgles.dir/src/egl.cpp.o
+[33/60] Generating gen/vpktaa_native_msl.h
+[34/60] Linking CXX static library shader/msl/libvpmsl.a
+[35/60] Building CXX object shader/spirv/CMakeFiles/vpspirv.dir/src/lower.cpp.o
+[36/60] Linking CXX static library shader/spirv/libvpspirv.a
+[37/60] Building CXX object gles/CMakeFiles/vpgles.dir/src/draw.cpp.o
+[38/60] Building CXX object gles/CMakeFiles/vpgles.dir/src/gl_api.cpp.o
+[39/60] Linking CXX static library gles/libvpgles.a
+[40/60] Building CXX object vulkan/CMakeFiles/VPVulkan.dir/src/physical_device.cpp.o
+[41/60] Building CXX object vulkan/CMakeFiles/VPVulkan.dir/src/config.cpp.o
+[42/60] Building CXX object vulkan/CMakeFiles/VPVulkan.dir/src/entry.cpp.o
+[43/60] Building CXX object vulkan/CMakeFiles/VPVulkan.dir/src/commands.cpp.o
+[44/60] Building CXX object vulkan/CMakeFiles/VPVulkan.dir/src/recipes.cpp.o
+[45/60] Building CXX object vulkan/CMakeFiles/VPVulkan.dir/src/ext.cpp.o
+[46/60] Building CXX object vulkan/CMakeFiles/VPVulkan.dir/src/precompile.cpp.o
+[47/60] Building CXX object vulkan/CMakeFiles/VPVulkan.dir/src/taa_native.cpp.o
+[48/60] Building CXX object vulkan/CMakeFiles/VPVulkan.dir/src/foveation.cpp.o
+[49/60] Building CXX object vulkan/CMakeFiles/VPVulkan.dir/src/vpcap.cpp.o
+[50/60] Building OBJCXX object metal2/CMakeFiles/vpgpu_metal2.dir/src/metal_backend.mm.o
+[51/60] Linking CXX static library metal2/libvpgpu_metal2.a
+[52/60] Building CXX object vulkan/CMakeFiles/VPVulkan.dir/src/texdecode.cpp.o
+[53/60] Building CXX object vulkan/CMakeFiles/VPVulkan.dir/src/pipelines.cpp.o
+[54/60] Building CXX object vulkan/CMakeFiles/VPVulkan.dir/src/pending.cpp.o
+[55/60] Building CXX object vulkan/CMakeFiles/VPVulkan.dir/src/passdump.cpp.o
+[56/60] Building OBJCXX object vulkan/CMakeFiles/VPVulkan.dir/src/platform_metal.mm.o
+[57/60] Building OBJCXX object vulkan/CMakeFiles/VPVulkan.dir/src/taa_native_metal.mm.o
+[58/60] Building CXX object vulkan/CMakeFiles/VPVulkan.dir/src/capture.cpp.o
+[59/60] Linking CXX shared library vulkan/libVPVulkan.dylib
+ platform VISIONOS
+    minos 26.0
+exported vk* symbols: 232
+total 10000
+drwxr-xr-x  4 runner  staff      128 Nov 13 09:52 .
+drwxr-xr-x  4 runner  staff      128 Nov 13 09:52 ..
+-rw-r--r--  1 runner  staff      663 Nov 13 09:52 Info.plist
+-rwxr-xr-x  1 runner  staff  5111992 Nov 13 09:52 VPVulkan
 
 ## runtime.log:       53 lines
 ### errors
@@ -276,10 +376,9 @@ runtime/gfx/kl_glfb.c:6034:25: warning: variable 'said' set but not used [-Wunus
       |                         ^
 1 warning generated.
 
-## app.log:      790 lines
+## app.log:      791 lines
 ### errors
 ### end
-  144 |     if (f == 0 && c == u) memcpy(out + w, blk, u), w += u;
       |                                                  ^
 /Users/runner/work/VisionQuestPro/VisionQuestPro/app/Native/vq_harvest.c:144:27: note: cast expression to void to silence warning
   144 |     if (f == 0 && c == u) memcpy(out + w, blk, u), w += u;
@@ -380,20 +479,21 @@ Copy /Users/runner/work/VisionQuestPro/VisionQuestPro/build/dd/Build/Products/Re
     cd /Users/runner/work/VisionQuestPro/VisionQuestPro
     builtin-copy -exclude .DS_Store -exclude CVS -exclude .svn -exclude .git -exclude .hg -exclude Headers -exclude PrivateHeaders -exclude Modules -exclude \*.tbd -bitcode-strip all -bitcode-strip-tool /Applications/Xcode_26.6.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/bitcode_strip -resolve-src-symlinks -remove-static-executable /Users/runner/work/VisionQuestPro/VisionQuestPro/klepton/vendor-moltenvk/out/xros/MoltenVK.framework /Users/runner/work/VisionQuestPro/VisionQuestPro/build/dd/Build/Products/Release-xros/VisionQuestPro.app/Frameworks
 /Applications/Xcode_26.6.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/bitcode_strip /Users/runner/work/VisionQuestPro/VisionQuestPro/klepton/vendor-moltenvk/out/xros/MoltenVK.framework/MoltenVK -r -o /Users/runner/work/VisionQuestPro/VisionQuestPro/build/dd/Build/Products/Release-xros/VisionQuestPro.app/Frameworks/MoltenVK.framework/MoltenVK
+
 ProcessInfoPlistFile /Users/runner/work/VisionQuestPro/VisionQuestPro/build/dd/Build/Products/Release-xros/VisionQuestPro.app/Info.plist /Users/runner/work/VisionQuestPro/VisionQuestPro/klepton/visionos/Info.plist (in target 'VisionQuestPro' from project 'VisionQuestPro')
     cd /Users/runner/work/VisionQuestPro/VisionQuestPro
     builtin-infoPlistUtility /Users/runner/work/VisionQuestPro/VisionQuestPro/klepton/visionos/Info.plist -producttype com.apple.product-type.application -genpkginfo /Users/runner/work/VisionQuestPro/VisionQuestPro/build/dd/Build/Products/Release-xros/VisionQuestPro.app/PkgInfo -expandbuildsettings -format binary -platform xros -scanforprivacyfile /Users/runner/work/VisionQuestPro/VisionQuestPro/build/dd/Build/Products/Release-xros/VisionQuestPro.app/Frameworks/MoltenVK.framework -scanforprivacyfile /Users/runner/work/VisionQuestPro/VisionQuestPro/build/dd/Build/Products/Release-xros/VisionQuestPro.app/Frameworks/VPVulkan.framework -o /Users/runner/work/VisionQuestPro/VisionQuestPro/build/dd/Build/Products/Release-xros/VisionQuestPro.app/Info.plist
 
 CopySwiftLibs /Users/runner/work/VisionQuestPro/VisionQuestPro/build/dd/Build/Products/Release-xros/VisionQuestPro.app (in target 'VisionQuestPro' from project 'VisionQuestPro')
     cd /Users/runner/work/VisionQuestPro/VisionQuestPro
-    builtin-swiftStdLibTool --copy --verbose --scan-executable /Users/runner/work/VisionQuestPro/VisionQuestPro/build/dd/Build/Products/Release-xros/VisionQuestPro.app/VisionQuestPro --scan-folder /Users/runner/work/VisionQuestPro/VisionQuestPro/build/dd/Build/Products/Release-xros/VisionQuestPro.app/Frameworks --scan-folder /Users/runner/work/VisionQuestPro/VisionQuestPro/build/dd/Build/Products/Release-xros/VisionQuestPro.app/PlugIns --scan-folder /Users/runner/work/VisionQuestPro/VisionQuestPro/build/dd/Build/Products/Release-xros/VisionQuestPro.app/SystemExtensions --scan-folder /Users/runner/work/VisionQuestPro/VisionQuestPro/build/dd/Build/Products/Release-xros/VisionQuestPro.app/Extensions --platform xros --toolchain /var/run/com.apple.security.cryptexd/mnt/com.apple.MobileAsset.MetalToolchain-v17.6.109.0.m01CWn/Metal.xctoolchain --toolchain /Applications/Xcode_26.6.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain --destination /Users/runner/work/VisionQuestPro/VisionQuestPro/build/dd/Build/Products/Release-xros/VisionQuestPro.app/Frameworks --strip-bitcode --strip-bitcode-tool /Applications/Xcode_26.6.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/bitcode_strip --emit-dependency-info /Users/runner/work/VisionQuestPro/VisionQuestPro/build/dd/Build/Intermediates.noindex/VisionQuestPro.build/Release-xros/VisionQuestPro.build/SwiftStdLibToolInputDependencies.dep --filter-for-swift-os
+    builtin-swiftStdLibTool --copy --verbose --scan-executable /Users/runner/work/VisionQuestPro/VisionQuestPro/build/dd/Build/Products/Release-xros/VisionQuestPro.app/VisionQuestPro --scan-folder /Users/runner/work/VisionQuestPro/VisionQuestPro/build/dd/Build/Products/Release-xros/VisionQuestPro.app/Frameworks --scan-folder /Users/runner/work/VisionQuestPro/VisionQuestPro/build/dd/Build/Products/Release-xros/VisionQuestPro.app/PlugIns --scan-folder /Users/runner/work/VisionQuestPro/VisionQuestPro/build/dd/Build/Products/Release-xros/VisionQuestPro.app/SystemExtensions --scan-folder /Users/runner/work/VisionQuestPro/VisionQuestPro/build/dd/Build/Products/Release-xros/VisionQuestPro.app/Extensions --platform xros --toolchain /var/run/com.apple.security.cryptexd/mnt/com.apple.MobileAsset.MetalToolchain-v17.6.109.0.gezaoT/Metal.xctoolchain --toolchain /Applications/Xcode_26.6.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain --destination /Users/runner/work/VisionQuestPro/VisionQuestPro/build/dd/Build/Products/Release-xros/VisionQuestPro.app/Frameworks --strip-bitcode --strip-bitcode-tool /Applications/Xcode_26.6.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/bitcode_strip --emit-dependency-info /Users/runner/work/VisionQuestPro/VisionQuestPro/build/dd/Build/Intermediates.noindex/VisionQuestPro.build/Release-xros/VisionQuestPro.build/SwiftStdLibToolInputDependencies.dep --filter-for-swift-os
 Ignoring --strip-bitcode because --sign was not passed
 
 ExtractAppIntentsMetadata (in target 'VisionQuestPro' from project 'VisionQuestPro')
     cd /Users/runner/work/VisionQuestPro/VisionQuestPro
-    /Applications/Xcode_26.6.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/appintentsmetadataprocessor --toolchain-dir /var/run/com.apple.security.cryptexd/mnt/com.apple.MobileAsset.MetalToolchain-v17.6.109.0.m01CWn/Metal.xctoolchain --module-name VisionQuestPro --sdk-root /Applications/Xcode_26.6.app/Contents/Developer/Platforms/XROS.platform/Developer/SDKs/XROS26.5.sdk --xcode-version 17F113 --platform-family xrOS --deployment-target 26.0 --bundle-identifier com.kdt.livecontainer --output /Users/runner/work/VisionQuestPro/VisionQuestPro/build/dd/Build/Products/Release-xros/VisionQuestPro.app --target-triple arm64-apple-xros26.0 --binary-file /Users/runner/work/VisionQuestPro/VisionQuestPro/build/dd/Build/Products/Release-xros/VisionQuestPro.app/VisionQuestPro --dependency-file /Users/runner/work/VisionQuestPro/VisionQuestPro/build/dd/Build/Intermediates.noindex/VisionQuestPro.build/Release-xros/VisionQuestPro.build/Objects-normal/arm64/VisionQuestPro_dependency_info.dat --stringsdata-file /Users/runner/work/VisionQuestPro/VisionQuestPro/build/dd/Build/Intermediates.noindex/VisionQuestPro.build/Release-xros/VisionQuestPro.build/Objects-normal/arm64/ExtractedAppShortcutsMetadata.stringsdata --source-file-list /Users/runner/work/VisionQuestPro/VisionQuestPro/build/dd/Build/Intermediates.noindex/VisionQuestPro.build/Release-xros/VisionQuestPro.build/Objects-normal/arm64/VisionQuestPro.SwiftFileList --metadata-file-list /Users/runner/work/VisionQuestPro/VisionQuestPro/build/dd/Build/Intermediates.noindex/VisionQuestPro.build/Release-xros/VisionQuestPro.build/VisionQuestPro.DependencyMetadataFileList --static-metadata-file-list /Users/runner/work/VisionQuestPro/VisionQuestPro/build/dd/Build/Intermediates.noindex/VisionQuestPro.build/Release-xros/VisionQuestPro.build/VisionQuestPro.DependencyStaticMetadataFileList --swift-const-vals-list /Users/runner/work/VisionQuestPro/VisionQuestPro/build/dd/Build/Intermediates.noindex/VisionQuestPro.build/Release-xros/VisionQuestPro.build/Objects-normal/arm64/VisionQuestPro.SwiftConstValuesFileList --compile-time-extraction --deployment-aware-processing --validate-assistant-intents --no-app-shortcuts-localization
-2026-11-13 04:37:33.341 appintentsmetadataprocessor[19813:50961] Starting appintentsmetadataprocessor export
-2026-11-13 04:37:33.357 appintentsmetadataprocessor[19813:50961] warning: Metadata extraction skipped. No AppIntents.framework dependency found.
+    /Applications/Xcode_26.6.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/appintentsmetadataprocessor --toolchain-dir /var/run/com.apple.security.cryptexd/mnt/com.apple.MobileAsset.MetalToolchain-v17.6.109.0.gezaoT/Metal.xctoolchain --module-name VisionQuestPro --sdk-root /Applications/Xcode_26.6.app/Contents/Developer/Platforms/XROS.platform/Developer/SDKs/XROS26.5.sdk --xcode-version 17F113 --platform-family xrOS --deployment-target 26.0 --bundle-identifier com.kdt.livecontainer --output /Users/runner/work/VisionQuestPro/VisionQuestPro/build/dd/Build/Products/Release-xros/VisionQuestPro.app --target-triple arm64-apple-xros26.0 --binary-file /Users/runner/work/VisionQuestPro/VisionQuestPro/build/dd/Build/Products/Release-xros/VisionQuestPro.app/VisionQuestPro --dependency-file /Users/runner/work/VisionQuestPro/VisionQuestPro/build/dd/Build/Intermediates.noindex/VisionQuestPro.build/Release-xros/VisionQuestPro.build/Objects-normal/arm64/VisionQuestPro_dependency_info.dat --stringsdata-file /Users/runner/work/VisionQuestPro/VisionQuestPro/build/dd/Build/Intermediates.noindex/VisionQuestPro.build/Release-xros/VisionQuestPro.build/Objects-normal/arm64/ExtractedAppShortcutsMetadata.stringsdata --source-file-list /Users/runner/work/VisionQuestPro/VisionQuestPro/build/dd/Build/Intermediates.noindex/VisionQuestPro.build/Release-xros/VisionQuestPro.build/Objects-normal/arm64/VisionQuestPro.SwiftFileList --metadata-file-list /Users/runner/work/VisionQuestPro/VisionQuestPro/build/dd/Build/Intermediates.noindex/VisionQuestPro.build/Release-xros/VisionQuestPro.build/VisionQuestPro.DependencyMetadataFileList --static-metadata-file-list /Users/runner/work/VisionQuestPro/VisionQuestPro/build/dd/Build/Intermediates.noindex/VisionQuestPro.build/Release-xros/VisionQuestPro.build/VisionQuestPro.DependencyStaticMetadataFileList --swift-const-vals-list /Users/runner/work/VisionQuestPro/VisionQuestPro/build/dd/Build/Intermediates.noindex/VisionQuestPro.build/Release-xros/VisionQuestPro.build/Objects-normal/arm64/VisionQuestPro.SwiftConstValuesFileList --compile-time-extraction --deployment-aware-processing --validate-assistant-intents --no-app-shortcuts-localization
+2026-11-13 10:02:10.807 appintentsmetadataprocessor[19304:52192] Starting appintentsmetadataprocessor export
+2026-11-13 10:02:10.824 appintentsmetadataprocessor[19304:52192] warning: Metadata extraction skipped. No AppIntents.framework dependency found.
 
 GenerateDSYMFile /Users/runner/work/VisionQuestPro/VisionQuestPro/build/dd/Build/Products/Release-xros/VisionQuestPro.app.dSYM /Users/runner/work/VisionQuestPro/VisionQuestPro/build/dd/Build/Products/Release-xros/VisionQuestPro.app/VisionQuestPro (in target 'VisionQuestPro' from project 'VisionQuestPro')
     cd /Users/runner/work/VisionQuestPro/VisionQuestPro
@@ -414,21 +514,21 @@ Touch /Users/runner/work/VisionQuestPro/VisionQuestPro/build/dd/Build/Products/R
 ** BUILD SUCCEEDED **
 
 build/dd/Build/Products/Release-xros/VisionQuestPro.app:
-total 23832
-drwxr-xr-x  7 runner  staff       224 Nov 13 04:37 .
-drwxr-xr-x@ 5 runner  staff       160 Nov 13 04:37 ..
-drwxr-xr-x  4 runner  staff       128 Nov 13 04:37 Frameworks
--rw-r--r--  1 runner  staff      2095 Nov 13 04:37 Info.plist
--rw-r--r--  1 runner  staff         8 Nov 13 04:37 PkgInfo
--rwxr-xr-x  1 runner  staff  12193768 Nov 13 04:37 VisionQuestPro
-drwxr-xr-x  8 runner  staff       256 Nov 13 04:36 VPKEngineCertificates
+total 23840
+drwxr-xr-x  7 runner  staff       224 Nov 13 10:02 .
+drwxr-xr-x@ 5 runner  staff       160 Nov 13 10:02 ..
+drwxr-xr-x  4 runner  staff       128 Nov 13 10:02 Frameworks
+-rw-r--r--  1 runner  staff      2095 Nov 13 10:02 Info.plist
+-rw-r--r--  1 runner  staff         8 Nov 13 10:02 PkgInfo
+-rwxr-xr-x  1 runner  staff  12193816 Nov 13 10:02 VisionQuestPro
+drwxr-xr-x  8 runner  staff       256 Nov 13 10:00 VPKEngineCertificates
 
 build/dd/Build/Products/Release-xros/VisionQuestPro.app/Frameworks:
 total 0
-drwxr-xr-x  4 runner  staff  128 Nov 13 04:37 .
-drwxr-xr-x  7 runner  staff  224 Nov 13 04:37 ..
-drwxr-xr-x  4 runner  staff  128 Nov 13 04:37 MoltenVK.framework
-drwxr-xr-x  4 runner  staff  128 Nov 13 04:37 VPVulkan.framework
+drwxr-xr-x  4 runner  staff  128 Nov 13 10:02 .
+drwxr-xr-x  7 runner  staff  224 Nov 13 10:02 ..
+drwxr-xr-x  4 runner  staff  128 Nov 13 10:02 MoltenVK.framework
+drwxr-xr-x  4 runner  staff  128 Nov 13 10:02 VPVulkan.framework
 
 ## compositor-api.txt:      232 lines
 sdk: /Applications/Xcode_26.6.app/Contents/Developer/Platforms/XROS.platform/Developer/SDKs/XROS26.5.sdk
