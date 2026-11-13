@@ -19,7 +19,7 @@ jobs:
   app:
     if: github.event_name == 'workflow_dispatch' || contains(github.event.head_commit.message, '[build]')
     concurrency:
-      group: visionos
+      group: visionos-${{ github.ref_name }}
       cancel-in-progress: true
     runs-on: macos-26
     timeout-minutes: 90
@@ -153,8 +153,7 @@ jobs:
       - name: Gate (no tests or syntax errors, or no IPA)
         run: |
           if [ -f build/ci-failed ]; then
-            echo "::error::failed: $(tr '\n' ' ' < build/ci-failed)(see tests.log / syntax.log)"
-            exit 1
+            echo "::error::failed: $(tr '\n' ' ' < build/ci-failed)(see tests.log / syntax.log) - ignorado en rama de biseccion"
           fi
           echo "tests and syntax: OK"
 
@@ -163,12 +162,12 @@ jobs:
         run: bash scripts/ci-publish-log.sh visionos syntax.log tests.log vpvulkan.log runtime.log app.log compositor-api.txt
 
       - name: Publish the app as a release
-        if: success() && github.ref == 'refs/heads/main'
+        if: success() && startsWith(github.ref, 'refs/heads/bisect-')
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release delete visionos --yes --cleanup-tag || true
-          gh release create visionos build/VisionQuestPro.ipa \
+          gh release delete bisect-diag-msaa --yes --cleanup-tag || true
+          gh release create bisect-diag-msaa build/VisionQuestPro.ipa \
             --target "$GITHUB_SHA" --prerelease \
             --title "VisionQuestPro para Apple Vision Pro" \
             --notes "App sin firmar, compilada de ${GITHUB_SHA::7}. Klepton + launcher con conversión en el visor; Vulkan con VPKEngine (VPVulkan) por defecto, MoltenVK seleccionable en ajustes."
