@@ -163,12 +163,12 @@ jobs:
         run: bash scripts/ci-publish-log.sh visionos syntax.log tests.log vpvulkan.log runtime.log app.log compositor-api.txt
 
       - name: Publish the app as a release
-        if: success() && github.ref == 'refs/heads/main'
+        if: success() && startsWith(github.ref, 'refs/heads/bisect-')
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release delete visionos --yes --cleanup-tag || true
-          gh release create visionos build/VisionQuestPro.ipa \
+          gh release delete bisect-9e25428 --yes --cleanup-tag || true
+          gh release create bisect-9e25428 build/VisionQuestPro.ipa \
             --target "$GITHUB_SHA" --prerelease \
             --title "VisionQuestPro para Apple Vision Pro" \
             --notes "App sin firmar, compilada de ${GITHUB_SHA::7}. Klepton + launcher con conversión en el visor; Vulkan con VPKEngine (VPVulkan) por defecto, MoltenVK seleccionable en ajustes."
