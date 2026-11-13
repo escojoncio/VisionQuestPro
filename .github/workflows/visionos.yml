@@ -19,7 +19,7 @@ jobs:
   app:
     if: github.event_name == 'workflow_dispatch' || contains(github.event.head_commit.message, '[build]')
     concurrency:
-      group: visionos
+      group: visionos-${{ github.ref_name }}
       cancel-in-progress: true
     runs-on: macos-26
     timeout-minutes: 90
