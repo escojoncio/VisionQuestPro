@@ -1,12 +1,12 @@
-# visionos - d16dfdf1744852b13cb81da7e5442b0c971a8224 - 2026-11-13T00:01:04Z
+# visionos - 12177ec58164ba6857a77d73258d3469e4d6a3fc - 2026-11-13T00:15:11Z
 
 ## syntax.log:        2 lines
 ### errors
 ### end
-syntax-xros: 89 files, -j3, sdk /Applications/Xcode_26.6.app/Contents/Developer/Platforms/XROS.platform/Developer/SDKs/XROS26.5.sdk
+syntax-xros: 88 files, -j3, sdk /Applications/Xcode_26.6.app/Contents/Developer/Platforms/XROS.platform/Developer/SDKs/XROS26.5.sdk
 syntax-xros: OK
 
-## tests.log:     1580 lines
+## tests.log:     1268 lines
 ### errors
 194-[ 99%] Building CXX object vulkan/CMakeFiles/vpvk_tests.dir/src/platform_null.cpp.o
 195-[100%] Linking CXX executable vpvk_tests
@@ -16,18 +16,62 @@ syntax-xros: OK
 199-        Start   1: vpir.builder
 200-        Start   2: vpir.roundtrip.compute_loop
 201-        Start   3: vpir.roundtrip.deferred_light_fetched_fs
-202-  1/359 Test   #1: vpir.builder ...............................   Passed    0.01 sec
+202-  1/345 Test   #1: vpir.builder ...............................   Passed    0.01 sec
 --
-1312-box + attached partition: 4 walls
-1313-duplicated / overlapping walls: 4 walls
-1314:t_room_build: ok
-1315-ok: t_room_build
-1316---- t_guardian
-1317-t_guardian: all passed
-1318-ok: t_guardian
-1319---- t_room_live
-1320-  [spatial] floor plane y=0.000 4.00x5.00 (ARKit world = head_display_y's frame: ~0 = the visionOS origin is this floor)
+913-	203 - gpu_metal2.nopool (Skipped)
+914-
+915:The following tests FAILED:
+916-	245 - gpu_gles.gl.es31 (Failed)
+917-Errors while running CTest
+918:FAILED: gpu_host
+919-
+920-=================== metal2_xros (exit 0)
+921--- The CXX compiler identification is AppleClang 21.0.0.21000101
+922--- Detecting CXX compiler ABI info
+923--- Detecting CXX compiler ABI info - done
+924--- Check for working CXX compiler: /usr/bin/c++ - skipped
+--
+1266-    eval "kill \$PID_$g 2>/dev/null";
+1267-done )
+1268:host-tests: FAILED
 ### end
+ok: t_memdiag
+--- t_jni_sig
+t_jni_sig: ok
+ok: t_jni_sig
+--- t_libc_sem
+  [klb] cond table FULL (262144 slots) — sharing one fallback cond; sync correctness degraded (raise MTX_MAP_SIZE)
+t_libc_sem ok
+ok: t_libc_sem
+--- t_media_announce
+t_media_announce ok
+ok: t_media_announce
+--- t_media_backpressure
+t_media_backpressure ok
+ok: t_media_backpressure
+--- t_load_needed
+  [klepton] dependency libbaddep.so of /lib/libbad_dep_parent.so failed to load: fake load failure
+  [klepton] dependency libbaddep.so of /lib/libbad_dep_parent.so failed to load: fake load failure — skipped; its imports will be UNRESOLVED
+  [klepton] dependency libbaddep.so of /lib/libmixed.so failed to load: fake load failure — skipped; its imports will be UNRESOLVED
+  [klepton] DT_NEEDED libnotthere.so of /lib/libbroken.so is neither loadable nor shim-served — its imports will be UNRESOLVED
+t_load_needed ok
+ok: t_load_needed
+--- t_frame_fence
+  [vk] frame end: PIPELINED (no vkQueueWaitIdle; at most 1 frame(s) submitted and not complete, the serial advances at GPU completion; KL_VK_FRAME_INFLIGHT, KL_VK_FRAME_ASYNC=0 for the old wait)
+t_frame_fence: ok
+ok: t_frame_fence
+--- t_ovrplat_msgtype
+t_ovrplat_msgtype ok
+ok: t_ovrplat_msgtype
+--- t_media_muxer
+  [media] AMediaMuxer_new: no encoder/muxer here (recording unsupported) -> NULL
+t_media_muxer ok
+ok: t_media_muxer
+--- t_retire_due
+t_retire_due ok
+ok: t_retire_due
+--- t_vk_trap
+t_vk_trap ok
 ok: t_vk_trap
 --- t_vk_robust
 t_vk_robust ok
@@ -53,9 +97,6 @@ ok: t_forcequit
 --- t_seat_offset
 all ok
 ok: t_seat_offset
---- t_floor_eye
-t_floor_eye: all passed
-ok: t_floor_eye
 --- t_ovrp_fallback
 t_ovrp_fallback: ok
 ok: t_ovrp_fallback
@@ -93,39 +134,16 @@ ok: t_perm_queue
 --- t_sp_sum
 t_sp_sum: ok
 ok: t_sp_sum
---- t_envdepth_job
-t_envdepth_job ok
-ok: t_envdepth_job
---- t_envdepth_z
-t_envdepth_z: all passed
-ok: t_envdepth_z
---- t_quest_profile
-t_quest_profile: ok
-ok: t_quest_profile
---- t_cache_complete
-t_cache_complete: ok
-ok: t_cache_complete
---- t_vq_area
-t_vq_area: ok
-ok: t_vq_area
---- t_closed_room
-t_closed_room: ok
-ok: t_closed_room
 
 =================== summary
-100% tests passed out of 359
+99% tests passed, 1 tests failed out of 345
 ok: pred_frame_offset_test
 ok: kl_ovrp_eyesize_test
 ok: t_ovrp_input
 ok: t_ovrp_render
 ok: t_ovrp_misc
 ok: spatial_test
-ok: t_room_build
-ok: t_guardian
-ok: t_room_live
-ok: t_plane_order
 ok: t_ptw
-ok: t_pt_force
 ok: t_bg
 ok: t_frame_boundary
 ok: no vpvk_frame_boundary in the engine, nothing called
@@ -133,10 +151,6 @@ ok: t_frame_boundary_nosym
 ok: t_diagcap
 ok: t_memdiag
 ok: t_jni_sig
-ok: t_lowmem
-ok: t_uelog
-ok: t_evgate
-ok: t_gswap
 ok: t_libc_sem
 ok: t_media_announce
 ok: t_media_backpressure
@@ -154,7 +168,6 @@ ok: t_pt_scan
 ok: t_bslash
 ok: t_forcequit
 ok: t_seat_offset
-ok: t_floor_eye
 ok: t_ovrp_fallback
 ok: t_vmgroup
 ok: t_lring
@@ -167,21 +180,68 @@ ok: t_ue4_thunk
 ok: t_noop_hit
 ok: t_perm_queue
 ok: t_sp_sum
-ok: t_envdepth_job
-ok: t_envdepth_z
-ok: t_quest_profile
-ok: t_cache_complete
-ok: t_vq_area
-ok: t_closed_room
-tools/ci/host-tests.sh: line 163:  6187 Terminated: 15          ( sleep 420; for g in gpu_host metal2_xros klepton_tests;
+tools/ci/host-tests.sh: line 143:  3961 Terminated: 15          ( sleep 420; for g in gpu_host metal2_xros klepton_tests;
 do
     eval "kill \$PID_$g 2>/dev/null";
 done )
-host-tests: OK
+host-tests: FAILED
 
-## app.log:      791 lines
+## runtime.log:       32 lines
 ### errors
 ### end
+In file included from runtime/libc/kl_shim.c:2156:
+runtime/libc/kl_libc_table.h:440:8: warning: 'strchrnul' is only available on visionOS 2.4 or newer [-Wunguarded-availability-new]
+  440 | KL_FWD(strchrnul)
+      |        ^
+/Applications/Xcode_26.6.app/Contents/Developer/Platforms/XROS.platform/Developer/SDKs/XROS26.5.sdk/usr/include/_string.h:198:9: note: 'strchrnul' has been marked as being introduced in visionOS 2.4 here, but the deployment target is visionOS 1.0.0
+  198 |         strchrnul(const char *__s, int __c);
+      |         ^
+runtime/libc/kl_shim.c:2155:23: note: annotate 'g_shim' with an availability attribute to silence this warning
+ 2155 | static const kl_entry g_shim[] = {
+      |                       ^
+In file included from runtime/libc/kl_shim.c:2156:
+runtime/libc/kl_libc_table.h:525:8: warning: 'vfork' is deprecated: Use posix_spawn or fork [-Wdeprecated-declarations]
+  525 | KL_FWD(vfork)
+      |        ^
+/Applications/Xcode_26.6.app/Contents/Developer/Platforms/XROS.platform/Developer/SDKs/XROS26.5.sdk/usr/include/unistd.h:618:1: note: 'vfork' has been explicitly marked deprecated here
+  618 | __deprecated_msg("Use posix_spawn or fork")
+      | ^
+/Applications/Xcode_26.6.app/Contents/Developer/Platforms/XROS.platform/Developer/SDKs/XROS26.5.sdk/usr/include/sys/cdefs.h:227:48: note: expanded from macro '__deprecated_msg'
+  227 |         #define __deprecated_msg(_msg) __attribute__((__deprecated__(_msg)))
+      |                                                       ^
+2 warnings generated.
+runtime/xr/kl_ovrp.c:3138:79: warning: misleading indentation; statement is not part of the previous 'if' [-Wmisleading-indentation]
+ 3138 |         fprintf(stderr, "  [ovrp] frameloop Update2 #%u step=%d\n", n, step); n++; }
+      |                                                                               ^
+runtime/xr/kl_ovrp.c:3137:26: note: previous statement is here
+ 3137 |     { static unsigned n; if (n < 48 || n % 600 == 0)
+      |                          ^
+1 warning generated.
+runtime/gfx/kl_glfb.c:5922:25: warning: variable 'said' set but not used [-Wunused-but-set-variable]
+ 5922 |     static int on = -1, said;
+      |                         ^
+1 warning generated.
+
+## app.log:      767 lines
+### errors
+### end
+    /Applications/Xcode_26.6.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/clang -x c -ivfsstatcache /Users/runner/work/VisionQuestPro/VisionQuestPro/build/dd/SDKStatCaches.noindex/xros26.5-23O469-688ef53f1462e2c8f657fdc38a81448f0ade8266673b0cdb1441e69d898f0d23.sdkstatcache -target arm64-apple-xros26.0 -fmessage-length\=0 -fdiagnostics-show-note-include-stack -fmacro-backtrace-limit\=0 -fno-color-diagnostics -fmodules-prune-interval\=86400 -fmodules-prune-after\=345600 -fbuild-session-file\=/Users/runner/work/VisionQuestPro/VisionQuestPro/build/dd/ModuleCache.noindex/Session.modulevalidation -fmodules-validate-once-per-build-session -Wnon-modular-include-in-framework-module -Werror\=non-modular-include-in-framework-module -Wno-trigraphs -Wno-missing-field-initializers -Wno-missing-prototypes -Werror\=return-type -Wdocumentation -Wunreachable-code -Wquoted-include-in-framework-header -Werror\=deprecated-objc-isa-usage -Werror\=objc-root-class -Wno-missing-braces -Wparentheses -Wswitch -Wunused-function -Wno-unused-label -Wno-unused-parameter -Wunused-variable -Wunused-value -Wempty-body -Wuninitialized -Wconditional-uninitialized -Wno-unknown-pragmas -Wno-shadow -Wno-four-char-constants -Wno-conversion -Wconstant-conversion -Wint-conversion -Wbool-conversion -Wenum-conversion -Wno-float-conversion -Wnon-literal-null-conversion -Wobjc-literal-conversion -Wshorten-64-to-32 -Wpointer-sign -Wno-newline-eof -Wno-implicit-fallthrough -isysroot /Applications/Xcode_26.6.app/Contents/Developer/Platforms/XROS.platform/Developer/SDKs/XROS26.5.sdk -fstrict-aliasing -Wdeprecated-declarations -Wno-sign-conversion -Winfinite-recursion -Wcomma -Wblock-capture-autoreleasing -Wstrict-prototypes -Wno-semicolon-before-method-body -Wunguarded-availability @/Users/runner/work/VisionQuestPro/VisionQuestPro/build/dd/Build/Intermediates.noindex/VisionQuestPro.build/Release-xros/VisionQuestPro.build/Objects-normal/arm64/7187679823f38a2a940e0043cdf9d637-common-args.resp -MMD -MT dependencies -MF /Users/runner/work/VisionQuestPro/VisionQuestPro/build/dd/Build/Intermediates.noindex/VisionQuestPro.build/Release-xros/VisionQuestPro.build/Objects-normal/arm64/vq_scan.d --serialize-diagnostics /Users/runner/work/VisionQuestPro/VisionQuestPro/build/dd/Build/Intermediates.noindex/VisionQuestPro.build/Release-xros/VisionQuestPro.build/Objects-normal/arm64/vq_scan.dia -c /Users/runner/work/VisionQuestPro/VisionQuestPro/app/Native/vq_scan.c -o /Users/runner/work/VisionQuestPro/VisionQuestPro/build/dd/Build/Intermediates.noindex/VisionQuestPro.build/Release-xros/VisionQuestPro.build/Objects-normal/arm64/vq_scan.o
+
+CompileC /Users/runner/work/VisionQuestPro/VisionQuestPro/build/dd/Build/Intermediates.noindex/VisionQuestPro.build/Release-xros/VisionQuestPro.build/Objects-normal/arm64/vq_harvest.o /Users/runner/work/VisionQuestPro/VisionQuestPro/app/Native/vq_harvest.c normal arm64 c com.apple.compilers.llvm.clang.1_0.compiler (in target 'VisionQuestPro' from project 'VisionQuestPro')
+    cd /Users/runner/work/VisionQuestPro/VisionQuestPro
+    
+    Using response file: /Users/runner/work/VisionQuestPro/VisionQuestPro/build/dd/Build/Intermediates.noindex/VisionQuestPro.build/Release-xros/VisionQuestPro.build/Objects-normal/arm64/7187679823f38a2a940e0043cdf9d637-common-args.resp
+    
+    /Applications/Xcode_26.6.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/clang -x c -ivfsstatcache /Users/runner/work/VisionQuestPro/VisionQuestPro/build/dd/SDKStatCaches.noindex/xros26.5-23O469-688ef53f1462e2c8f657fdc38a81448f0ade8266673b0cdb1441e69d898f0d23.sdkstatcache -target arm64-apple-xros26.0 -fmessage-length\=0 -fdiagnostics-show-note-include-stack -fmacro-backtrace-limit\=0 -fno-color-diagnostics -fmodules-prune-interval\=86400 -fmodules-prune-after\=345600 -fbuild-session-file\=/Users/runner/work/VisionQuestPro/VisionQuestPro/build/dd/ModuleCache.noindex/Session.modulevalidation -fmodules-validate-once-per-build-session -Wnon-modular-include-in-framework-module -Werror\=non-modular-include-in-framework-module -Wno-trigraphs -Wno-missing-field-initializers -Wno-missing-prototypes -Werror\=return-type -Wdocumentation -Wunreachable-code -Wquoted-include-in-framework-header -Werror\=deprecated-objc-isa-usage -Werror\=objc-root-class -Wno-missing-braces -Wparentheses -Wswitch -Wunused-function -Wno-unused-label -Wno-unused-parameter -Wunused-variable -Wunused-value -Wempty-body -Wuninitialized -Wconditional-uninitialized -Wno-unknown-pragmas -Wno-shadow -Wno-four-char-constants -Wno-conversion -Wconstant-conversion -Wint-conversion -Wbool-conversion -Wenum-conversion -Wno-float-conversion -Wnon-literal-null-conversion -Wobjc-literal-conversion -Wshorten-64-to-32 -Wpointer-sign -Wno-newline-eof -Wno-implicit-fallthrough -isysroot /Applications/Xcode_26.6.app/Contents/Developer/Platforms/XROS.platform/Developer/SDKs/XROS26.5.sdk -fstrict-aliasing -Wdeprecated-declarations -Wno-sign-conversion -Winfinite-recursion -Wcomma -Wblock-capture-autoreleasing -Wstrict-prototypes -Wno-semicolon-before-method-body -Wunguarded-availability @/Users/runner/work/VisionQuestPro/VisionQuestPro/build/dd/Build/Intermediates.noindex/VisionQuestPro.build/Release-xros/VisionQuestPro.build/Objects-normal/arm64/7187679823f38a2a940e0043cdf9d637-common-args.resp -MMD -MT dependencies -MF /Users/runner/work/VisionQuestPro/VisionQuestPro/build/dd/Build/Intermediates.noindex/VisionQuestPro.build/Release-xros/VisionQuestPro.build/Objects-normal/arm64/vq_harvest.d --serialize-diagnostics /Users/runner/work/VisionQuestPro/VisionQuestPro/build/dd/Build/Intermediates.noindex/VisionQuestPro.build/Release-xros/VisionQuestPro.build/Objects-normal/arm64/vq_harvest.dia -c /Users/runner/work/VisionQuestPro/VisionQuestPro/app/Native/vq_harvest.c -o /Users/runner/work/VisionQuestPro/VisionQuestPro/build/dd/Build/Intermediates.noindex/VisionQuestPro.build/Release-xros/VisionQuestPro.build/Objects-normal/arm64/vq_harvest.o
+/Users/runner/work/VisionQuestPro/VisionQuestPro/app/Native/vq_harvest.c:39:13: warning: possible misuse of comma operator here [-Wcomma]
+   39 |     i += lit, o += lit;
+      |             ^
+/Users/runner/work/VisionQuestPro/VisionQuestPro/app/Native/vq_harvest.c:39:5: note: cast expression to void to silence warning
+   39 |     i += lit, o += lit;
+      |     ^~~~~~~~
+      |     (void)( )
+/Users/runner/work/VisionQuestPro/VisionQuestPro/app/Native/vq_harvest.c:144:50: warning: possible misuse of comma operator here [-Wcomma]
+  144 |     if (f == 0 && c == u) memcpy(out + w, blk, u), w += u;
       |                                                  ^
 /Users/runner/work/VisionQuestPro/VisionQuestPro/app/Native/vq_harvest.c:144:27: note: cast expression to void to silence warning
   144 |     if (f == 0 && c == u) memcpy(out + w, blk, u), w += u;
@@ -238,22 +298,6 @@ CompileC /Users/runner/work/VisionQuestPro/VisionQuestPro/build/dd/Build/Interme
     Using response file: /Users/runner/work/VisionQuestPro/VisionQuestPro/build/dd/Build/Intermediates.noindex/VisionQuestPro.build/Release-xros/VisionQuestPro.build/Objects-normal/arm64/7187679823f38a2a940e0043cdf9d637-common-args.resp
     
     /Applications/Xcode_26.6.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/clang -x c -ivfsstatcache /Users/runner/work/VisionQuestPro/VisionQuestPro/build/dd/SDKStatCaches.noindex/xros26.5-23O469-688ef53f1462e2c8f657fdc38a81448f0ade8266673b0cdb1441e69d898f0d23.sdkstatcache -target arm64-apple-xros26.0 -fmessage-length\=0 -fdiagnostics-show-note-include-stack -fmacro-backtrace-limit\=0 -fno-color-diagnostics -fmodules-prune-interval\=86400 -fmodules-prune-after\=345600 -fbuild-session-file\=/Users/runner/work/VisionQuestPro/VisionQuestPro/build/dd/ModuleCache.noindex/Session.modulevalidation -fmodules-validate-once-per-build-session -Wnon-modular-include-in-framework-module -Werror\=non-modular-include-in-framework-module -Wno-trigraphs -Wno-missing-field-initializers -Wno-missing-prototypes -Werror\=return-type -Wdocumentation -Wunreachable-code -Wquoted-include-in-framework-header -Werror\=deprecated-objc-isa-usage -Werror\=objc-root-class -Wno-missing-braces -Wparentheses -Wswitch -Wunused-function -Wno-unused-label -Wno-unused-parameter -Wunused-variable -Wunused-value -Wempty-body -Wuninitialized -Wconditional-uninitialized -Wno-unknown-pragmas -Wno-shadow -Wno-four-char-constants -Wno-conversion -Wconstant-conversion -Wint-conversion -Wbool-conversion -Wenum-conversion -Wno-float-conversion -Wnon-literal-null-conversion -Wobjc-literal-conversion -Wshorten-64-to-32 -Wpointer-sign -Wno-newline-eof -Wno-implicit-fallthrough -isysroot /Applications/Xcode_26.6.app/Contents/Developer/Platforms/XROS.platform/Developer/SDKs/XROS26.5.sdk -fstrict-aliasing -Wdeprecated-declarations -Wno-sign-conversion -Winfinite-recursion -Wcomma -Wblock-capture-autoreleasing -Wstrict-prototypes -Wno-semicolon-before-method-body -Wunguarded-availability @/Users/runner/work/VisionQuestPro/VisionQuestPro/build/dd/Build/Intermediates.noindex/VisionQuestPro.build/Release-xros/VisionQuestPro.build/Objects-normal/arm64/7187679823f38a2a940e0043cdf9d637-common-args.resp -MMD -MT dependencies -MF /Users/runner/work/VisionQuestPro/VisionQuestPro/build/dd/Build/Intermediates.noindex/VisionQuestPro.build/Release-xros/VisionQuestPro.build/Objects-normal/arm64/kl_app.d --serialize-diagnostics /Users/runner/work/VisionQuestPro/VisionQuestPro/build/dd/Build/Intermediates.noindex/VisionQuestPro.build/Release-xros/VisionQuestPro.build/Objects-normal/arm64/kl_app.dia -c /Users/runner/work/VisionQuestPro/VisionQuestPro/klepton/visionos/Sources/kl_app.c -o /Users/runner/work/VisionQuestPro/VisionQuestPro/build/dd/Build/Intermediates.noindex/VisionQuestPro.build/Release-xros/VisionQuestPro.build/Objects-normal/arm64/kl_app.o
-In file included from /Users/runner/work/VisionQuestPro/VisionQuestPro/klepton/visionos/Sources/kl_app.c:33:
-/Users/runner/work/VisionQuestPro/VisionQuestPro/klepton/runtime/kl_uelog.h:59:42: warning: possible misuse of comma operator here [-Wcomma]
-   59 |             r->newest_mtime = st.st_mtime, r->newest_bytes = (long long)st.st_size, r->newest_depth = level;
-      |                                          ^
-/Users/runner/work/VisionQuestPro/VisionQuestPro/klepton/runtime/kl_uelog.h:59:13: note: cast expression to void to silence warning
-   59 |             r->newest_mtime = st.st_mtime, r->newest_bytes = (long long)st.st_size, r->newest_depth = level;
-      |             ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-      |             (void)(                      )
-/Users/runner/work/VisionQuestPro/VisionQuestPro/klepton/runtime/kl_uelog.h:59:83: warning: possible misuse of comma operator here [-Wcomma]
-   59 |             r->newest_mtime = st.st_mtime, r->newest_bytes = (long long)st.st_size, r->newest_depth = level;
-      |                                                                                   ^
-/Users/runner/work/VisionQuestPro/VisionQuestPro/klepton/runtime/kl_uelog.h:59:44: note: cast expression to void to silence warning
-   59 |             r->newest_mtime = st.st_mtime, r->newest_bytes = (long long)st.st_size, r->newest_depth = level;
-      |                                            ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-      |                                            (void)(                                )
-2 warnings generated.
 
 CompileC /Users/runner/work/VisionQuestPro/VisionQuestPro/build/dd/Build/Intermediates.noindex/VisionQuestPro.build/Release-xros/VisionQuestPro.build/Objects-normal/arm64/klepton_ld.o /Users/runner/work/VisionQuestPro/VisionQuestPro/klepton/tools/klepton_ld.c normal arm64 c com.apple.compilers.llvm.clang.1_0.compiler (in target 'VisionQuestPro' from project 'VisionQuestPro')
     cd /Users/runner/work/VisionQuestPro/VisionQuestPro
@@ -282,20 +326,19 @@ Copy /Users/runner/work/VisionQuestPro/VisionQuestPro/build/dd/Build/Products/Re
     cd /Users/runner/work/VisionQuestPro/VisionQuestPro
     builtin-copy -exclude .DS_Store -exclude CVS -exclude .svn -exclude .git -exclude .hg -exclude Headers -exclude PrivateHeaders -exclude Modules -exclude \*.tbd -bitcode-strip all -bitcode-strip-tool /Applications/Xcode_26.6.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/bitcode_strip -resolve-src-symlinks -remove-static-executable /Users/runner/work/VisionQuestPro/VisionQuestPro/klepton/vendor-moltenvk/out/xros/MoltenVK.framework /Users/runner/work/VisionQuestPro/VisionQuestPro/build/dd/Build/Products/Release-xros/VisionQuestPro.app/Frameworks
 /Applications/Xcode_26.6.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/bitcode_strip /Users/runner/work/VisionQuestPro/VisionQuestPro/klepton/vendor-moltenvk/out/xros/MoltenVK.framework/MoltenVK -r -o /Users/runner/work/VisionQuestPro/VisionQuestPro/build/dd/Build/Products/Release-xros/VisionQuestPro.app/Frameworks/MoltenVK.framework/MoltenVK
-
 ProcessInfoPlistFile /Users/runner/work/VisionQuestPro/VisionQuestPro/build/dd/Build/Products/Release-xros/VisionQuestPro.app/Info.plist /Users/runner/work/VisionQuestPro/VisionQuestPro/klepton/visionos/Info.plist (in target 'VisionQuestPro' from project 'VisionQuestPro')
     cd /Users/runner/work/VisionQuestPro/VisionQuestPro
     builtin-infoPlistUtility /Users/runner/work/VisionQuestPro/VisionQuestPro/klepton/visionos/Info.plist -producttype com.apple.product-type.application -genpkginfo /Users/runner/work/VisionQuestPro/VisionQuestPro/build/dd/Build/Products/Release-xros/VisionQuestPro.app/PkgInfo -expandbuildsettings -format binary -platform xros -scanforprivacyfile /Users/runner/work/VisionQuestPro/VisionQuestPro/build/dd/Build/Products/Release-xros/VisionQuestPro.app/Frameworks/MoltenVK.framework -scanforprivacyfile /Users/runner/work/VisionQuestPro/VisionQuestPro/build/dd/Build/Products/Release-xros/VisionQuestPro.app/Frameworks/VPVulkan.framework -o /Users/runner/work/VisionQuestPro/VisionQuestPro/build/dd/Build/Products/Release-xros/VisionQuestPro.app/Info.plist
 
 ExtractAppIntentsMetadata (in target 'VisionQuestPro' from project 'VisionQuestPro')
     cd /Users/runner/work/VisionQuestPro/VisionQuestPro
-    /Applications/Xcode_26.6.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/appintentsmetadataprocessor --toolchain-dir /var/run/com.apple.security.cryptexd/mnt/com.apple.MobileAsset.MetalToolchain-v17.6.109.0.46FD4i/Metal.xctoolchain --module-name VisionQuestPro --sdk-root /Applications/Xcode_26.6.app/Contents/Developer/Platforms/XROS.platform/Developer/SDKs/XROS26.5.sdk --xcode-version 17F113 --platform-family xrOS --deployment-target 26.0 --bundle-identifier com.kdt.livecontainer --output /Users/runner/work/VisionQuestPro/VisionQuestPro/build/dd/Build/Products/Release-xros/VisionQuestPro.app --target-triple arm64-apple-xros26.0 --binary-file /Users/runner/work/VisionQuestPro/VisionQuestPro/build/dd/Build/Products/Release-xros/VisionQuestPro.app/VisionQuestPro --dependency-file /Users/runner/work/VisionQuestPro/VisionQuestPro/build/dd/Build/Intermediates.noindex/VisionQuestPro.build/Release-xros/VisionQuestPro.build/Objects-normal/arm64/VisionQuestPro_dependency_info.dat --stringsdata-file /Users/runner/work/VisionQuestPro/VisionQuestPro/build/dd/Build/Intermediates.noindex/VisionQuestPro.build/Release-xros/VisionQuestPro.build/Objects-normal/arm64/ExtractedAppShortcutsMetadata.stringsdata --source-file-list /Users/runner/work/VisionQuestPro/VisionQuestPro/build/dd/Build/Intermediates.noindex/VisionQuestPro.build/Release-xros/VisionQuestPro.build/Objects-normal/arm64/VisionQuestPro.SwiftFileList --metadata-file-list /Users/runner/work/VisionQuestPro/VisionQuestPro/build/dd/Build/Intermediates.noindex/VisionQuestPro.build/Release-xros/VisionQuestPro.build/VisionQuestPro.DependencyMetadataFileList --static-metadata-file-list /Users/runner/work/VisionQuestPro/VisionQuestPro/build/dd/Build/Intermediates.noindex/VisionQuestPro.build/Release-xros/VisionQuestPro.build/VisionQuestPro.DependencyStaticMetadataFileList --swift-const-vals-list /Users/runner/work/VisionQuestPro/VisionQuestPro/build/dd/Build/Intermediates.noindex/VisionQuestPro.build/Release-xros/VisionQuestPro.build/Objects-normal/arm64/VisionQuestPro.SwiftConstValuesFileList --compile-time-extraction --deployment-aware-processing --validate-assistant-intents --no-app-shortcuts-localization
-2026-11-13 00:01:01.180 appintentsmetadataprocessor[20661:53749] Starting appintentsmetadataprocessor export
-2026-11-13 00:01:01.194 appintentsmetadataprocessor[20661:53749] warning: Metadata extraction skipped. No AppIntents.framework dependency found.
+    /Applications/Xcode_26.6.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/appintentsmetadataprocessor --toolchain-dir /var/run/com.apple.security.cryptexd/mnt/com.apple.MobileAsset.MetalToolchain-v17.6.109.0.1KsFfd/Metal.xctoolchain --module-name VisionQuestPro --sdk-root /Applications/Xcode_26.6.app/Contents/Developer/Platforms/XROS.platform/Developer/SDKs/XROS26.5.sdk --xcode-version 17F113 --platform-family xrOS --deployment-target 26.0 --bundle-identifier com.kdt.livecontainer --output /Users/runner/work/VisionQuestPro/VisionQuestPro/build/dd/Build/Products/Release-xros/VisionQuestPro.app --target-triple arm64-apple-xros26.0 --binary-file /Users/runner/work/VisionQuestPro/VisionQuestPro/build/dd/Build/Products/Release-xros/VisionQuestPro.app/VisionQuestPro --dependency-file /Users/runner/work/VisionQuestPro/VisionQuestPro/build/dd/Build/Intermediates.noindex/VisionQuestPro.build/Release-xros/VisionQuestPro.build/Objects-normal/arm64/VisionQuestPro_dependency_info.dat --stringsdata-file /Users/runner/work/VisionQuestPro/VisionQuestPro/build/dd/Build/Intermediates.noindex/VisionQuestPro.build/Release-xros/VisionQuestPro.build/Objects-normal/arm64/ExtractedAppShortcutsMetadata.stringsdata --source-file-list /Users/runner/work/VisionQuestPro/VisionQuestPro/build/dd/Build/Intermediates.noindex/VisionQuestPro.build/Release-xros/VisionQuestPro.build/Objects-normal/arm64/VisionQuestPro.SwiftFileList --metadata-file-list /Users/runner/work/VisionQuestPro/VisionQuestPro/build/dd/Build/Intermediates.noindex/VisionQuestPro.build/Release-xros/VisionQuestPro.build/VisionQuestPro.DependencyMetadataFileList --static-metadata-file-list /Users/runner/work/VisionQuestPro/VisionQuestPro/build/dd/Build/Intermediates.noindex/VisionQuestPro.build/Release-xros/VisionQuestPro.build/VisionQuestPro.DependencyStaticMetadataFileList --swift-const-vals-list /Users/runner/work/VisionQuestPro/VisionQuestPro/build/dd/Build/Intermediates.noindex/VisionQuestPro.build/Release-xros/VisionQuestPro.build/Objects-normal/arm64/VisionQuestPro.SwiftConstValuesFileList --compile-time-extraction --deployment-aware-processing --validate-assistant-intents --no-app-shortcuts-localization
+2026-11-13 00:15:07.788 appintentsmetadataprocessor[20198:51822] Starting appintentsmetadataprocessor export
+2026-11-13 00:15:07.816 appintentsmetadataprocessor[20198:51822] warning: Metadata extraction skipped. No AppIntents.framework dependency found.
 
 CopySwiftLibs /Users/runner/work/VisionQuestPro/VisionQuestPro/build/dd/Build/Products/Release-xros/VisionQuestPro.app (in target 'VisionQuestPro' from project 'VisionQuestPro')
     cd /Users/runner/work/VisionQuestPro/VisionQuestPro
-    builtin-swiftStdLibTool --copy --verbose --scan-executable /Users/runner/work/VisionQuestPro/VisionQuestPro/build/dd/Build/Products/Release-xros/VisionQuestPro.app/VisionQuestPro --scan-folder /Users/runner/work/VisionQuestPro/VisionQuestPro/build/dd/Build/Products/Release-xros/VisionQuestPro.app/Frameworks --scan-folder /Users/runner/work/VisionQuestPro/VisionQuestPro/build/dd/Build/Products/Release-xros/VisionQuestPro.app/PlugIns --scan-folder /Users/runner/work/VisionQuestPro/VisionQuestPro/build/dd/Build/Products/Release-xros/VisionQuestPro.app/SystemExtensions --scan-folder /Users/runner/work/VisionQuestPro/VisionQuestPro/build/dd/Build/Products/Release-xros/VisionQuestPro.app/Extensions --platform xros --toolchain /var/run/com.apple.security.cryptexd/mnt/com.apple.MobileAsset.MetalToolchain-v17.6.109.0.46FD4i/Metal.xctoolchain --toolchain /Applications/Xcode_26.6.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain --destination /Users/runner/work/VisionQuestPro/VisionQuestPro/build/dd/Build/Products/Release-xros/VisionQuestPro.app/Frameworks --strip-bitcode --strip-bitcode-tool /Applications/Xcode_26.6.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/bitcode_strip --emit-dependency-info /Users/runner/work/VisionQuestPro/VisionQuestPro/build/dd/Build/Intermediates.noindex/VisionQuestPro.build/Release-xros/VisionQuestPro.build/SwiftStdLibToolInputDependencies.dep --filter-for-swift-os
+    builtin-swiftStdLibTool --copy --verbose --scan-executable /Users/runner/work/VisionQuestPro/VisionQuestPro/build/dd/Build/Products/Release-xros/VisionQuestPro.app/VisionQuestPro --scan-folder /Users/runner/work/VisionQuestPro/VisionQuestPro/build/dd/Build/Products/Release-xros/VisionQuestPro.app/Frameworks --scan-folder /Users/runner/work/VisionQuestPro/VisionQuestPro/build/dd/Build/Products/Release-xros/VisionQuestPro.app/PlugIns --scan-folder /Users/runner/work/VisionQuestPro/VisionQuestPro/build/dd/Build/Products/Release-xros/VisionQuestPro.app/SystemExtensions --scan-folder /Users/runner/work/VisionQuestPro/VisionQuestPro/build/dd/Build/Products/Release-xros/VisionQuestPro.app/Extensions --platform xros --toolchain /var/run/com.apple.security.cryptexd/mnt/com.apple.MobileAsset.MetalToolchain-v17.6.109.0.1KsFfd/Metal.xctoolchain --toolchain /Applications/Xcode_26.6.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain --destination /Users/runner/work/VisionQuestPro/VisionQuestPro/build/dd/Build/Products/Release-xros/VisionQuestPro.app/Frameworks --strip-bitcode --strip-bitcode-tool /Applications/Xcode_26.6.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/bitcode_strip --emit-dependency-info /Users/runner/work/VisionQuestPro/VisionQuestPro/build/dd/Build/Intermediates.noindex/VisionQuestPro.build/Release-xros/VisionQuestPro.build/SwiftStdLibToolInputDependencies.dep --filter-for-swift-os
 Ignoring --strip-bitcode because --sign was not passed
 
 GenerateDSYMFile /Users/runner/work/VisionQuestPro/VisionQuestPro/build/dd/Build/Products/Release-xros/VisionQuestPro.app.dSYM /Users/runner/work/VisionQuestPro/VisionQuestPro/build/dd/Build/Products/Release-xros/VisionQuestPro.app/VisionQuestPro (in target 'VisionQuestPro' from project 'VisionQuestPro')
@@ -317,21 +360,21 @@ Touch /Users/runner/work/VisionQuestPro/VisionQuestPro/build/dd/Build/Products/R
 ** BUILD SUCCEEDED **
 
 build/dd/Build/Products/Release-xros/VisionQuestPro.app:
-total 23600
-drwxr-xr-x  7 runner  staff       224 Nov 13 00:01 .
-drwxr-xr-x@ 5 runner  staff       160 Nov 13 00:01 ..
-drwxr-xr-x  4 runner  staff       128 Nov 13 00:01 Frameworks
--rw-r--r--  1 runner  staff      2095 Nov 13 00:01 Info.plist
--rw-r--r--  1 runner  staff         8 Nov 13 00:01 PkgInfo
--rwxr-xr-x  1 runner  staff  12073624 Nov 13 00:01 VisionQuestPro
-drwxr-xr-x  8 runner  staff       256 Nov 12 23:59 VPKEngineCertificates
+total 22056
+drwxr-xr-x  7 runner  staff       224 Nov 13 00:15 .
+drwxr-xr-x@ 5 runner  staff       160 Nov 13 00:15 ..
+drwxr-xr-x  4 runner  staff       128 Nov 13 00:15 Frameworks
+-rw-r--r--  1 runner  staff      2095 Nov 13 00:15 Info.plist
+-rw-r--r--  1 runner  staff         8 Nov 13 00:15 PkgInfo
+-rwxr-xr-x  1 runner  staff  11282776 Nov 13 00:15 VisionQuestPro
+drwxr-xr-x  8 runner  staff       256 Nov 13 00:13 VPKEngineCertificates
 
 build/dd/Build/Products/Release-xros/VisionQuestPro.app/Frameworks:
 total 0
-drwxr-xr-x  4 runner  staff  128 Nov 13 00:01 .
-drwxr-xr-x  7 runner  staff  224 Nov 13 00:01 ..
-drwxr-xr-x  4 runner  staff  128 Nov 13 00:01 MoltenVK.framework
-drwxr-xr-x  4 runner  staff  128 Nov 13 00:01 VPVulkan.framework
+drwxr-xr-x  4 runner  staff  128 Nov 13 00:15 .
+drwxr-xr-x  7 runner  staff  224 Nov 13 00:15 ..
+drwxr-xr-x  4 runner  staff  128 Nov 13 00:15 MoltenVK.framework
+drwxr-xr-x  4 runner  staff  128 Nov 13 00:15 VPVulkan.framework
 
 ## compositor-api.txt:      232 lines
 sdk: /Applications/Xcode_26.6.app/Contents/Developer/Platforms/XROS.platform/Developer/SDKs/XROS26.5.sdk
