@@ -288,7 +288,9 @@ extern const klj_binding *const klj_binding_tables[];
 
 typedef struct { char *url; char *path; int found, logged; } klj_webdoc;
 typedef struct { void **items; int count; } klj_list;
-typedef struct { int64_t native_ptr; void *classes; int disabled; } klj_proxy;
+typedef struct { int64_t native_ptr; void *classes; int disabled;
+                 int unity_helper;   // made by ReflectionHelper.newProxyInstance: Unity dispatches it through ReflectionHelper.nativeProxyInvoke
+               } klj_proxy;
 typedef struct { void *looper, *callback; } klj_handler;
 typedef struct { int32_t what, arg1, arg2; void *obj, *target; } klj_message;
 typedef struct {
